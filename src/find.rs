@@ -901,6 +901,7 @@ impl MorrowApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.vim_command.is_some()

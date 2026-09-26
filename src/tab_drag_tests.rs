@@ -834,8 +834,11 @@ fn holding_a_drag_at_the_strip_edge_reaches_initially_hidden_tabs() {
     }
     app.adopt_orphan_documents();
     let mut screen = harness(app);
-    let pane = screen.state().editor_layout.rects[&1];
-    let target = egui::pos2(pane.right() - 8.0, pane.top() + 18.5);
+    let strip = screen
+        .state()
+        .tab_strip_rect(1)
+        .expect("the tabs expose a drop strip");
+    let target = egui::pos2(strip.right() - 8.0, strip.center().y);
     start_drag(&mut screen, 1, "first.txt", target);
     screen.run_steps(160);
     release(&mut screen, target);

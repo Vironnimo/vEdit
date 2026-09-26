@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_marks;
 mod app;
 mod bookmarks;
 #[allow(dead_code)]

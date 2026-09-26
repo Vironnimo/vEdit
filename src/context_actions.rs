@@ -12,6 +12,8 @@ pub(super) enum EditorAction {
     Redo,
     Find,
     CommandPalette,
+    MarkForAgent,
+    AgentMarks,
 }
 
 /// Collect the user's choice; apply it only after the editor releases its borrow.
@@ -56,6 +58,17 @@ pub(super) fn editor_menu(
                 action = Some(command);
                 ui.close();
             }
+        }
+        ui.separator();
+        if ui.add_enabled_ui(can_edit && can_copy, |ui| design::menu_item(ui,
+            "Mark for agent", "Ctrl+Shift+A", "Keep this selected block for an agent, without changing the selection"))
+            .inner.clicked() {
+            action = Some(EditorAction::MarkForAgent);
+            ui.close();
+        }
+        if design::menu_item(ui, "Agent marks", "Ctrl+Alt+Shift+A", "Review selected blocks across your projects").clicked() {
+            action = Some(EditorAction::AgentMarks);
+            ui.close();
         }
         ui.separator();
         for (label, shortcut, tooltip, command) in [
@@ -717,6 +730,10 @@ impl MorrowApp {
                 self.find_focus = true;
             }
             EditorAction::CommandPalette => self.open_palette(Palette::Commands),
+            EditorAction::MarkForAgent => {
+                self.capture_agent_mark_for_tab(id, None);
+            }
+            EditorAction::AgentMarks => self.open_agent_marks(),
             EditorAction::Paste => {
                 let widget = self.document_widget_id(id);
                 let vim = self.settings.vim;

@@ -43,6 +43,8 @@ enum NavigationAction {
     ToggleBookmark,
     OpenBookmarks,
     ScreenJump,
+    MarkForAgent,
+    OpenAgentMarks,
 }
 
 impl MorrowApp {
@@ -86,27 +88,7 @@ impl MorrowApp {
             return true;
         }
         let ctx = self.ctx.clone();
-        let eligible = self.settings.vim
-            && !self.vim_search_active()
-            && self.screen_jump.is_none()
-            && !egui::Popup::is_any_open(&ctx)
-            && self.palette.is_none()
-            && self.picker.is_none()
-            && !self.settings_open
-            && self.save_as.is_none()
-            && self.close_action.is_none()
-            && self.vim_command.is_none()
-            && self.diff.is_none()
-            && !self.git_detail_open()
-            && self.context_file_dialog.is_none()
-            && self.tab().is_some_and(|tab| {
-                tab.vim.mode != VimMode::Insert
-                    && tab.agent_view == crate::cli::DocumentView::Source
-                    && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
-                    && (self.navigation_pending() || tab.vim.pending_command().is_empty())
-                    && !tab.vim.expects_literal_character()
-            });
-        if !eligible {
+        if !self.navigation_source_ready() {
             self.navigation.leader = None;
             return false;
         }
@@ -117,12 +99,6 @@ impl MorrowApp {
             .is_some_and(|leader| leader.started.elapsed() >= LEADER_TIMEOUT)
         {
             self.navigation.leader = None;
-        }
-        if self.navigation.leader.is_some()
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
-        {
-            self.cancel_navigation();
-            return true;
         }
         if ctx.input(|input| {
             input.pointer.any_pressed()
@@ -147,77 +123,112 @@ impl MorrowApp {
             })
             .flatten()
             .collect();
-        let mut retained = Vec::with_capacity(events.len());
+        // A Text event may contain motions, a leader command, and more input.
+        // Keep their order while splitting only at character boundaries.
+        let mut events = events.into_iter().flat_map(|event| match event {
+            egui::Event::Text(text) => text
+                .chars()
+                .map(|ch| egui::Event::Text(ch.to_string()))
+                .collect::<Vec<_>>(),
+            other => vec![other],
+        });
+        let mut retained = Vec::new();
         let mut consumed_keys = Vec::new();
         let mut actions = Vec::new();
-        let mut consumed = false;
-        let mut passthrough = false;
-        for event in events {
-            match event {
-                egui::Event::Text(text) => {
-                    let mut remainder = String::new();
-                    for ch in text.chars() {
-                        if !passthrough && self.navigation_character(ch, leader_key, &mut actions) {
-                            consumed = true;
-                            consumed_keys.push(ch);
-                        } else {
-                            remainder.push(ch);
-                            // Vim must see this key before interpreting the
-                            // following ones: `i ` inserts a space and `f `
-                            // finds one even when both arrive in one frame.
-                            passthrough = true;
-                        }
-                    }
-                    if !remainder.is_empty() {
-                        retained.push(egui::Event::Text(remainder));
-                    }
-                }
+        let mut rewritten = false;
+        while let Some(event) = events.next() {
+            if self.navigation.leader.is_some()
+                && matches!(&event, egui::Event::Key { key: Key::Escape, pressed: true, modifiers, .. }
+                    if *modifiers == egui::Modifiers::NONE)
+            {
+                self.cancel_navigation();
+                rewritten = true;
+                continue;
+            }
+            let ch = match &event {
+                egui::Event::Text(text) => text.chars().next(),
                 egui::Event::Key {
                     key,
                     pressed: true,
                     modifiers,
-                    repeat,
+                    repeat: false,
                     ..
                 } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => {
-                    let ch = key_character(key, modifiers.shift);
-                    // Desktop input includes both Key and Text. Text owns that
-                    // character, with a Key fallback for synthetic inputs and
-                    // platforms that omit the Space text event.
-                    if let Some(ch) = ch
-                        && !passthrough
-                        && !text_keys.contains(&ch)
-                        && !repeat
-                        && self.navigation_character(ch, leader_key, &mut actions)
+                    key_character(*key, modifiers.shift).filter(|ch| !text_keys.contains(ch))
+                }
+                _ => None,
+            };
+            if let Some(ch) = ch {
+                if self.navigation.leader.is_none() && ch == leader_key {
+                    // Ordinary input must reach Vim before a possible leader:
+                    // `l a` moves before capture, while `i ` and `f ` retain
+                    // their Insert and literal-character meanings.
+                    for action in actions.drain(..) {
+                        self.navigation_action(action);
+                    }
+                    remove_navigation_character_keys(&mut retained, &consumed_keys);
+                    ctx.input_mut(|input| input.events = std::mem::take(&mut retained));
+                    self.handle_vim();
+                    retained = ctx.input(|input| input.events.clone());
+                    rewritten = true;
+                    if !self.navigation_source_context()
+                        || self
+                            .tab()
+                            .is_some_and(|tab| tab.vim.mode == VimMode::Insert)
                     {
-                        consumed = true;
-                        consumed_keys.push(ch);
-                    } else {
-                        if !passthrough && ch.is_none() && self.navigation.leader.is_some() {
-                            self.navigation.leader = None;
-                            passthrough = true;
-                        }
+                        // Native insertion and search own their entire suffix.
+                        // Avoid rescanning an ever-growing insert prefix for
+                        // every following space in a large Text event.
                         retained.push(event);
+                        retained.extend(events);
+                        break;
                     }
                 }
-                egui::Event::Key { pressed: true, .. } => {
-                    if self.navigation.leader.take().is_some() {
-                        passthrough = true;
-                    }
-                    retained.push(event);
-                }
-                other => retained.push(other),
-            }
-        }
-        if consumed {
-            retained.retain(|event| match event {
-                egui::Event::Key { key, modifiers, .. }
-                    if !modifiers.command && !modifiers.ctrl && !modifiers.alt =>
+                if self.navigation_source_ready()
+                    && self.navigation_character(ch, leader_key, &mut actions)
                 {
-                    !key_character(*key, modifiers.shift)
-                        .is_some_and(|ch| consumed_keys.contains(&ch))
+                    rewritten = true;
+                    consumed_keys.push(ch);
+                    if let Some(
+                        action
+                        @ (NavigationAction::MarkForAgent | NavigationAction::OpenAgentMarks),
+                    ) = actions.last().copied()
+                    {
+                        actions.pop();
+                        remove_navigation_character_keys(&mut retained, &consumed_keys);
+                        let trailing: Vec<_> = events.collect();
+                        ctx.input_mut(|input| input.events = retained);
+                        for action in actions {
+                            self.navigation_action(action);
+                        }
+                        self.defer_agent_mark_input(
+                            matches!(action, NavigationAction::OpenAgentMarks),
+                            trailing,
+                        );
+                        return false;
+                    }
+                    continue;
                 }
-                _ => true,
-            });
+            } else if match &event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => {
+                    key_character(*key, modifiers.shift).is_none()
+                }
+                egui::Event::Key { pressed: true, .. } => true,
+                _ => false,
+            } {
+                // A non-character key interrupts a pending leader and remains
+                // available to Vim before any later leader in this frame.
+                self.navigation.leader = None;
+            }
+            retained.push(event);
+        }
+        if rewritten {
+            remove_navigation_character_keys(&mut retained, &consumed_keys);
             ctx.input_mut(|input| input.events = retained);
         }
         for action in actions {
@@ -227,6 +238,38 @@ impl MorrowApp {
             ctx.request_repaint_after(LEADER_TIMEOUT);
         }
         self.navigation.leader.is_some() || self.navigation_modal_open()
+    }
+
+    fn navigation_source_context(&self) -> bool {
+        let ctx = &self.ctx;
+        self.settings.vim
+            && !self.vim_search_active()
+            && self.screen_jump.is_none()
+            && !egui::Popup::is_any_open(ctx)
+            && self.palette.is_none()
+            && self.picker.is_none()
+            && !self.settings_open
+            && !self.agent_marks_modal_open()
+            && !self.navigation_modal_open()
+            && self.save_as.is_none()
+            && self.close_action.is_none()
+            && self.vim_command.is_none()
+            && self.diff.is_none()
+            && !self.git_detail_open()
+            && self.context_file_dialog.is_none()
+            && self.tab().is_some_and(|tab| {
+                tab.agent_view == crate::cli::DocumentView::Source
+                    && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
+            })
+    }
+
+    fn navigation_source_ready(&self) -> bool {
+        self.navigation_source_context()
+            && self.tab().is_some_and(|tab| {
+                tab.vim.mode != VimMode::Insert
+                    && (self.navigation_pending() || tab.vim.pending_command().is_empty())
+                    && !tab.vim.expects_literal_character()
+            })
     }
 
     fn navigation_character(
@@ -239,6 +282,8 @@ impl MorrowApp {
             let action = match (leader.stage, ch) {
                 (LeaderStage::Actions, 'm') => Some(NavigationAction::ToggleBookmark),
                 (LeaderStage::Actions, 'b') => Some(NavigationAction::OpenBookmarks),
+                (LeaderStage::Actions, 'a') => Some(NavigationAction::MarkForAgent),
+                (LeaderStage::Actions, 'A') => Some(NavigationAction::OpenAgentMarks),
                 (LeaderStage::Actions, ch) if ch == leader_key => {
                     leader.stage = LeaderStage::Jump;
                     leader.started = Instant::now();
@@ -275,6 +320,11 @@ impl MorrowApp {
                 self.navigation_restore_editor_focus();
             }
             NavigationAction::OpenBookmarks => self.open_bookmarks(),
+            NavigationAction::MarkForAgent => {
+                self.capture_agent_mark();
+                self.navigation_restore_editor_focus();
+            }
+            NavigationAction::OpenAgentMarks => self.open_agent_marks(),
             NavigationAction::ScreenJump => {
                 self.start_screen_jump();
                 self.navigation_restore_editor_focus();
@@ -307,7 +357,7 @@ impl MorrowApp {
                         // Keep both leader levels at the same size. Shrinking
                         // an anchored card otherwise moves its pointer targets
                         // between the hover and press frames.
-                        ui.set_min_height(160.0);
+                        ui.set_min_height(240.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(if stage == LeaderStage::Actions {
@@ -347,6 +397,26 @@ impl MorrowApp {
                             .clicked()
                             {
                                 action = Some(NavigationAction::OpenBookmarks);
+                            }
+                            if design::menu_item(
+                                ui,
+                                "Mark selection for agent",
+                                "a",
+                                "Keep the selected block for an agent",
+                            )
+                            .clicked()
+                            {
+                                action = Some(NavigationAction::MarkForAgent);
+                            }
+                            if design::menu_item(
+                                ui,
+                                "Agent marks",
+                                "A",
+                                "Review collected blocks across all projects",
+                            )
+                            .clicked()
+                            {
+                                action = Some(NavigationAction::OpenAgentMarks);
                             }
                             more = design::menu_item(
                                 ui,
@@ -739,6 +809,17 @@ impl MorrowApp {
             self.ctx.memory_mut(|memory| memory.request_focus(id));
         }
     }
+}
+
+fn remove_navigation_character_keys(events: &mut Vec<egui::Event>, consumed: &[char]) {
+    events.retain(|event| match event {
+        egui::Event::Key { key, modifiers, .. }
+            if !modifiers.command && !modifiers.ctrl && !modifiers.alt =>
+        {
+            !key_character(*key, modifiers.shift).is_some_and(|ch| consumed.contains(&ch))
+        }
+        _ => true,
+    });
 }
 
 fn leader_label(key: &str) -> String {

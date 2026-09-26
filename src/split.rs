@@ -12,6 +12,9 @@ pub(super) struct RegionFocusState {
     pending: Option<RegionFocusAction>,
     trailing: Vec<egui::Event>,
     owner: Option<RegionInputOwner>,
+    awaiting_mark_owner: bool,
+    mark_destination_filter: bool,
+    boundary_event: Option<egui::Event>,
 }
 
 #[derive(PartialEq)]
@@ -20,6 +23,10 @@ struct RegionInputOwner {
     pane: u64,
     document: Option<(u64, u64, usize, Range<usize>, VimMode)>,
     widget: Option<egui::Id>,
+    vim_enabled: bool,
+    vim_swap_jk: bool,
+    leader_key: String,
+    view: Option<DocumentView>,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +35,7 @@ enum RegionFocusAction {
     Editor,
     Cycle(bool),
     Direction(&'static str),
+    AgentMark(bool),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1200,6 +1208,7 @@ impl MorrowApp {
             || self.workspace_picker_open()
             || self.save_as.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.palette.is_some()
             || self.context_file_dialog.is_some()
@@ -1678,6 +1687,7 @@ impl MorrowApp {
     fn region_focus_blocked(&self) -> bool {
         self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.diff.is_some()
@@ -1705,10 +1715,17 @@ impl MorrowApp {
                 )
             }),
             widget: self.ctx.memory(|memory| memory.focused()),
+            vim_enabled: self.settings.vim,
+            vim_swap_jk: self.settings.swap_jk,
+            leader_key: self.settings.leader_key.clone(),
+            view: self.tab().map(|tab| tab.agent_view),
         }
     }
 
     pub(super) fn resume_region_input(&mut self) {
+        if self.region_focus.awaiting_mark_owner {
+            return;
+        }
         if !self.region_focus.trailing.is_empty() {
             let mut events = std::mem::take(&mut self.region_focus.trailing);
             if self.region_focus.owner.take().as_ref() != Some(&self.region_input_owner()) {
@@ -1738,7 +1755,15 @@ impl MorrowApp {
                 else {
                     return None;
                 };
-                let action = if modifiers.command && !modifiers.alt {
+                let action = if modifiers.command
+                    && modifiers.shift
+                    && *key == Key::A
+                    && !self.vim_search_active()
+                    && !self.navigation_pending()
+                    && self.screen_jump.is_none()
+                {
+                    RegionFocusAction::AgentMark(modifiers.alt)
+                } else if modifiers.command && !modifiers.alt {
                     match (key, modifiers.shift) {
                         (Key::E, true) => RegionFocusAction::Explorer,
                         (Key::Num1, false) => RegionFocusAction::Editor,
@@ -1764,7 +1789,7 @@ impl MorrowApp {
         if let Some((index, action)) = shortcut {
             self.region_focus.trailing = ctx.input_mut(|input| {
                 let trailing = input.events.split_off(index + 1);
-                input.events.pop();
+                self.region_focus.boundary_event = input.events.pop();
                 trailing
             });
             self.region_focus.pending = Some(action);
@@ -1775,18 +1800,69 @@ impl MorrowApp {
 
     pub(super) fn finish_region_focus(&mut self) {
         if let Some(action) = self.region_focus.pending.take() {
+            self.region_focus.boundary_event = None;
             self.find.break_escape_sequence();
-            if !self.region_focus_blocked() {
+            let mark_blocked = matches!(action, RegionFocusAction::AgentMark(_))
+                && (self.vim_search_active()
+                    || self.navigation_pending()
+                    || self.screen_jump.is_some());
+            if !self.region_focus_blocked() && !mark_blocked {
                 match action {
                     RegionFocusAction::Explorer => self.focus_explorer(),
                     RegionFocusAction::Editor => self.focus_editor(),
                     RegionFocusAction::Cycle(backwards) => self.cycle_focus_region(backwards),
                     RegionFocusAction::Direction(action) => self.split_command(action),
+                    RegionFocusAction::AgentMark(open) => {
+                        // TextEdit has applied the prefix, but leaves its raw
+                        // events available. A newly focused dialog must never
+                        // receive the same text a second time.
+                        self.ctx.input_mut(|input| input.events.clear());
+                        if open {
+                            self.open_agent_marks();
+                        } else {
+                            self.capture_agent_mark();
+                        }
+                        self.region_focus.awaiting_mark_owner = true;
+                        self.region_focus.mark_destination_filter = open;
+                    }
                 }
             }
             self.region_focus.owner = Some(self.region_input_owner());
             self.ctx.request_repaint();
         }
+    }
+
+    /// Keep queued source input before a leader action in its original editor.
+    /// Its suffix resumes only after rendering and establishing the new owner.
+    pub(super) fn defer_agent_mark_input(&mut self, open: bool, mut trailing: Vec<egui::Event>) {
+        // A leader command can precede a region shortcut already split out of
+        // this frame. Replay that boundary after the earlier leader action.
+        if self.region_focus.pending.is_some() {
+            trailing.extend(self.region_focus.boundary_event.take());
+            trailing.append(&mut self.region_focus.trailing);
+        }
+        self.region_focus.pending = Some(RegionFocusAction::AgentMark(open));
+        self.region_focus.trailing = trailing;
+    }
+
+    pub(super) fn finish_agent_mark_input_owner(&mut self) {
+        if !self.region_focus.awaiting_mark_owner {
+            return;
+        }
+        if self.region_focus.mark_destination_filter {
+            if !self.agent_marks_modal_open() {
+                self.region_focus.trailing.clear();
+            } else if self.ctx.memory(|memory| memory.focused())
+                != Some(egui::Id::new("agent_marks_filter"))
+            {
+                // A new Modal first renders a sizing pass. Hold its suffix
+                // until the filter actually owns keyboard input.
+                self.ctx.request_repaint();
+                return;
+            }
+        }
+        self.region_focus.awaiting_mark_owner = false;
+        self.region_focus.owner = Some(self.region_input_owner());
     }
 
     pub(super) fn cycle_focus_region(&mut self, backwards: bool) {

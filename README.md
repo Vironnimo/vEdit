@@ -1,4 +1,4 @@
-# Morrow 0.4.7
+# Morrow 0.4.8
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -42,6 +42,14 @@ Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Date
 
 Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffnet die Datei, **Home/End** und **Page Up/Down** bewegen sich durch längere Listen. **F2** startet Umbenennen mit ausgewähltem Dateinamen ohne Erweiterung; bei Ordnern wird der ganze Name ausgewählt. **Shift+F10** öffnet das Kontextmenü des ausgewählten Eintrags.
 
+## Bereiche für Agenten markieren
+
+Text mit der Maus oder Vim `v` / `V` auswählen und **Leader a** oder **Ctrl+Shift+A** drücken. Der Ausschnitt bleibt als zusätzliche lila Markierung erhalten; weitere Bereiche können in beliebigen Dateien und Projekten hinzukommen. Die gewöhnliche Auswahl und das Vim-Register bleiben erhalten. Das **×** am Rand entfernt einen Bereich. Das Symbol **For agent** in der Tab-Leiste zeigt die Gesamtzahl; **Leader A** oder **Ctrl+Alt+Shift+A** öffnet die gemeinsame Übersicht mit Dateigruppen, Suche, optionalen Notizen, **Clear all** und **Restore last**.
+
+Die Markierung enthält den Text zum Zeitpunkt der Auswahl, einschließlich ungespeicherter Änderungen. Bei Änderungen vor dem Bereich wandert sie mit; Änderungen innerhalb des Bereichs kennzeichnen den gespeicherten Ausschnitt als veraltet, statt einen anderen Text als ursprünglich ausgewählt auszugeben. Geschlossene Dateien und Projektwechsel löschen die Sammlung nicht.
+
+Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](.agents/skills/morrow/SKILL.md), der auch im portablen Paket enthalten ist.
+
 ## Tastenkürzel
 
 | Aktion | Tastenkürzel |
@@ -74,6 +82,8 @@ Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffne
 | Rust-Vervollständigung anfordern | Ctrl+Space |
 | Zur Rust-Definition springen | F12 oder `gd` im Vim-Normalmodus |
 | Fehler und Warnungen anzeigen | Ctrl+Shift+M |
+| Auswahl für einen Agenten markieren | Ctrl+Shift+A oder Leader a |
+| Agent-Markierungen öffnen | Ctrl+Alt+Shift+A oder Leader A |
 | Interaktives Terminal im Projekt öffnen | Run → Open terminal |
 | `cargo check` starten | F5 |
 | `cargo test` starten | Alt+F6 |

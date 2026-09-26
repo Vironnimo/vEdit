@@ -21,6 +21,10 @@ pub(super) struct TabDragState {
 }
 
 impl MorrowApp {
+    #[cfg(test)]
+    pub(super) fn tab_strip_rect(&self, pane_id: u64) -> Option<egui::Rect> {
+        self.tab_drag.strips.get(&pane_id).map(|strip| strip.rect)
+    }
     pub(super) fn tab_drag_active(&self) -> bool {
         self.tab_drag.active.is_some()
     }
@@ -150,6 +154,7 @@ impl MorrowApp {
         let modal = self.picker.is_some()
             || self.save_as.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.palette.is_some()
             || self.diff.is_some()

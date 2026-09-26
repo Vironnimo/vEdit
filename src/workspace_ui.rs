@@ -79,6 +79,7 @@ impl MorrowApp {
     pub(super) fn workspace_keys(&mut self) -> bool {
         if self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.context_file_dialog.is_some()
@@ -145,6 +146,7 @@ impl MorrowApp {
         if let Some(action) = self.workspace_ui.pending.take()
             && self.picker.is_none()
             && !self.settings_open
+            && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()
             && self.context_file_dialog.is_none()

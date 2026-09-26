@@ -1,18 +1,25 @@
 {
   "protocol": 1,
-  "purpose": "Read, edit, save and arrange Morrow documents, keep persistent bookmarks, query project state, run curated tasks and present marked reviews. Responses describe actual GUI application; asynchronous loads/saves remain pending until status confirms completion.",
+  "purpose": "Read, edit, save and arrange Morrow documents, receive user-selected snippets, keep persistent bookmarks, query project state, run curated tasks and present marked reviews. Responses describe actual GUI application; asynchronous loads/saves remain pending until status confirms completion.",
   "coordinates": {
     "positions": "1-based lines and Unicode scalar columns, including the boundary after a line's last character. CRLF cannot be split.",
     "edit_selection_find_diagnostics": "range.end is exclusive",
+    "agent_marks": "range.end is exclusive; text-chunk offsets are zero-based Unicode scalar counts",
     "annotations": "end inclusive; omitted end marks the entire start line"
   },
-  "ids": "Tab and pane IDs belong to the response session (process lifetime). Pane IDs remain unique and stable across project switches; inactive pane IDs are refused, never retargeted. Bookmark IDs persist across restarts. Obtain IDs from their current list/status responses; never guess IDs.",
+  "ids": "Tab and pane IDs belong to the response session (process lifetime). Pane IDs remain unique and stable across project switches; inactive pane IDs are refused, never retargeted. Bookmark and user agent-mark/batch IDs persist across restarts. Obtain IDs from their current list/status responses; never guess IDs.",
   "limits": {
     "files": 100,
     "annotations": 500,
     "tabs_page": 100,
     "query_page": 500,
     "bookmarks_page": 500,
+    "agent_marks_page": 500,
+    "agent_marks_page_bytes": 262144,
+    "agent_mark_preview_characters": 4096,
+    "agent_mark_text_characters": 65536,
+    "agent_mark_note_characters": 4096,
+    "agent_mark_request_id_bytes": 128,
     "read_lines": 500,
     "edit_ranges": 256,
     "replace_matches": 10000,
@@ -222,6 +229,49 @@
         "action": "remove",
         "id": 1
       }
+    },
+    {
+      "op": "agent_marks"
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "list", "limit": 100, "offset": 0}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "take", "request_id": "task-842-collect", "limit": 100}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "batch", "batch_id": 1, "limit": 100, "offset": 100}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "text", "id": 1, "batch_id": 1, "offset": 4096, "count": 4096}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "ack", "batch_id": 1}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "restore"}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "clear"}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "remove", "id": 1}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "note", "id": 1, "note": "Explain why this branch exists"}
+    },
+    {
+      "op": "agent_marks",
+      "action": {"action": "add", "tab_id": 1, "note": "Review the current selection"}
     },
     {
       "op": "command",
@@ -455,6 +505,18 @@
     "remove": "Removes only the bookmark metadata identified by id, never file contents.",
     "persistence": "Bookmarks survive file closure and application restart, retain their IDs, and do not save or alter document text."
   },
+  "agent_marks": {
+    "purpose": "User-to-agent selections across projects, separate from review/open annotations and clear_marks. The ordinary CLI command is agent-marks. Captures exact selected in-memory text, including unsaved drafts, without editing or saving a buffer.",
+    "list": "Omit action for read-only list, or use action:{action:list,limit:100,offset:0}. limit is 1..500; offset is a nonnegative item index. Items include persistent mark ID, workspace/path/title, captured range/text/note and freshness. Text is frozen at capture; stale and the boolean range_current describe whether current-mark positions match an open buffer. Retained batches always report range_current:false because their coordinates are frozen receipts, not live verification. Follow non-null next_offset for more pages; next_offset:null ends the collection. Follow each non-null text_next_offset with text to retrieve a snippet's remaining characters. A response page is bounded to 256 KiB, with up to 4096 Unicode characters per snippet preview.",
+    "take": "Moves ALL current marks into one durable batch and removes their live highlights, returning the first bounded page and batch_id/request_id. This does not mean the whole batch has been read. Supply a unique request_id (1..128 UTF-8 bytes, no controls) and reuse it only to retry that same collection; omission generates one. A retry returns the same batch rather than consuming new marks. A fresh take fails batch_pending until the outstanding batch is acknowledged. Empty take returns no items, not the previous collection. The snapshot and receipt are saved atomically before success; persistence:saved confirms this.",
+    "batch": "Read a stable captured batch with batch_id/limit/offset. Omitted/null batch_id reads the latest batch, useful after lost take delivery. Follow returned next_offset until null; IDs and snapshots survive restart. An explicit unavailable batch ID never selects another batch.",
+    "text": "Read exact frozen snippet text for mark id; omit batch_id to read a live mark, or provide the returned batch ID for captured/consumed marks. Start at the item's text_next_offset. offset is a zero-based Unicode scalar offset inside that snippet, count defaults to 4096 (1..65536). Follow the text response's next_offset until null; chunks may be shorter to obey response byte limits. This reads selected text, not the entire file.",
+    "ack": "Required batch_id acknowledges that the agent finished retrieving EVERY page and each full snippet, permitting a fresh take. The acknowledgment is saved atomically before a successful response (persistence:saved). The snapshot remains readable/restorable until the next successful take replaces it. Acknowledgment never clears new live marks.",
+    "restore": "Merge the latest removed collection (omit batch_id) or the retained explicit batch into live marks, deduplicating persistent mark IDs and preserving new marks. Never edits document text. Clear/remove also retain a last removed collection for default restore.",
+    "clear_remove_note": "clear removes all live marks; remove deletes only id. note replaces id's note with up to 4096 Unicode characters; empty string clears it. These do not affect source text or review annotations.",
+    "add": "Capture the existing nonempty selection in tab_id; omission/null uses the active buffer. Optional note is at most 4096 Unicode characters. No arbitrary range is accepted; use selection with expected_revision first if explicitly arranging a selection. Capture never changes cursor, selection, document text or saves.",
+    "persistence": "Take and ack save session metadata atomically before successful responses (persistence:saved); a storage failure preserves the previous marks and receipt. Add, note, remove, clear and restore queue session persistence (persistence:queued). Neither policy saves document text."
+  },
   "queries": {
     "diff": "Bounded contiguous replacement hunk against saved buffer, not Git history; reports truncation.",
     "diagnostics": "Open document's current cached language-server diagnostics; one-based Unicode range, exclusive end, clamping explicitly reported when positions are stale.",
@@ -477,7 +539,7 @@
     "open": "keeps existing buffer ownership; otherwise uses deepest registered containing project or creates a project for the parent directory. Reveals last success's project; clean buffers refresh asynchronously from disk",
     "location_omitted": "reveals first annotation when present; otherwise preserves document cursor",
     "close": "refuses unsaved/saving tabs",
-    "clear_marks_empty": "clears all marks and review summary",
+    "clear_marks_empty": "clears all agent-authored review annotations and review summary; user agent_marks stay intact",
     "relative_paths": "CLI open/request use current directory; review manifest paths use manifest directory"
   },
   "panels": [

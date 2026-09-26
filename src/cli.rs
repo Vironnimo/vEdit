@@ -51,6 +51,9 @@ fn one() -> usize {
 fn default_limit() -> usize {
     100
 }
+fn default_mark_text_count() -> usize {
+    4096
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -181,6 +184,70 @@ pub enum BookmarkAction {
     Jump {
         id: u64,
     },
+}
+
+/// User-selected snippets are separate from agent-authored review annotations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentMarksAction {
+    List {
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    Take {
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+    },
+    Batch {
+        #[serde(default)]
+        batch_id: Option<u64>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    Text {
+        id: u64,
+        #[serde(default)]
+        batch_id: Option<u64>,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_mark_text_count")]
+        count: usize,
+    },
+    Ack {
+        batch_id: u64,
+    },
+    Restore {
+        #[serde(default)]
+        batch_id: Option<u64>,
+    },
+    Clear {},
+    Remove {
+        id: u64,
+    },
+    Note {
+        id: u64,
+        note: String,
+    },
+    Add {
+        #[serde(default)]
+        tab_id: Option<u64>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+}
+impl Default for AgentMarksAction {
+    fn default() -> Self {
+        Self::List {
+            limit: 100,
+            offset: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -352,6 +419,10 @@ pub enum Request {
     Bookmarks {
         change: BookmarkAction,
     },
+    AgentMarks {
+        #[serde(default)]
+        action: AgentMarksAction,
+    },
     Command {
         tab_id: u64,
         command: EditorCommand,
@@ -500,6 +571,16 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli bookmarks toggle [--tab ID] [--label TEXT]
   morrow-cli bookmarks remove|jump ID
   morrow-cli bookmarks rename ID --label TEXT
+  morrow-cli agent-marks [list] [--limit N] [--offset N]
+  morrow-cli agent-marks take [--request-id TOKEN] [--limit N]
+  morrow-cli agent-marks batch [BATCH_ID] [--limit N] [--offset N]
+  morrow-cli agent-marks text MARK_ID [--batch BATCH_ID] [--offset N] [--count N]
+  morrow-cli agent-marks ack BATCH_ID
+  morrow-cli agent-marks restore [BATCH_ID]
+  morrow-cli agent-marks clear
+  morrow-cli agent-marks remove MARK_ID
+  morrow-cli agent-marks note MARK_ID TEXT
+  morrow-cli agent-marks add [--tab TAB_ID] [--note TEXT]
   morrow-cli command TAB_ID undo|redo|select_all|clear_selection|indent|outdent|toggle_comment|duplicate_line|delete_line|reload|find_next|find_previous|source|preview --revision N
   morrow-cli find TAB_ID QUERY [--case-sensitive] [--whole-word] [--limit N] [--offset N]
   morrow-cli replace TAB_ID QUERY REPLACEMENT --revision N [--case-sensitive] [--whole-word] [--first]
@@ -574,6 +655,24 @@ Invalid rules apply nothing. swap_jk defaults false and swaps j/k navigation;
 inserted text and literal find/replacement targets keep their original letters.
 editor_font defaults jetbrains_mono; consolas and cascadia_mono are alternatives.
 JetBrains Mono is bundled; unavailable Windows fonts fall back to it.
+
+agent-marks reads the user's selected snippets across projects, including unsaved
+text, without clearing them. This is separate from review/clear-marks annotations.
+take removes the live collection into a durable batch and returns its first page.
+Follow non-null next_offset with batch BATCH_ID; follow each text_next_offset with
+text MARK_ID --batch BATCH_ID, then its next_offset until null, for long snippets.
+Only ack BATCH_ID after reading every page and full snippet;
+a fresh take is blocked while a batch awaits ack. Reuse --request-id TOKEN to retry
+the same take safely. batch without ID reads the latest batch after lost delivery.
+ack retains the batch for reading/restoration until the next take. restore merges
+it without duplicating IDs; clear/remove preserve an undo collection for restore.
+Ranges are 1-based Unicode positions with exclusive ends. Captured text is frozen;
+stale/range_current describe current-mark positions; frozen batches always report
+range_current:false. Read current source before relying on a receipt's position.
+take/ack are saved atomically before success (persistence:saved); other mark
+mutations queue persistence (persistence:queued). Notes accept up
+to 4096 Unicode characters; empty text clears a note. add captures the existing
+nonempty selection only; it never edits or saves the document.
 "#;
 
 pub enum Parsed {
@@ -616,7 +715,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 return false;
             }
             "--line" | "--column" | "--limit" | "--offset" | "--count" | "--revision" | "--tab"
-            | "--label" => expects_value = true,
+            | "--label" | "--note" | "--batch" | "--request-id" => expects_value = true,
             _ => {}
         }
         true
@@ -679,6 +778,21 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 &mut options.label,
                 iter.next().ok_or("--label needs text")?,
                 "--label",
+            )?,
+            "--note" => set_option(
+                &mut options.note,
+                iter.next().ok_or("--note needs text")?,
+                "--note",
+            )?,
+            "--batch" => set_option(
+                &mut options.batch,
+                agent_mark_id(&iter.next().ok_or("--batch needs a batch ID")?)?,
+                "--batch",
+            )?,
+            "--request-id" => set_option(
+                &mut options.request_id,
+                iter.next().ok_or("--request-id needs a token")?,
+                "--request-id",
             )?,
             "--exclude" => {
                 if options.no_excludes {
@@ -839,6 +953,9 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         },
         "bookmarks" => Request::Bookmarks {
             change: parse_bookmarks(&positional, &options)?,
+        },
+        "agent-marks" => Request::AgentMarks {
+            action: parse_agent_marks(&positional, &options)?,
         },
         "command" => {
             if positional.len() != 2 {
@@ -1004,6 +1121,9 @@ struct Options {
     revision: Option<u64>,
     tab: Option<u64>,
     label: Option<String>,
+    note: Option<String>,
+    batch: Option<u64>,
+    request_id: Option<String>,
     excludes: Option<Vec<String>>,
     no_excludes: bool,
     case_sensitive: bool,
@@ -1033,7 +1153,13 @@ impl Options {
                 self.limit.is_some(),
                 matches!(
                     command,
-                    "tabs" | "find" | "search" | "diagnostics" | "git-status" | "bookmarks"
+                    "tabs"
+                        | "find"
+                        | "search"
+                        | "diagnostics"
+                        | "git-status"
+                        | "bookmarks"
+                        | "agent-marks"
                 ),
                 "--limit",
             ),
@@ -1041,13 +1167,13 @@ impl Options {
                 self.offset.is_some(),
                 matches!(
                     command,
-                    "tabs" | "find" | "diagnostics" | "git-status" | "bookmarks"
+                    "tabs" | "find" | "diagnostics" | "git-status" | "bookmarks" | "agent-marks"
                 ),
                 "--offset",
             ),
             (
                 self.count.is_some(),
-                matches!(command, "read" | "output" | "diff"),
+                matches!(command, "read" | "output" | "diff" | "agent-marks"),
                 "--count",
             ),
             (
@@ -1055,8 +1181,19 @@ impl Options {
                 matches!(command, "command" | "replace"),
                 "--revision",
             ),
-            (self.tab.is_some(), command == "bookmarks", "--tab"),
+            (
+                self.tab.is_some(),
+                matches!(command, "bookmarks" | "agent-marks"),
+                "--tab",
+            ),
             (self.label.is_some(), command == "bookmarks", "--label"),
+            (self.note.is_some(), command == "agent-marks", "--note"),
+            (self.batch.is_some(), command == "agent-marks", "--batch"),
+            (
+                self.request_id.is_some(),
+                command == "agent-marks",
+                "--request-id",
+            ),
             (self.excludes.is_some(), command == "search", "--exclude"),
             (self.no_excludes, command == "search", "--no-excludes"),
             (
@@ -1142,6 +1279,98 @@ fn bookmark_id(value: &str) -> Result<u64, String> {
         .ok()
         .filter(|id| *id > 0)
         .ok_or_else(|| "Bookmark ID must be a positive integer returned by bookmarks".into())
+}
+
+fn parse_agent_marks(positional: &[String], options: &Options) -> Result<AgentMarksAction, String> {
+    let action = match positional {
+        [] => AgentMarksAction::List {
+            limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0),
+        },
+        [action] if action == "list" => AgentMarksAction::List {
+            limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0),
+        },
+        [action] if action == "take" => AgentMarksAction::Take {
+            request_id: options.request_id.clone(), limit: options.limit.unwrap_or(100),
+        },
+        [action] if action == "batch" => AgentMarksAction::Batch {
+            batch_id: None, limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0),
+        },
+        [action, id] if action == "batch" => AgentMarksAction::Batch {
+            batch_id: Some(agent_mark_id(id)?), limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0),
+        },
+        [action, id] if action == "text" => AgentMarksAction::Text {
+            id: agent_mark_id(id)?, batch_id: options.batch,
+            offset: options.offset.unwrap_or(0), count: options.count.unwrap_or(4096),
+        },
+        [action, id] if action == "ack" => AgentMarksAction::Ack { batch_id: agent_mark_id(id)? },
+        [action] if action == "restore" => AgentMarksAction::Restore { batch_id: None },
+        [action, id] if action == "restore" => AgentMarksAction::Restore { batch_id: Some(agent_mark_id(id)?) },
+        [action] if action == "clear" => AgentMarksAction::Clear {},
+        [action, id] if action == "remove" => AgentMarksAction::Remove { id: agent_mark_id(id)? },
+        [action, id, note] if action == "note" => AgentMarksAction::Note { id: agent_mark_id(id)?, note: note.clone() },
+        [action] if action == "add" => AgentMarksAction::Add { tab_id: options.tab, note: options.note.clone() },
+        _ => return Err("agent-marks takes list, take, batch [BATCH_ID], text MARK_ID, ack BATCH_ID, restore [BATCH_ID], clear, remove MARK_ID, note MARK_ID TEXT, or add; use --help".into()),
+    };
+    for (present, allowed, flag) in [
+        (
+            options.limit.is_some(),
+            matches!(
+                action,
+                AgentMarksAction::List { .. }
+                    | AgentMarksAction::Take { .. }
+                    | AgentMarksAction::Batch { .. }
+            ),
+            "--limit",
+        ),
+        (
+            options.offset.is_some(),
+            matches!(
+                action,
+                AgentMarksAction::List { .. }
+                    | AgentMarksAction::Batch { .. }
+                    | AgentMarksAction::Text { .. }
+            ),
+            "--offset",
+        ),
+        (
+            options.count.is_some(),
+            matches!(action, AgentMarksAction::Text { .. }),
+            "--count",
+        ),
+        (
+            options.batch.is_some(),
+            matches!(action, AgentMarksAction::Text { .. }),
+            "--batch",
+        ),
+        (
+            options.request_id.is_some(),
+            matches!(action, AgentMarksAction::Take { .. }),
+            "--request-id",
+        ),
+        (
+            options.tab.is_some(),
+            matches!(action, AgentMarksAction::Add { .. }),
+            "--tab",
+        ),
+        (
+            options.note.is_some(),
+            matches!(action, AgentMarksAction::Add { .. }),
+            "--note",
+        ),
+    ] {
+        if present && !allowed {
+            return Err(format!(
+                "{flag} is not supported by this agent-marks action"
+            ));
+        }
+    }
+    Ok(action)
+}
+
+fn agent_mark_id(value: &str) -> Result<u64, String> {
+    value.parse().ok().filter(|id| *id > 0).ok_or_else(|| {
+        "Agent mark/batch ID must be a positive integer returned by agent-marks".into()
+    })
 }
 
 /// Accepted aliases denote exactly one key; never infer a nearby key spelling.
@@ -1553,6 +1782,64 @@ pub fn validate(request: &Request) -> Result<(), String> {
                 validate_bookmark_label(label)?;
             }
         },
+        Request::AgentMarks { action } => match action {
+            AgentMarksAction::List { limit, .. } | AgentMarksAction::Batch { limit, .. } => {
+                validate_agent_mark_page(*limit)?;
+                if let AgentMarksAction::Batch {
+                    batch_id: Some(id), ..
+                } = action
+                {
+                    validate_agent_mark_id(*id)?;
+                }
+            }
+            AgentMarksAction::Take { request_id, limit } => {
+                validate_agent_mark_page(*limit)?;
+                if let Some(request_id) = request_id
+                    && (request_id.is_empty()
+                        || request_id.len() > 128
+                        || request_id.chars().any(char::is_control))
+                {
+                    return Err(
+                        "request_id must contain 1..128 UTF-8 bytes without control characters"
+                            .into(),
+                    );
+                }
+            }
+            AgentMarksAction::Text {
+                id,
+                batch_id,
+                count,
+                ..
+            } => {
+                validate_agent_mark_id(*id)?;
+                if let Some(batch_id) = batch_id {
+                    validate_agent_mark_id(*batch_id)?;
+                }
+                if !(1..=65536).contains(count) {
+                    return Err("Agent mark text count must be 1..65536 Unicode characters; offset must be inside the captured snippet".into());
+                }
+            }
+            AgentMarksAction::Ack { batch_id } => validate_agent_mark_id(*batch_id)?,
+            AgentMarksAction::Restore { batch_id } => {
+                if let Some(batch_id) = batch_id {
+                    validate_agent_mark_id(*batch_id)?;
+                }
+            }
+            AgentMarksAction::Remove { id } => validate_agent_mark_id(*id)?,
+            AgentMarksAction::Note { id, note } => {
+                validate_agent_mark_id(*id)?;
+                validate_agent_mark_note(note)?;
+            }
+            AgentMarksAction::Add { tab_id, note } => {
+                if let Some(tab_id) = tab_id {
+                    validate_id(*tab_id)?;
+                }
+                if let Some(note) = note {
+                    validate_agent_mark_note(note)?;
+                }
+            }
+            AgentMarksAction::Clear {} => {}
+        },
         Request::Layout { change } => match change {
             LayoutAction::Status {} => {}
             LayoutAction::Split {
@@ -1652,6 +1939,27 @@ fn validate_bookmark_label(label: &str) -> Result<(), String> {
 fn validate_bookmark_id(id: u64) -> Result<(), String> {
     if id == 0 {
         Err("Bookmark ID must be a positive integer returned by bookmarks".into())
+    } else {
+        Ok(())
+    }
+}
+fn validate_agent_mark_id(id: u64) -> Result<(), String> {
+    if id == 0 {
+        Err("Agent mark/batch ID must be a positive integer returned by agent-marks".into())
+    } else {
+        Ok(())
+    }
+}
+fn validate_agent_mark_note(note: &str) -> Result<(), String> {
+    if note.chars().count() > 4096 {
+        Err("Agent mark notes accept at most 4096 Unicode characters".into())
+    } else {
+        Ok(())
+    }
+}
+fn validate_agent_mark_page(limit: usize) -> Result<(), String> {
+    if !(1..=500).contains(&limit) {
+        Err("Agent marks page limit must be 1..500".into())
     } else {
         Ok(())
     }
@@ -1784,6 +2092,274 @@ mod tests {
     use super::*;
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         parse_args(args.iter().map(OsString::from))
+    }
+    fn mark_request(args: &[&str]) -> Request {
+        let Parsed::Command { request, start } = parse(args).unwrap() else {
+            panic!("expected an application request")
+        };
+        assert!(!start, "agent marks must use the existing window");
+        request
+    }
+    #[test]
+    fn agent_marks_cli_preserves_collection_targets_and_action_defaults() {
+        let cases = [
+            (
+                vec!["agent-marks"],
+                json!({"action":"list","limit":100,"offset":0}),
+            ),
+            (
+                vec![
+                    "agent-marks",
+                    "list",
+                    "--limit",
+                    "500",
+                    "--offset",
+                    "100001",
+                ],
+                json!({"action":"list","limit":500,"offset":100001}),
+            ),
+            (
+                vec!["agent-marks", "take"],
+                json!({"action":"take","request_id":null,"limit":100}),
+            ),
+            (
+                vec![
+                    "agent-marks",
+                    "take",
+                    "--request-id",
+                    "collection-42",
+                    "--limit",
+                    "3",
+                ],
+                json!({"action":"take","request_id":"collection-42","limit":3}),
+            ),
+            (
+                vec!["agent-marks", "batch"],
+                json!({"action":"batch","batch_id":null,"limit":100,"offset":0}),
+            ),
+            (
+                vec!["agent-marks", "batch", "42", "--offset", "101"],
+                json!({"action":"batch","batch_id":42,"limit":100,"offset":101}),
+            ),
+            (
+                vec!["agent-marks", "text", "9"],
+                json!({"action":"text","id":9,"batch_id":null,"offset":0,"count":4096}),
+            ),
+            (
+                vec![
+                    "agent-marks",
+                    "text",
+                    "9",
+                    "--batch",
+                    "42",
+                    "--offset",
+                    "4096",
+                    "--count",
+                    "65536",
+                ],
+                json!({"action":"text","id":9,"batch_id":42,"offset":4096,"count":65536}),
+            ),
+            (
+                vec!["agent-marks", "ack", "42"],
+                json!({"action":"ack","batch_id":42}),
+            ),
+            (
+                vec!["agent-marks", "restore"],
+                json!({"action":"restore","batch_id":null}),
+            ),
+            (
+                vec!["agent-marks", "restore", "42"],
+                json!({"action":"restore","batch_id":42}),
+            ),
+            (vec!["agent-marks", "clear"], json!({"action":"clear"})),
+            (
+                vec!["agent-marks", "remove", "9"],
+                json!({"action":"remove","id":9}),
+            ),
+            (
+                vec!["agent-marks", "note", "9", ""],
+                json!({"action":"note","id":9,"note":""}),
+            ),
+            (
+                vec!["agent-marks", "add"],
+                json!({"action":"add","tab_id":null,"note":null}),
+            ),
+            (
+                vec![
+                    "agent-marks",
+                    "add",
+                    "--tab",
+                    "7",
+                    "--note",
+                    " Prüfe Überlauf 🎯\nZeile zwei ",
+                ],
+                json!({"action":"add","tab_id":7,"note":" Prüfe Überlauf 🎯\nZeile zwei "}),
+            ),
+        ];
+        for (args, action) in cases {
+            let request = mark_request(&args);
+            assert_eq!(
+                serde_json::to_value(request).unwrap(),
+                json!({"op":"agent_marks","action":action}),
+                "{args:?}"
+            );
+        }
+        assert!(matches!(
+            mark_request(&["clear-marks"]),
+            Request::ClearMarks { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_marks_parser_keeps_literal_notes_and_refuses_unrelated_constraints() {
+        for payload in ["--help", "-h", "--no-start", "--", "{\"action\":\"clear\"}"] {
+            let request = mark_request(&["agent-marks", "add", "--note", payload]);
+            assert!(
+                matches!(request, Request::AgentMarks { action: AgentMarksAction::Add { note: Some(note), .. } } if note == payload)
+            );
+            let request = mark_request(&["agent-marks", "note", "9", "--", payload]);
+            assert!(
+                matches!(request, Request::AgentMarks { action: AgentMarksAction::Note { id: 9, note } } if note == payload)
+            );
+        }
+        let request = mark_request(&["agent-marks", "take", "--request-id", "--no-start"]);
+        assert!(
+            matches!(request, Request::AgentMarks { action: AgentMarksAction::Take { request_id: Some(token), .. } } if token == "--no-start")
+        );
+        for args in [
+            &["agent-marks", "list", "--tab", "7"][..],
+            &["agent-marks", "take", "--offset", "1"],
+            &["agent-marks", "take", "--count", "1"],
+            &["agent-marks", "take", "--batch", "42"],
+            &["agent-marks", "text", "9", "--limit", "1"],
+            &["agent-marks", "text", "9", "--request-id", "token"],
+            &["agent-marks", "batch", "42", "--batch", "43"],
+            &["agent-marks", "batch", "--note", "x"],
+            &["agent-marks", "ack", "42", "--limit", "2"],
+            &["agent-marks", "restore", "42", "--offset", "0"],
+            &["agent-marks", "clear", "--tab", "7"],
+            &["agent-marks", "remove", "9", "--note", "x"],
+            &["agent-marks", "note", "9", "x", "--note", "y"],
+            &["agent-marks", "add", "--offset", "0"],
+            &["agent-marks", "add", "--line", "7"],
+            &["agent-marks", "add", "--label", "x"],
+            &[
+                "agent-marks",
+                "take",
+                "--request-id",
+                "a",
+                "--request-id",
+                "b",
+            ],
+            &["agent-marks", "text", "9", "--batch", "42", "--batch", "43"],
+            &["agent-marks", "add", "--note", "a", "--note", "b"],
+            &["agent-marks", "add", "--tab", "7", "--tab", "8"],
+            &["agent-marks", "ack"],
+            &["agent-marks", "remove", "0"],
+            &["agent-marks", "batch", "-1"],
+            &["agent-marks", "note", "9"],
+            &["agent-marks", "add", "arbitrary-range"],
+            &["status", "--request-id", "x"],
+            &["bookmarks", "--batch", "42"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn agent_marks_json_has_readonly_omission_and_strict_explicit_intent() {
+        let request: Request = serde_json::from_value(json!({"op":"agent_marks"})).unwrap();
+        validate(&request).unwrap();
+        assert!(matches!(
+            request,
+            Request::AgentMarks {
+                action: AgentMarksAction::List {
+                    limit: 100,
+                    offset: 0
+                }
+            }
+        ));
+        let action = |value: Value| {
+            serde_json::from_value::<Request>(json!({"op":"agent_marks","action":value}))
+        };
+        for invalid in [
+            Value::Null,
+            json!("take"),
+            json!({}),
+            json!({"action":"Take"}),
+            json!({"action":"take","offset":1}),
+            json!({"action":"take","request_id":42}),
+            json!({"action":"remove","id":9,"force":true}),
+            json!({"action":"note","id":9,"note":null}),
+            json!({"action":"add","range":{"start":{"line":1},"end":{"line":2}}}),
+            json!({"action":"text","id":9,"tab_id":7}),
+            json!({"action":"batch","batch_id":-1}),
+            json!({"action":"clear","workspace":"C:/other"}),
+        ] {
+            assert!(action(invalid.clone()).is_err(), "{invalid}");
+        }
+        for valid in [
+            json!({"action":"batch"}),
+            json!({"action":"batch","batch_id":null}),
+            json!({"action":"text","id":9,"batch_id":null}),
+            json!({"action":"restore","batch_id":null}),
+            json!({"action":"take","request_id":null}),
+            json!({"action":"add","tab_id":null,"note":null}),
+        ] {
+            validate(&action(valid.clone()).unwrap()).unwrap();
+        }
+        for bytes in [
+            br#"{"op":"agent_marks","action":{"action":"take","request_id":"a","request_id":"b"}}"#
+                .as_slice(),
+            br#"{"op":"agent_marks","action":{"action":"remove","id":9,"id":10}}"#,
+            br#"{"op":"agent_marks","action":{"action":"list"},"action":{"action":"clear"}}"#,
+        ] {
+            assert!(transport::from_unique_json::<Request>(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn agent_marks_bounds_use_unicode_notes_positive_ids_and_bounded_payloads() {
+        let request = |action: Value| {
+            serde_json::from_value::<Request>(json!({"op":"agent_marks","action":action})).unwrap()
+        };
+        for note in [
+            "".to_owned(),
+            "🎯".repeat(4096),
+            " literal {\"op\":\"clear\"}\n\t ".to_owned(),
+        ] {
+            let input = request(json!({"action":"note","id":9,"note":note}));
+            validate(&input).unwrap();
+            assert!(
+                matches!(input, Request::AgentMarks { action: AgentMarksAction::Note { note: actual, .. } } if actual == note)
+            );
+        }
+        for invalid in [
+            json!({"action":"list","limit":0}),
+            json!({"action":"take","limit":501}),
+            json!({"action":"batch","batch_id":0}),
+            json!({"action":"text","id":0}),
+            json!({"action":"text","id":9,"batch_id":0}),
+            json!({"action":"text","id":9,"count":0}),
+            json!({"action":"text","id":9,"count":65537}),
+            json!({"action":"ack","batch_id":0}),
+            json!({"action":"restore","batch_id":0}),
+            json!({"action":"add","tab_id":0}),
+            json!({"action":"add","note":"x".repeat(4097)}),
+            json!({"action":"note","id":9,"note":"🎯".repeat(4097)}),
+            json!({"action":"take","request_id":""}),
+            json!({"action":"take","request_id":"é".repeat(65)}),
+            json!({"action":"take","request_id":"line\nbreak"}),
+        ] {
+            assert!(validate(&request(invalid.clone())).is_err(), "{invalid}");
+        }
+        for valid in [
+            json!({"action":"list","limit":500,"offset":usize::MAX}),
+            json!({"action":"take","request_id":"é".repeat(64)}),
+            json!({"action":"text","id":u64::MAX,"offset":usize::MAX,"count":65536}),
+        ] {
+            validate(&request(valid)).unwrap();
+        }
     }
     #[test]
     fn bookmark_commands_preserve_targets_labels_and_existing_instance_scope() {

@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "agent_marks_control.rs"]
+mod agent_marks_control;
+#[path = "agent_marks_ui.rs"]
+mod agent_marks_ui;
 #[path = "context_actions.rs"]
 mod context_actions;
 #[path = "control.rs"]
@@ -105,6 +109,7 @@ struct Session {
     settings: Option<Settings>,
     layout: Option<split::SessionLayout>,
     bookmarks: Vec<crate::bookmarks::Bookmark>,
+    agent_marks: crate::agent_marks::AgentMarks,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -516,6 +521,8 @@ pub struct MorrowApp {
     context_file_jobs: context_actions::FileJobRegistry,
     native_dialog_builder: Option<rfd::FileDialog>,
     settings_open: bool,
+    agent_marks: crate::agent_marks::AgentMarks,
+    agent_marks_ui: agent_marks_ui::AgentMarksUi,
     applied_editor_font: crate::cli::EditorFont,
     save_as: Option<u64>,
     save_queue: std::collections::VecDeque<u64>,
@@ -579,6 +586,7 @@ impl MorrowApp {
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
+        app.agent_marks = session.agent_marks;
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -743,6 +751,8 @@ impl MorrowApp {
             context_file_jobs: context_actions::FileJobRegistry::default(),
             native_dialog_builder: None,
             settings_open: false,
+            agent_marks: crate::agent_marks::AgentMarks::default(),
+            agent_marks_ui: agent_marks_ui::AgentMarksUi::default(),
             save_as: None,
             save_queue: std::collections::VecDeque::new(),
             close_action: None,
@@ -1131,6 +1141,7 @@ impl MorrowApp {
         }
     }
     fn perform_close(&mut self, action: CloseAction) {
+        self.sync_agent_marks();
         match action {
             CloseAction::PaneTab { pane_id, id } => {
                 if self.current_pane_id() == pane_id
@@ -1160,6 +1171,7 @@ impl MorrowApp {
                     let p = self.projects.remove(index);
                     p.index_cancel.store(true, Ordering::Relaxed);
                     for t in p.tabs {
+                        self.agent_marks.detach_document(t.id);
                         let _ = self.recovery_writer.remove(&t.recovery_path, t.revision);
                     }
                     if self.active_project > index {
@@ -1197,6 +1209,7 @@ impl MorrowApp {
         for project in &mut self.projects {
             if let Some(index) = project.tabs.iter().position(|tab| tab.id == id) {
                 let tab = project.tabs.remove(index);
+                self.agent_marks.detach_document(id);
                 let _ = self
                     .recovery_writer
                     .remove(&tab.recovery_path, tab.revision);
@@ -2068,6 +2081,7 @@ impl MorrowApp {
             })
             && self.palette.is_none()
             && !self.settings_open
+            && !self.agent_marks_modal_open()
             && self.picker.is_none()
             && self.save_as.is_none()
             && self.close_action.is_none()
@@ -2315,6 +2329,7 @@ impl MorrowApp {
             settings: Some(self.settings.clone()),
             layout: None,
             bookmarks: self.bookmarks.items.clone(),
+            agent_marks: self.agent_marks.clone(),
         }
     }
     fn persist_session(&self) {
@@ -2581,6 +2596,7 @@ impl MorrowApp {
         let ctx = self.ctx.clone();
         if self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.diff.is_some()
@@ -2745,6 +2761,7 @@ impl MorrowApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.vim_command.is_some()
@@ -3493,6 +3510,10 @@ impl MorrowApp {
                             }
                         });
                         design::menu(ui, "View", "Navigate and arrange your workspace", |ui| {
+                            if design::menu_item(ui, "For agent", "Ctrl+Alt+Shift+A", "Open selected blocks across all projects, add notes, or restore the last collection").clicked() {
+                                self.open_agent_marks();
+                                ui.close();
+                            }
                             if design::menu_item(
                                 ui,
                                 "Bookmarks",
@@ -4673,7 +4694,7 @@ impl MorrowApp {
         let view = self.tab().map(|tab| tab.agent_view).unwrap_or_default();
         ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let controls_width = if markdown { 38.0 } else { 0.0 };
+        let controls_width = 44.0 + if markdown { 38.0 } else { 0.0 };
         let tab_width = (ui.available_width() - controls_width).max(20.0);
         ui.allocate_ui_with_layout(Vec2::new(tab_width, 37.0), Layout::left_to_right(Align::Center), |ui| {
         let tab_scroll = egui::ScrollArea::horizontal()
@@ -4828,12 +4849,14 @@ impl MorrowApp {
             });
         self.register_tab_drop_strip(&tab_scroll, std::mem::take(&mut tab_drop_rects));
         });
-        if markdown {
         ui.allocate_ui_with_layout(Vec2::new(controls_width, 37.0), Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(5.0);
-            self.markdown_preview_toggle(ui, view == crate::cli::DocumentView::Preview);
+            if self.tab_pointer_interaction_active() { ui.disable(); }
+            self.agent_marks_toolbar(ui);
+            if markdown {
+                ui.add_space(5.0);
+                self.markdown_preview_toggle(ui, view == crate::cli::DocumentView::Preview);
+            }
         });
-        }
         });
         if let Some((project, index)) = select {
             self.activate_tab(project, index);
@@ -4849,6 +4872,7 @@ impl MorrowApp {
         }
     }
     fn text_editor(&mut self, ui: &mut egui::Ui) {
+        self.sync_agent_marks();
         let explorer_focused = self.explorer_keyboard_focused();
         let search_matches = self.editor_search_matches();
         let search_pane_id = self.current_pane_id();
@@ -4862,6 +4886,7 @@ impl MorrowApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
+            && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()
             && self.vim_command.is_none()
@@ -4892,8 +4917,12 @@ impl MorrowApp {
             .restore_scroll
             .remove(&(search_pane_id, document_id));
         let id = self.document_widget_id(document_id);
+        let mark_overlays = self.agent_mark_overlay_rows(document_id);
+        let marker_owns_pointer =
+            source_interaction && agent_marks_ui::marker_pointer_owns_editor(&ctx, id);
+        let source_interaction = source_interaction && !marker_owns_pointer;
         let pane_focused = self.render_pane_is_focused();
-        if !source_interaction && !tab_pointer_interaction {
+        if !source_interaction && !tab_pointer_interaction && !marker_owns_pointer {
             // Give external dialogs their own keyboard/IME input before the
             // source widget is rendered. Tab drags retain editor focus so
             // cancellation can return to the unchanged modal selection.
@@ -4936,6 +4965,7 @@ impl MorrowApp {
             .map(|(_, marks)| marks.clone())
             .unwrap_or_default();
         let mut bookmark_click = None;
+        let mut agent_mark_remove = None;
         if !settings.vim
             && pane_focused
             && source_interaction
@@ -5123,7 +5153,7 @@ impl MorrowApp {
                 .id(id)
                 .interactive(pane_focused && source_interaction)
                 .frame(egui::Frame::new().inner_margin(Margin {
-                    left: 56,
+                    left: if mark_overlays.is_empty() { 56 } else { 82 },
                     right: 24,
                     top: 10,
                     bottom: 100,
@@ -5248,6 +5278,10 @@ impl MorrowApp {
                 .skip(first)
                 .collect();
             find::paint_matches(ui, &output.galley, output.galley_pos, &visible_rows, &search_matches, search_cursor);
+            agent_mark_remove = agent_marks_ui::paint_agent_mark_overlays(
+                ui, id, &output.galley, output.galley_pos, &visible_rows,
+                if tab.revision == revision { &mark_overlays } else { &[] },
+            );
             if pane_focused && let Some(feedback) = &tab.feedback {
                 feedback.paint(ui, &output.galley, output.galley_pos, &visible_rows, tab.revision);
             }
@@ -5504,6 +5538,13 @@ impl MorrowApp {
         self.editor_rect = rect;
         self.editor_cursor_rect = caret_rect;
         self.screen_jump = jump;
+        if let Some(mark_id) = agent_mark_remove {
+            self.agent_marks_remove(mark_id);
+            if let Some(tab) = self.tab_mut() {
+                tab.focus = true;
+            }
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
         if let Some(id) = bookmark_click {
             self.jump_to_bookmark(id);
         }
@@ -5515,6 +5556,7 @@ impl MorrowApp {
         let find_id = ui.make_persistent_id("find_query");
         let replace_id = ui.make_persistent_id("replace_query");
         let interactive = !self.settings_open
+            && !self.agent_marks_modal_open()
             && self.palette.is_none()
             && self.picker.is_none()
             && self.close_action.is_none()
@@ -5974,6 +6016,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("Go to definition", "gd / F12"),
     ("Show completions", "Ctrl Space"),
     ("Show problems", "Ctrl Shift M"),
+    ("Mark selection for agent", "Ctrl Shift A"),
+    ("Agent marks", "Ctrl Alt Shift A"),
     ("Markdown source / preview", "Ctrl Shift V"),
     ("Split right", "Ctrl \\"),
     ("Split down", "Ctrl Shift \\"),
@@ -6026,6 +6070,10 @@ impl MorrowApp {
             "Go to line" => self.open_palette(Palette::Line),
             "Toggle bookmark" => self.toggle_bookmark(),
             "Bookmarks" => self.open_bookmarks(),
+            "Mark selection for agent" => {
+                self.capture_agent_mark();
+            }
+            "Agent marks" => self.open_agent_marks(),
             "Jump to visible text" => self.start_screen_jump(),
             "Go to definition" => self.request_definition(),
             "Show completions" => self.request_completion(),
@@ -6665,6 +6713,7 @@ impl MorrowApp {
         let restore_after_menu = egui::Popup::is_any_open(&self.ctx)
             && self.ctx.input(|input| input.key_pressed(Key::Escape));
         self.poll();
+        self.sync_agent_marks();
         self.poll_control();
         self.apply_editor_font();
         self.syntax.begin_frame(ui);
@@ -6726,6 +6775,7 @@ impl MorrowApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
+            && !self.agent_marks_modal_open()
             && self.close_action.is_none()
             && self.save_as.is_none()
             && self.diff.is_none()
@@ -6740,8 +6790,11 @@ impl MorrowApp {
         self.finish_workspace_action();
         self.finish_region_focus();
         self.overlays();
+        self.agent_marks_dialog();
+        self.sync_agent_marks();
         self.navigation_ui();
         self.completion_ui();
+        self.finish_agent_mark_input_owner();
         self.autosave();
         self.sync_languages(false);
         self.watch_disk();
@@ -7325,6 +7378,7 @@ impl MorrowApp {
         if self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.diff.is_some()
@@ -7677,3 +7731,11 @@ mod workspace_context_tests;
 #[cfg(test)]
 #[path = "project_layout_tests.rs"]
 mod project_layout_tests;
+
+#[cfg(test)]
+#[path = "agent_marks_receiver_tests.rs"]
+mod agent_marks_receiver_tests;
+
+#[cfg(test)]
+#[path = "agent_marks_input_tests.rs"]
+mod agent_marks_input_tests;

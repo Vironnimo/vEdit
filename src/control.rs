@@ -94,8 +94,11 @@ impl MorrowApp {
                 visible: false
             }
         ) && dialog == Some("settings");
+        let own_marks_dialog =
+            matches!(request, Request::AgentMarks { .. }) && dialog == Some("agent_marks");
         if !observation
             && !closing_settings
+            && !own_marks_dialog
             && let Some(dialog) = dialog
         {
             return Response::failure(
@@ -128,6 +131,7 @@ impl MorrowApp {
             );
         }
         let result = match request {
+            Request::AgentMarks { action } => return self.control_agent_marks(action),
             Request::Status {} => self.control_status(),
             Request::Tabs { limit, offset } => self.control_tabs(limit, offset),
             Request::Open { files } => self.control_open(files, None),
@@ -521,7 +525,7 @@ impl MorrowApp {
     }
 
     fn control_status(&self) -> Value {
-        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.language_ready,"rust_analysis_error":p.language_error})).take(100).collect::<Vec<_>>(),"tabs":self.control_tabs(100,0),"review":self.review,"dialog":self.control_dialog(),"task":{"status":self.task_status,"running":self.task.is_some()},"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
+        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.language_ready,"rust_analysis_error":p.language_error})).take(100).collect::<Vec<_>>(),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":{"status":self.task_status,"running":self.task.is_some()},"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
     }
     fn control_tabs(&self, limit: usize, offset: usize) -> Value {
         let total = self.projects.iter().map(|p| p.tabs.len()).sum::<usize>();
@@ -597,6 +601,8 @@ impl MorrowApp {
             Some("file_picker")
         } else if self.settings_open {
             Some("settings")
+        } else if self.agent_marks_modal_open() {
+            Some("agent_marks")
         } else if self.palette.is_some() {
             Some("palette")
         } else if self.workspace_picker_open() {
@@ -628,6 +634,12 @@ impl MorrowApp {
 fn control_observation(request: &Request) -> bool {
     match request {
         Request::Batch { actions, .. } => actions.iter().all(control_observation),
+        Request::AgentMarks { action } => matches!(
+            action,
+            cli::AgentMarksAction::List { .. }
+                | cli::AgentMarksAction::Batch { .. }
+                | cli::AgentMarksAction::Text { .. }
+        ),
         Request::Status {}
         | Request::Tabs { .. }
         | Request::Read { .. }
