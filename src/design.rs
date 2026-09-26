@@ -33,10 +33,12 @@ pub(crate) fn ghost_button(ui: &mut Ui, label: &str, tooltip: &str) -> Response 
 
 /// A menu item with a real right-aligned keyboard hint instead of spaces.
 pub(crate) fn menu_item(ui: &mut Ui, label: &str, shortcut: &str, tooltip: &str) -> Response {
-    let button = egui::Button::new(RichText::new(label).size(12.0))
-        .shortcut_text(RichText::new(shortcut).size(11.0))
+    let mut button = egui::Button::new(RichText::new(label).size(12.0))
         .frame_when_inactive(false)
         .min_size(Vec2::new(225.0, 27.0));
+    if !shortcut.is_empty() {
+        button = button.shortcut_text(RichText::new(shortcut).size(11.0));
+    }
     ui.add(button)
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(tooltip)

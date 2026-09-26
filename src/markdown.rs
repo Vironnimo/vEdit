@@ -249,7 +249,7 @@ impl MarkdownCache {
         if !smooth_scroll
             && let Some(offset) = crate::render::instant_scroll_offset_axes(
                 ui,
-                ui.make_persistent_id(scroll_salt),
+                ui.make_persistent_id(egui::IdSalt::new(scroll_salt)),
                 egui::Vec2b::new(false, true),
             )
         {
@@ -844,7 +844,7 @@ impl Renderer<'_> {
             );
             if let Some(offset) = crate::render::instant_scroll_offset_axes(
                 &wheel_ui,
-                ui.make_persistent_id(salt),
+                ui.make_persistent_id(egui::IdSalt::new(salt)),
                 egui::Vec2b::new(true, false),
             ) {
                 scroll = scroll.scroll_offset(offset);
@@ -1932,6 +1932,156 @@ mod tests {
         screen.get_by_label_contains("Open source here").click();
         screen.run_steps(2);
         assert_eq!(opened.get(), Some(1));
+    }
+
+    #[test]
+    fn preview_wheel_accumulates_across_separate_frames_and_reverses_immediately() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = "# Section\n\nA paragraph with enough words to read.\n\n".repeat(40);
+        preview_pass(&context, &mut cache, &text, 0.0, vec![]);
+        let mut expected = 0.0;
+        for (index, delta) in [-90.0, -55.0, 30.0, -75.0, 65.0].into_iter().enumerate() {
+            let time = (index * 2 + 1) as f64 * 0.1;
+            preview_pass(
+                &context,
+                &mut cache,
+                &text,
+                time,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(160.0, 180.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, delta),
+                        modifiers: egui::Modifiers::NONE,
+                        phase: egui::TouchPhase::Move,
+                    },
+                ],
+            );
+            expected -= delta;
+            assert_eq!(
+                cache.documents[0].scroll_y, expected,
+                "wheel frame {index} must start at the previous frame's position"
+            );
+            preview_pass(&context, &mut cache, &text, time + 0.1, vec![]);
+            assert_eq!(
+                cache.documents[0].scroll_y, expected,
+                "idle frame after wheel frame {index} must not continue moving"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_wheel_clamps_to_both_ends_and_can_leave_them_immediately() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = (1..=80)
+            .map(|line| format!("Paragraph {line}: review this step.\n\n"))
+            .collect::<String>();
+        preview_pass(&context, &mut cache, &text, 0.0, vec![]);
+        let mut frame = 0;
+        let mut wheel = |cache: &mut MarkdownCache, delta| {
+            frame += 1;
+            preview_pass(
+                &context,
+                cache,
+                &text,
+                frame as f64 * 0.1,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(160.0, 180.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, delta),
+                        modifiers: egui::Modifiers::NONE,
+                        phase: egui::TouchPhase::Move,
+                    },
+                ],
+            );
+        };
+        wheel(&mut cache, -1_000_000.0);
+        let bottom = cache.documents[0].scroll_y;
+        assert!(bottom > 1_000.0 && bottom < 10_000.0);
+        wheel(&mut cache, -1_000_000.0);
+        assert_eq!(cache.documents[0].scroll_y, bottom);
+        wheel(&mut cache, 31.0);
+        assert_eq!(cache.documents[0].scroll_y, bottom - 31.0);
+        wheel(&mut cache, 1_000_000.0);
+        assert_eq!(cache.documents[0].scroll_y, 0.0);
+        wheel(&mut cache, 1_000_000.0);
+        assert_eq!(cache.documents[0].scroll_y, 0.0);
+        wheel(&mut cache, -47.0);
+        assert_eq!(cache.documents[0].scroll_y, 47.0);
+        preview_pass(&context, &mut cache, &text, 1.0, vec![]);
+        assert_eq!(cache.documents[0].scroll_y, 47.0);
+    }
+
+    #[test]
+    fn table_wheel_accumulates_and_clamps_without_vertical_motion() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = "| Risk | Countermeasure | DoD |\n| --- | --- | --- |\n| Long risk description which should have room to wrap safely in a narrow pane. | Some extensive countermeasure details which also require enough width. | H1 |\n";
+        let mut frame = 0;
+        let mut render = |cache: &mut MarkdownCache, delta: Option<f32>| {
+            frame += 1;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Default::default(),
+                        Vec2::new(320.0, 900.0),
+                    )),
+                    time: Some(frame as f64 * 0.1),
+                    events: delta.map_or_else(Vec::new, |delta| {
+                        vec![
+                            egui::Event::PointerMoved(egui::pos2(160.0, 120.0)),
+                            egui::Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: egui::vec2(0.0, delta),
+                                modifiers: egui::Modifiers::SHIFT,
+                                phase: egui::TouchPhase::Move,
+                            },
+                        ]
+                    }),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        cache.show(ui, 1, 0, text, Path::new("README.md"), 14.0, false, true);
+                    });
+                },
+            );
+            let header_x = text_bounds(&output.shapes)
+                .iter()
+                .find(|(text, _)| text == "Countermeasure")
+                .expect("countermeasure header remains visible while the table scrolls")
+                .1
+                .left();
+            output.drop_without_applying_deltas();
+            assert_eq!(cache.documents[0].scroll_y, 0.0);
+            header_x
+        };
+        let start = render(&mut cache, None);
+        let mut expected = 0.0;
+        for delta in [-30.0, -35.0, 20.0, -10.0] {
+            expected -= delta;
+            let header_x = render(&mut cache, Some(delta));
+            assert!((start - header_x - expected).abs() < 1.0);
+            let idle_x = render(&mut cache, None);
+            assert!((idle_x - header_x).abs() < 1.0);
+        }
+        let right_end = render(&mut cache, Some(-1_000_000.0));
+        assert!(start - right_end > expected);
+        let at_right_end = render(&mut cache, Some(-1_000_000.0));
+        assert!((at_right_end - right_end).abs() < 1.0);
+        let reversed = render(&mut cache, Some(19.0));
+        assert!((reversed - right_end - 19.0).abs() < 1.0);
+        let left_end = render(&mut cache, Some(1_000_000.0));
+        assert!((left_end - start).abs() < 1.0);
+        let at_left_end = render(&mut cache, Some(1_000_000.0));
+        assert!((at_left_end - start).abs() < 1.0);
+        let forward = render(&mut cache, Some(-13.0));
+        assert!((start - forward - 13.0).abs() < 1.0);
+        let idle = render(&mut cache, None);
+        assert!((idle - forward).abs() < 1.0);
     }
 
     #[test]

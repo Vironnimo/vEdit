@@ -22,6 +22,10 @@ use std::{
 mod context_actions;
 #[path = "control.rs"]
 mod control;
+#[path = "git_panel.rs"]
+mod git_panel;
+#[path = "navigation.rs"]
+mod navigation;
 #[path = "split.rs"]
 mod split;
 
@@ -60,6 +64,7 @@ struct Settings {
     tab_width: usize,
     word_wrap: bool,
     smooth_scroll: bool,
+    leader_key: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -70,6 +75,7 @@ impl Default for Settings {
             tab_width: 4,
             word_wrap: false,
             smooth_scroll: false,
+            leader_key: " ".into(),
         }
     }
 }
@@ -82,6 +88,7 @@ struct Session {
     autosave: Option<bool>,
     settings: Option<Settings>,
     layout: Option<split::SessionLayout>,
+    bookmarks: Vec<crate::bookmarks::Bookmark>,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -117,9 +124,15 @@ struct Project {
     git_branch: Option<String>,
     git_tracking: Option<git::BranchInfo>,
     git_changes: Vec<git::FileStatus>,
+    git_stats: git::WorkingTreeStats,
+    git_stats_error: Option<String>,
     recent_commits: Vec<git::CommitSummary>,
+    git_history_limit: usize,
+    git_history_error: Option<String>,
+    git_view: git_panel::GitViewState,
     git_error: Option<String>,
     git_loading: bool,
+    git_refresh_pending: bool,
     last_git_refresh: Instant,
     commit_message: String,
     language: Option<crate::lsp::LanguageServer>,
@@ -144,9 +157,15 @@ impl Project {
             git_branch: None,
             git_tracking: None,
             git_changes: Vec::new(),
+            git_stats: git::WorkingTreeStats::default(),
+            git_stats_error: None,
             recent_commits: Vec::new(),
+            git_history_limit: 40,
+            git_history_error: None,
+            git_view: git_panel::GitViewState::default(),
             git_error: None,
             git_loading: false,
+            git_refresh_pending: false,
             last_git_refresh: Instant::now() - Duration::from_secs(30),
             commit_message: String::new(),
             language: None,
@@ -255,8 +274,20 @@ struct GitSnapshot {
     branch: Option<String>,
     tracking: Option<git::BranchInfo>,
     files: Vec<git::FileStatus>,
+    stats: git::WorkingTreeStats,
+    stats_error: Option<String>,
     commits: Vec<git::CommitSummary>,
+    history_error: Option<String>,
 }
+struct ActiveScreenJump {
+    tab_id: u64,
+    pane_id: u64,
+    revision: u64,
+    state: crate::screen_jump::ScreenJump,
+    glyphs: Vec<crate::screen_jump::VisibleGlyph>,
+}
+type BookmarkMarks = Vec<(usize, u64, String)>;
+type BookmarkLineCache = HashMap<u64, (u64, BookmarkMarks)>;
 enum WorkerResult {
     Index {
         root: PathBuf,
@@ -283,6 +314,11 @@ enum WorkerResult {
         root: PathBuf,
         result: Result<GitSnapshot, String>,
     },
+    GitCommit {
+        root: PathBuf,
+        hash: String,
+        result: Result<git::CommitDetails, String>,
+    },
     GitAction {
         root: PathBuf,
         message: String,
@@ -300,6 +336,7 @@ enum WorkerResult {
         result: Result<Option<DialogSelection>, String>,
     },
     Diff {
+        generation: u64,
         title: String,
         result: Result<String, String>,
     },
@@ -393,6 +430,11 @@ pub struct MorrowApp {
     sidebar: SidebarView,
     sidebar_visible: bool,
     settings: Settings,
+    bookmarks: crate::bookmarks::BookmarkStore,
+    bookmark_lines: BookmarkLineCache,
+    pending_bookmark_jump: Option<(u64, crate::bookmarks::Bookmark)>,
+    navigation: navigation::NavigationState,
+    screen_jump: Option<ActiveScreenJump>,
     sender: Sender<WorkerResult>,
     receiver: Receiver<WorkerResult>,
     ctx: egui::Context,
@@ -429,6 +471,10 @@ pub struct MorrowApp {
     exit_ready: bool,
     git_busy: Option<PathBuf>,
     diff: Option<(String, String)>,
+    diff_view: crate::git_diff_view::DiffView,
+    diff_generation: u64,
+    diff_loading: bool,
+    diff_error: Option<String>,
     output_visible: bool,
     command: String,
     task: Option<tasks::RunningTask>,
@@ -472,6 +518,9 @@ impl MorrowApp {
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
+        app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
+            .unwrap_or_else(|_| " ".into());
+        app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -563,6 +612,11 @@ impl MorrowApp {
             sidebar: SidebarView::Explorer,
             sidebar_visible: true,
             settings: Settings::default(),
+            bookmarks: crate::bookmarks::BookmarkStore::default(),
+            bookmark_lines: HashMap::new(),
+            pending_bookmark_jump: None,
+            navigation: navigation::NavigationState::default(),
+            screen_jump: None,
             sender,
             receiver,
             ctx,
@@ -599,6 +653,10 @@ impl MorrowApp {
             exit_ready: false,
             git_busy: None,
             diff: None,
+            diff_view: crate::git_diff_view::DiffView::default(),
+            diff_generation: 0,
+            diff_loading: false,
+            diff_error: None,
             output_visible: false,
             command: String::new(),
             task: None,
@@ -1157,6 +1215,7 @@ impl MorrowApp {
                             }
                         }
                     }
+                    let saved = message.as_ref().is_some_and(|(_, error)| !error);
                     if let Some((message, error)) = message {
                         self.status(message, error);
                         if error {
@@ -1172,6 +1231,18 @@ impl MorrowApp {
                             .position(|p| p.tabs.iter().any(|t| t.id == id))
                     {
                         self.index_project(index);
+                    }
+                    if saved {
+                        let indices: Vec<_> = self
+                            .projects
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| p.tabs.iter().any(|t| t.id == id))
+                            .map(|(index, _)| index)
+                            .collect();
+                        for index in indices {
+                            self.refresh_git(index, true);
+                        }
                     }
                     self.sync_languages(true);
                     for project in &self.projects {
@@ -1201,7 +1272,8 @@ impl MorrowApp {
                     self.session_dirty = true;
                 }
                 WorkerResult::GitStatus { root, result } => {
-                    if let Some(p) = self.projects.iter_mut().find(|p| p.root == root) {
+                    if let Some(index) = self.projects.iter().position(|p| p.root == root) {
+                        let p = &mut self.projects[index];
                         p.git_loading = false;
                         p.last_git_refresh = Instant::now();
                         match result {
@@ -1210,10 +1282,41 @@ impl MorrowApp {
                                 p.git_branch = s.branch;
                                 p.git_tracking = s.tracking;
                                 p.git_changes = s.files;
+                                p.git_stats = s.stats;
+                                p.git_stats_error = s.stats_error;
                                 p.recent_commits = s.commits;
+                                p.git_history_error = s.history_error;
                                 p.git_error = None;
                             }
                             Err(e) => p.git_error = Some(e),
+                        }
+                        let refresh = std::mem::take(&mut p.git_refresh_pending);
+                        if refresh {
+                            self.refresh_git(index, true);
+                        }
+                    }
+                }
+                WorkerResult::GitCommit { root, hash, result } => {
+                    if let Some(p) = self.projects.iter_mut().find(|p| p.root == root) {
+                        if let Ok(detail) = &result {
+                            // Keep recent immutable commits without growing with history.
+                            if p.git_view.detail_cache.len() >= 16 {
+                                p.git_view.detail_cache.clear();
+                            }
+                            p.git_view.detail_cache.insert(hash.clone(), detail.clone());
+                        }
+                        if p.git_view.selected_commit.as_deref() == Some(&hash) {
+                            p.git_view.detail_loading = false;
+                            match result {
+                                Ok(detail) => {
+                                    p.git_view.detail = Some(detail);
+                                    p.git_view.detail_error = None;
+                                }
+                                Err(error) => {
+                                    p.git_view.detail = None;
+                                    p.git_view.detail_error = Some(error);
+                                }
+                            }
                         }
                     }
                 }
@@ -1226,11 +1329,16 @@ impl MorrowApp {
                     match result {
                         Ok(_) => {
                             self.status(format!("{message} completed"), false);
-                            if let Some(i) = self
+                            let indices: Vec<_> = self
                                 .projects
                                 .iter()
-                                .position(|p| p.git_root.as_ref() == Some(&root) || p.root == root)
-                            {
+                                .enumerate()
+                                .filter(|(_, p)| {
+                                    p.git_root.as_ref() == Some(&root) || p.root == root
+                                })
+                                .map(|(index, _)| index)
+                                .collect();
+                            for i in indices {
                                 if message == "Create commit" {
                                     self.projects[i].commit_message.clear();
                                 }
@@ -1259,10 +1367,22 @@ impl MorrowApp {
                 WorkerResult::NativeDialog { request, result } => {
                     self.finish_native_dialog(request, result);
                 }
-                WorkerResult::Diff { title, result } => match result {
-                    Ok(text) => self.diff = Some((title, text)),
-                    Err(e) => self.status(e, true),
-                },
+                WorkerResult::Diff {
+                    generation,
+                    title,
+                    result,
+                } => {
+                    if generation == self.diff_generation && self.diff.is_some() {
+                        self.diff_loading = false;
+                        match result {
+                            Ok(text) => {
+                                self.diff = Some((title, text));
+                                self.diff_error = None;
+                            }
+                            Err(error) => self.diff_error = Some(error),
+                        }
+                    }
+                }
                 WorkerResult::DiskChanges(changes) => {
                     self.disk_check_running = false;
                     for (id, baseline, result) in changes {
@@ -1368,30 +1488,47 @@ impl MorrowApp {
         }
     }
     fn refresh_git(&mut self, index: usize, force: bool) {
+        let interval = if self.sidebar_visible && self.sidebar == SidebarView::SourceControl {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_secs(10)
+        };
         let Some(p) = self.projects.get_mut(index) else {
             return;
         };
-        if p.git_loading
-            || self.git_busy.is_some()
-            || (!force && p.last_git_refresh.elapsed() < Duration::from_secs(10))
-        {
+        if p.git_loading {
+            p.git_refresh_pending |= force;
+            return;
+        }
+        if self.git_busy.is_some() || (!force && p.last_git_refresh.elapsed() < interval) {
             return;
         }
         p.git_loading = true;
         let root = p.root.clone();
+        let history_limit = p.git_history_limit;
         self.worker(move || {
             let result = (|| {
                 let repo = git::repository_root(&root).map_err(|e| e.to_string())?;
                 if let Some(repo) = repo {
                     let status = git::status(&repo).map_err(|e| e.to_string())?;
                     let tracking = git::branch_info(&repo).ok();
-                    let commits = git::recent_log(&repo, 8).unwrap_or_default();
+                    let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
+                        Ok(stats) => (stats, None),
+                        Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
+                    };
+                    let (commits, history_error) = match git::recent_log(&repo, history_limit) {
+                        Ok(commits) => (commits, None),
+                        Err(error) => (Vec::new(), Some(error.to_string())),
+                    };
                     Ok(GitSnapshot {
                         root: Some(repo),
                         branch: status.branch,
                         tracking,
                         files: status.files,
+                        stats,
+                        stats_error,
                         commits,
+                        history_error,
                     })
                 } else {
                     Ok(GitSnapshot {
@@ -1399,7 +1536,10 @@ impl MorrowApp {
                         branch: None,
                         tracking: None,
                         files: Vec::new(),
+                        stats: git::WorkingTreeStats::default(),
+                        stats_error: None,
                         commits: Vec::new(),
+                        history_error: None,
                     })
                 }
             })();
@@ -1418,6 +1558,391 @@ impl MorrowApp {
             root,
             message,
         });
+    }
+    fn request_git_commit(&mut self, index: usize, hash: String) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        let view = &mut project.git_view;
+        view.detail_open = true;
+        if view.selected_commit.as_ref() == Some(&hash) && view.detail_loading {
+            return;
+        }
+        view.selected_commit = Some(hash.clone());
+        view.selected_file = None;
+        view.detail_error = None;
+        if let Some(detail) = view.detail_cache.get(&hash) {
+            view.detail = Some(detail.clone());
+            view.detail_loading = false;
+            return;
+        }
+        view.detail = None;
+        view.detail_loading = true;
+        let repository = project
+            .git_root
+            .clone()
+            .unwrap_or_else(|| project.root.clone());
+        let root = project.root.clone();
+        self.worker(move || WorkerResult::GitCommit {
+            root,
+            result: git::commit_details(&repository, &hash).map_err(|e| e.to_string()),
+            hash,
+        });
+    }
+    fn load_more_git_history(&mut self) {
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.git_history_limit = project.git_history_limit.saturating_add(40);
+            self.refresh_git(self.active_project, true);
+        }
+    }
+    fn request_git_diff(&mut self, root: PathBuf, path: PathBuf, staged: bool, untracked: bool) {
+        let title = format!(
+            "{} · {}",
+            path.display(),
+            if staged {
+                "Staged changes"
+            } else {
+                "Working tree"
+            }
+        );
+        let file = self
+            .projects
+            .iter()
+            .filter(|p| p.git_root.as_ref() == Some(&root))
+            .flat_map(|p| &p.git_changes)
+            .find(|file| Path::new(&file.path) == path)
+            .cloned();
+        self.begin_git_diff(title.clone());
+        let generation = self.diff_generation;
+        self.worker(move || WorkerResult::Diff {
+            generation,
+            title,
+            result: if let Some(file) = file {
+                git::status_diff(&root, &file, staged)
+            } else if untracked {
+                git::untracked_diff(&root, &path)
+            } else {
+                git::diff(&root, &path, staged)
+            }
+            .map_err(|e| e.to_string()),
+        });
+    }
+    fn request_commit_diff(&mut self, root: PathBuf, hash: String, path: PathBuf) {
+        let title = format!("{} · {}", path.display(), &hash[..hash.len().min(8)]);
+        let cached = self
+            .project()
+            .and_then(|p| p.git_view.detail_cache.get(&hash))
+            .and_then(|detail| {
+                detail
+                    .files
+                    .iter()
+                    .find(|file| Path::new(&file.path) == path)
+                    .map(|file| (detail.clone(), file.clone()))
+            });
+        self.begin_git_diff(title.clone());
+        let generation = self.diff_generation;
+        self.worker(move || WorkerResult::Diff {
+            generation,
+            title,
+            result: if let Some((detail, file)) = cached {
+                git::commit_file_diff(&root, &detail, &file)
+            } else {
+                git::commit_diff(&root, &hash, &path)
+            }
+            .map_err(|e| e.to_string()),
+        });
+    }
+    fn begin_git_diff(&mut self, title: String) {
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+        self.diff_loading = true;
+        self.diff_error = None;
+        self.diff = Some((title, String::new()));
+    }
+    fn toggle_bookmark(&mut self) {
+        match self.try_toggle_bookmark(self.tab().map(|tab| tab.id)) {
+            Ok(crate::bookmarks::ToggleResult::Added(_)) => self.status("Bookmark saved", false),
+            Ok(crate::bookmarks::ToggleResult::Removed(_)) => {
+                self.status("Bookmark removed", false)
+            }
+            Err(error) => self.status(error, true),
+        }
+    }
+    fn try_toggle_bookmark(
+        &mut self,
+        tab_id: Option<u64>,
+    ) -> Result<crate::bookmarks::ToggleResult, String> {
+        let id = tab_id.ok_or_else(|| "Open a file before saving a bookmark".to_owned())?;
+        let tab = self
+            .projects
+            .iter()
+            .flat_map(|p| &p.tabs)
+            .find(|tab| tab.id == id)
+            .ok_or_else(|| "The document is no longer open".to_owned())?;
+        if tab.loading || tab.error.is_some() {
+            return Err("Wait until the file has loaded before saving a bookmark".into());
+        }
+        let path = tab
+            .path
+            .clone()
+            .ok_or_else(|| "Save this file before creating a bookmark".to_owned())?;
+        let (line, column) = tab.lines.line_col(&tab.text, tab.revision, tab.vim.cursor);
+        let context = tab
+            .text
+            .lines()
+            .nth(line.saturating_sub(1))
+            .filter(|line| line.len() <= 4096)
+            .unwrap_or("")
+            .to_owned();
+        let existing = self
+            .bookmarks
+            .for_path(&path)
+            .find(|bookmark| crate::bookmarks::locate(&tab.text, bookmark).line == line)
+            .map(|bookmark| bookmark.id);
+        let result = if let Some(id) = existing {
+            self.bookmarks.remove(id);
+            crate::bookmarks::ToggleResult::Removed(id)
+        } else {
+            self.bookmarks.toggle(&path, line, column, Some(&context))
+        };
+        self.bookmark_lines.clear();
+        self.session_dirty = true;
+        Ok(result)
+    }
+    fn jump_to_bookmark(&mut self, id: u64) {
+        if let Err(error) = self.try_jump_to_bookmark(id) {
+            self.status(error, true);
+        }
+    }
+    fn try_jump_to_bookmark(&mut self, id: u64) -> Result<u64, String> {
+        let bookmark = self
+            .bookmarks
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "The bookmark no longer exists".to_owned())?;
+        let existing = self.projects.iter().enumerate().find_map(|(project, p)| {
+            p.tabs
+                .iter()
+                .position(|t| t.path.as_ref() == Some(&bookmark.path))
+                .map(|tab| (project, tab))
+        });
+        if let Some((project, tab)) = existing {
+            if let Some(error) = &self.projects[project].tabs[tab].error {
+                return Err(format!("The bookmarked file is unavailable: {error}"));
+            }
+            self.activate_tab(project, tab);
+        } else {
+            let project = self
+                .projects
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| bookmark.path.starts_with(&p.root))
+                .max_by_key(|(_, p)| p.root.components().count())
+                .map(|(index, _)| index);
+            if let Some(project) = project {
+                let active = self.projects[project].active_tab;
+                self.activate_tab(project, active);
+            } else if let Some(parent) = bookmark.path.parent() {
+                self.add_project(parent.to_owned());
+            } else {
+                return Err("The bookmark has no valid file path".into());
+            }
+            self.open_file(bookmark.path.clone());
+        }
+        let tab = self
+            .tab_mut()
+            .ok_or_else(|| "The bookmarked file could not be opened".to_owned())?;
+        let id = tab.id;
+        tab.agent_view = crate::cli::DocumentView::Source;
+        self.pending_bookmark_jump = Some((id, bookmark));
+        self.apply_pending_bookmark_jump();
+        self.session_dirty = true;
+        Ok(id)
+    }
+    fn apply_pending_bookmark_jump(&mut self) {
+        let Some((id, bookmark)) = self.pending_bookmark_jump.take() else {
+            return;
+        };
+        let Some(tab) = self.tab_by_id_mut(id) else {
+            return;
+        };
+        if tab.loading {
+            self.pending_bookmark_jump = Some((id, bookmark));
+            return;
+        }
+        if let Some(error) = tab.error.clone() {
+            self.status(format!("Could not open bookmark: {error}"), true);
+            return;
+        }
+        let location = crate::bookmarks::locate(&tab.text, &bookmark);
+        Self::move_navigation_cursor(tab, location.char_index);
+        if let Some(stored) = self
+            .bookmarks
+            .items
+            .iter_mut()
+            .find(|item| item.id == bookmark.id)
+        {
+            stored.line = location.line;
+            stored.column = location.column;
+        }
+        self.bookmark_lines.clear();
+        self.session_dirty = true;
+    }
+    fn move_navigation_cursor(tab: &mut EditorTab, cursor: usize) {
+        let action = tab.vim.finish_insert(&mut tab.text);
+        if action.text_changed {
+            tab.changed();
+        }
+        tab.vim.set_cursor(&tab.text, cursor);
+        let selection = tab
+            .vim
+            .selection(&tab.text)
+            .unwrap_or(tab.vim.cursor..tab.vim.cursor);
+        tab.selection = selection.clone();
+        tab.pending_selection = Some(selection);
+        tab.scroll_to_cursor = true;
+        tab.focus = true;
+    }
+    fn start_screen_jump(&mut self) {
+        if let Some(tab) = self.tab_mut() {
+            let action = tab.vim.finish_insert(&mut tab.text);
+            if action.text_changed {
+                tab.changed();
+            }
+        }
+        let Some(tab) = self.tab() else { return };
+        if tab.loading || tab.error.is_some() || tab.agent_view != crate::cli::DocumentView::Source
+        {
+            self.status(
+                "Open a source document to jump between visible matches",
+                true,
+            );
+            return;
+        }
+        self.screen_jump = Some(ActiveScreenJump {
+            tab_id: tab.id,
+            pane_id: self.current_pane_id(),
+            revision: tab.revision,
+            state: crate::screen_jump::ScreenJump::new(),
+            glyphs: Vec::new(),
+        });
+        self.completions = None;
+    }
+    fn screen_jump_keys(&mut self) -> bool {
+        let Some(mut jump) = self.screen_jump.take() else {
+            return false;
+        };
+        let valid = self.current_pane_id() == jump.pane_id
+            && self.tab().is_some_and(|tab| {
+                tab.id == jump.tab_id
+                    && tab.revision == jump.revision
+                    && tab.agent_view == crate::cli::DocumentView::Source
+            })
+            && self.palette.is_none()
+            && !self.settings_open
+            && self.picker.is_none()
+            && self.save_as.is_none()
+            && self.close_action.is_none()
+            && self.vim_command.is_none()
+            && self.context_file_dialog.is_none()
+            && !egui::Popup::is_any_open(&self.ctx)
+            && self.diff.is_none()
+            && !self.git_detail_open()
+            && !self.navigation_modal_open();
+        if !valid || self.ctx.input(|input| input.pointer.any_pressed()) {
+            jump.state.cancel();
+            return false;
+        }
+        let events = self
+            .ctx
+            .input_mut(|input| std::mem::take(&mut input.events));
+        let text_characters: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                if let egui::Event::Text(text) = event {
+                    Some(text.chars())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        let mut keep = Vec::new();
+        let mut action = crate::screen_jump::JumpAction::None;
+        for event in events {
+            if !matches!(action, crate::screen_jump::JumpAction::None) {
+                // A completed jump owns the entire input batch; trailing query
+                // characters must never become an editing command.
+                if !matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)) {
+                    keep.push(event);
+                }
+                continue;
+            }
+            match event {
+                egui::Event::Text(text) => {
+                    for ch in text.chars() {
+                        action = jump.state.input_char(ch);
+                        jump.state.recompute(&jump.glyphs);
+                        if !matches!(action, crate::screen_jump::JumpAction::None) {
+                            break;
+                        }
+                    }
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    if modifiers.command || modifiers.ctrl || modifiers.alt {
+                        continue;
+                    }
+                    match key {
+                        Key::Escape => action = crate::screen_jump::JumpAction::Cancel,
+                        Key::Enter => {
+                            jump.state.enter();
+                        }
+                        Key::Backspace => {
+                            jump.state.backspace();
+                            jump.state.recompute(&jump.glyphs);
+                        }
+                        _ => {
+                            let name = key.name();
+                            let ch = if key == Key::Space {
+                                Some(' ')
+                            } else if name.chars().count() == 1 {
+                                name.chars().next().map(|ch| {
+                                    if modifiers.shift {
+                                        ch
+                                    } else {
+                                        ch.to_ascii_lowercase()
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some(ch) = ch.filter(|ch| !text_characters.contains(ch)) {
+                                action = jump.state.input_char(ch);
+                                jump.state.recompute(&jump.glyphs);
+                            }
+                        }
+                    }
+                }
+                egui::Event::Key { .. } => {}
+                other => keep.push(other),
+            }
+        }
+        self.ctx.input_mut(|input| input.events = keep);
+        match action {
+            crate::screen_jump::JumpAction::Jump(cursor) => {
+                if let Some(tab) = self.tab_mut() {
+                    Self::move_navigation_cursor(tab, cursor);
+                }
+                self.session_dirty = true;
+            }
+            crate::screen_jump::JumpAction::Cancel => {}
+            crate::screen_jump::JumpAction::None => self.screen_jump = Some(jump),
+        }
+        true
     }
     fn search_project(&mut self) {
         self.search_cancel.store(true, Ordering::Relaxed);
@@ -1542,6 +2067,7 @@ impl MorrowApp {
             autosave: Some(self.settings.autosave),
             settings: Some(self.settings.clone()),
             layout: Some(self.editor_session_layout()),
+            bookmarks: self.bookmarks.items.clone(),
         }
     }
     fn persist_session(&self) {
@@ -1780,6 +2306,10 @@ impl MorrowApp {
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.diff.is_some()
+            || self.git_detail_open()
+            || self.navigation_modal_open()
+            || self.navigation_pending()
+            || self.screen_jump.is_some()
             || self.context_file_dialog.is_some()
         {
             return;
@@ -1940,6 +2470,10 @@ impl MorrowApp {
             || self.close_action.is_some()
             || self.vim_command.is_some()
             || self.diff.is_some()
+            || self.git_detail_open()
+            || self.navigation_modal_open()
+            || self.navigation_pending()
+            || self.screen_jump.is_some()
             || self.context_file_dialog.is_some()
         {
             return;
@@ -2496,6 +3030,40 @@ impl MorrowApp {
                             }
                         });
                         design::menu(ui, "View", "Navigate and arrange your workspace", |ui| {
+                            if design::menu_item(
+                                ui,
+                                "Bookmarks",
+                                "Leader b",
+                                "Search saved file and cursor positions",
+                            )
+                            .clicked()
+                            {
+                                self.open_bookmarks();
+                                ui.close();
+                            }
+                            if design::menu_item(
+                                ui,
+                                "Toggle bookmark",
+                                "Leader m",
+                                "Mark or unmark the current file and line",
+                            )
+                            .clicked()
+                            {
+                                self.toggle_bookmark();
+                                ui.close();
+                            }
+                            if design::menu_item(
+                                ui,
+                                "Jump to visible text",
+                                "Leader Leader f",
+                                "Find a visible match and jump by its label",
+                            )
+                            .clicked()
+                            {
+                                self.start_screen_jump();
+                                ui.close();
+                            }
+                            ui.separator();
                             if design::menu_item(ui, "Explorer", "", "Browse project files")
                                 .clicked()
                             {
@@ -2836,7 +3404,10 @@ impl MorrowApp {
         if let Some(error) = error {
             ui.colored_label(ORANGE, error);
         }
-        let Some(index) = index else { return };
+        let Some(index) = index else {
+            self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
+            return;
+        };
         if index.truncated {
             ui.label(
                 RichText::new("File limit reached. Narrow this workspace.")
@@ -2875,6 +3446,7 @@ impl MorrowApp {
         let show_root = root_state.is_open();
         root_state.store(ui.ctx());
         if !show_root {
+            self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
             return;
         }
         egui::ScrollArea::vertical()
@@ -2887,6 +3459,9 @@ impl MorrowApp {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.spacing_mut().indent = 14.0;
                 self.tree(ui, &index, &index.root, &active, 0);
+                // This rectangle starts below the last row, leaving file and
+                // folder menus (and the ScrollArea's scrollbar) in control.
+                self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
             });
     }
     fn tree(
@@ -3043,223 +3618,6 @@ impl MorrowApp {
             }
         }
     }
-    fn git_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(p) = self.project() else { return };
-        let root = p.git_root.clone().unwrap_or_else(|| p.root.clone());
-        let repo = p.git_root.is_some();
-        let loading = p.git_loading;
-        let branch = p.git_branch.clone();
-        let changes = p.git_changes.clone();
-        let commits = p.recent_commits.clone();
-        let error = p.git_error.clone();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(branch.unwrap_or_else(|| {
-                    if loading {
-                        "Loading…".into()
-                    } else {
-                        "No repository".into()
-                    }
-                }))
-                .size(13.0)
-                .strong()
-                .color(ACCENT),
-            );
-            if loading {
-                ui.spinner();
-            }
-        });
-        if let Some(error) = error {
-            ui.colored_label(ORANGE, error);
-        }
-        if !repo {
-            if !loading {
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new("Track this project's changes with Git.")
-                        .color(MUTED)
-                        .size(12.0),
-                );
-                if ui.button("Initialize repository").clicked() {
-                    self.git_action(root, GitAction::Initialize);
-                }
-            }
-            return;
-        }
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("CHANGES   {}", changes.len()))
-                    .size(10.5)
-                    .strong()
-                    .color(MUTED),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if small_button(ui, "+", "Stage all changes").clicked() {
-                    self.git_action(root.clone(), GitAction::StageAll);
-                }
-                if small_button(ui, "−", "Unstage all").clicked() {
-                    self.git_action(root.clone(), GitAction::UnstageAll);
-                }
-            });
-        });
-        egui::ScrollArea::vertical()
-            .max_height((ui.available_height() * 0.45).max(100.0))
-            .id_salt("git_changes")
-            .show(ui, |ui| {
-                if changes.is_empty() {
-                    ui.label(
-                        RichText::new("Working tree is clean")
-                            .size(12.0)
-                            .color(MUTED),
-                    );
-                }
-                for change in &changes {
-                    ui.horizontal(|ui| {
-                        let staged = change.is_staged();
-                        if small_button(
-                            ui,
-                            if staged { "−" } else { "+" },
-                            if staged { "Unstage" } else { "Stage" },
-                        )
-                        .clicked()
-                        {
-                            let mut paths = vec![PathBuf::from(&change.path)];
-                            if let Some(old) = &change.original_path {
-                                paths.push(PathBuf::from(old));
-                            }
-                            self.git_action(
-                                root.clone(),
-                                if staged {
-                                    GitAction::Unstage(paths)
-                                } else {
-                                    GitAction::Stage(paths)
-                                },
-                            );
-                        }
-                        let mark = if change.is_conflicted() {
-                            "!"
-                        } else if change.is_untracked() {
-                            "U"
-                        } else if staged && change.is_unstaged() {
-                            "SM"
-                        } else if staged {
-                            "S"
-                        } else {
-                            "M"
-                        };
-                        ui.label(RichText::new(mark).monospace().color(
-                            if change.is_conflicted() {
-                                RED
-                            } else if staged {
-                                ACCENT
-                            } else {
-                                ORANGE
-                            },
-                        ));
-                        let response = ui.add(
-                            egui::Label::new(RichText::new(&change.path).size(11.5).color(TEXT))
-                                .truncate()
-                                .sense(egui::Sense::click()),
-                        );
-                        if response.clicked() {
-                            self.open_file(root.join(&change.path));
-                        }
-                        response.context_menu(|ui| {
-                            if ui.button("View diff").clicked() {
-                                let path = PathBuf::from(&change.path);
-                                let worker_root = root.clone();
-                                let title = format!(
-                                    "{}{}",
-                                    change.path,
-                                    if staged { " · staged" } else { "" }
-                                );
-                                self.worker(move || WorkerResult::Diff {
-                                    title,
-                                    result: git::diff(&worker_root, &path, staged)
-                                        .map_err(|e| e.to_string()),
-                                });
-                                ui.close();
-                            }
-                        });
-                    });
-                }
-            });
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
-        if let Some(p) = self.projects.get_mut(self.active_project) {
-            ui.add(
-                egui::TextEdit::multiline(&mut p.commit_message)
-                    .hint_text("Commit message")
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(3),
-            );
-        }
-        let message = self
-            .project()
-            .map(|p| p.commit_message.clone())
-            .unwrap_or_default();
-        let busy = self.git_busy.is_some();
-        if ui
-            .add_enabled_ui(
-                !busy
-                    && !message.trim().is_empty()
-                    && changes.iter().any(|c| c.is_staged())
-                    && !changes.iter().any(|c| c.is_conflicted()),
-                |ui| {
-                    design::primary_button(
-                        ui,
-                        "Commit staged changes",
-                        Vec2::new(ui.available_width(), 32.0),
-                    )
-                },
-            )
-            .inner
-            .on_hover_text("Commit the staged files with this message")
-            .clicked()
-        {
-            self.git_action(root.clone(), GitAction::Commit(message));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            for (label, action) in [
-                ("Fetch", GitAction::Fetch),
-                ("Pull", GitAction::Pull),
-                ("Push", GitAction::Push),
-            ] {
-                if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                    self.git_action(root.clone(), action);
-                }
-            }
-        });
-        if busy {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Working…");
-            });
-        }
-        ui.add_space(14.0);
-        egui::CollapsingHeader::new(RichText::new("RECENT COMMITS").size(10.5).color(MUTED)).show(
-            ui,
-            |ui| {
-                for commit in &commits {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(&commit.hash[..commit.hash.len().min(7)])
-                                .monospace()
-                                .size(10.5)
-                                .color(ACCENT),
-                        );
-                        ui.add(
-                            egui::Label::new(RichText::new(&commit.subject).size(11.0).color(TEXT))
-                                .truncate(),
-                        );
-                    });
-                }
-            },
-        );
-    }
 }
 
 impl MorrowApp {
@@ -3268,7 +3626,7 @@ impl MorrowApp {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 2)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (mode, color) = if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", BLUE) } else if self.settings.vim {
+                    let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", BLUE) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", ACCENT), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
@@ -3285,7 +3643,16 @@ impl MorrowApp {
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         if design::ghost_button(ui, &branch, &hint).clicked() { self.sidebar = SidebarView::SourceControl; self.sidebar_visible = true; }
                     }
-                    if let Some((message, error, time)) = &self.status
+                    if let Some(jump) = &self.screen_jump {
+                        let hint = if jump.state.query.is_empty() {
+                            "Type 1–3 characters · Esc cancels".to_owned()
+                        } else {
+                            let digits = jump.state.targets.first().map_or(1, |target| target.label.len());
+                            format!("{} · {} matches · type a {digits}-digit label · Esc cancels", jump.state.query, jump.state.targets.len())
+                        };
+                        ui.add(egui::Label::new(RichText::new(&hint).size(10.5).color(ORANGE)).truncate())
+                            .on_hover_text("Type up to three characters to find visible matches. Digits choose a jump label. For numeric search text, press Enter before selecting a label. Backspace refines the query; Esc cancels.");
+                    } else if let Some((message, error, time)) = &self.status
                         && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - 350.0).clamp(40.0, 440.0);
                         ui.add_sized([width, 20.0], egui::Label::new(RichText::new(message).size(10.5).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
@@ -3963,6 +4330,43 @@ impl MorrowApp {
         };
         let id = self.document_widget_id(document_id);
         let pane_focused = self.render_pane_is_focused();
+        let mut jump = self.screen_jump.take();
+        if let Some(tab) = self.tab()
+            && self
+                .bookmark_lines
+                .get(&document_id)
+                .is_none_or(|(revision, _)| *revision != tab.revision)
+        {
+            let marks = tab
+                .path
+                .as_ref()
+                .map(|path| {
+                    self.bookmarks
+                        .for_path(path)
+                        .map(|bookmark| {
+                            let position = crate::bookmarks::locate(&tab.text, bookmark);
+                            (
+                                position.line,
+                                bookmark.id,
+                                if bookmark.label.is_empty() {
+                                    format!("Bookmark · {}:{}", position.line, position.column)
+                                } else {
+                                    bookmark.label.clone()
+                                },
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.bookmark_lines
+                .insert(document_id, (tab.revision, marks));
+        }
+        let bookmark_marks = self
+            .bookmark_lines
+            .get(&document_id)
+            .map(|(_, marks)| marks.clone())
+            .unwrap_or_default();
+        let mut bookmark_click = None;
         if !settings.vim
             && pane_focused
             && ui.is_enabled()
@@ -4073,7 +4477,7 @@ impl MorrowApp {
         let mut rect = None;
         let mut caret_rect = None;
         let mut context_action = None;
-        let scroll_id = ui.make_persistent_id(("document_scroll", tab.id));
+        let scroll_id = ui.make_persistent_id(egui::IdSalt::new(("document_scroll", tab.id)));
         let wheel_offset = (!settings.smooth_scroll)
             .then(|| crate::render::instant_scroll_offset(ui, scroll_id))
             .flatten();
@@ -4232,6 +4636,22 @@ impl MorrowApp {
                 .take(last)
                 .skip(first)
                 .collect();
+            if pane_focused && let Some(jump) = jump.as_mut()
+                && jump.tab_id == tab.id && jump.revision == tab.revision
+            {
+                jump.glyphs.clear();
+                for &(row_index, mapped) in &visible_rows {
+                    let row = &rows[row_index];
+                    for (offset, glyph) in row.glyphs.iter().enumerate() {
+                        let min = output.galley_pos + row.pos.to_vec2() + egui::vec2(glyph.pos.x, 0.0);
+                        let rect = egui::Rect::from_min_size(min, egui::vec2(glyph.advance_width.max(1.0), row.size.y));
+                        if clip.contains_rect(rect) {
+                            jump.glyphs.push(crate::screen_jump::VisibleGlyph { char_index: mapped.start + offset, character: glyph.chr, rect });
+                        }
+                    }
+                }
+                jump.state.recompute(&jump.glyphs);
+            }
             if !settings.vim && (!focused || restored_native_selection) && !tab.selection.is_empty()
             {
                 // Keep search matches and another pane's selection visible
@@ -4375,6 +4795,18 @@ impl MorrowApp {
                 if mapped.first_in_line {
                     let row = &rows[i];
                     let y = output.galley_pos.y + row.pos.y;
+                    for &(line, id, ref label) in &bookmark_marks {
+                        if line != mapped.line { continue; }
+                        let center = egui::pos2(output.galley_pos.x - 47.0, y + row.size.y * 0.5);
+                        let rect = egui::Rect::from_center_size(center, egui::vec2(11.0, 17.0)).intersect(clip);
+                        ui.painter().add(egui::Shape::convex_polygon(vec![
+                            center + Vec2::new(-3.5, -5.0), center + Vec2::new(3.5, -5.0),
+                            center + Vec2::new(3.5, 5.0), center + Vec2::new(0.0, 2.5), center + Vec2::new(-3.5, 5.0),
+                        ], ORANGE, Stroke::NONE));
+                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_text(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Bookmark at line {line}")));
+                        if response.clicked() { bookmark_click = Some(id); }
+                    }
                     ui.painter().text(
                         egui::pos2(output.galley_pos.x - 17.0, y),
                         egui::Align2::RIGHT_TOP,
@@ -4431,11 +4863,18 @@ impl MorrowApp {
                     output.response.changed(),
                 );
             }
+            if pane_focused && let Some(jump) = &jump && jump.tab_id == tab.id {
+                jump.state.paint_with_caret(ui, clip, Some(cursor_rect));
+            }
         });
         crate::render::remember_scroll_limits(&ctx, &scroll_output);
         self.editor_focused = focused;
         self.editor_rect = rect;
         self.editor_cursor_rect = caret_rect;
+        self.screen_jump = jump;
+        if let Some(id) = bookmark_click {
+            self.jump_to_bookmark(id);
+        }
         if let Some(action) = context_action {
             self.apply_editor_context_action(document_id, action);
         }
@@ -4737,6 +5176,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("Open terminal", ""),
     ("Toggle word wrap", "Alt Z"),
     ("Toggle Vim motions", ""),
+    ("Toggle bookmark", "Leader m"),
+    ("Bookmarks", "Leader b"),
+    ("Jump to visible text", "Leader Leader f"),
     ("Reload file from disk", ""),
     ("Settings", "Ctrl ,"),
 ];
@@ -4762,6 +5204,9 @@ impl MorrowApp {
                 self.sidebar_visible = true;
             }
             "Go to line" => self.open_palette(Palette::Line),
+            "Toggle bookmark" => self.toggle_bookmark(),
+            "Bookmarks" => self.open_bookmarks(),
+            "Jump to visible text" => self.start_screen_jump(),
             "Go to definition" => self.request_definition(),
             "Show completions" => self.request_completion(),
             "Show problems" => {
@@ -5003,6 +5448,14 @@ impl MorrowApp {
                     );
                     ui.add_space(12.0);
                     ui.checkbox(&mut self.settings.vim, "Vim motions (default)");
+                    egui::ComboBox::from_label("Leader key")
+                        .selected_text(if self.settings.leader_key == " " { "Space" } else { &self.settings.leader_key })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.settings.leader_key, " ".into(), "Space (default)");
+                            ui.selectable_value(&mut self.settings.leader_key, ",".into(), "Comma");
+                            ui.selectable_value(&mut self.settings.leader_key, "\\".into(), "Backslash");
+                        });
+                    ui.label(RichText::new("Leader m: bookmark · Leader b: bookmarks · Leader Leader f: jump").size(10.5).color(MUTED));
                     ui.label(
                         RichText::new(
                             "v selects characters · V selects lines · Esc returns to Normal",
@@ -5129,34 +5582,33 @@ impl MorrowApp {
                 }
             }
         }
+        self.git_detail_ui();
+        if self.diff.is_some()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
+            && !egui::Popup::is_any_open(&ctx)
+        {
+            self.diff = None;
+        }
         if let Some((title, text)) = &self.diff {
             let mut open = true;
             egui::Window::new(title)
+                .id(egui::Id::new("git_patch_window"))
                 .open(&mut open)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center() - Vec2::new(475.0, 310.0))
                 .default_size([950.0, 620.0])
+                .min_size([440.0, 280.0])
                 .show(&ctx, |ui| {
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        for line in text.lines() {
-                            let color = if line.starts_with('+') {
-                                ACCENT
-                            } else if line.starts_with('-') {
-                                RED
-                            } else if line.starts_with("@@") {
-                                BLUE
-                            } else {
-                                MUTED
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(line).monospace().size(12.0).color(color),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                        }
-                        if text.is_empty() {
-                            ui.label("No tracked diff. Open untracked files in the editor.");
-                        }
-                    });
+                    if self.diff_loading {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Loading changes…");
+                        });
+                    } else if let Some(error) = &self.diff_error {
+                        ui.colored_label(RED, error);
+                    } else {
+                        self.diff_view.show(ui, title, text);
+                    }
                 });
             if !open {
                 self.diff = None;
@@ -5169,12 +5621,17 @@ impl MorrowApp {
             && self.ctx.input(|input| input.key_pressed(Key::Escape));
         self.poll();
         self.poll_control();
+        self.apply_pending_bookmark_jump();
         self.apply_pending_agent_locations();
         self.poll_languages();
         self.focus_pane_from_pointer();
         self.context_paste_poll();
-        self.shortcuts();
-        self.handle_vim();
+        let navigation_pending = self.navigation_keys();
+        let jumping = self.screen_jump_keys();
+        if !navigation_pending && !jumping {
+            self.shortcuts();
+            self.handle_vim();
+        }
         self.refresh_git(self.active_project, false);
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();
@@ -5198,12 +5655,16 @@ impl MorrowApp {
             && self.close_action.is_none()
             && self.save_as.is_none()
             && self.diff.is_none()
+            && !self.git_detail_open()
+            && !self.navigation_modal_open()
+            && self.screen_jump.is_none()
             && let Some(tab) = self.tab_mut()
         {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
         self.editor_ui(ui);
         self.overlays();
+        self.navigation_ui();
         self.completion_ui();
         self.autosave();
         self.sync_languages(false);
@@ -5817,6 +6278,10 @@ impl MorrowApp {
             || self.save_as.is_some()
             || self.close_action.is_some()
             || self.diff.is_some()
+            || self.git_detail_open()
+            || self.navigation_modal_open()
+            || self.navigation_pending()
+            || self.screen_jump.is_some()
             || self.tab().is_none_or(|t| {
                 !self
                     .ctx
@@ -6021,6 +6486,14 @@ impl MorrowApp {
 #[cfg(test)]
 #[path = "visual_tests.rs"]
 mod visual_tests;
+
+#[cfg(test)]
+#[path = "git_ui_tests.rs"]
+mod git_ui_tests;
+
+#[cfg(test)]
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
 
 #[cfg(test)]
 #[path = "intel_tests.rs"]

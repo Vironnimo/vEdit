@@ -1064,36 +1064,21 @@ impl MorrowApp {
             Some(0) => self.open_file(path.into()),
             Some(1) => self.open_to_side(path.into()),
             Some(2 | 3) => {
-                self.context_file_dialog = Some(FileActionDialog {
-                    operation: if action == Some(2) {
+                self.context_begin_file_action(
+                    if action == Some(2) {
                         FileOperation::NewFile
                     } else {
                         FileOperation::NewFolder
                     },
-                    path: if is_dir {
-                        path.into()
+                    if is_dir {
+                        path
                     } else {
-                        path.parent().unwrap_or(path).into()
+                        path.parent().unwrap_or(path)
                     },
-                    name: String::new(),
-                    error: None,
-                    focus: true,
-                    busy: false,
-                })
+                );
             }
             Some(4) => {
-                self.context_file_dialog = Some(FileActionDialog {
-                    operation: FileOperation::Rename,
-                    path: path.into(),
-                    name: path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    error: None,
-                    focus: true,
-                    busy: false,
-                })
+                self.context_begin_file_action(FileOperation::Rename, path);
             }
             Some(5) => self.ctx.copy_text(crate::paths::display(path)),
             Some(6) => self.ctx.copy_text(crate::paths::display(
@@ -1104,6 +1089,97 @@ impl MorrowApp {
             Some(7) => self.context_reveal(path.into()),
             _ => {}
         }
+    }
+
+    /// Attach the workspace menu only to a genuinely unoccupied Explorer region.
+    /// The caller supplies disjoint background rectangles so file rows and the
+    /// scroll bar retain their own pointer interactions.
+    pub(super) fn explorer_background_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        rect: egui::Rect,
+    ) {
+        let rect = rect.intersect(ui.clip_rect());
+        if !rect.is_positive() {
+            return;
+        }
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id((
+                "explorer_background",
+                root,
+                rect.min.x.to_bits(),
+                rect.min.y.to_bits(),
+            )),
+            egui::Sense::click(),
+        );
+        let mut action = None;
+        response.context_menu(|ui| {
+            for (label, tooltip, command) in [
+                ("New file…", "Create a file in the project folder", 0),
+                ("New folder…", "Create a folder in the project folder", 1),
+            ] {
+                if design::menu_item(ui, label, "", tooltip).clicked() {
+                    action = Some(command);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            for (label, tooltip, command) in [
+                (
+                    "Copy project path",
+                    "Copy the full Windows path of this project",
+                    2,
+                ),
+                (
+                    "Reveal in Explorer",
+                    "Open the project folder in Windows Explorer",
+                    3,
+                ),
+                ("Refresh", "Refresh the files and source control status", 4),
+            ] {
+                if design::menu_item(ui, label, "", tooltip).clicked() {
+                    action = Some(command);
+                    ui.close();
+                }
+            }
+        });
+        match action {
+            Some(0) => self.context_begin_file_action(FileOperation::NewFile, root),
+            Some(1) => self.context_begin_file_action(FileOperation::NewFolder, root),
+            Some(2) => self.ctx.copy_text(crate::paths::display(root)),
+            Some(3) => self.context_reveal(root.into()),
+            Some(4) => {
+                if let Some(index) = self
+                    .projects
+                    .iter()
+                    .position(|project| project.root == root)
+                {
+                    self.index_project(index);
+                    self.refresh_git(index, true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn context_begin_file_action(&mut self, operation: FileOperation, path: &Path) {
+        self.context_file_dialog = Some(FileActionDialog {
+            operation,
+            path: path.into(),
+            name: if operation == FileOperation::Rename {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                String::new()
+            },
+            error: None,
+            focus: true,
+            busy: false,
+        });
     }
 
     pub(super) fn context_path_busy(&self, path: &Path) -> bool {
@@ -1293,6 +1369,9 @@ impl MorrowApp {
         }
         let mut updated_tabs = Vec::new();
         if result.operation == FileOperation::Rename {
+            self.bookmarks
+                .rename_prefix(&result.old_path, &result.new_path);
+            self.bookmark_lines.clear();
             for project in &mut self.projects {
                 let old_open: Vec<_> = project
                     .language_opened
@@ -1555,6 +1634,10 @@ fn rename_without_overwrite(old_path: &Path, new_path: &Path) -> Result<(), Stri
         fs::rename(old_path, new_path).map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "explorer_menu_tests.rs"]
+mod explorer_menu_tests;
 
 #[cfg(test)]
 mod tests {

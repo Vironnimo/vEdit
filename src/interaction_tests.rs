@@ -598,6 +598,126 @@ fn default_editor_wheel_scroll_is_immediate_and_has_no_smoothing_tail() {
 }
 
 #[test]
+fn editor_wheel_frames_accumulate_reverse_and_clamp_at_document_boundaries() {
+    let mut app = fixture();
+    let tab = app.tab_mut().unwrap();
+    tab.text = (0..200)
+        .map(|line| format!("Readable source line {line}\n"))
+        .collect();
+    tab.saved_text = tab.text.clone();
+    let original = tab.text.clone();
+    let mut screen = harness(app);
+    let initial = document_shape(&screen).pos.y;
+    let pointer = screen.state().editor_rect.unwrap().center();
+    screen.hover_at(pointer);
+    let wheel = |screen: &mut Harness<'static, MorrowApp>, delta| {
+        screen.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, delta),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        screen.run_steps(1);
+    };
+    for (delta, expected_offset) in [(-96.0, 96.0), (-64.0, 160.0), (40.0, 120.0)] {
+        wheel(&mut screen, delta);
+        assert!(
+            (initial - document_shape(&screen).pos.y - expected_offset).abs() < 1.0,
+            "Each wheel frame must continue from the existing document position"
+        );
+    }
+    let position = document_shape(&screen).pos.y;
+    screen.run_steps(4);
+    assert!((document_shape(&screen).pos.y - position).abs() < 1.0);
+
+    wheel(&mut screen, -1_000_000.0);
+    let bottom = document_shape(&screen);
+    let clip = screen
+        .output()
+        .shapes
+        .iter()
+        .find(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == original))
+        .unwrap()
+        .clip_rect;
+    let last_line = bottom
+        .galley
+        .pos_from_cursor(egui::text::CCursor::new(original.chars().count() - 1))
+        .translate(bottom.pos.to_vec2());
+    assert!(last_line.center().y >= clip.top() && last_line.center().y <= clip.bottom());
+    wheel(&mut screen, -1_000_000.0);
+    assert!((document_shape(&screen).pos.y - bottom.pos.y).abs() < 1.0);
+    wheel(&mut screen, 80.0);
+    assert!((document_shape(&screen).pos.y - bottom.pos.y - 80.0).abs() < 1.0);
+    wheel(&mut screen, 1_000_000.0);
+    assert!((document_shape(&screen).pos.y - initial).abs() < 1.0);
+    wheel(&mut screen, 1_000_000.0);
+    assert!((document_shape(&screen).pos.y - initial).abs() < 1.0);
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(tab.text, original);
+    assert!(!tab.dirty);
+    assert_eq!(tab.vim.cursor, 0);
+    assert_eq!(tab.selection, 0..0);
+}
+
+#[test]
+fn editor_horizontal_wheel_frames_accumulate_reverse_and_clamp_at_line_boundaries() {
+    let mut app = fixture();
+    let tab = app.tab_mut().unwrap();
+    tab.text = format!("{}LAST_WORD\n", "long_identifier ".repeat(300));
+    tab.saved_text = tab.text.clone();
+    let original = tab.text.clone();
+    let mut screen = harness(app);
+    let initial = document_shape(&screen).pos.x;
+    let pointer = screen.state().editor_rect.unwrap().center();
+    screen.hover_at(pointer);
+    let wheel = |screen: &mut Harness<'static, MorrowApp>, delta| {
+        screen.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(delta, 0.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        screen.run_steps(1);
+    };
+    for (delta, expected_offset) in [(-120.0, 120.0), (-60.0, 180.0), (45.0, 135.0)] {
+        wheel(&mut screen, delta);
+        assert!(
+            (initial - document_shape(&screen).pos.x - expected_offset).abs() < 1.0,
+            "Horizontal wheel frames must accumulate and reverse immediately"
+        );
+    }
+    let position = document_shape(&screen).pos.x;
+    screen.run_steps(4);
+    assert!((document_shape(&screen).pos.x - position).abs() < 1.0);
+    wheel(&mut screen, -1_000_000.0);
+    let right = document_shape(&screen);
+    let clip = screen
+        .output()
+        .shapes
+        .iter()
+        .find(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == original))
+        .unwrap()
+        .clip_rect;
+    let end = right
+        .galley
+        .pos_from_cursor(egui::text::CCursor::new(original.chars().count() - 1))
+        .translate(right.pos.to_vec2());
+    assert!(end.left() >= clip.left() && end.left() <= clip.right());
+    wheel(&mut screen, -1_000_000.0);
+    assert!((document_shape(&screen).pos.x - right.pos.x).abs() < 1.0);
+    wheel(&mut screen, 80.0);
+    assert!((document_shape(&screen).pos.x - right.pos.x - 80.0).abs() < 1.0);
+    wheel(&mut screen, 1_000_000.0);
+    assert!((document_shape(&screen).pos.x - initial).abs() < 1.0);
+    wheel(&mut screen, 1_000_000.0);
+    assert!((document_shape(&screen).pos.x - initial).abs() < 1.0);
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(tab.text, original);
+    assert!(!tab.dirty);
+    assert_eq!(tab.vim.cursor, 0);
+}
+
+#[test]
 fn opening_editor_context_menu_preserves_visual_selection() {
     let mut app = fixture();
     app.projects[0].active_tab = 1;

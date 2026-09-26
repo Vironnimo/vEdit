@@ -582,6 +582,14 @@ impl MorrowApp {
             Some("palette")
         } else if self.diff.is_some() {
             Some("diff")
+        } else if self.git_detail_open() {
+            Some("git_commit")
+        } else if self.navigation_modal_open() {
+            Some("bookmarks")
+        } else if self.navigation_pending() {
+            Some("vim_leader")
+        } else if self.screen_jump.is_some() {
+            Some("screen_jump")
         } else if self.vim_command.is_some() {
             Some("vim_command")
         } else if self.context_file_dialog.is_some() {
@@ -607,6 +615,9 @@ fn control_observation(request: &Request) -> bool {
         | Request::Search { .. }
         | Request::Output { .. }
         | Request::GitStatus { .. }
+        | Request::Bookmarks {
+            change: cli::BookmarkAction::List { .. },
+        }
         | Request::FileJob { .. }
         | Request::Layout {
             change: cli::LayoutAction::Status {},

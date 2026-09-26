@@ -5,6 +5,7 @@
 //! passed directly to the process, so paths and commit messages are never
 //! interpreted by a shell.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
@@ -18,6 +19,9 @@ use std::time::{Duration, Instant};
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(90);
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const UNTRACKED_FILE_LIMIT: usize = 1024 * 1024;
+const UNTRACKED_TOTAL_LIMIT: usize = 8 * 1024 * 1024;
+const UNTRACKED_PATH_LIMIT: usize = 128;
 
 pub type GitResult<T> = Result<T, GitError>;
 
@@ -109,6 +113,46 @@ pub struct CommitSummary {
     /// Date formatted by Git as `YYYY-MM-DD`.
     pub date: String,
     pub subject: String,
+}
+
+/// Line changes reported by Git. Binary files deliberately have no line counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineStats {
+    pub added: u64,
+    pub removed: u64,
+    pub binary: bool,
+}
+
+/// Separate comparisons of HEAD to index and index to working tree. Untracked
+/// text files are counted in `unstaged`, within a bounded file and byte budget.
+/// A missing entry means its statistics could not be computed, not zero changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkingTreeStats {
+    pub staged: HashMap<String, LineStats>,
+    pub unstaged: HashMap<String, LineStats>,
+}
+
+/// One committed change; rename and copy entries preserve the previous path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFile {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub status: FileChange,
+    pub stats: LineStats,
+}
+
+/// Full commit metadata and changes compared with its first parent. A root
+/// commit is compared with the empty tree, so its files are all additions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetails {
+    pub hash: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    /// ISO 8601 author timestamp, including its time zone.
+    pub date: String,
+    pub message: String,
+    pub files: Vec<CommitFile>,
 }
 
 /// Tracking information for the current branch. Counts are based on the last
@@ -207,7 +251,13 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
 /// Reads the current branch and concise staged, unstaged, and untracked file
 /// status. Renames retain both the new path and Git's reported previous path.
 pub fn status(root: &Path) -> GitResult<RepoStatus> {
-    let args = string_args(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    let args = string_args(&[
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--renames",
+    ]);
     let output = checked_git(root, &args, "read repository status")?;
     let branch = current_branch(root)?;
     let files = parse_status(&output.stdout)?;
@@ -276,15 +326,308 @@ pub fn pull(root: &Path) -> GitResult<String> {
 /// programs and text-conversion commands are disabled so previewing a change
 /// cannot open another application or run a repository-defined program.
 pub fn diff(root: &Path, path: &Path, staged: bool) -> GitResult<String> {
-    validate_paths(&[path.to_path_buf()], "read file diff")?;
-    let mut args = string_args(&["diff", "--no-ext-diff", "--no-textconv", "--no-color"]);
+    tracked_diff(root, path, None, staged)
+}
+
+/// Preview a status entry with both rename paths, or an untracked addition.
+pub fn status_diff(root: &Path, file: &FileStatus, staged: bool) -> GitResult<String> {
+    if !staged && file.is_untracked() {
+        return untracked_diff(root, Path::new(&file.path));
+    }
+    tracked_diff(
+        root,
+        Path::new(&file.path),
+        (if staged { file.index } else { file.worktree })
+            .eq(&FileChange::Renamed)
+            .then(|| file.original_path.as_deref().map(Path::new))
+            .flatten(),
+        staged,
+    )
+}
+
+fn tracked_diff(
+    root: &Path,
+    path: &Path,
+    original_path: Option<&Path>,
+    staged: bool,
+) -> GitResult<String> {
+    let mut paths = vec![path.to_path_buf()];
+    if let Some(original_path) = original_path {
+        paths.push(original_path.to_path_buf());
+    }
+    validate_paths(&paths, "read file diff")?;
+    let mut args = string_args(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+    ]);
     if staged {
         args.push(OsString::from("--cached"));
     }
     args.push(OsString::from("--"));
-    args.push(path.as_os_str().to_owned());
+    args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
     let output = checked_git(root, &args, "read file diff")?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Read both tracked comparisons in two Git invocations, rather than spawning a
+/// process for every file. NUL-delimited paths retain Unicode and control bytes.
+pub fn working_tree_stats(root: &Path, files: &[FileStatus]) -> GitResult<WorkingTreeStats> {
+    let common = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--numstat",
+        "-z",
+        "--find-renames",
+    ];
+    let mut staged_args = string_args(&common);
+    staged_args.push(OsString::from("--cached"));
+    let staged = checked_git(root, &staged_args, "read staged line statistics")?;
+    let unstaged = checked_git(
+        root,
+        &string_args(&common),
+        "read working tree line statistics",
+    )?;
+    let mut statistics = WorkingTreeStats {
+        staged: parse_numstat(&staged.stdout)?.into_iter().collect(),
+        unstaged: parse_numstat(&unstaged.stdout)?.into_iter().collect(),
+    };
+    let mut remaining = UNTRACKED_TOTAL_LIMIT;
+    for file in files
+        .iter()
+        .filter(|file| file.is_untracked())
+        .take(UNTRACKED_PATH_LIMIT)
+    {
+        let limit = remaining.min(UNTRACKED_FILE_LIMIT);
+        if limit == 0 {
+            break;
+        }
+        // A concurrently removed file, a link outside the repository, or a
+        // large untracked asset does not invalidate the tracked statistics.
+        if let Ok(bytes) = read_untracked_bytes(root, Path::new(&file.path), limit) {
+            remaining = remaining.saturating_sub(bytes.len());
+            statistics
+                .unstaged
+                .insert(file.path.clone(), added_file_stats(&bytes));
+        }
+    }
+    Ok(statistics)
+}
+
+/// Inspect an immutable full commit ID. Ref expressions and option-like strings
+/// are rejected so the caller cannot accidentally inspect a moving revision.
+pub fn commit_details(root: &Path, full_hash: &str) -> GitResult<CommitDetails> {
+    validate_commit_hash(full_hash)?;
+    let metadata = checked_git(
+        root,
+        &string_args(&[
+            "show",
+            "--no-patch",
+            "--no-notes",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%B%x00",
+            full_hash,
+            "--",
+        ]),
+        "read commit details",
+    )?;
+    let mut details = parse_commit_metadata(&metadata.stdout)?;
+    let comparison = commit_comparison_args(&details);
+    let mut names_args = string_args(&[
+        "diff-tree",
+        "--no-commit-id",
+        "-r",
+        "--root",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--find-renames",
+        "--name-status",
+        "-z",
+    ]);
+    names_args.extend(comparison.iter().cloned());
+    names_args.push(OsString::from("--"));
+    let names = checked_git(root, &names_args, "read committed files")?;
+    let mut stats_args = string_args(&[
+        "diff-tree",
+        "--no-commit-id",
+        "-r",
+        "--root",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--find-renames",
+        "--numstat",
+        "-z",
+    ]);
+    stats_args.extend(comparison);
+    stats_args.push(OsString::from("--"));
+    let statistics = checked_git(root, &stats_args, "read committed line statistics")?;
+    let statistics: HashMap<_, _> = parse_numstat(&statistics.stdout)?.into_iter().collect();
+    details.files = parse_commit_files(&names.stdout)?;
+    for file in &mut details.files {
+        file.stats = statistics.get(&file.path).copied().unwrap_or_default();
+    }
+    Ok(details)
+}
+
+/// Preview the selected commit's patch, preserving renames and comparing merge
+/// commits with the same first parent used by `commit_details`.
+pub fn commit_diff(root: &Path, full_hash: &str, path: &Path) -> GitResult<String> {
+    validate_paths(&[path.to_path_buf()], "read commit diff")?;
+    let details = commit_details(root, full_hash)?;
+    let Some(file) = details
+        .files
+        .iter()
+        .find(|file| Path::new(&file.path) == path)
+    else {
+        return Err(GitError::new(
+            "read commit diff",
+            "the selected file is not changed in this commit",
+        ));
+    };
+    commit_file_diff(root, &details, file)
+}
+
+/// Preview a file from already loaded commit details in one Git invocation.
+/// Both commit identity and repository-relative paths are revalidated, while
+/// immutable object IDs let callers safely cache metadata across refreshes.
+pub fn commit_file_diff(
+    root: &Path,
+    details: &CommitDetails,
+    file: &CommitFile,
+) -> GitResult<String> {
+    validate_commit_hash(&details.hash)?;
+    for parent in &details.parents {
+        validate_commit_hash(parent)?;
+    }
+    if !details.files.contains(file) {
+        return Err(GitError::new(
+            "read commit diff",
+            "the selected file does not belong to these commit details",
+        ));
+    }
+    let mut paths = vec![PathBuf::from(&file.path)];
+    if file.status == FileChange::Renamed
+        && let Some(original_path) = &file.original_path
+    {
+        paths.push(PathBuf::from(original_path));
+    }
+    validate_paths(&paths, "read commit diff")?;
+    let mut args = string_args(&[
+        "diff-tree",
+        "--no-commit-id",
+        "-r",
+        "--root",
+        "-p",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+    ]);
+    args.extend(commit_comparison_args(details));
+    args.push(OsString::from("--"));
+    args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    let output = checked_git(root, &args, "read commit diff")?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Preview a small untracked file as an addition without staging it or invoking
+/// attributes, text-conversion programs, or an external diff tool.
+pub fn untracked_diff(root: &Path, path: &Path) -> GitResult<String> {
+    let bytes = read_untracked_bytes(root, path, UNTRACKED_FILE_LIMIT)?;
+    let stats = added_file_stats(&bytes);
+    let display_path = path.to_string_lossy().replace('\\', "/");
+    let before = format!("a/{display_path}");
+    let after = format!("b/{display_path}");
+    let mut patch = format!("diff --git {before:?} {after:?}\nnew file mode 100644\n");
+    if stats.binary {
+        patch.push_str(&format!("Binary files /dev/null and {after:?} differ\n"));
+        return Ok(patch);
+    }
+    patch.push_str(&format!("--- /dev/null\n+++ {after:?}\n"));
+    if !bytes.is_empty() {
+        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", stats.added));
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.split_inclusive('\n') {
+            patch.push('+');
+            patch.push_str(line);
+        }
+        if !bytes.ends_with(b"\n") {
+            patch.push_str("\n\\ No newline at end of file\n");
+        }
+    }
+    Ok(patch)
+}
+
+fn validate_commit_hash(hash: &str) -> GitResult<()> {
+    if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GitError::new(
+            "read commit",
+            "a full hexadecimal commit ID is required",
+        ));
+    }
+    Ok(())
+}
+
+fn commit_comparison_args(details: &CommitDetails) -> Vec<OsString> {
+    let mut args = Vec::new();
+    if let Some(parent) = details.parents.first() {
+        args.push(OsString::from(parent));
+    }
+    args.push(OsString::from(&details.hash));
+    args
+}
+
+fn read_untracked_bytes(root: &Path, path: &Path, limit: usize) -> GitResult<Vec<u8>> {
+    const OPERATION: &str = "read untracked file";
+    validate_paths(&[path.to_path_buf()], OPERATION)?;
+    let read_error = |error: io::Error| GitError::new(OPERATION, error.to_string());
+    let absolute = root.join(path);
+    let metadata = std::fs::symlink_metadata(&absolute).map_err(read_error)?;
+    if !metadata.file_type().is_file() || metadata.len() > limit as u64 {
+        return Err(GitError::new(
+            OPERATION,
+            "preview is limited to regular files up to 1 MiB",
+        ));
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(read_error)?;
+    let canonical_file = std::fs::canonicalize(&absolute).map_err(read_error)?;
+    if !canonical_file.starts_with(canonical_root) {
+        return Err(GitError::new(
+            OPERATION,
+            "the file resolves outside the repository",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(canonical_file)
+        .map_err(read_error)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    if bytes.len() > limit {
+        return Err(GitError::new(
+            OPERATION,
+            "the file grew beyond the preview limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn added_file_stats(bytes: &[u8]) -> LineStats {
+    if bytes.iter().take(8000).any(|byte| *byte == 0) {
+        return LineStats {
+            binary: true,
+            ..LineStats::default()
+        };
+    }
+    LineStats {
+        added: bytes.iter().filter(|byte| **byte == b'\n').count() as u64
+            + u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n")),
+        removed: 0,
+        binary: false,
+    }
 }
 
 /// Return up to `limit` commits, newest first.
@@ -703,6 +1046,128 @@ fn output_text(output: &Output) -> String {
     }
 }
 
+fn nul_records<'a>(bytes: &'a [u8], operation: &str) -> GitResult<Vec<&'a [u8]>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(bytes) = bytes.strip_suffix(&[0]) else {
+        return Err(GitError::new(
+            operation,
+            "Git returned a truncated NUL-delimited record",
+        ));
+    };
+    Ok(bytes.split(|byte| *byte == 0).collect())
+}
+
+/// `--numstat -z` emits a normal path in the third field, but a rename has an
+/// empty third field followed by two distinct NUL-delimited paths. Splitting
+/// the whole output on tabs or lines would corrupt valid file names.
+fn parse_numstat(bytes: &[u8]) -> GitResult<Vec<(String, LineStats)>> {
+    const OPERATION: &str = "parse line statistics";
+    let records = nul_records(bytes, OPERATION)?;
+    let mut records = records.into_iter();
+    let mut statistics = Vec::new();
+    while let Some(record) = records.next() {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let added = fields.next().unwrap_or_default();
+        let removed = fields
+            .next()
+            .ok_or_else(|| GitError::new(OPERATION, "missing removed line count"))?;
+        let path = fields
+            .next()
+            .ok_or_else(|| GitError::new(OPERATION, "missing file path"))?;
+        let stats = if added == b"-" && removed == b"-" {
+            LineStats {
+                binary: true,
+                ..LineStats::default()
+            }
+        } else {
+            let parse_count = |count: &[u8]| -> GitResult<u64> {
+                std::str::from_utf8(count)
+                    .ok()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or_else(|| GitError::new(OPERATION, "invalid line count"))
+            };
+            LineStats {
+                added: parse_count(added)?,
+                removed: parse_count(removed)?,
+                binary: false,
+            }
+        };
+        let path = if path.is_empty() {
+            let old = records.next().filter(|record| !record.is_empty());
+            let new = records.next().filter(|record| !record.is_empty());
+            match (old, new) {
+                (Some(_), Some(new)) => new,
+                _ => return Err(GitError::new(OPERATION, "incomplete rename paths")),
+            }
+        } else {
+            path
+        };
+        statistics.push((String::from_utf8_lossy(path).into_owned(), stats));
+    }
+    Ok(statistics)
+}
+
+fn parse_commit_metadata(bytes: &[u8]) -> GitResult<CommitDetails> {
+    const OPERATION: &str = "parse commit details";
+    let fields: Vec<_> = bytes.splitn(7, |byte| *byte == 0).collect();
+    if fields.len() != 7 || !fields[6].iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
+        return Err(GitError::new(
+            OPERATION,
+            "Git returned unexpected commit metadata",
+        ));
+    }
+    let string = |index| String::from_utf8_lossy(fields[index]).into_owned();
+    let hash = string(0);
+    validate_commit_hash(&hash)?;
+    let parents: Vec<_> = string(1).split_whitespace().map(str::to_owned).collect();
+    for parent in &parents {
+        validate_commit_hash(parent)?;
+    }
+    Ok(CommitDetails {
+        hash,
+        parents,
+        author: string(2),
+        author_email: string(3),
+        date: string(4),
+        message: string(5),
+        files: Vec::new(),
+    })
+}
+
+fn parse_commit_files(bytes: &[u8]) -> GitResult<Vec<CommitFile>> {
+    const OPERATION: &str = "parse committed files";
+    let records = nul_records(bytes, OPERATION)?;
+    let mut records = records.into_iter();
+    let mut files = Vec::new();
+    while let Some(code) = records.next() {
+        let Some(code) = code.first().copied() else {
+            return Err(GitError::new(OPERATION, "empty file status"));
+        };
+        let path = records
+            .next()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| GitError::new(OPERATION, "missing file path"))?;
+        let (original_path, path) = if matches!(code, b'R' | b'C') {
+            let next = records
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| GitError::new(OPERATION, "missing renamed file path"))?;
+            (Some(String::from_utf8_lossy(path).into_owned()), next)
+        } else {
+            (None, path)
+        };
+        files.push(CommitFile {
+            path: String::from_utf8_lossy(path).into_owned(),
+            original_path,
+            status: change_from_code(code as char),
+            stats: LineStats::default(),
+        });
+    }
+    Ok(files)
+}
+
 fn parse_status(bytes: &[u8]) -> GitResult<Vec<FileStatus>> {
     let mut records = bytes.split(|byte| *byte == 0);
     let mut files = Vec::new();
@@ -922,6 +1387,13 @@ mod tests {
         repository.write(file, "fn main() {}\n");
         stage_paths(&repository.0, &[PathBuf::from(file)]).unwrap();
         let repository_status = status(&repository.0).unwrap();
+        assert_eq!(
+            working_tree_stats(&repository.0, &repository_status.files)
+                .unwrap()
+                .staged[file]
+                .added,
+            1
+        );
         assert!(
             repository_status
                 .files
@@ -992,6 +1464,28 @@ mod tests {
         repository.write("code.txt", "changed\n");
         let patch = diff(&repository.0, Path::new("code.txt"), false).unwrap();
         assert!(patch.contains("+changed\n"));
+        let files = status(&repository.0).unwrap().files;
+        assert_eq!(
+            working_tree_stats(&repository.0, &files).unwrap().unstaged["code.txt"].added,
+            1
+        );
+        repository.commit_all("Changed without conversion helpers");
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        // A working-tree path with the same spelling must not make Git treat a
+        // full immutable revision as an ambiguous path argument.
+        repository.write(&hash, "untracked path named after the commit\n");
+        let details = commit_details(&repository.0, &hash).unwrap();
+        let file = details
+            .files
+            .iter()
+            .find(|file| file.path == "code.txt")
+            .unwrap();
+        assert_eq!(file.stats.added, 1);
+        assert!(
+            commit_file_diff(&repository.0, &details, file)
+                .unwrap()
+                .contains("+changed\n")
+        );
     }
 
     #[test]
@@ -1084,6 +1578,300 @@ mod tests {
         }
         assert!(commit(&repository.0, " \n\t").is_err());
         assert!(stage_paths(&repository.0, &[]).is_ok());
+    }
+
+    #[test]
+    fn line_statistics_separate_index_worktree_binary_and_untracked_content() {
+        let repository = TestRepository::new();
+        repository.write("code ü.rs", "one\ntwo\nthree\n");
+        fs::write(repository.0.join("asset.bin"), b"original\0asset").unwrap();
+        repository.commit_all("Initial");
+        repository.write("code ü.rs", "one\nchanged\nthree\n");
+        stage_paths(&repository.0, &[PathBuf::from("code ü.rs")]).unwrap();
+        repository.write("code ü.rs", "one\nchanged\nthree\nfour\n");
+        fs::write(repository.0.join("asset.bin"), b"modified\0asset").unwrap();
+        repository.write("untracked ü.txt", "first\nsecond");
+        repository.write("empty.txt", "");
+        fs::write(repository.0.join("new.bin"), b"new\0asset").unwrap();
+        fs::write(
+            repository.0.join("large.txt"),
+            vec![b'x'; UNTRACKED_FILE_LIMIT + 1],
+        )
+        .unwrap();
+        let index_before = fs::read(repository.0.join(".git/index")).unwrap();
+        let files = status(&repository.0).unwrap().files;
+        let stats = working_tree_stats(&repository.0, &files).unwrap();
+        assert_eq!(
+            stats.staged["code ü.rs"],
+            LineStats {
+                added: 1,
+                removed: 1,
+                binary: false
+            }
+        );
+        assert_eq!(
+            stats.unstaged["code ü.rs"],
+            LineStats {
+                added: 1,
+                removed: 0,
+                binary: false
+            }
+        );
+        assert!(stats.unstaged["asset.bin"].binary);
+        assert!(stats.unstaged["new.bin"].binary);
+        assert_eq!(stats.unstaged["untracked ü.txt"].added, 2);
+        assert_eq!(stats.unstaged["empty.txt"], LineStats::default());
+        assert!(!stats.unstaged.contains_key("large.txt"));
+        assert_eq!(
+            fs::read(repository.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        let patch = untracked_diff(&repository.0, Path::new("untracked ü.txt")).unwrap();
+        assert!(patch.contains("@@ -0,0 +1,2 @@\n+first\n+second\n\\ No newline at end of file\n"));
+        assert!(
+            untracked_diff(&repository.0, Path::new("new.bin"))
+                .unwrap()
+                .contains("Binary files")
+        );
+        assert!(untracked_diff(&repository.0, Path::new("large.txt")).is_err());
+        assert!(untracked_diff(&repository.0, Path::new("../outside.txt")).is_err());
+    }
+
+    #[test]
+    fn root_commit_details_include_full_metadata_message_files_and_line_counts() {
+        let repository = TestRepository::new();
+        repository.git(&["config", "user.name", "Morrow Göß Test"]);
+        repository.write("root ü.txt", "one\ntwo\n");
+        fs::write(repository.0.join("asset.bin"), b"binary\0content").unwrap();
+        repository.commit_all(
+            "Root subject\n\nA complete multiline body.\nSecond paragraph with ü and tabs\ttoo.",
+        );
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let details = commit_details(&repository.0, &hash).unwrap();
+        assert_eq!(details.hash, hash);
+        assert!(details.parents.is_empty());
+        assert_eq!(details.author, "Morrow Göß Test");
+        assert_eq!(details.author_email, "morrow-tests@example.invalid");
+        assert!(details.date.contains('T') && details.date.len() >= 20);
+        assert!(
+            details
+                .message
+                .starts_with("Root subject\n\nA complete multiline body.\nSecond paragraph")
+        );
+        assert!(details.message.contains("ü and tabs\ttoo."));
+        let root_file = details
+            .files
+            .iter()
+            .find(|file| file.path == "root ü.txt")
+            .unwrap();
+        assert_eq!(root_file.status, FileChange::Added);
+        assert_eq!(
+            root_file.stats,
+            LineStats {
+                added: 2,
+                removed: 0,
+                binary: false
+            }
+        );
+        assert!(
+            details
+                .files
+                .iter()
+                .find(|file| file.path == "asset.bin")
+                .unwrap()
+                .stats
+                .binary
+        );
+        let patch = commit_diff(&repository.0, &hash, Path::new("root ü.txt")).unwrap();
+        assert!(patch.contains("+one\n+two\n") && patch.contains("/dev/null"));
+        assert!(commit_diff(&repository.0, &hash, Path::new("not-in-commit.txt")).is_err());
+        for invalid in [
+            "HEAD",
+            "--help",
+            "a12345",
+            "../../HEAD",
+            "fffffffffffffffffffffffffffffffffffffffz",
+        ] {
+            assert!(commit_details(&repository.0, invalid).is_err());
+            assert!(commit_diff(&repository.0, invalid, Path::new("root ü.txt")).is_err());
+        }
+    }
+
+    #[test]
+    fn commit_rename_statistics_and_patch_preserve_both_paths() {
+        let repository = TestRepository::new();
+        // Status classification and counted comparisons must agree even when
+        // the user's default diff settings disable rename detection.
+        repository.git(&["config", "diff.renames", "false"]);
+        let initial = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+        repository.write("old ü name.txt", initial);
+        repository.commit_all("Initial");
+        let parent = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        fs::rename(
+            repository.0.join("old ü name.txt"),
+            repository.0.join("new ü name.txt"),
+        )
+        .unwrap();
+        repository.write("new ü name.txt", &format!("{initial}eleven\n"));
+        stage_all(&repository.0).unwrap();
+        let stats =
+            working_tree_stats(&repository.0, &status(&repository.0).unwrap().files).unwrap();
+        assert_eq!(stats.staged["new ü name.txt"].added, 1);
+        assert_eq!(stats.staged["new ü name.txt"].removed, 0);
+        let entry = status(&repository.0)
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|file| file.path == "new ü name.txt")
+            .unwrap();
+        let staged_patch = status_diff(&repository.0, &entry, true).unwrap();
+        assert!(staged_patch.contains("rename from ") && staged_patch.contains("rename to "));
+        assert!(staged_patch.contains("+eleven\n"));
+        commit(&repository.0, "Rename with one added line").unwrap();
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let details = commit_details(&repository.0, &hash).unwrap();
+        assert_eq!(details.parents, vec![parent]);
+        assert_eq!(details.files.len(), 1);
+        let file = &details.files[0];
+        assert_eq!(file.path, "new ü name.txt");
+        assert_eq!(file.original_path.as_deref(), Some("old ü name.txt"));
+        assert_eq!(file.status, FileChange::Renamed);
+        assert_eq!(file.stats.added, 1);
+        let patch = commit_diff(&repository.0, &hash, Path::new("new ü name.txt")).unwrap();
+        assert!(patch.contains("rename from ") && patch.contains("rename to "));
+        assert!(patch.contains("+eleven\n"));
+        assert_eq!(
+            commit_file_diff(&repository.0, &details, file).unwrap(),
+            patch
+        );
+    }
+
+    #[test]
+    fn copied_file_previews_do_not_include_changes_to_the_source() {
+        let repository = TestRepository::new();
+        repository.write("source.txt", "original contents\n");
+        repository.commit_all("Initial");
+        repository.write("source.txt", "changed source only\n");
+        repository.write("copy.txt", "original contents\n");
+        stage_all(&repository.0).unwrap();
+        // Copy detection is configurable in Git. Preserve the status returned
+        // by such a configuration without expanding the selected path to the
+        // independently modified source file.
+        let copied = FileStatus {
+            path: "copy.txt".into(),
+            original_path: Some("source.txt".into()),
+            index: FileChange::Copied,
+            worktree: FileChange::None,
+        };
+        let patch = status_diff(&repository.0, &copied, true).unwrap();
+        assert!(patch.contains("b/copy.txt"));
+        assert!(!patch.contains("changed source only"));
+        assert!(!patch.contains("b/source.txt"));
+        commit(&repository.0, "Copy and independently change its source").unwrap();
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let mut details = commit_details(&repository.0, &hash).unwrap();
+        let copy = details
+            .files
+            .iter_mut()
+            .find(|file| file.path == "copy.txt")
+            .unwrap();
+        copy.status = FileChange::Copied;
+        copy.original_path = Some("source.txt".into());
+        let file = details
+            .files
+            .iter()
+            .find(|file| file.path == "copy.txt")
+            .unwrap();
+        let patch = commit_file_diff(&repository.0, &details, file).unwrap();
+        assert!(patch.contains("b/copy.txt"));
+        assert!(!patch.contains("changed source only"));
+        assert!(!patch.contains("b/source.txt"));
+    }
+
+    #[test]
+    fn merge_commit_files_and_patch_compare_to_the_first_parent() {
+        let repository = TestRepository::new();
+        repository.write("common.txt", "common\n");
+        repository.commit_all("Initial");
+        repository.git(&["checkout", "-b", "feature"]);
+        repository.write("feature.txt", "feature branch\n");
+        repository.commit_all("Feature");
+        repository.git(&["checkout", "main"]);
+        repository.write("main.txt", "main branch\n");
+        repository.commit_all("Main");
+        let first_parent = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        repository.git(&["merge", "--no-ff", "--no-edit", "feature"]);
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let details = commit_details(&repository.0, &hash).unwrap();
+        assert_eq!(details.parents.len(), 2);
+        assert_eq!(details.parents[0], first_parent);
+        assert_eq!(details.files.len(), 1);
+        assert_eq!(details.files[0].path, "feature.txt");
+        assert_eq!(details.files[0].stats.added, 1);
+        assert!(
+            commit_diff(&repository.0, &hash, Path::new("feature.txt"))
+                .unwrap()
+                .contains("+feature branch\n")
+        );
+    }
+
+    #[test]
+    fn nul_delimited_statistics_and_commit_paths_keep_tabs_newlines_and_renames() {
+        let stats = parse_numstat(b"2\t1\tdir/with\ttab\nline.txt\0-\t-\tasset.bin\x000\t0\t\0old\tname\n.txt\0new\tname\n.txt\0").unwrap();
+        assert_eq!(stats[0].0, "dir/with\ttab\nline.txt");
+        assert_eq!(
+            stats[0].1,
+            LineStats {
+                added: 2,
+                removed: 1,
+                binary: false
+            }
+        );
+        assert!(stats[1].1.binary);
+        assert_eq!(stats[2], ("new\tname\n.txt".into(), LineStats::default()));
+        let files = parse_commit_files(
+            b"R100\0old\tname\n.txt\0new\tname\n.txt\0M\0dir/with\ttab\nline.txt\0",
+        )
+        .unwrap();
+        assert_eq!(files[0].original_path.as_deref(), Some("old\tname\n.txt"));
+        assert_eq!(files[0].path, "new\tname\n.txt");
+        assert_eq!(files[1].path, "dir/with\ttab\nline.txt");
+        for invalid in [
+            b"1\t2\tpath".as_slice(),
+            b"1\t2\t\0old\0",
+            b"x\t1\tfile\0",
+            b"-\t2\tfile\0",
+        ] {
+            assert!(parse_numstat(invalid).is_err());
+        }
+        assert!(parse_commit_files(b"R100\0old\0").is_err());
+        assert!(parse_commit_files(b"M\0truncated").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_statistics_handle_control_characters_in_file_names() {
+        let repository = TestRepository::new();
+        let file = "tab\tand\nnewline ü.txt";
+        repository.write(file, "before\n");
+        repository.commit_all("Initial");
+        repository.write(file, "after\nextra\n");
+        stage_paths(&repository.0, &[PathBuf::from(file)]).unwrap();
+        let stats =
+            working_tree_stats(&repository.0, &status(&repository.0).unwrap().files).unwrap();
+        assert_eq!(
+            stats.staged[file],
+            LineStats {
+                added: 2,
+                removed: 1,
+                binary: false
+            }
+        );
+        commit(&repository.0, "Control characters").unwrap();
+        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let details = commit_details(&repository.0, &hash).unwrap();
+        assert_eq!(details.files[0].path, file);
+        assert_eq!(details.files[0].stats, stats.staged[file]);
     }
 
     #[test]

@@ -269,7 +269,9 @@ impl MorrowApp {
                 "path":file.path,"original_path":file.original_path,
                 "index":git_change(file.index),"worktree":git_change(file.worktree),
                 "staged":file.is_staged(),"unstaged":file.is_unstaged(),
-                "untracked":file.is_untracked(),"conflicted":file.is_conflicted()
+                "untracked":file.is_untracked(),"conflicted":file.is_conflicted(),
+                "staged_stats":project.git_stats.staged.get(&file.path).map(|stats| json!({"added":stats.added,"removed":stats.removed,"binary":stats.binary})),
+                "worktree_stats":project.git_stats.unstaged.get(&file.path).map(|stats| json!({"added":stats.added,"removed":stats.removed,"binary":stats.binary}))
             });
             let item_bytes =
                 serde_json::to_vec(&value).map_or(QUERY_PAYLOAD_BYTES, |bytes| bytes.len());
@@ -295,12 +297,16 @@ impl MorrowApp {
         if let Some(error) = &mut error {
             truncate_utf8(error, 4096);
         }
+        let mut stats_error = project.git_stats_error.clone();
+        if let Some(error) = &mut stats_error {
+            truncate_utf8(error, 4096);
+        }
         Response::success(json!({
             "workspace":crate::paths::display(&project.root),
             "repository":project.git_root.as_deref().map(crate::paths::display),
             "branch":branch,"tracking":tracking,"items":items,
             "total":total,"offset":offset,"has_more":next<total,"next_offset":if next<total{Some(next)}else{None},
-            "loading":project.git_loading,"error":error,
+            "loading":project.git_loading,"error":error,"stats_error":stats_error,
             "cached":true,"age_ms":project.last_git_refresh.elapsed().as_millis()
         }))
     }
@@ -689,9 +695,25 @@ mod tests {
         app.projects[0].git_changes.push(git::FileStatus {
             path: "code.rs".into(),
             original_path: None,
-            index: git::FileChange::None,
+            index: git::FileChange::Modified,
             worktree: git::FileChange::Modified,
         });
+        app.projects[0].git_stats.staged.insert(
+            "code.rs".into(),
+            git::LineStats {
+                added: 8,
+                removed: 2,
+                binary: false,
+            },
+        );
+        app.projects[0].git_stats.unstaged.insert(
+            "code.rs".into(),
+            git::LineStats {
+                added: 3,
+                removed: 1,
+                binary: false,
+            },
+        );
         let response = app
             .control_query(&Request::GitStatus {
                 workspace: None,
@@ -701,6 +723,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.result["branch"], "feature");
         assert_eq!(response.result["items"][0]["worktree"], "modified");
+        assert_eq!(response.result["items"][0]["staged_stats"]["added"], 8);
+        assert_eq!(response.result["items"][0]["worktree_stats"]["added"], 3);
         assert!(!app.projects[0].git_loading);
     }
 

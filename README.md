@@ -1,4 +1,4 @@
-# Morrow 0.4.1
+# Morrow 0.4.2
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -29,13 +29,13 @@ Beim ersten Start mit **Ctrl+Shift+O** Projektordner hinzufügen. **Ctrl+O**, da
 - Ein Klick setzt den Cursor. Ziehen und Doppelklick wählen Text aus, ein Dreifachklick ganze Zeilen. Im Vim-Normalmodus wird daraus eine Visual-Auswahl; im Insert-Modus bleibt die Texteingabe aktiv.
 - **Ctrl+F** sucht in der Datei, **Ctrl+H** öffnet Suchen und Ersetzen. Groß-/Kleinschreibung und ganze Wörter lassen sich einstellen; es wird nach wörtlichem Text gesucht.
 - **Ctrl+Shift+F** durchsucht das aktive Projekt. Ein Treffer öffnet die passende Datei an der Fundstelle.
-- **Settings** (**Ctrl+,**) bietet Vim an/aus, automatisches Speichern, Schriftgröße, Einrückungsbreite, Zeilenumbruch und **Smooth scrolling**. Vim und automatisches Speichern sind standardmäßig eingeschaltet; weiches Scrollen ist standardmäßig ausgeschaltet und lässt sich für Editor und Markdown-Vorschau aktivieren.
+- **Settings** (**Ctrl+,**) bietet Vim an/aus, die Leader-Taste, automatisches Speichern, Schriftgröße, Einrückungsbreite, Zeilenumbruch und **Smooth scrolling**. Vim und automatisches Speichern sind standardmäßig eingeschaltet; weiches Scrollen ist standardmäßig ausgeschaltet und lässt sich für Editor und Markdown-Vorschau aktivieren.
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
 - Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** rückt ein, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um und **Alt+Shift+↓** dupliziert Zeilen. Neue Zeilen übernehmen die Einrückung.
 
 Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergrund. Der Explorer berücksichtigt `.gitignore` und überspringt unter anderem `.git`, `target`, `node_modules` und generierte Build-Ordner. Symbolische Links werden im Index nicht verfolgt. Bei erreichten Such- oder Indexgrenzen erscheint ein Hinweis; dann hilft ein kleinerer Projektordner oder eine genauere Suche.
 
-Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
+Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Auf der freien Fläche im Explorer lassen sich neue Dateien und Ordner direkt im Projekt anlegen; dort sind auch Projektpfad, Windows-Explorer und Aktualisieren erreichbar. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
 
 ## Tastenkürzel
 
@@ -75,6 +75,10 @@ Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Date
 ## Vim
 
 Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schreiben in den **Insert-Modus**, **Esc** führt zurück. Der aktuelle Modus steht unten in der Statusleiste. Wer normale Texteditor-Bedienung bevorzugt, kann **Vim motions** in den Einstellungen ausschalten.
+
+**Space** ist die Standard-Leader-Taste. Im Normal- und Visual-Modus öffnet sie eine kurze Hilfe: **Space m** setzt oder entfernt einen Bookmark an der aktuellen Zeile, **Space b** öffnet die durchsuchbare Bookmark-Liste. Bookmarks speichern Datei, Zeile und Cursorposition, bleiben beim Schließen einer Datei und nach Neustarts erhalten und können benannt oder entfernt werden. Im Picker lässt sich zwischen aktuellem Projekt und allen Bookmarks wechseln; die Markierung erscheint auch im Editor-Gutter. Kleine Verschiebungen werden beim Anspringen anhand der gespeicherten Quelltextzeile berücksichtigt. **Settings → Leader key** bietet Space, Komma und Backslash; die CLI erlaubt auch andere einzelne Zeichen. Im Insert-Modus bleibt Space ein normales Leerzeichen.
+
+**Space Space f** startet den Bildschirm-Sprung. Ein bis drei Zeichen eingeben, etwa `gi`: vollständig sichtbare Treffer werden hervorgehoben und erhalten numerische Labels. Das Label tippen, um den Cursor dorthin zu bewegen; mehrstellige Labels haben eine feste Länge, etwa `03`. Weitere Buchstaben verfeinern die Suche, **Backspace** korrigiert sie, **Esc** bricht ab. Für numerischen Suchtext zuerst **Enter** drücken, um die Suche festzulegen, und danach das Label eingeben. Im Visual-Modus erweitert der Sprung die bestehende Auswahl. Die Suche wirkt auf den aktiven Editorbereich und verändert keinen Text. Bookmarks und Bildschirm-Sprung sind auch über das Menü und die Befehlspalette erreichbar.
 
 `v` startet eine Zeichenauswahl; `V` (**Shift+V**) wählt ganze Zeilen. Mit Bewegungen erweitern, dann beispielsweise `y` kopieren, `d` löschen, `c` ändern oder `>` / `<` ein-/ausrücken. **Esc** beendet die Auswahl.
 
@@ -128,6 +132,9 @@ Jeder Bereich hat seine eigene Navigation und Scrollposition. Unterschiedliche D
 .\dist\Morrow\morrow-cli.exe review "C:\Code\Projekt\review.json"
 .\dist\Morrow\morrow-cli.exe tabs
 .\dist\Morrow\morrow-cli.exe focus 12 --line 42 --source
+.\dist\Morrow\morrow-cli.exe bookmarks
+.\dist\Morrow\morrow-cli.exe bookmarks toggle --tab 12 --label "Review this section"
+.\dist\Morrow\morrow-cli.exe bookmarks jump 1
 .\dist\Morrow\morrow-cli.exe read 12 --line 1 --count 50
 .\dist\Morrow\morrow-cli.exe request ".\editor-action.json"
 .\dist\Morrow\morrow-cli.exe --help
@@ -142,7 +149,8 @@ Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App
 | Dateien | Dateien und Ordner umbenennen, neue Ordner erstellen, Abschluss und Fehler der Hintergrundoperation abfragen |
 | Ansichten | Fokus, Cursorposition, Source/Preview, Splits erstellen, Dokumente zuweisen, Bereiche fokussieren, schließen und skalieren |
 | Editoraktionen | Einrücken, Kommentare umschalten, Zeilen duplizieren/löschen, Treffer wechseln, unveränderte Dateien neu laden |
-| Einstellungen | Vim, Autosave, Schriftgröße, Tab-Breite, Zeilenumbruch und weiches Scrollen lesen oder gezielt ändern |
+| Einstellungen | Vim, Leader-Taste, Autosave, Schriftgröße, Tab-Breite, Zeilenumbruch und weiches Scrollen lesen oder gezielt ändern |
+| Bookmarks | Gespeicherte Stellen auflisten, setzen, benennen, entfernen und anspringen |
 | Projektarbeit | Inhaltsuche, Git-Status, Diagnosen, Diff zum gespeicherten Text, Build/Test/Check starten oder stoppen, Ausgabe lesen |
 | Präsentation | Mehrere Dateien mit Hinweisen öffnen, Review-Seitenleiste, Markierungen entfernen, Panels zeigen oder ausblenden |
 
@@ -202,7 +210,11 @@ rustup component add rust-analyzer rust-src
 
 ## Git und Befehle
 
-**View → Source control** zeigt Branch, geänderte Dateien und letzte Commits. Änderungen einzeln oder gemeinsam stagen/unstagen, über das Kontextmenü einen Diff öffnen und gestagte Änderungen mit einer Commit-Nachricht committen. **Fetch**, **Pull** und **Push** sind direkt erreichbar. Pull verwendet `--ff-only`; Zugangsdaten werden über die vorhandene Git-Konfiguration verwaltet.
+**View → Source control** bietet **Changes** und **History**. Änderungen stehen als Ordnerbaum getrennt nach **Staged**, **Changes** und **Untracked**, mit hinzugefügten und entfernten Zeilen pro Datei. Eine teilweise gestagte Datei erscheint in beiden passenden Gruppen mit den jeweiligen Zahlen. Binärdateien werden als solche angezeigt; für große unversionierte Dateien können die Zahlen fehlen.
+
+Ein Klick auf eine Änderung öffnet ihren Diff mit alten und neuen Zeilennummern und lesbarem Funktionskontext. Dateiinformationen und technische Patch-Details stehen getrennt im Kopfbereich; **Copy patch** kopiert den vollständigen Originalpatch. Das Kontextmenü bietet Datei öffnen, Pfad kopieren sowie Stage/Unstage; ganze Ordner lassen sich gemeinsam vorbereiten. Gestagte Änderungen werden mit einer Commit-Nachricht committed. **Fetch**, **Pull** und **Push** sind erreichbar. Pull verwendet `--ff-only`; Zugangsdaten werden über die vorhandene Git-Konfiguration verwaltet.
+
+**History** zeigt anklickbare Commits mit Autor und Datum; **Load more** lädt weitere Einträge. Die Detailansicht enthält die vollständige Nachricht, Hash, Eltern und einen Dateibaum mit Zeilenzahlen. Dort öffnen Dateien den historischen Diff dieses Commits; bei Merge-Commits wird mit dem ersten Eltern-Commit verglichen. Alle Git-Abfragen laufen im Hintergrund. Commit-Details werden zwischengespeichert und große Diffs rendern nur ihre sichtbaren Zeilen.
 
 **Run** bietet `cargo check`, `cargo test`, `cargo build`, `cargo clippy` und `cargo run`. Im Bereich **Output** lassen sich außerdem eigene Befehle im aktiven Projektordner starten. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Vor einem Build oder Test Änderungen speichern und den Abschluss des Speicherns abwarten: die Werkzeuge lesen die Dateien auf dem Datenträger.
 

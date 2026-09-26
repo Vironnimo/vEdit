@@ -53,7 +53,21 @@ To close only one pane's tab, use the actual IDs from layout:
 
 `close_tab` removes that local tab, leaving the shared buffer in any other pane. If it is the final reference to a dirty or saving buffer, it refuses without effects. Closing the last tab automatically collapses an empty split pane; the sole remaining pane stays available. Ordinary `close TAB_ID...` closes each clean, non-saving document in every pane. Layout `close` closes a whole pane and transfers tabs that have no other pane to a survivor, preserving unsaved work; the last pane cannot be closed. Query layout after changes to verify local tab membership and the requested documents remain visible.
 
-`settings` without a patch returns the current preferences; `patch` changes supplied fields: `vim`, `autosave`, `font_size` (10–24), `tab_width` (1–8), `word_wrap`, and `smooth_scroll`. Null leaves a field unchanged. Changes persist. Do not change unrelated preferences merely to carry out an editor action.
+`settings` without a patch returns the current preferences; `patch` changes supplied fields: `vim`, `autosave`, `font_size` (10–24), `tab_width` (1–8), `word_wrap`, `smooth_scroll`, and `leader_key`. Null leaves a field unchanged. Changes persist. Do not change unrelated preferences merely to carry out an editor action.
+
+`settings leader-key space`, `comma`, `backslash`, or a single printable Unicode character changes the Vim leader key. The JSON equivalent for Space is `{"op":"settings","patch":{"leader_key":" "}}`. Named aliases are normalized to the actual character in the applied settings response; controls and multiple characters are refused.
+
+## Keep persistent bookmarks
+
+`bookmarks` lists bookmarks across projects, including files that are currently closed. Lists default to 100 items; `bookmarks list --limit N --offset N` accepts 1–500 items per page. Follow `next_offset` while `has_more` is true. Items contain ID, path, line, column, and label, without document text. Each bookmark has its own persistent ID; obtain it from this list rather than using a tab ID. `bookmarks toggle --tab TAB_ID --label "Review this flow"` toggles the current cursor line in that named file. Omit `--tab` to use the active document and omit `--label` for the default label. To mark a specific location, first focus that tab at the desired line, then toggle:
+
+```json
+{"op":"bookmarks","change":{"action":"toggle","tab_id":42,"label":"Review this flow"}}
+```
+
+`bookmarks rename ID --label "Follow up"` changes the label; an empty label clears it. Labels are single-line text of at most 256 UTF-8 bytes. `bookmarks jump ID` opens or focuses that file and reveals the bookmarked location; inspect status if file loading is still pending. `bookmarks remove ID` removes only that bookmark. The corresponding JSON actions are `rename` with `id`/`label`, and `jump`/`remove` with `id`, all inside `change`.
+
+Bookmarks preserve their IDs across app restarts and survive closing their files. They capture the cursor and line context without editing or saving the document. Toggle is not idempotent: toggling an existing bookmark removes it. After uncertain delivery, inspect `bookmarks` before deciding whether to repeat it.
 
 ## Inspect project work and run tasks
 

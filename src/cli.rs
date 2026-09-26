@@ -138,6 +138,35 @@ pub struct SettingsPatch {
     pub tab_width: Option<usize>,
     pub word_wrap: Option<bool>,
     pub smooth_scroll: Option<bool>,
+    pub leader_key: Option<String>,
+}
+
+/// Session bookmarks use persistent IDs returned by the bookmark list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BookmarkAction {
+    List {
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    Toggle {
+        #[serde(default)]
+        tab_id: Option<u64>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    Remove {
+        id: u64,
+    },
+    Rename {
+        id: u64,
+        label: String,
+    },
+    Jump {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -300,6 +329,9 @@ pub enum Request {
         #[serde(default)]
         patch: Option<SettingsPatch>,
     },
+    Bookmarks {
+        change: BookmarkAction,
+    },
     Command {
         tab_id: u64,
         command: EditorCommand,
@@ -439,6 +471,11 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli save TAB_ID...
   morrow-cli selection TAB_ID
   morrow-cli settings [PATCH.json]
+  morrow-cli settings leader-key space|comma|backslash|CHAR
+  morrow-cli bookmarks [list] [--limit N] [--offset N]
+  morrow-cli bookmarks toggle [--tab ID] [--label TEXT]
+  morrow-cli bookmarks remove|jump ID
+  morrow-cli bookmarks rename ID --label TEXT
   morrow-cli command TAB_ID undo|redo|select_all|clear_selection|indent|outdent|toggle_comment|duplicate_line|delete_line|reload|find_next|find_previous|source|preview --revision N
   morrow-cli find TAB_ID QUERY [--case-sensitive] [--whole-word] [--limit N] [--offset N]
   morrow-cli replace TAB_ID QUERY REPLACEMENT --revision N [--case-sensitive] [--whole-word] [--first]
@@ -504,20 +541,37 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
     if args.is_empty() {
         return Ok(Parsed::Help);
     }
-    let option_end = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    if args[..option_end]
-        .iter()
-        .any(|a| a == "--help" || a == "-h")
-    {
+    // A label or other option value may literally be `--help`, `--`, or
+    // `--no-start`. Only interpret global flags in argument positions owned
+    // by the CLI, never inside a supplied value.
+    let mut literal = false;
+    let mut expects_value = false;
+    let mut help = false;
+    let mut no_start = false;
+    args.retain(|arg| {
+        if literal {
+            return true;
+        }
+        if expects_value {
+            expects_value = false;
+            return true;
+        }
+        match arg.as_str() {
+            "--" => literal = true,
+            "--help" | "-h" => help = true,
+            "--no-start" => {
+                no_start = true;
+                return false;
+            }
+            "--line" | "--column" | "--limit" | "--offset" | "--count" | "--revision" | "--tab"
+            | "--label" => expects_value = true,
+            _ => {}
+        }
+        true
+    });
+    if help {
         return Ok(Parsed::Help);
     }
-    let no_start = args[..option_end].iter().any(|a| a == "--no-start");
-    let mut index = 0;
-    args.retain(|a| {
-        let keep = index >= option_end || a != "--no-start";
-        index += 1;
-        keep
-    });
     if args.is_empty() {
         return Err("A command is required after --no-start; use --help".into());
     }
@@ -563,6 +617,16 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                     .parse::<u64>()
                     .map_err(|_| "--revision needs a nonnegative integer")?,
                 "--revision",
+            )?,
+            "--tab" => set_option(
+                &mut options.tab,
+                tab_id(&iter.next().ok_or("--tab needs a tab ID")?)?,
+                "--tab",
+            )?,
+            "--label" => set_option(
+                &mut options.label,
+                iter.next().ok_or("--label needs text")?,
+                "--label",
             )?,
             "--case-sensitive" => set_flag(&mut options.case_sensitive, "--case-sensitive")?,
             "--whole-word" => set_flag(&mut options.whole_word, "--whole-word")?,
@@ -675,14 +739,25 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         "settings" => Request::Settings {
             patch: match positional.as_slice() {
                 [] => None,
+                [setting, value] if setting == "leader-key" => Some(SettingsPatch {
+                    leader_key: Some(normalize_leader_key(value)?),
+                    ..Default::default()
+                }),
                 [path] => Some(
                     transport::from_unique_json::<SettingsPatch>(json_bytes(&read_json_file(
                         &absolute(path.into()),
                     )?))
                     .map_err(|e| format!("Invalid settings patch: {e}"))?,
                 ),
-                _ => return Err("settings takes at most one patch file".into()),
+                _ => {
+                    return Err(
+                        "settings takes PATCH.json or leader-key space|comma|backslash|CHAR".into(),
+                    );
+                }
             },
+        },
+        "bookmarks" => Request::Bookmarks {
+            change: parse_bookmarks(&positional, &options)?,
         },
         "command" => {
             if positional.len() != 2 {
@@ -841,6 +916,8 @@ struct Options {
     offset: Option<usize>,
     count: Option<usize>,
     revision: Option<u64>,
+    tab: Option<u64>,
+    label: Option<String>,
     case_sensitive: bool,
     whole_word: bool,
     first: bool,
@@ -868,13 +945,16 @@ impl Options {
                 self.limit.is_some(),
                 matches!(
                     command,
-                    "tabs" | "find" | "search" | "diagnostics" | "git-status"
+                    "tabs" | "find" | "search" | "diagnostics" | "git-status" | "bookmarks"
                 ),
                 "--limit",
             ),
             (
                 self.offset.is_some(),
-                matches!(command, "tabs" | "find" | "diagnostics" | "git-status"),
+                matches!(
+                    command,
+                    "tabs" | "find" | "diagnostics" | "git-status" | "bookmarks"
+                ),
                 "--offset",
             ),
             (
@@ -887,6 +967,8 @@ impl Options {
                 matches!(command, "command" | "replace"),
                 "--revision",
             ),
+            (self.tab.is_some(), command == "bookmarks", "--tab"),
+            (self.label.is_some(), command == "bookmarks", "--label"),
             (
                 self.case_sensitive,
                 matches!(command, "find" | "search" | "replace"),
@@ -927,6 +1009,64 @@ fn set_flag(field: &mut bool, name: &str) -> Result<(), String> {
     }
     *field = true;
     Ok(())
+}
+
+fn parse_bookmarks(positional: &[String], options: &Options) -> Result<BookmarkAction, String> {
+    let change = match positional {
+        [] => BookmarkAction::List { limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0) },
+        [action] if action == "list" => BookmarkAction::List { limit: options.limit.unwrap_or(100), offset: options.offset.unwrap_or(0) },
+        [action] if action == "toggle" => BookmarkAction::Toggle {
+            tab_id: options.tab,
+            label: options.label.clone(),
+        },
+        [action, id] if action == "remove" => BookmarkAction::Remove { id: bookmark_id(id)? },
+        [action, id] if action == "rename" => BookmarkAction::Rename {
+            id: bookmark_id(id)?,
+            label: options.label.clone().ok_or("bookmarks rename needs --label TEXT")?,
+        },
+        [action, id] if action == "jump" => BookmarkAction::Jump { id: bookmark_id(id)? },
+        _ => return Err("bookmarks takes list, toggle [--tab ID] [--label TEXT], remove ID, rename ID --label TEXT, or jump ID".into()),
+    };
+    if options.tab.is_some() && !matches!(change, BookmarkAction::Toggle { .. }) {
+        return Err("--tab is supported only by bookmarks toggle".into());
+    }
+    if options.label.is_some()
+        && !matches!(
+            change,
+            BookmarkAction::Toggle { .. } | BookmarkAction::Rename { .. }
+        )
+    {
+        return Err("--label is supported only by bookmarks toggle or rename".into());
+    }
+    if (options.limit.is_some() || options.offset.is_some())
+        && !matches!(change, BookmarkAction::List { .. })
+    {
+        return Err("--limit and --offset are supported only by bookmarks list".into());
+    }
+    Ok(change)
+}
+
+fn bookmark_id(value: &str) -> Result<u64, String> {
+    value
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "Bookmark ID must be a positive integer returned by bookmarks".into())
+}
+
+/// Accepted aliases denote exactly one key; never infer a nearby key spelling.
+pub fn normalize_leader_key(value: &str) -> Result<String, String> {
+    let normalized = match value {
+        "space" => " ",
+        "comma" => ",",
+        "backslash" => "\\",
+        _ => value,
+    };
+    let mut chars = normalized.chars();
+    match (chars.next(), chars.next()) {
+        (Some(key), None) if !key.is_control() => Ok(normalized.to_owned()),
+        _ => Err("leader_key needs one printable character or space|comma|backslash".into()),
+    }
 }
 fn set_option<T>(field: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
     if field.is_some() {
@@ -1170,6 +1310,9 @@ pub fn validate(request: &Request) -> Result<(), String> {
             }
         }
         Request::Settings { patch: Some(patch) } => {
+            if let Some(leader_key) = &patch.leader_key {
+                normalize_leader_key(leader_key)?;
+            }
             if patch
                 .font_size
                 .is_some_and(|n| !n.is_finite() || !(10.0..=24.0).contains(&n))
@@ -1248,6 +1391,24 @@ pub fn validate(request: &Request) -> Result<(), String> {
                 validate_path(path)?;
             }
         }
+        Request::Bookmarks { change } => match change {
+            BookmarkAction::List { limit, offset } => validate_page(*limit, *offset)?,
+            BookmarkAction::Toggle { tab_id, label } => {
+                if let Some(tab_id) = tab_id {
+                    validate_id(*tab_id)?;
+                }
+                if let Some(label) = label {
+                    validate_bookmark_label(label)?;
+                }
+            }
+            BookmarkAction::Remove { id } | BookmarkAction::Jump { id } => {
+                validate_bookmark_id(*id)?
+            }
+            BookmarkAction::Rename { id, label } => {
+                validate_bookmark_id(*id)?;
+                validate_bookmark_label(label)?;
+            }
+        },
         Request::Layout { change } => match change {
             LayoutAction::Status {} => {}
             LayoutAction::Split {
@@ -1316,6 +1477,22 @@ pub fn validate(request: &Request) -> Result<(), String> {
 fn validate_query(query: &str) -> Result<(), String> {
     if query.is_empty() || query.len() > 16_384 {
         Err("Literal search query must contain 1..16384 bytes".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_bookmark_label(label: &str) -> Result<(), String> {
+    if label.len() > 256 || label.chars().any(char::is_control) {
+        Err("Bookmark label must be single-line text of at most 256 UTF-8 bytes".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_bookmark_id(id: u64) -> Result<(), String> {
+    if id == 0 {
+        Err("Bookmark ID must be a positive integer returned by bookmarks".into())
     } else {
         Ok(())
     }
@@ -1448,6 +1625,282 @@ mod tests {
     use super::*;
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         parse_args(args.iter().map(OsString::from))
+    }
+    #[test]
+    fn bookmark_commands_preserve_targets_labels_and_existing_instance_scope() {
+        for args in [&["bookmarks"][..], &["bookmarks", "list"]] {
+            assert!(matches!(
+                parse(args).unwrap(),
+                Parsed::Command {
+                    request: Request::Bookmarks {
+                        change: BookmarkAction::List {
+                            limit: 100,
+                            offset: 0
+                        }
+                    },
+                    start: false
+                }
+            ));
+        }
+        let Parsed::Command {
+            request:
+                Request::Bookmarks {
+                    change: BookmarkAction::Toggle { tab_id, label },
+                },
+            start,
+        } = parse(&[
+            "bookmarks",
+            "toggle",
+            "--tab",
+            "42",
+            "--label",
+            " Prüfe Überlauf 🎯 ",
+        ])
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(tab_id, Some(42));
+        assert_eq!(label.as_deref(), Some(" Prüfe Überlauf 🎯 "));
+        assert!(!start);
+        assert!(matches!(
+            parse(&["bookmarks", "toggle"]).unwrap(),
+            Parsed::Command {
+                request: Request::Bookmarks {
+                    change: BookmarkAction::Toggle {
+                        tab_id: None,
+                        label: None
+                    }
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["bookmarks", "remove", "7"]).unwrap(),
+            Parsed::Command {
+                request: Request::Bookmarks {
+                    change: BookmarkAction::Remove { id: 7 }
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["bookmarks", "jump", "9"]).unwrap(),
+            Parsed::Command {
+                request: Request::Bookmarks {
+                    change: BookmarkAction::Jump { id: 9 }
+                },
+                ..
+            }
+        ));
+        assert!(
+            matches!(parse(&["bookmarks", "rename", "7", "--label", ""]).unwrap(), Parsed::Command { request: Request::Bookmarks { change: BookmarkAction::Rename { id: 7, label } }, .. } if label.is_empty())
+        );
+    }
+
+    #[test]
+    fn bookmark_parser_refuses_unrelated_or_contradictory_constraints() {
+        for args in [
+            &["bookmarks", "--tab", "42"][..],
+            &["bookmarks", "list", "--label", "x"],
+            &["bookmarks", "remove", "7", "--label", "x"],
+            &["bookmarks", "rename", "7"],
+            &["bookmarks", "rename", "7", "--label", "x", "--tab", "42"],
+            &["bookmarks", "toggle", "--tab", "0"],
+            &["bookmarks", "toggle", "--tab", "1", "--tab", "2"],
+            &["bookmarks", "toggle", "--label", "a", "--label", "b"],
+            &["bookmarks", "toggle", "--line", "7"],
+            &["bookmarks", "toggle", "--revision", "3"],
+            &["bookmarks", "toggle", "--limit", "3"],
+            &["bookmarks", "rename", "7", "--label", "x", "--offset", "2"],
+            &["bookmarks", "toggle", "extra"],
+            &["bookmarks", "jump", "0"],
+            &["bookmarks", "remove", "18446744073709551616"],
+            &["status", "--label", "x"],
+            &["focus", "1", "--tab", "2"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn bookmark_pages_are_bounded_and_legacy_list_json_keeps_defaults() {
+        for args in [
+            &["bookmarks", "--limit", "500", "--offset", "13"][..],
+            &["bookmarks", "list", "--limit", "500", "--offset", "13"],
+        ] {
+            assert!(matches!(
+                parse(args).unwrap(),
+                Parsed::Command {
+                    request: Request::Bookmarks {
+                        change: BookmarkAction::List {
+                            limit: 500,
+                            offset: 13
+                        }
+                    },
+                    ..
+                }
+            ));
+        }
+        let request: Request =
+            serde_json::from_value(json!({"op":"bookmarks","change":{"action":"list"}})).unwrap();
+        validate(&request).unwrap();
+        assert!(matches!(
+            request,
+            Request::Bookmarks {
+                change: BookmarkAction::List {
+                    limit: 100,
+                    offset: 0
+                }
+            }
+        ));
+        for limit in [0, 501] {
+            let request: Request = serde_json::from_value(
+                json!({"op":"bookmarks","change":{"action":"list","limit":limit}}),
+            )
+            .unwrap();
+            assert!(validate(&request).is_err());
+            assert!(parse(&["bookmarks", "--limit", &limit.to_string()]).is_err());
+        }
+    }
+
+    #[test]
+    fn labels_that_look_like_global_options_remain_literal_payload() {
+        for label in ["--help", "-h", "--no-start", "--"] {
+            let Parsed::Command {
+                request:
+                    Request::Bookmarks {
+                        change:
+                            BookmarkAction::Toggle {
+                                label: Some(actual),
+                                ..
+                            },
+                    },
+                ..
+            } = parse(&["bookmarks", "toggle", "--label", label]).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(actual, label);
+        }
+        assert!(matches!(
+            parse(&["bookmarks", "toggle", "--label", "x", "--help"]).unwrap(),
+            Parsed::Help
+        ));
+        assert!(
+            matches!(parse(&["open", "--no-start", "--", "--no-start"]).unwrap(), Parsed::Command { request: Request::Open { files }, start: false } if files[0].path.file_name().unwrap() == "--no-start")
+        );
+    }
+
+    #[test]
+    fn bookmark_json_keeps_explicit_targets_and_refuses_unknown_features() {
+        let request: Request = serde_json::from_value(json!({"op":"bookmarks","change":{"action":"toggle","tab_id":42,"label":"source/plan.md"}})).unwrap();
+        validate(&request).unwrap();
+        assert!(
+            matches!(request, Request::Bookmarks { change: BookmarkAction::Toggle { tab_id: Some(42), label: Some(label) } } if label == "source/plan.md")
+        );
+        for change in [
+            json!({"action":"toggle","tab_id":42,"line":7}),
+            json!({"action":"list","workspace":"C:/project"}),
+            json!({"action":"jump","id":9,"force":true}),
+            json!({"action":"remove","tab_id":42}),
+            json!({"action":"rename","id":9}),
+            json!({"action":"jump","id":-1}),
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(json!({"op":"bookmarks","change":change}))
+                    .is_err()
+            );
+        }
+        for change in [
+            json!({"action":"jump","id":0}),
+            json!({"action":"toggle","tab_id":0}),
+        ] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"bookmarks","change":change})).unwrap();
+            assert!(validate(&request).is_err());
+        }
+    }
+
+    #[test]
+    fn bookmark_labels_have_unicode_byte_boundaries_and_clear_semantics() {
+        let allowed = "é".repeat(128);
+        let refused = "é".repeat(129);
+        for label in ["", allowed.as_str(), " leading and trailing "] {
+            let request = Request::Bookmarks {
+                change: BookmarkAction::Rename {
+                    id: 1,
+                    label: label.to_owned(),
+                },
+            };
+            validate(&request).unwrap();
+        }
+        for label in [refused.as_str(), "line\nbreak", "tab\tlabel", "null\0label"] {
+            let request = Request::Bookmarks {
+                change: BookmarkAction::Toggle {
+                    tab_id: Some(42),
+                    label: Some(label.to_owned()),
+                },
+            };
+            assert!(validate(&request).is_err());
+        }
+    }
+
+    #[test]
+    fn leader_key_cli_normalizes_only_exact_aliases_and_preserves_unicode() {
+        for (input, expected) in [
+            ("space", " "),
+            ("comma", ","),
+            ("backslash", "\\"),
+            (" ", " "),
+            ("ß", "ß"),
+            ("🎯", "🎯"),
+            ("x", "x"),
+        ] {
+            let Parsed::Command {
+                request: Request::Settings { patch: Some(patch) },
+                start,
+            } = parse(&["settings", "leader-key", input]).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(patch.leader_key.as_deref(), Some(expected));
+            assert!(!start);
+            assert!(
+                patch.vim.is_none() && patch.autosave.is_none() && patch.smooth_scroll.is_none()
+            );
+        }
+        assert!(
+            matches!(parse(&["settings", "leader-key", "--", "-"]).unwrap(), Parsed::Command { request: Request::Settings { patch: Some(patch) }, .. } if patch.leader_key.as_deref() == Some("-"))
+        );
+        for value in ["", "SPACE", "comma ", "Space", "ab", "\n", "\t", "\0"] {
+            assert!(
+                parse(&["settings", "leader-key", value]).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leader_key_json_validation_matches_cli_without_changing_payload_fields() {
+        for value in [" ", "space", "comma", "backslash", "ö"] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":{"leader_key":value}}))
+                    .unwrap();
+            validate(&request).unwrap();
+        }
+        for value in ["", "spacebar", "a b", "\u{7f}", "\r"] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":{"leader_key":value}}))
+                    .unwrap();
+            assert!(validate(&request).is_err());
+        }
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"op":"settings","patch":{"leader_key":" ","leader_timeout":500}})
+            )
+            .is_err()
+        );
     }
     #[test]
     fn open_preserves_preview_and_exact_location() {

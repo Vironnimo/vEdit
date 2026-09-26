@@ -1,16 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bookmarks;
 #[allow(dead_code)]
 mod cli;
 mod design;
 mod editor;
 mod git;
+mod git_diff_view;
 mod lsp;
 mod markdown;
 mod paths;
 mod recovery;
 mod render;
+mod screen_jump;
 mod single_instance;
 mod tasks;
 mod vim;

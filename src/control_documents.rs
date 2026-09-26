@@ -3,6 +3,96 @@ use super::*;
 use crate::cli::{EditorCommand, SettingsPatch, TaskAction, TextEdit, TextRange};
 
 impl MorrowApp {
+    fn control_bookmarks(&mut self, change: cli::BookmarkAction) -> Response {
+        match change {
+            cli::BookmarkAction::List { limit, offset } => {
+                let total = self.bookmarks.items.len();
+                let mut items = Vec::new();
+                let mut bytes = 0;
+                for bookmark in self.bookmarks.items.iter().skip(offset).take(limit) {
+                    let item = json!({"id":bookmark.id,"path":crate::paths::display(&bookmark.path),"line":bookmark.line,"column":bookmark.column,"label":bookmark.label});
+                    let size = serde_json::to_vec(&item).map_or(262_144, |value| value.len());
+                    if bytes + size > 262_144 {
+                        break;
+                    }
+                    bytes += size;
+                    items.push(item);
+                }
+                let next = offset.saturating_add(items.len());
+                Response::success(
+                    json!({"items":items,"total":total,"offset":offset,"has_more":next<total,"next_offset":if next<total{Some(next)}else{None},"scope":"session"}),
+                )
+            }
+            cli::BookmarkAction::Toggle { tab_id, label } => {
+                let tab_id = tab_id.or_else(|| self.tab().map(|tab| tab.id));
+                match self.try_toggle_bookmark(tab_id) {
+                    Ok(result) => {
+                        let (id, added) = match result {
+                            crate::bookmarks::ToggleResult::Added(id) => (id, true),
+                            crate::bookmarks::ToggleResult::Removed(id) => (id, false),
+                        };
+                        if added && let Some(label) = label {
+                            self.bookmarks.set_label(id, &label);
+                        }
+                        self.persist_session();
+                        Response::success(
+                            json!({"applied":true,"id":id,"added":added,"tab_id":tab_id,"persistence":"queued"}),
+                        )
+                    }
+                    Err(error) => Response::failure("bookmark_unavailable", error),
+                }
+            }
+            cli::BookmarkAction::Remove { id } => {
+                if !self.bookmarks.remove(id) {
+                    return Response::failure(
+                        "unknown_bookmark",
+                        "The bookmark no longer exists; list bookmarks before retrying",
+                    );
+                }
+                self.bookmark_lines.clear();
+                self.session_dirty = true;
+                self.persist_session();
+                Response::success(
+                    json!({"applied":true,"id":id,"removed":true,"persistence":"queued"}),
+                )
+            }
+            cli::BookmarkAction::Rename { id, label } => {
+                if !self.bookmarks.set_label(id, &label) {
+                    return Response::failure(
+                        "unknown_bookmark",
+                        "The bookmark no longer exists; list bookmarks before retrying",
+                    );
+                }
+                self.bookmark_lines.clear();
+                self.session_dirty = true;
+                self.persist_session();
+                Response::success(json!({"applied":true,"id":id,"persistence":"queued"}))
+            }
+            cli::BookmarkAction::Jump { id } => {
+                if self.bookmarks.get(id).is_none() {
+                    return Response::failure(
+                        "unknown_bookmark",
+                        "The bookmark no longer exists; list bookmarks before retrying",
+                    );
+                }
+                if self
+                    .tab()
+                    .is_some_and(|tab| tab.vim.mode == VimMode::Insert)
+                {
+                    return Response::failure(
+                        "editor_busy",
+                        "Finish the current Insert transaction before navigating to a bookmark; nothing changed",
+                    );
+                }
+                match self.try_jump_to_bookmark(id) {
+                    Ok(tab_id) => Response::success(
+                        json!({"applied":true,"id":id,"tab_id":tab_id,"pending":self.pending_bookmark_jump.is_some()}),
+                    ),
+                    Err(error) => Response::failure("bookmark_unavailable", error),
+                }
+            }
+        }
+    }
     pub(super) fn control_document_request(&mut self, request: Request) -> Response {
         match request {
             Request::Edit {
@@ -338,6 +428,7 @@ impl MorrowApp {
             }
             Request::File { action } => self.control_file_action(action),
             Request::FileJob { job_id } => self.control_file_job(job_id),
+            Request::Bookmarks { change } => self.control_bookmarks(change),
             Request::Layout { change } => match self.control_layout(change) {
                 Ok(layout) => Response::success(layout),
                 Err(error) => Response::failure("invalid_layout", error),
@@ -673,6 +764,10 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     }
     if let Some(value) = patch.smooth_scroll {
         settings.smooth_scroll = value;
+    }
+    if let Some(value) = &patch.leader_key {
+        // validate(request) has checked this before applying any preference.
+        settings.leader_key = cli::normalize_leader_key(value).unwrap_or_else(|_| " ".into());
     }
 }
 fn finish_control_insert(tab: &mut EditorTab) {

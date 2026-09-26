@@ -92,7 +92,7 @@ Keep the next steps close to the code. Each row has enough detail to read withou
 This paragraph starts after the last complete row. It should never overlap the table, even in a narrow pane.
 "#;
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+pub(super) fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
     if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
         options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
@@ -130,7 +130,7 @@ fn document(root: &Path, relative: &str, text: &str) -> EditorTab {
     tab
 }
 
-fn workspace(app: &mut MorrowApp) {
+pub(super) fn workspace(app: &mut MorrowApp) {
     let root = fs::canonicalize(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-project"),
     )
@@ -156,7 +156,7 @@ fn workspace(app: &mut MorrowApp) {
     );
 }
 
-fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
+pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
     // Keep periodic disk/Git/session work out of render-only review fixtures.
     let app = screen.state_mut();
     app.last_disk_check = Instant::now();

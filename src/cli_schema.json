@@ -1,21 +1,23 @@
 {
   "protocol": 1,
-  "purpose": "Read, edit, save and arrange Morrow documents, query project state, run curated tasks and present marked reviews. Responses describe actual GUI application; asynchronous loads/saves remain pending until status confirms completion.",
+  "purpose": "Read, edit, save and arrange Morrow documents, keep persistent bookmarks, query project state, run curated tasks and present marked reviews. Responses describe actual GUI application; asynchronous loads/saves remain pending until status confirms completion.",
   "coordinates": {
     "positions": "1-based lines and Unicode scalar columns, including the boundary after a line's last character. CRLF cannot be split.",
     "edit_selection_find_diagnostics": "range.end is exclusive",
     "annotations": "end inclusive; omitted end marks the entire start line"
   },
-  "ids": "Tab and pane IDs belong to the response session (process lifetime). Refresh status after restarting; never guess IDs.",
+  "ids": "Tab and pane IDs belong to the response session (process lifetime). Bookmark IDs persist across restarts. Obtain IDs from their current list/status responses; never guess IDs.",
   "limits": {
     "files": 100,
     "annotations": 500,
     "tabs_page": 100,
     "query_page": 500,
+    "bookmarks_page": 500,
     "read_lines": 500,
     "edit_ranges": 256,
     "replace_matches": 10000,
     "batch_actions": 100,
+    "bookmark_label_bytes": 256,
     "document_bytes": 8388608,
     "json_bytes": 1048576
   },
@@ -173,7 +175,46 @@
         "font_size": 14.0,
         "tab_width": 4,
         "word_wrap": true,
-        "smooth_scroll": false
+        "smooth_scroll": false,
+        "leader_key": " "
+      }
+    },
+    {
+      "op": "bookmarks",
+      "change": {
+        "action": "list",
+        "limit": 100,
+        "offset": 0
+      }
+    },
+    {
+      "op": "bookmarks",
+      "change": {
+        "action": "toggle",
+        "tab_id": 1,
+        "label": "Review this flow"
+      }
+    },
+    {
+      "op": "bookmarks",
+      "change": {
+        "action": "rename",
+        "id": 1,
+        "label": "Follow up"
+      }
+    },
+    {
+      "op": "bookmarks",
+      "change": {
+        "action": "jump",
+        "id": 1
+      }
+    },
+    {
+      "op": "bookmarks",
+      "change": {
+        "action": "remove",
+        "id": 1
       }
     },
     {
@@ -376,7 +417,16 @@
     "patch": "only supplied fields change; null leaves a field unchanged. Applied settings are returned, persistence is queued.",
     "font_size": "10..24",
     "tab_width": "1..8",
-    "smooth_scroll": "false by default; input key scrolling works with either setting"
+    "smooth_scroll": "false by default; input key scrolling works with either setting",
+    "leader_key": "One printable Unicode character, including a literal space. Aliases space/comma/backslash are accepted and normalized to that character. CLI shortcut: settings leader-key space|comma|backslash|CHAR. Applied settings return the actual character."
+  },
+  "bookmarks": {
+    "list": "Lists persistent session bookmarks across all projects, including closed files. limit defaults to 100 (1..500), offset to 0. Responses contain items/total/offset/has_more/next_offset; follow next_offset while has_more. Items contain ID/path/line/column/label, not document text. Use the returned IDs for remove/rename/jump.",
+    "toggle": "Toggles the current cursor line in tab_id; omit tab_id to use the active tab. Requires a named file. Adding captures the cursor and current line context; label is optional single-line text (max 256 UTF-8 bytes). Toggling an existing bookmark removes it, so inspect list after uncertain delivery before retrying.",
+    "rename": "Changes the label for an existing bookmark ID. An empty label clears the custom label.",
+    "jump": "Opens/focuses the bookmarked file and reveals its location. File loading can remain pending; inspect status until the target tab is ready.",
+    "remove": "Removes only the bookmark metadata identified by id, never file contents.",
+    "persistence": "Bookmarks survive file closure and application restart, retain their IDs, and do not save or alter document text."
   },
   "queries": {
     "diff": "Bounded contiguous replacement hunk against saved buffer, not Git history; reports truncation.",

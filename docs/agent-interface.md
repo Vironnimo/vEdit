@@ -2,7 +2,7 @@
 
 The CLI controls Morrow's editor state and presents plans and review targets. The `morrow` skill belongs to this repository at `.agents/skills/morrow/`; portable builds bundle it under `skills/morrow/`. Neither building nor using the application installs a personal skill.
 
-The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
+The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
 ## Observable contract
 
@@ -11,6 +11,8 @@ The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinar
 - Each pane owns an ordered tab group. Layout results expose its active `tab_id` and local `tab_ids`, usable pane IDs, split orientations, and ratios. A new split starts with the selected document; new opens join the focused pane. Assigning a document adds and focuses it in the target pane without removing other references. Panes share document text and Undo, while their cursor, view, and scrolling are separate.
 - Layout `close_tab` removes one pane's reference to a document. It preserves a dirty or saving document shown elsewhere, and refuses to remove its final reference. Removing the final local tab collapses an empty split pane; the sole pane remains available. Ordinary `close TAB_ID...` closes clean, non-saving documents in every pane. Closing a whole pane transfers documents absent from the other panes to a surviving pane, preserving unsaved work; the last pane cannot be closed.
 - Settings patches affect supplied preferences and persist. File rename/folder creation run as tracked background jobs; task dispatch and file-job dispatch are separate from completion.
+- Bookmarks are session metadata across projects and retain their own IDs across restarts. Listing defaults to 100 records, accepts pages of 1–500, and supplies `next_offset`/`has_more`. Records expose path, line, column, and label, without stored document text. Toggle, rename, and removal do not edit or save documents; a jump may still have a pending file load. Toggle removes an existing line bookmark, so callers inspect the list after uncertain delivery before retrying.
+- The Vim `leader_key` preference accepts one printable Unicode character or the exact aliases `space`, `comma`, and `backslash`. Applied settings return the actual character. Option values such as a bookmark label containing `--help` or `--no-start` remain literal data rather than being interpreted as global CLI flags.
 - Ordered batches stop on failure or partial execution by default and return completed effect evidence plus the stopping point. Large results are compacted explicitly; omitted details remain separately retrievable. Batches do not roll back or replay applied work. Nested batches, background project search, and asynchronous file actions are excluded.
 - Project search reads indexed files on disk and reports completed bounded results; use buffer `find` for unsaved text. Git status and language diagnostics expose cached state. Diff compares the current buffer with its saved text using a bounded replacement hunk. Truncation and readiness remain observable.
 - Opening Markdown with `--preview` selects its reading view. `--source` returns to the editable document and preserves the user's editor preferences.
@@ -54,6 +56,24 @@ The packaged 0.4.1 CLI and repository skill were captured using the same exact-b
 
 The extra guidance and schema describe local tab ownership, closure, and preservation of shared buffers. They add 892 and 747 UTF-8 bytes respectively; the other surfaces retain identical bytes and hashes. This is a context increase, with no token saving claimed. Raw payloads, SHA-256 hashes, byte counts, and token counts are retained separately in `target/agent-interface-audit/after-0.4.1/`; the historical 0.4.0 captures and trial remain unchanged.
 
+## Context cost: 0.4.1 to 0.4.2
+
+The 0.4.2 production CLI contract and repository skill use the same tokenizer, `tiktoken` 0.14.0 with `o200k_base`, and serialization as 0.4.1: complete UTF-8 bytes without line-ending normalization, including unmodified CLI stdout and its trailing newlines. Offline help and schema capture do not start or mutate the GUI. Provider wrappers are excluded; these local estimates are not billing measurements. UI metadata remains counted separately because it may not be delivered as model instructions.
+
+| Surface | 0.4.1 | 0.4.2 | Delta |
+| --- | ---: | ---: | ---: |
+| `SKILL.md`, including frontmatter | 802 | 802 | 0 |
+| Conditional editor-control reference | 1,746 | 2,174 | +428 |
+| Conditional review reference | 628 | 628 | 0 |
+| Production CLI help | 880 | 951 | +71 |
+| Production CLI schema | 2,499 | 2,911 | +412 |
+| Instruction/discovery total | 6,555 | 7,466 | +911 |
+| UI metadata, counted separately | 49 | 49 | 0 |
+
+Including UI metadata, all six surfaces total 6,604 before and 7,515 after, also an increase of 911 tokens. The schema expands from 30 to 31 operations: `bookmarks` adds five typed actions, while `leader_key` extends settings. The reference teaches persistent IDs, bounded listing, exact leader aliases, pending navigation, and recovery from uncertain toggle delivery. This is a capability expansion, with no token saving claimed; tasks need not load every conditional reference or both discovery outputs.
+
+Raw payloads, hashes, byte counts, and token counts are retained in `target/agent-interface-audit/after-0.4.2/`. `target/agent-interface-audit/measure-0.4.2.py` accepts a built CLI path and captures its actual help/schema output alongside the repository skill files. No new first-use model trial or comparable argument/result cost measurement was performed for bookmarks or leader preferences. The historical 0.4.0 success and 0.4.1 scripted checks below remain unchanged and do not establish first-use success for these additions.
+
 ## Historical 0.4.0 verification
 
 The 0.4.0 repository skill passed `skill-creator/scripts/quick_validate.py`; all supporting reference links resolved, and the packaged production schema exposed 30 distinct operations. Structural validation checks packaging and placeholders, rather than proving task success.
@@ -87,3 +107,15 @@ Scripted checks against the running packaged Windows 0.4.1 receiver confirmed th
 The ordinary upgrade restart preserved all previously open paths and preferences; empty panes from the older layout collapsed during migration. Before/after receiving-state snapshots are retained in `target/pane-groups-before-restart.json` and `target/pane-groups-after-restart.json`. Tab IDs changed with the new process as expected.
 
 These scripted checks target local tab groups and their receiving state, without claiming visual latency or user approval. The broader 0.4.0 first-use trial above remains historical; it was not rerun for 0.4.1 and does not establish first-use success for the new local closure action.
+
+## 0.4.2 navigation and Git verification
+
+The 0.4.2 implementation checks passed **487 tests**: 450 application tests and 37 CLI tests, with seven tests ignored in the standard suite. Formatting and strict Clippy passed. The separately invoked Windows captured-output startup regression also passed. All 20 strict screenshot comparisons passed, including the new Git changes/history/commit/diff, bookmark picker, and screen-jump views.
+
+Real pointer and keyboard regressions cover the blank Explorer context menu, leader dispatch in Normal/Visual/Insert modes, visible targets in wrapped and split editors, Unicode cursor positions, bookmark opening of a closed file, and preservation of Visual selections and unchanged text. Scroll regressions use separate wheel events and check accumulation, reversal, both bounds, and retained final content in the editor, Markdown preview/tables, and the virtualized diff. Diff tests check readable code presentation separately from the exact original patch used by Copy patch, including multiple files, quoted Unicode paths, empty files, mode changes, renames, and binary changes.
+
+Scripted checks against the packaged Windows 0.4.2 receiver created and renamed a temporary bookmark, verified bounded listing and the exact cursor destination, and confirmed the bookmark reached the recovery session on disk. A normal window close and a new process restored the same persistent bookmark ID, label, file, line, and column. After jumping again, the check removed only its temporary bookmark and restored the original tabs, groups, views, cursor positions, panels, and preferences. Original file hashes remained identical. Receiving-state traces and restart process IDs are retained in `target/navigation-live/`, including `proof.json` and `restart.json`.
+
+The final offline help/schema capture used `dist/Morrow/morrow-cli.exe`; it confirmed 31 operations and the context counts listed above without GUI mutation. Packaged GUI and CLI executable hashes matched their release build outputs. The skill stays in the repository and portable package; it was not installed into the user's personal skills directory.
+
+These are implementation and rendering checks. They do not establish general first-use agent success, visual latency on other machines, or user approval.
