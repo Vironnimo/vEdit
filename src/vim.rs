@@ -1,0 +1,2851 @@
+//! Unicode-safe modal editing. Cursors and selection ranges use Unicode
+//! character indices, matching egui's text cursor. Keep a state per document.
+use std::ops::Range;
+
+const MAX_COUNT: usize = 9_999;
+const MAX_HISTORY: usize = 100;
+const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VimMode {
+    #[default]
+    Normal,
+    Insert,
+    Visual,
+    VisualLine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VimKey {
+    Char(char),
+    Escape,
+    Enter,
+    Backspace,
+    Tab,
+    /// Map normal-mode Ctrl+R to this key.
+    Redo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yank {
+    /// Linewise register values end in a newline.
+    pub text: String,
+    pub linewise: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Action {
+    pub consumed: bool,
+    pub text_changed: bool,
+    pub cursor_changed: bool,
+    pub mode_changed: bool,
+    /// Includes copies and cuts, for sharing the unnamed register across tabs.
+    pub yanked: Option<Yank>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Operator {
+    Delete,
+    Change,
+    Yank,
+    Indent,
+    Outdent,
+}
+
+impl Operator {
+    fn key(self) -> char {
+        match self {
+            Self::Delete => 'd',
+            Self::Change => 'c',
+            Self::Yank => 'y',
+            Self::Indent => '>',
+            Self::Outdent => '<',
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Find {
+    character: char,
+    forward: bool,
+    till: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Pending {
+    Operator(Operator, usize),
+    Go {
+        operator: Option<Operator>,
+        count: usize,
+        explicit: bool,
+    },
+    Replace(usize),
+    Find {
+        operator: Option<Operator>,
+        count: usize,
+        forward: bool,
+        till: bool,
+    },
+    TextObject {
+        operator: Option<Operator>,
+        count: usize,
+        around: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct Snapshot {
+    text: String,
+    cursor: usize,
+}
+
+#[derive(Clone, Debug)]
+struct InsertDelta {
+    relative_start: isize,
+    removed: usize,
+    inserted: String,
+}
+
+#[derive(Clone, Debug)]
+struct RepeatChange {
+    keys: Vec<VimKey>,
+    insert: Option<InsertDelta>,
+}
+
+#[derive(Clone, Debug)]
+struct InsertReplay {
+    keys: Vec<VimKey>,
+    baseline: String,
+    cursor: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Line {
+    start: usize,
+    end: usize,
+    newline: Option<usize>,
+}
+
+/// The navigation belonging to one view of a document. Undo history, registers,
+/// repeat commands and the current insert transaction stay on `VimState`.
+#[derive(Clone, Debug, Default)]
+pub struct VimNavigation {
+    pub mode: VimMode,
+    pub cursor: usize,
+    visual_anchor: Option<usize>,
+    pending: Option<Pending>,
+    count: usize,
+    preferred_column: Option<usize>,
+    last_find: Option<Find>,
+    command_keys: Vec<VimKey>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VimState {
+    pub mode: VimMode,
+    /// Insert mode: insertion boundary. Other modes: current character.
+    pub cursor: usize,
+    register: Option<Yank>,
+    pending: Option<Pending>,
+    count: usize,
+    preferred_column: Option<usize>,
+    visual_anchor: Option<usize>,
+    last_find: Option<Find>,
+    indent_width: usize,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    insert_origin: Option<Snapshot>,
+    insert_count: usize,
+    command_keys: Vec<VimKey>,
+    last_change: Option<RepeatChange>,
+    insert_replay: Option<InsertReplay>,
+    replaying: bool,
+}
+
+impl Default for VimState {
+    fn default() -> Self {
+        Self {
+            mode: VimMode::Normal,
+            cursor: 0,
+            register: None,
+            pending: None,
+            count: 0,
+            preferred_column: None,
+            visual_anchor: None,
+            last_find: None,
+            indent_width: 4,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            insert_origin: None,
+            insert_count: 1,
+            command_keys: Vec::new(),
+            last_change: None,
+            insert_replay: None,
+            replaying: false,
+        }
+    }
+}
+
+impl VimState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn navigation(&self) -> VimNavigation {
+        VimNavigation {
+            mode: self.mode,
+            cursor: self.cursor,
+            visual_anchor: self.visual_anchor,
+            pending: self.pending,
+            count: self.count,
+            preferred_column: self.preferred_column,
+            last_find: self.last_find,
+            command_keys: self.command_keys.clone(),
+        }
+    }
+
+    /// Restore a view without replacing this document's shared editing history.
+    /// Finish an active insert session before switching to another view. An
+    /// Insert snapshot starts a new transaction if its original one was finished.
+    pub fn restore_navigation(&mut self, text: &str, navigation: &VimNavigation) {
+        let len = text.chars().count();
+        self.mode = navigation.mode;
+        self.cursor = navigation.cursor.min(len);
+        self.visual_anchor = navigation.visual_anchor.map(|anchor| anchor.min(len));
+        self.pending = navigation.pending;
+        self.count = navigation.count.min(MAX_COUNT);
+        self.preferred_column = navigation.preferred_column;
+        self.last_find = navigation.last_find;
+        self.command_keys.clone_from(&navigation.command_keys);
+        if self.mode == VimMode::Insert && self.insert_origin.is_none() {
+            self.insert_origin = Some(self.snapshot(text));
+            self.insert_count = 1;
+            self.insert_replay = Some(InsertReplay {
+                keys: vec![VimKey::Char('i')],
+                baseline: text.to_owned(),
+                cursor: self.cursor,
+            });
+        }
+    }
+
+    /// Set an exact half-open range of Unicode scalar indices. Finish an active
+    /// insert session first. A nonempty range becomes Visual mode; an empty range
+    /// becomes Normal mode at the requested boundary, including end of file.
+    pub fn set_selection(&mut self, text: &str, range: Range<usize>) {
+        self.set_selection_boundaries(text, range.start, range.end);
+    }
+
+    /// Like `set_selection`, preserving which end of the selection is active.
+    /// `anchor` and `cursor` are half-open boundaries, as used by a text widget.
+    pub fn set_selection_boundaries(&mut self, text: &str, anchor: usize, cursor: usize) {
+        let len = text.chars().count();
+        let anchor = anchor.min(len);
+        let cursor = cursor.min(len);
+        self.cancel_pending_command();
+        if anchor == cursor {
+            self.mode = VimMode::Normal;
+            self.visual_anchor = None;
+            self.cursor = cursor;
+        } else {
+            self.mode = VimMode::Visual;
+            if cursor > anchor {
+                self.visual_anchor = Some(anchor);
+                self.cursor = cursor - 1;
+            } else {
+                self.visual_anchor = Some(anchor - 1);
+                self.cursor = cursor;
+            }
+        }
+    }
+
+    /// Accept native mouse selection boundaries. Insert mode keeps its current
+    /// transaction and native widget selection; modal selections use exact Vim
+    /// Visual ranges. A collapsed modal click selects a valid character on its
+    /// logical line rather than moving to an insertion boundary past that line.
+    pub fn set_mouse_selection(
+        &mut self,
+        text: &str,
+        primary: usize,
+        anchor: usize,
+        linewise: bool,
+    ) {
+        if self.mode == VimMode::Insert {
+            self.cursor = primary.min(text.chars().count());
+            self.visual_anchor = None;
+            self.cancel_pending_command();
+        } else if primary == anchor {
+            self.mode = VimMode::Normal;
+            self.visual_anchor = None;
+            self.set_cursor(text, primary);
+        } else {
+            self.set_selection_boundaries(text, anchor, primary);
+            if linewise && self.mode == VimMode::Visual {
+                self.mode = VimMode::VisualLine;
+            }
+        }
+    }
+
+    pub fn set_cursor(&mut self, text: &str, cursor: usize) {
+        let chars: Vec<char> = text.chars().collect();
+        self.cursor = if self.mode == VimMode::Insert {
+            cursor.min(chars.len())
+        } else {
+            normal_cursor(&chars, cursor)
+        };
+        self.preferred_column = None;
+        self.pending = None;
+        self.count = 0;
+        if self.mode != VimMode::Insert {
+            self.command_keys.clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn register(&self) -> Option<&Yank> {
+        self.register.as_ref()
+    }
+    pub fn set_register(&mut self, yank: Yank) {
+        self.register = Some(yank);
+    }
+    pub fn set_indent_width(&mut self, width: usize) {
+        self.indent_width = width.clamp(1, 16);
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty() || self.insert_origin.is_some()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+    /// Call immediately before an external operation changes the document.
+    /// Insert-mode edits stay in the current insert transaction; other modes
+    /// get a bounded undo snapshot and return to normal mode.
+    pub fn begin_external_edit(&mut self, text: &str) {
+        if self.mode == VimMode::Insert {
+            if self.insert_origin.is_none() {
+                self.insert_origin = Some(self.snapshot(text));
+            }
+            return;
+        }
+        let before = self.snapshot(text);
+        self.leave_visual();
+        self.cancel_pending_command();
+        self.insert_origin = None;
+        self.insert_replay = None;
+        self.insert_count = 1;
+        self.record(before);
+    }
+    /// When true, punctuation belongs to a command such as r/ or df/ and must
+    /// reach this model rather than opening a search or command field.
+    pub fn expects_literal_character(&self) -> bool {
+        matches!(
+            self.pending,
+            Some(Pending::Replace(_) | Pending::Find { .. } | Pending::TextObject { .. })
+        )
+    }
+    /// Cancel an unfinished operator/count without leaving a visual selection.
+    pub fn cancel_pending_command(&mut self) {
+        self.clear_command();
+        self.command_keys.clear();
+    }
+
+    /// Selected characters; the end is exclusive. Line selections include their
+    /// newline when one exists. Returns None outside either visual mode.
+    pub fn selection(&self, text: &str) -> Option<Range<usize>> {
+        let anchor = self.visual_anchor?;
+        let len = text.chars().count();
+        match self.mode {
+            VimMode::Visual => Some(
+                anchor.min(self.cursor).min(len)
+                    ..anchor.max(self.cursor).saturating_add(1).min(len),
+            ),
+            VimMode::VisualLine => {
+                let chars: Vec<char> = text.chars().collect();
+                let rows = lines(&chars);
+                let first = rows[row_for_cursor(&rows, anchor.min(self.cursor).min(len))];
+                let last = rows[row_for_cursor(&rows, anchor.max(self.cursor).min(len))];
+                Some(first.start..last.newline.map_or(last.end, |index| index + 1))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn pending_command(&self) -> String {
+        let prefix = |count: usize| {
+            if count > 1 {
+                count.to_string()
+            } else {
+                String::new()
+            }
+        };
+        let mut command = match self.pending {
+            Some(Pending::Operator(op, count)) => format!("{}{}", prefix(count), op.key()),
+            Some(Pending::Go {
+                operator,
+                count,
+                explicit,
+            }) => format!(
+                "{}{}g",
+                if explicit {
+                    count.to_string()
+                } else {
+                    String::new()
+                },
+                operator.map(|op| op.key().to_string()).unwrap_or_default()
+            ),
+            Some(Pending::Replace(count)) => format!("{}r", prefix(count)),
+            Some(Pending::Find {
+                operator,
+                count,
+                forward,
+                till,
+            }) => format!(
+                "{}{}{}",
+                prefix(count),
+                operator.map(|op| op.key().to_string()).unwrap_or_default(),
+                match (forward, till) {
+                    (true, false) => 'f',
+                    (false, false) => 'F',
+                    (true, true) => 't',
+                    (false, true) => 'T',
+                }
+            ),
+            Some(Pending::TextObject {
+                operator,
+                count,
+                around,
+            }) => format!(
+                "{}{}{}",
+                prefix(count),
+                operator.map(|op| op.key().to_string()).unwrap_or_default(),
+                if around { 'a' } else { 'i' }
+            ),
+            None => String::new(),
+        };
+        if self.count > 0 {
+            command.push_str(&self.count.to_string());
+        }
+        command
+    }
+
+    /// The insert-session snapshot also covers edits performed by the widget.
+    pub fn notify_external_text_change(&mut self) {}
+
+    /// Commit the insert session before e.g. switching documents.
+    pub fn finish_insert(&mut self, text: &mut String) -> Action {
+        if self.mode == VimMode::Insert {
+            self.handle_key(text, VimKey::Escape)
+        } else {
+            Action::default()
+        }
+    }
+
+    /// Move by visible-page rows supplied by the UI, preserving visual mode.
+    pub fn scroll_lines(&mut self, text: &mut String, delta: isize) -> Action {
+        let prefix = self.take_count();
+        self.pending = None;
+        let count = delta
+            .unsigned_abs()
+            .saturating_mul(prefix)
+            .clamp(1, MAX_COUNT);
+        self.count = count;
+        self.handle_key(text, VimKey::Char(if delta < 0 { 'k' } else { 'j' }))
+    }
+
+    pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        let old_cursor = self.cursor;
+        let old_mode = self.mode;
+        let insert_changed = old_mode == VimMode::Insert
+            && self
+                .insert_origin
+                .as_ref()
+                .is_some_and(|origin| origin.text != *text);
+        let inserted_delta = if old_mode == VimMode::Insert && key == VimKey::Escape {
+            self.insert_replay
+                .as_ref()
+                .map(|replay| insert_delta(&replay.baseline, text, replay.cursor))
+        } else {
+            None
+        };
+        let history_command =
+            key == VimKey::Redo || (key == VimKey::Char('u') && self.pending.is_none());
+        let dot_command =
+            key == VimKey::Char('.') && old_mode == VimMode::Normal && self.pending.is_none();
+        if !self.replaying && old_mode != VimMode::Insert && !history_command && !dot_command {
+            // A command itself is short even when the supplied count overflows.
+            if self.command_keys.len() < 64 {
+                self.command_keys.push(key);
+            }
+        }
+        self.clamp_cursor(text);
+        let (consumed, text_changed, yanked) = match self.mode {
+            VimMode::Insert => self.handle_insert_key(text, key),
+            VimMode::Normal | VimMode::Visual | VimMode::VisualLine => {
+                self.handle_normal_key(text, key)
+            }
+        };
+        self.clamp_cursor(text);
+        if !self.replaying {
+            if old_mode != VimMode::Insert && self.mode == VimMode::Insert {
+                self.insert_replay = Some(InsertReplay {
+                    keys: std::mem::take(&mut self.command_keys),
+                    baseline: text.clone(),
+                    cursor: self.cursor,
+                });
+            } else if old_mode == VimMode::Insert && self.mode != VimMode::Insert {
+                if let Some(replay) = self.insert_replay.take()
+                    && insert_changed
+                {
+                    self.last_change = Some(RepeatChange {
+                        keys: replay.keys,
+                        insert: inserted_delta
+                            .or_else(|| Some(insert_delta(&replay.baseline, text, replay.cursor))),
+                    });
+                }
+            } else if text_changed && !history_command && !dot_command {
+                self.last_change = Some(RepeatChange {
+                    keys: std::mem::take(&mut self.command_keys),
+                    insert: None,
+                });
+            }
+            if self.mode == VimMode::Normal && self.pending.is_none() && self.count == 0 {
+                self.command_keys.clear();
+            }
+        }
+        Action {
+            consumed,
+            text_changed,
+            cursor_changed: self.cursor != old_cursor,
+            mode_changed: self.mode != old_mode,
+            yanked,
+        }
+    }
+
+    pub fn insert_text(&mut self, text: &mut String, inserted: &str) -> Action {
+        if self.mode != VimMode::Insert || inserted.is_empty() {
+            return Action::default();
+        }
+        let old_cursor = self.cursor;
+        let at = self.cursor.min(text.chars().count());
+        text.insert_str(char_to_byte(text, at), inserted);
+        self.cursor = at + inserted.chars().count();
+        self.preferred_column = None;
+        Action {
+            consumed: true,
+            text_changed: true,
+            cursor_changed: self.cursor != old_cursor,
+            ..Action::default()
+        }
+    }
+
+    fn clamp_cursor(&mut self, text: &str) {
+        let chars: Vec<char> = text.chars().collect();
+        self.cursor = if self.mode != VimMode::Normal {
+            self.cursor.min(chars.len())
+        } else {
+            normal_cursor(&chars, self.cursor)
+        };
+    }
+
+    fn handle_insert_key(&mut self, text: &mut String, key: VimKey) -> (bool, bool, Option<Yank>) {
+        match key {
+            VimKey::Escape => {
+                let mut changed = false;
+                if self.insert_count > 1
+                    && let Some(replay) = &self.insert_replay
+                {
+                    let delta = insert_delta(&replay.baseline, text, replay.cursor);
+                    if delta.removed == 0
+                        && !delta.inserted.is_empty()
+                        && let Some(repeated) =
+                            repeated_text(&delta.inserted, self.insert_count - 1)
+                        && text.len().saturating_add(repeated.len()) <= MAX_PASTE_BYTES
+                    {
+                        text.insert_str(char_to_byte(text, self.cursor), &repeated);
+                        self.cursor += repeated.chars().count();
+                        changed = true;
+                    }
+                }
+                self.insert_count = 1;
+                let chars: Vec<char> = text.chars().collect();
+                let rows = lines(&chars);
+                if self.cursor > rows[row_for_cursor(&rows, self.cursor)].start {
+                    self.cursor -= 1;
+                }
+                if let Some(before) = self.insert_origin.take()
+                    && before.text != *text
+                {
+                    self.record(before);
+                }
+                self.mode = VimMode::Normal;
+                self.clear_command();
+                (true, changed, None)
+            }
+            VimKey::Char(ch) => (
+                true,
+                self.insert_text(text, &ch.to_string()).text_changed,
+                None,
+            ),
+            VimKey::Enter => (true, self.insert_text(text, "\n").text_changed, None),
+            VimKey::Tab => (true, self.insert_text(text, "\t").text_changed, None),
+            VimKey::Backspace => {
+                if self.cursor == 0 {
+                    return (true, false, None);
+                }
+                let range = char_to_byte(text, self.cursor - 1)..char_to_byte(text, self.cursor);
+                text.replace_range(range, "");
+                self.cursor -= 1;
+                (true, true, None)
+            }
+            VimKey::Redo => (false, false, None),
+        }
+    }
+
+    fn handle_normal_key(&mut self, text: &mut String, key: VimKey) -> (bool, bool, Option<Yank>) {
+        if key == VimKey::Escape {
+            self.leave_visual();
+            self.clear_command();
+            return (true, false, None);
+        }
+        if key == VimKey::Redo {
+            let count = self.take_count();
+            self.leave_visual();
+            self.clear_command();
+            let mut changed = false;
+            for _ in 0..count {
+                if !self.restore(text, true) {
+                    break;
+                }
+                changed = true;
+            }
+            return (true, changed, None);
+        }
+        if let Some(Pending::Replace(count)) = self.pending {
+            self.clear_command();
+            let replacement = match key {
+                VimKey::Char(ch) => Some(ch),
+                VimKey::Enter => Some('\n'),
+                VimKey::Tab => Some('\t'),
+                _ => None,
+            };
+            return (
+                true,
+                replacement.is_some_and(|ch| self.replace_characters(text, count, ch)),
+                None,
+            );
+        }
+        if let Some(Pending::Find {
+            operator,
+            count,
+            forward,
+            till,
+        }) = self.pending
+        {
+            self.pending = None;
+            self.count = 0;
+            let VimKey::Char(character) = key else {
+                return (true, false, None);
+            };
+            let find = Find {
+                character,
+                forward,
+                till,
+            };
+            self.last_find = Some(find);
+            return self.find(text, find, count, operator, false);
+        }
+        if let Some(Pending::TextObject {
+            operator,
+            count,
+            around,
+        }) = self.pending
+        {
+            self.pending = None;
+            self.count = 0;
+            let VimKey::Char(object) = key else {
+                return (true, false, None);
+            };
+            let chars: Vec<char> = text.chars().collect();
+            let Some(range) = text_object(&chars, self.cursor, object, count, around) else {
+                return (true, false, None);
+            };
+            if let Some(op) = operator {
+                if matches!(op, Operator::Indent | Operator::Outdent) {
+                    let rows = lines(&chars);
+                    return self.apply_lines(
+                        text,
+                        op,
+                        row_for_cursor(&rows, range.start),
+                        row_for_cursor(&rows, range.end.saturating_sub(1).max(range.start)),
+                    );
+                }
+                return self.apply_range(text, op, range);
+            }
+            self.mode = VimMode::Visual;
+            self.visual_anchor = Some(range.start);
+            self.cursor = range.end.saturating_sub(1).max(range.start);
+            return (true, false, None);
+        }
+        let ch = match key {
+            VimKey::Char(ch) => ch,
+            VimKey::Backspace => 'h',
+            _ => {
+                self.clear_command();
+                return (false, false, None);
+            }
+        };
+        if ch.is_ascii_digit() && (ch != '0' || self.count > 0) {
+            self.count = self
+                .count
+                .saturating_mul(10)
+                .saturating_add(ch as usize - '0' as usize)
+                .min(MAX_COUNT);
+            return (true, false, None);
+        }
+        let explicit = self.count > 0;
+        let count = self.take_count();
+        let chars: Vec<char> = text.chars().collect();
+        if let Some(pending) = self.pending.take() {
+            match pending {
+                Pending::Go {
+                    operator,
+                    count: prefix,
+                    explicit: explicit_prefix,
+                } => {
+                    if ch != 'g' {
+                        return (true, false, None);
+                    }
+                    let rows = lines(&chars);
+                    let row = if explicit_prefix || explicit {
+                        prefix
+                            .saturating_mul(count)
+                            .saturating_sub(1)
+                            .min(rows.len() - 1)
+                    } else {
+                        0
+                    };
+                    if let Some(op) = operator {
+                        return self.apply_lines(text, op, row_for_cursor(&rows, self.cursor), row);
+                    }
+                    self.cursor = first_nonblank(&chars, rows[row]);
+                    self.preferred_column = None;
+                    return (true, false, None);
+                }
+                Pending::Operator(op, prefix) => {
+                    let count = prefix.saturating_mul(count).min(MAX_COUNT);
+                    if ch == op.key() {
+                        let rows = lines(&chars);
+                        let row = row_for_cursor(&rows, self.cursor);
+                        return self.apply_lines(
+                            text,
+                            op,
+                            row,
+                            row.saturating_add(count - 1).min(rows.len() - 1),
+                        );
+                    }
+                    if ch == 'g' {
+                        self.pending = Some(Pending::Go {
+                            operator: Some(op),
+                            count,
+                            explicit: explicit || prefix > 1,
+                        });
+                        return (true, false, None);
+                    }
+                    if matches!(ch, 'i' | 'a') {
+                        self.pending = Some(Pending::TextObject {
+                            operator: Some(op),
+                            count,
+                            around: ch == 'a',
+                        });
+                        return (true, false, None);
+                    }
+                    if matches!(ch, 'f' | 'F' | 't' | 'T') {
+                        self.pending = Some(Pending::Find {
+                            operator: Some(op),
+                            count,
+                            forward: ch.is_lowercase(),
+                            till: matches!(ch, 't' | 'T'),
+                        });
+                        return (true, false, None);
+                    }
+                    if matches!(ch, ';' | ',') {
+                        if let Some(mut find) = self.last_find {
+                            if ch == ',' {
+                                find.forward = !find.forward;
+                            }
+                            return self.find(text, find, count, Some(op), true);
+                        }
+                        return (true, false, None);
+                    }
+                    return self.apply_operator_motion(text, op, ch, count, explicit || prefix > 1);
+                }
+                Pending::Replace(_) | Pending::Find { .. } | Pending::TextObject { .. } => {
+                    unreachable!()
+                }
+            }
+        }
+
+        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+            match ch {
+                'y' | 'd' | 'x' | 'c' | 's' | '>' | '<' => {
+                    return self.apply_visual(text, ch, count);
+                }
+                'p' | 'P' => return self.paste_visual(text, count),
+                'o' => {
+                    if let Some(anchor) = self.visual_anchor.as_mut() {
+                        std::mem::swap(anchor, &mut self.cursor);
+                    }
+                    return (true, false, None);
+                }
+                'r' => {
+                    self.pending = Some(Pending::Replace(count));
+                    return (true, false, None);
+                }
+                'i' | 'a' => {
+                    self.pending = Some(Pending::TextObject {
+                        operator: None,
+                        count,
+                        around: ch == 'a',
+                    });
+                    return (true, false, None);
+                }
+                'J' => {
+                    let rows = lines(&chars);
+                    let anchor = self.visual_anchor.unwrap_or(self.cursor);
+                    let first = row_for_cursor(&rows, self.cursor.min(anchor));
+                    let last = row_for_cursor(&rows, self.cursor.max(anchor));
+                    self.cursor = rows[first].start;
+                    self.leave_visual();
+                    return (true, self.join_lines(text, (last - first + 1).max(2)), None);
+                }
+                _ => {}
+            }
+        }
+
+        match ch {
+            '.' if self.mode == VimMode::Normal => self.repeat_change(text, count, explicit),
+            'h' | 'j' | 'k' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '0' | '^' | '$' | 'G'
+            | '%' | '{' | '}' => {
+                self.move_cursor(&chars, ch, count, explicit);
+                (true, false, None)
+            }
+            'g' => {
+                self.pending = Some(Pending::Go {
+                    operator: None,
+                    count,
+                    explicit,
+                });
+                (true, false, None)
+            }
+            'v' | 'V' => {
+                let target = if ch == 'v' {
+                    VimMode::Visual
+                } else {
+                    VimMode::VisualLine
+                };
+                if self.mode == target {
+                    self.leave_visual();
+                } else {
+                    if self.visual_anchor.is_none() {
+                        self.visual_anchor = Some(self.cursor);
+                    }
+                    self.mode = target;
+                }
+                (true, false, None)
+            }
+            'f' | 'F' | 't' | 'T' => {
+                self.pending = Some(Pending::Find {
+                    operator: None,
+                    count,
+                    forward: ch.is_lowercase(),
+                    till: matches!(ch, 't' | 'T'),
+                });
+                (true, false, None)
+            }
+            ';' | ',' => {
+                if let Some(mut find) = self.last_find {
+                    if ch == ',' {
+                        find.forward = !find.forward;
+                    }
+                    self.find(text, find, count, None, true)
+                } else {
+                    (true, false, None)
+                }
+            }
+            'i' | 'I' | 'a' | 'A' if self.mode == VimMode::Normal => {
+                let rows = lines(&chars);
+                let line = rows[row_for_cursor(&rows, self.cursor)];
+                let at = match ch {
+                    'I' => first_nonblank(&chars, line),
+                    'a' => (self.cursor + usize::from(line.end > line.start)).min(line.end),
+                    'A' => line.end,
+                    _ => self.cursor,
+                };
+                self.start_insert(text, at);
+                self.insert_count = count;
+                (true, false, None)
+            }
+            'o' | 'O' if self.mode == VimMode::Normal => {
+                self.open_line(text, ch == 'O');
+                (true, true, None)
+            }
+            'd' | 'c' | 'y' | '>' | '<' if self.mode == VimMode::Normal => {
+                let op = operator_for(ch);
+                self.pending = Some(Pending::Operator(op, count));
+                (true, false, None)
+            }
+            'D' | 'C' if self.mode == VimMode::Normal => self.apply_operator_motion(
+                text,
+                if ch == 'D' {
+                    Operator::Delete
+                } else {
+                    Operator::Change
+                },
+                '$',
+                count,
+                explicit,
+            ),
+            'Y' if self.mode == VimMode::Normal => {
+                let rows = lines(&chars);
+                let row = row_for_cursor(&rows, self.cursor);
+                self.apply_lines(
+                    text,
+                    Operator::Yank,
+                    row,
+                    row.saturating_add(count - 1).min(rows.len() - 1),
+                )
+            }
+            'x' | 's' if self.mode == VimMode::Normal => {
+                let rows = lines(&chars);
+                let line = rows[row_for_cursor(&rows, self.cursor)];
+                self.apply_range(
+                    text,
+                    if ch == 's' {
+                        Operator::Change
+                    } else {
+                        Operator::Delete
+                    },
+                    self.cursor..self.cursor.saturating_add(count).min(line.end),
+                )
+            }
+            'X' if self.mode == VimMode::Normal => {
+                let rows = lines(&chars);
+                let line = rows[row_for_cursor(&rows, self.cursor)];
+                self.apply_range(
+                    text,
+                    Operator::Delete,
+                    self.cursor.saturating_sub(count).max(line.start)..self.cursor,
+                )
+            }
+            'p' | 'P' if self.mode == VimMode::Normal => {
+                (true, self.paste(text, ch == 'P', count), None)
+            }
+            'r' => {
+                self.pending = Some(Pending::Replace(count));
+                (true, false, None)
+            }
+            'J' => {
+                self.leave_visual();
+                (
+                    true,
+                    self.join_lines(text, if explicit { count.max(2) } else { 2 }),
+                    None,
+                )
+            }
+            'u' => {
+                self.leave_visual();
+                let mut changed = false;
+                for _ in 0..count {
+                    if !self.restore(text, false) {
+                        break;
+                    }
+                    changed = true;
+                }
+                (true, changed, None)
+            }
+            _ => (false, false, None),
+        }
+    }
+
+    fn take_count(&mut self) -> usize {
+        let count = self.count.max(1);
+        self.count = 0;
+        count
+    }
+    fn clear_command(&mut self) {
+        self.pending = None;
+        self.count = 0;
+        self.preferred_column = None;
+    }
+    fn leave_visual(&mut self) {
+        self.visual_anchor = None;
+        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+            self.mode = VimMode::Normal;
+        }
+    }
+    fn snapshot(&self, text: &str) -> Snapshot {
+        Snapshot {
+            text: text.to_owned(),
+            cursor: self.cursor,
+        }
+    }
+    fn record(&mut self, before: Snapshot) {
+        if self.replaying {
+            return;
+        }
+        self.redo.clear();
+        self.undo.push(before);
+        trim_history(&mut self.undo);
+    }
+
+    fn start_insert(&mut self, text: &str, cursor: usize) {
+        self.insert_origin = Some(self.snapshot(text));
+        self.mode = VimMode::Insert;
+        self.cursor = cursor.min(text.chars().count());
+        self.visual_anchor = None;
+        self.insert_count = 1;
+        self.clear_command();
+    }
+
+    fn open_line(&mut self, text: &mut String, above: bool) {
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let line = rows[row_for_cursor(&rows, self.cursor)];
+        let indent: String = chars[line.start..line.end]
+            .iter()
+            .copied()
+            .take_while(|ch| *ch == ' ' || *ch == '\t')
+            .collect();
+        let at = if above { line.start } else { line.end };
+        let inserted = if above {
+            format!("{indent}\n")
+        } else {
+            format!("\n{indent}")
+        };
+        let before = self.snapshot(text);
+        text.insert_str(char_to_byte(text, at), &inserted);
+        self.mode = VimMode::Insert;
+        self.cursor = at + indent.chars().count() + usize::from(!above);
+        self.insert_origin = Some(before);
+        self.insert_count = 1;
+        self.clear_command();
+    }
+
+    fn move_cursor(&mut self, chars: &[char], key: char, count: usize, explicit: bool) {
+        let rows = lines(chars);
+        let row = row_for_cursor(&rows, self.cursor);
+        let line = rows[row];
+        if key == 'j' || key == 'k' {
+            let col = *self
+                .preferred_column
+                .get_or_insert(self.cursor.saturating_sub(line.start));
+            let target = rows[if key == 'j' {
+                row.saturating_add(count).min(rows.len() - 1)
+            } else {
+                row.saturating_sub(count)
+            }];
+            self.cursor = target.start + col.min(target.end.saturating_sub(target.start + 1));
+            return;
+        }
+        self.cursor = match key {
+            'h' => self.cursor.saturating_sub(count).max(line.start),
+            'l' => self
+                .cursor
+                .saturating_add(count)
+                .min(line.end.saturating_sub(1).max(line.start)),
+            '0' => line.start,
+            '^' => first_nonblank(chars, line),
+            '$' => {
+                let target = rows[row.saturating_add(count - 1).min(rows.len() - 1)];
+                target.end.saturating_sub(1).max(target.start)
+            }
+            'G' => first_nonblank(
+                chars,
+                rows[if explicit {
+                    count.saturating_sub(1).min(rows.len() - 1)
+                } else {
+                    rows.len() - 1
+                }],
+            ),
+            'w' | 'W' => repeat_motion(chars, self.cursor, count, key == 'W', word_forward),
+            'b' | 'B' => repeat_motion(chars, self.cursor, count, key == 'B', word_backward),
+            'e' | 'E' => repeat_motion(chars, self.cursor, count, key == 'E', word_end),
+            '%' => matching_bracket(chars, self.cursor).unwrap_or(self.cursor),
+            '{' | '}' => paragraph(chars, self.cursor, count, key == '}'),
+            _ => self.cursor,
+        };
+        self.preferred_column = None;
+    }
+
+    fn apply_operator_motion(
+        &mut self,
+        text: &mut String,
+        op: Operator,
+        key: char,
+        count: usize,
+        explicit: bool,
+    ) -> (bool, bool, Option<Yank>) {
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let row = row_for_cursor(&rows, self.cursor);
+        let line = rows[row];
+        if matches!(key, 'j' | 'k' | 'G') {
+            let target = match key {
+                'j' => row.saturating_add(count).min(rows.len() - 1),
+                'k' => row.saturating_sub(count),
+                _ => {
+                    if explicit {
+                        count.saturating_sub(1).min(rows.len() - 1)
+                    } else {
+                        rows.len() - 1
+                    }
+                }
+            };
+            return self.apply_lines(text, op, row, target);
+        }
+        let range = match key {
+            'h' => self.cursor.saturating_sub(count).max(line.start)..self.cursor,
+            'l' => self.cursor..self.cursor.saturating_add(count).min(line.end),
+            '0' => line.start..self.cursor,
+            '^' => {
+                let target = first_nonblank(&chars, line);
+                self.cursor.min(target)..self.cursor.max(target)
+            }
+            '$' => self.cursor..rows[row.saturating_add(count - 1).min(rows.len() - 1)].end,
+            'w' | 'W' => {
+                if op == Operator::Change
+                    && chars.get(self.cursor).is_some_and(|ch| !ch.is_whitespace())
+                {
+                    let mut end = self.cursor;
+                    for step in 0..count {
+                        end = if step == 0 {
+                            change_word_end(&chars, end, key == 'W')
+                        } else {
+                            word_end(&chars, end, key == 'W')
+                        };
+                    }
+                    self.cursor..end.saturating_add(1).min(chars.len())
+                } else {
+                    let mut target = self.cursor;
+                    let mut last_start = self.cursor;
+                    for _ in 0..count {
+                        last_start = target;
+                        let next = word_forward(&chars, target, key == 'W');
+                        if next == target {
+                            break;
+                        }
+                        target = next;
+                    }
+                    let last_row = row_for_cursor(&rows, last_start);
+                    let last_line = rows[last_row];
+                    if target > last_line.end
+                        && last_line.start < last_line.end
+                        && (op == Operator::Yank || last_row == row)
+                    {
+                        target = last_line.end;
+                    }
+                    self.cursor..target
+                }
+            }
+            'b' | 'B' => {
+                repeat_motion(&chars, self.cursor, count, key == 'B', word_backward)..self.cursor
+            }
+            'e' | 'E' => {
+                self.cursor
+                    ..repeat_motion(&chars, self.cursor, count, key == 'E', word_end)
+                        .saturating_add(1)
+                        .min(chars.len())
+            }
+            '%' => {
+                let Some(target) = matching_bracket(&chars, self.cursor) else {
+                    return (true, false, None);
+                };
+                self.cursor.min(target)..self.cursor.max(target) + 1
+            }
+            '{' | '}' => {
+                let target = paragraph(&chars, self.cursor, count, key == '}');
+                self.cursor.min(target)..self.cursor.max(target)
+            }
+            _ => return (true, false, None),
+        };
+        if matches!(op, Operator::Indent | Operator::Outdent) {
+            let last_char = range.end.saturating_sub(1).max(range.start);
+            return self.apply_lines(
+                text,
+                op,
+                row_for_cursor(&rows, range.start),
+                row_for_cursor(&rows, last_char),
+            );
+        }
+        self.apply_range(text, op, range)
+    }
+
+    fn apply_lines(
+        &mut self,
+        text: &mut String,
+        op: Operator,
+        first: usize,
+        last: usize,
+    ) -> (bool, bool, Option<Yank>) {
+        let (first, last) = (first.min(last), first.max(last));
+        if matches!(op, Operator::Indent | Operator::Outdent) {
+            return (
+                true,
+                self.shift_lines(text, first, last, op == Operator::Indent, 1),
+                None,
+            );
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let first_line = rows[first];
+        let last_line = rows[last];
+        let mut register: String = chars[first_line.start..last_line.end].iter().collect();
+        register.push('\n');
+        let yank = Yank {
+            text: register,
+            linewise: true,
+        };
+        self.register = Some(yank.clone());
+        if op == Operator::Yank {
+            return (true, false, Some(yank));
+        }
+        let before = self.snapshot(text);
+        let mut start = first_line.start;
+        let end = if op == Operator::Change {
+            last_line.end
+        } else if let Some(newline) = last_line.newline {
+            newline + 1
+        } else {
+            start = start.saturating_sub(1);
+            last_line.end
+        };
+        let indentation: String = if op == Operator::Change {
+            chars[first_line.start..first_line.end]
+                .iter()
+                .copied()
+                .take_while(|ch| matches!(ch, ' ' | '\t'))
+                .collect()
+        } else {
+            String::new()
+        };
+        let bytes = char_to_byte(text, start)..char_to_byte(text, end);
+        let changed = text[bytes.clone()] != indentation;
+        if changed {
+            text.replace_range(bytes, &indentation);
+        }
+        self.cursor = if op == Operator::Change {
+            first_line.start + indentation.chars().count()
+        } else {
+            start
+        };
+        self.visual_anchor = None;
+        if op == Operator::Change {
+            self.mode = VimMode::Insert;
+            self.insert_origin = Some(before);
+        } else {
+            self.mode = VimMode::Normal;
+            if changed {
+                self.record(before);
+            }
+            let chars: Vec<char> = text.chars().collect();
+            let rows = lines(&chars);
+            self.cursor = first_nonblank(&chars, rows[row_for_cursor(&rows, self.cursor)]);
+        }
+        self.preferred_column = None;
+        (true, changed, Some(yank))
+    }
+
+    fn apply_range(
+        &mut self,
+        text: &mut String,
+        op: Operator,
+        range: Range<usize>,
+    ) -> (bool, bool, Option<Yank>) {
+        let len = text.chars().count();
+        let start = range.start.min(len);
+        let end = range.end.min(len).max(start);
+        let start_byte = char_to_byte(text, start);
+        let end_byte = char_to_byte(text, end);
+        let yank = if start < end {
+            let yank = Yank {
+                text: text[start_byte..end_byte].to_owned(),
+                linewise: false,
+            };
+            self.register = Some(yank.clone());
+            Some(yank)
+        } else {
+            None
+        };
+        if op == Operator::Yank {
+            return (true, false, yank);
+        }
+        let before = self.snapshot(text);
+        if start < end {
+            text.replace_range(start_byte..end_byte, "");
+        }
+        self.cursor = start;
+        self.visual_anchor = None;
+        if op == Operator::Change {
+            self.mode = VimMode::Insert;
+            self.insert_origin = Some(before);
+        } else {
+            self.mode = VimMode::Normal;
+            if start < end {
+                self.record(before);
+            }
+        }
+        self.preferred_column = None;
+        (true, start < end, yank)
+    }
+
+    fn apply_visual(
+        &mut self,
+        text: &mut String,
+        key: char,
+        count: usize,
+    ) -> (bool, bool, Option<Yank>) {
+        let Some(range) = self.selection(text) else {
+            return (true, false, None);
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let first = row_for_cursor(&rows, range.start);
+        let last = row_for_cursor(
+            &rows,
+            self.cursor.max(self.visual_anchor.unwrap_or(self.cursor)),
+        );
+        if matches!(key, '>' | '<') {
+            self.leave_visual();
+            return (
+                true,
+                self.shift_lines(text, first, last, key == '>', count),
+                None,
+            );
+        }
+        let linewise = self.mode == VimMode::VisualLine;
+        self.leave_visual();
+        let op = match key {
+            'y' => Operator::Yank,
+            'c' | 's' => Operator::Change,
+            _ => Operator::Delete,
+        };
+        let result = if linewise {
+            self.apply_lines(text, op, first, last)
+        } else {
+            self.apply_range(text, op, range.clone())
+        };
+        if op == Operator::Yank {
+            self.cursor = range.start;
+        }
+        result
+    }
+
+    fn paste_visual(&mut self, text: &mut String, count: usize) -> (bool, bool, Option<Yank>) {
+        let Some(register) = self.register.clone() else {
+            self.leave_visual();
+            return (true, false, None);
+        };
+        let Some(range) = self.selection(text) else {
+            return (true, false, None);
+        };
+        let linewise = self.mode == VimMode::VisualLine;
+        let before = self.snapshot(text);
+        let bytes = char_to_byte(text, range.start)..char_to_byte(text, range.end);
+        let mut removed = text[bytes.clone()].to_owned();
+        if linewise && !removed.ends_with('\n') {
+            removed.push('\n');
+        }
+        let deleted = Yank {
+            text: removed,
+            linewise,
+        };
+        let Some(mut pasted) = repeated_text(&register.text, count) else {
+            return (true, false, None);
+        };
+        if !linewise && register.linewise {
+            if !pasted.ends_with('\n') {
+                pasted.push('\n');
+            }
+            pasted.insert(0, '\n');
+            if range.end == text.chars().count() && !text.ends_with('\n') {
+                pasted.pop();
+            }
+        }
+        if linewise {
+            if !pasted.ends_with('\n') {
+                pasted.push('\n');
+            }
+            if range.end == text.chars().count() && !text.ends_with('\n') {
+                pasted.pop();
+            }
+        }
+        let changed = text[bytes.clone()] != pasted;
+        text.replace_range(bytes, &pasted);
+        self.cursor = if linewise {
+            range.start
+        } else {
+            range.start + pasted.chars().count().saturating_sub(1)
+        };
+        self.leave_visual();
+        self.register = Some(deleted.clone());
+        if changed {
+            self.record(before);
+        }
+        (true, changed, Some(deleted))
+    }
+
+    fn shift_lines(
+        &mut self,
+        text: &mut String,
+        first: usize,
+        last: usize,
+        right: bool,
+        count: usize,
+    ) -> bool {
+        let before = self.snapshot(text);
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let last = last.min(rows.len() - 1);
+        if right {
+            let width = self.indent_width.saturating_mul(count);
+            let affected = rows[first..=last]
+                .iter()
+                .filter(|line| line.start != line.end)
+                .count();
+            if width
+                .checked_mul(affected)
+                .and_then(|added| text.len().checked_add(added))
+                .is_none_or(|size| size > MAX_PASTE_BYTES)
+            {
+                return false;
+            }
+        }
+        for line in rows[first..=last].iter().rev() {
+            if right {
+                if line.start == line.end {
+                    continue;
+                }
+                text.insert_str(
+                    char_to_byte(text, line.start),
+                    &" ".repeat(self.indent_width.saturating_mul(count)),
+                );
+            } else {
+                let mut at = line.start;
+                let mut columns = 0;
+                let wanted = self.indent_width.saturating_mul(count);
+                while at < line.end && columns < wanted {
+                    match chars[at] {
+                        ' ' => columns += 1,
+                        '\t' => columns += self.indent_width - columns % self.indent_width,
+                        _ => break,
+                    }
+                    at += 1;
+                }
+                text.replace_range(char_to_byte(text, line.start)..char_to_byte(text, at), "");
+            }
+        }
+        if *text == before.text {
+            return false;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        self.cursor = first_nonblank(&chars, rows[first]);
+        self.record(before);
+        self.preferred_column = None;
+        true
+    }
+
+    fn paste(&mut self, text: &mut String, before_cursor: bool, count: usize) -> bool {
+        let Some(yank) = self.register.as_ref() else {
+            return false;
+        };
+        if yank.text.is_empty() {
+            return false;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let line = rows[row_for_cursor(&rows, self.cursor)];
+        let Some(mut pasted) = repeated_text(&yank.text, count) else {
+            return false;
+        };
+        let (at, cursor) = if yank.linewise {
+            if !pasted.ends_with('\n') {
+                pasted.push('\n');
+            }
+            if text.is_empty() {
+                pasted.pop();
+                (0, 0)
+            } else if before_cursor {
+                (line.start, line.start)
+            } else if let Some(newline) = line.newline {
+                (newline + 1, newline + 1)
+            } else {
+                pasted.pop();
+                pasted.insert(0, '\n');
+                (line.end, line.end + 1)
+            }
+        } else {
+            let at = if before_cursor {
+                self.cursor
+            } else {
+                (self.cursor + usize::from(line.end > line.start)).min(line.end)
+            };
+            (at, at + pasted.chars().count().saturating_sub(1))
+        };
+        if pasted.is_empty() {
+            return false;
+        }
+        if text.len().saturating_add(pasted.len()) > MAX_PASTE_BYTES {
+            return false;
+        }
+        let snapshot = self.snapshot(text);
+        text.insert_str(char_to_byte(text, at), &pasted);
+        self.cursor = cursor;
+        if yank.linewise {
+            let chars: Vec<char> = text.chars().collect();
+            let rows = lines(&chars);
+            self.cursor = first_nonblank(&chars, rows[row_for_cursor(&rows, self.cursor)]);
+        }
+        self.record(snapshot);
+        self.preferred_column = None;
+        true
+    }
+
+    fn replace_characters(&mut self, text: &mut String, count: usize, replacement: char) -> bool {
+        let visual = self.selection(text);
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let line = rows[row_for_cursor(&rows, self.cursor)];
+        let selection = if let Some(range) = visual {
+            range
+        } else {
+            if self.cursor.saturating_add(count) > line.end {
+                return false;
+            }
+            self.cursor..self.cursor + count
+        };
+        let mut incoming = String::new();
+        for ch in &chars[selection.clone()] {
+            incoming.push(if *ch == '\n' { '\n' } else { replacement });
+        }
+        if self.mode == VimMode::Normal && replacement == '\n' {
+            incoming = "\n".to_owned();
+        }
+        let range = char_to_byte(text, selection.start)..char_to_byte(text, selection.end);
+        let changed = text[range.clone()] != incoming;
+        let snapshot = self.snapshot(text);
+        text.replace_range(range, &incoming);
+        self.cursor = if replacement == '\n' {
+            selection.start + 1
+        } else {
+            selection.start + incoming.chars().count().saturating_sub(1)
+        };
+        self.leave_visual();
+        if changed {
+            self.record(snapshot);
+        }
+        changed
+    }
+
+    fn find(
+        &mut self,
+        text: &mut String,
+        find: Find,
+        count: usize,
+        operator: Option<Operator>,
+        repeated: bool,
+    ) -> (bool, bool, Option<Yank>) {
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let line = rows[row_for_cursor(&rows, self.cursor)];
+        let mut at = self.cursor;
+        for step in 0..count {
+            let skip = if repeated && find.till && step == 0 {
+                2
+            } else {
+                1
+            };
+            let target = if find.forward {
+                (at.saturating_add(skip)..line.end).find(|index| chars[*index] == find.character)
+            } else {
+                (line.start..at.saturating_sub(skip - 1))
+                    .rev()
+                    .find(|index| chars[*index] == find.character)
+            };
+            let Some(target) = target else {
+                return (true, false, None);
+            };
+            at = target;
+        }
+        let target = if find.till {
+            if find.forward {
+                at.saturating_sub(1)
+            } else {
+                at + 1
+            }
+        } else {
+            at
+        };
+        if let Some(op) = operator {
+            let range = if find.forward {
+                self.cursor..target + 1
+            } else {
+                target..self.cursor
+            };
+            if matches!(op, Operator::Indent | Operator::Outdent) {
+                return self.apply_lines(
+                    text,
+                    op,
+                    row_for_cursor(&rows, range.start),
+                    row_for_cursor(&rows, range.end.saturating_sub(1)),
+                );
+            }
+            return self.apply_range(text, op, range);
+        }
+        self.cursor = target;
+        self.preferred_column = None;
+        (true, false, None)
+    }
+
+    fn join_lines(&mut self, text: &mut String, count: usize) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        let rows = lines(&chars);
+        let row = row_for_cursor(&rows, self.cursor);
+        let last = row.saturating_add(count - 1).min(rows.len() - 1);
+        if last == row {
+            return false;
+        }
+        let snapshot = self.snapshot(text);
+        let first = rows[row];
+        let mut joined: String = chars[first.start..first.end].iter().collect();
+        let cursor = first.end;
+        for line in &rows[row + 1..=last] {
+            let content: String = chars[line.start..line.end].iter().collect();
+            let content = content.trim_start_matches([' ', '\t']);
+            if !joined.is_empty() && !joined.ends_with([' ', '\t']) && !content.is_empty() {
+                joined.push(' ');
+            }
+            joined.push_str(content);
+        }
+        text.replace_range(
+            char_to_byte(text, first.start)..char_to_byte(text, rows[last].end),
+            &joined,
+        );
+        self.cursor = cursor;
+        self.record(snapshot);
+        self.preferred_column = None;
+        true
+    }
+
+    fn restore(&mut self, text: &mut String, redo: bool) -> bool {
+        let source = if redo { &mut self.redo } else { &mut self.undo };
+        let Some(snapshot) = source.pop() else {
+            return false;
+        };
+        let current = self.snapshot(text);
+        let target = if redo { &mut self.undo } else { &mut self.redo };
+        target.push(current);
+        trim_history(target);
+        *text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.insert_origin = None;
+        self.clear_command();
+        true
+    }
+
+    fn repeat_change(
+        &mut self,
+        text: &mut String,
+        count: usize,
+        explicit: bool,
+    ) -> (bool, bool, Option<Yank>) {
+        let Some(mut change) = self.last_change.clone() else {
+            return (true, false, None);
+        };
+        if change.keys.is_empty() {
+            return (true, false, None);
+        }
+        if explicit {
+            // A count on dot replaces the original command count, as in Vim.
+            let digits = change
+                .keys
+                .iter()
+                .take_while(|key| matches!(key, VimKey::Char(ch) if ch.is_ascii_digit()))
+                .count();
+            change.keys.drain(..digits);
+            if change
+                .keys
+                .first()
+                .is_some_and(|key| matches!(key, VimKey::Char('d' | 'c' | 'y' | '>' | '<')))
+            {
+                let motion_digits = if change
+                    .keys
+                    .get(1)
+                    .is_some_and(|key| matches!(key, VimKey::Char('1'..='9')))
+                {
+                    change
+                        .keys
+                        .iter()
+                        .skip(1)
+                        .take_while(|key| matches!(key, VimKey::Char(ch) if ch.is_ascii_digit()))
+                        .count()
+                } else {
+                    0
+                };
+                change.keys.drain(1..1 + motion_digits);
+            }
+            let mut keys: Vec<VimKey> = count.to_string().chars().map(VimKey::Char).collect();
+            keys.extend(change.keys);
+            change.keys = keys;
+        }
+        let before = self.snapshot(text);
+        self.command_keys.clear();
+        self.replaying = true;
+        // The insert replay supplies a baseline even during command replay, so
+        // counted i/a commands can repeat the inserted text on Escape.
+        let mut yank = None;
+        for key in &change.keys {
+            let action = self.handle_key(text, *key);
+            if action.yanked.is_some() {
+                yank = action.yanked;
+            }
+        }
+        if let Some(delta) = &change.insert
+            && self.mode == VimMode::Insert
+        {
+            self.insert_replay = Some(InsertReplay {
+                keys: change.keys.clone(),
+                baseline: text.clone(),
+                cursor: self.cursor,
+            });
+            let len = text.chars().count();
+            let start = self
+                .cursor
+                .saturating_add_signed(delta.relative_start)
+                .min(len);
+            let end = start.saturating_add(delta.removed).min(len);
+            let range = char_to_byte(text, start)..char_to_byte(text, end);
+            // Guard replayed paste/insert sizes before allocating or mutating.
+            if text
+                .len()
+                .saturating_sub(range.len())
+                .saturating_add(delta.inserted.len())
+                <= MAX_PASTE_BYTES
+            {
+                text.replace_range(range, &delta.inserted);
+                self.cursor = start + delta.inserted.chars().count();
+            }
+            self.finish_insert(text);
+        }
+        self.replaying = false;
+        self.insert_replay = None;
+        self.clear_command();
+        let changed = *text != before.text;
+        if changed {
+            self.record(before);
+            self.last_change = Some(change);
+        }
+        (true, changed, yank)
+    }
+}
+
+fn operator_for(ch: char) -> Operator {
+    match ch {
+        'd' | 'x' => Operator::Delete,
+        'c' | 's' => Operator::Change,
+        '>' => Operator::Indent,
+        '<' => Operator::Outdent,
+        _ => Operator::Yank,
+    }
+}
+
+fn trim_history(history: &mut Vec<Snapshot>) {
+    let mut bytes: usize = history.iter().map(|snapshot| snapshot.text.len()).sum();
+    let mut remove = 0;
+    while history.len() - remove > 1
+        && (history.len() - remove > MAX_HISTORY || bytes > MAX_HISTORY_BYTES)
+    {
+        bytes -= history[remove].text.len();
+        remove += 1;
+    }
+    if remove > 0 {
+        history.drain(..remove);
+    }
+}
+fn char_to_byte(text: &str, cursor: usize) -> usize {
+    text.char_indices()
+        .nth(cursor)
+        .map_or(text.len(), |(index, _)| index)
+}
+fn repeated_text(text: &str, count: usize) -> Option<String> {
+    if text.len().checked_mul(count)? > MAX_PASTE_BYTES {
+        return None;
+    }
+    Some(text.repeat(count))
+}
+fn insert_delta(before: &str, after: &str, cursor: usize) -> InsertDelta {
+    let old: Vec<char> = before.chars().collect();
+    let new: Vec<char> = after.chars().collect();
+    let mut start = 0;
+    while start < old.len().min(new.len()).min(cursor) && old[start] == new[start] {
+        start += 1;
+    }
+    let mut suffix = 0;
+    while suffix
+        < old
+            .len()
+            .saturating_sub(start)
+            .min(new.len().saturating_sub(start))
+        && old[old.len() - suffix - 1] == new[new.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+    InsertDelta {
+        relative_start: start as isize - cursor as isize,
+        removed: old.len() - start - suffix,
+        inserted: new[start..new.len() - suffix].iter().collect(),
+    }
+}
+fn word_class(ch: char, big: bool) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if big || ch.is_alphanumeric() || ch == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+fn word_forward(chars: &[char], cursor: usize, big: bool) -> usize {
+    let mut at = cursor.min(chars.len());
+    if at == chars.len() {
+        return at;
+    }
+    let empty_line_at =
+        |index: usize| chars.get(index) == Some(&'\n') && (index == 0 || chars[index - 1] == '\n');
+    if empty_line_at(at) {
+        at += 1;
+    } else {
+        let class = word_class(chars[at], big);
+        while at < chars.len() && word_class(chars[at], big) == class && !empty_line_at(at) {
+            at += 1;
+        }
+    }
+    while at < chars.len() && chars[at].is_whitespace() {
+        if empty_line_at(at) {
+            break;
+        }
+        at += 1;
+    }
+    at
+}
+fn word_backward(chars: &[char], cursor: usize, big: bool) -> usize {
+    if chars.is_empty() || cursor == 0 {
+        return 0;
+    }
+    let mut at = cursor.min(chars.len()).saturating_sub(1);
+    let empty_line_at =
+        |index: usize| chars.get(index) == Some(&'\n') && (index == 0 || chars[index - 1] == '\n');
+    while at > 0 && chars[at].is_whitespace() {
+        if empty_line_at(at) {
+            return at;
+        }
+        at -= 1;
+    }
+    let class = word_class(chars[at], big);
+    while at > 0 && word_class(chars[at - 1], big) == class {
+        at -= 1;
+    }
+    at
+}
+fn word_end(chars: &[char], cursor: usize, big: bool) -> usize {
+    if chars.is_empty() {
+        return 0;
+    }
+    let mut at = cursor.min(chars.len() - 1);
+    if at + 1 >= chars.len() {
+        return at;
+    }
+    let class = word_class(chars[at], big);
+    at += 1;
+    if class == 0 || word_class(chars[at], big) != class {
+        while at < chars.len() && chars[at].is_whitespace() {
+            at += 1;
+        }
+    }
+    if at == chars.len() {
+        return chars.len() - 1;
+    }
+    let class = word_class(chars[at], big);
+    while at + 1 < chars.len() && word_class(chars[at + 1], big) == class {
+        at += 1;
+    }
+    at
+}
+fn change_word_end(chars: &[char], cursor: usize, big: bool) -> usize {
+    if chars.is_empty() {
+        return 0;
+    }
+    let mut at = cursor.min(chars.len() - 1);
+    let class = word_class(chars[at], big);
+    while at + 1 < chars.len() && word_class(chars[at + 1], big) == class {
+        at += 1;
+    }
+    at
+}
+fn repeat_motion(
+    chars: &[char],
+    cursor: usize,
+    count: usize,
+    big: bool,
+    motion: fn(&[char], usize, bool) -> usize,
+) -> usize {
+    let mut at = cursor;
+    for _ in 0..count {
+        let next = motion(chars, at, big);
+        if next == at {
+            break;
+        }
+        at = next;
+    }
+    at
+}
+fn text_object(
+    chars: &[char],
+    cursor: usize,
+    object: char,
+    count: usize,
+    around: bool,
+) -> Option<Range<usize>> {
+    if chars.is_empty() {
+        return None;
+    }
+    let cursor = cursor.min(chars.len() - 1);
+    if matches!(object, 'w' | 'W') {
+        let big = object == 'W';
+        let class = word_class(chars[cursor], big);
+        let mut start = cursor;
+        while start > 0 && word_class(chars[start - 1], big) == class {
+            start -= 1;
+        }
+        let mut end = cursor + 1;
+        while end < chars.len() && word_class(chars[end], big) == class {
+            end += 1;
+        }
+        if around {
+            // On whitespace, "a word" includes the following word. Otherwise
+            // each count adds another word and the whitespace between them.
+            let words = if class == 0 {
+                count
+            } else {
+                count.saturating_sub(1)
+            };
+            for _ in 0..words {
+                while end < chars.len() && chars[end].is_whitespace() {
+                    end += 1;
+                }
+                if end == chars.len() {
+                    break;
+                }
+                let next_class = word_class(chars[end], big);
+                while end < chars.len() && word_class(chars[end], big) == next_class {
+                    end += 1;
+                }
+            }
+            let content_end = end;
+            if class != 0 {
+                while end < chars.len() && chars[end].is_whitespace() {
+                    end += 1;
+                }
+                if end == content_end {
+                    while start > 0 && chars[start - 1].is_whitespace() {
+                        start -= 1;
+                    }
+                }
+            }
+        } else {
+            // Inner-word counts include whitespace as its own text object.
+            for _ in 1..count {
+                if end == chars.len() {
+                    break;
+                }
+                let next_class = word_class(chars[end], big);
+                while end < chars.len() && word_class(chars[end], big) == next_class {
+                    end += 1;
+                }
+            }
+        }
+        return Some(start..end);
+    }
+    if matches!(object, '\'' | '"' | '`') {
+        let rows = lines(chars);
+        let line = rows[row_for_cursor(&rows, cursor)];
+        let quotes: Vec<usize> = (line.start..line.end)
+            .filter(|index| {
+                if chars[*index] != object {
+                    return false;
+                }
+                let backslashes = chars[line.start..*index]
+                    .iter()
+                    .rev()
+                    .take_while(|ch| **ch == '\\')
+                    .count();
+                backslashes % 2 == 0
+            })
+            .collect();
+        let preceding = quotes.iter().rposition(|index| *index <= cursor);
+        let opening = match preceding {
+            Some(index) if quotes[index] == cursor && index % 2 == 1 => index - 1,
+            Some(index) => index,
+            None => 0,
+        };
+        let pair = (*quotes.get(opening)?, *quotes.get(opening + 1)?);
+        let mut range = if around || count > 1 {
+            pair.0..pair.1 + 1
+        } else {
+            pair.0 + 1..pair.1
+        };
+        if around {
+            let content_end = range.end;
+            while range.end < line.end && matches!(chars[range.end], ' ' | '\t') {
+                range.end += 1;
+            }
+            if range.end == content_end {
+                while range.start > line.start && matches!(chars[range.start - 1], ' ' | '\t') {
+                    range.start -= 1;
+                }
+            }
+        }
+        return Some(range);
+    }
+    let (open, close) = match object {
+        '(' | ')' | 'b' => ('(', ')'),
+        '[' | ']' => ('[', ']'),
+        '{' | '}' | 'B' => ('{', '}'),
+        '<' | '>' => ('<', '>'),
+        _ => return None,
+    };
+    let mut pairs = Vec::new();
+    let mut stack = Vec::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == open {
+            stack.push(index);
+        } else if *ch == close
+            && let Some(start) = stack.pop()
+        {
+            pairs.push((start, index));
+        }
+    }
+    // Closing delimiters encounter enclosing pairs from the inside out. From
+    // outside a block, Vim searches forward by opening delimiter instead.
+    let enclosing: Vec<_> = pairs
+        .iter()
+        .copied()
+        .filter(|pair| pair.0 <= cursor && cursor <= pair.1)
+        .collect();
+    let pair = if enclosing.is_empty() {
+        pairs.sort_unstable_by_key(|pair| pair.0);
+        let mut pair = *pairs.iter().find(|pair| pair.0 > cursor)?;
+        for _ in 1..count {
+            pair = *pairs
+                .iter()
+                .find(|nested| pair.0 < nested.0 && nested.1 < pair.1)?;
+        }
+        pair
+    } else {
+        *enclosing.get(count.saturating_sub(1))?
+    };
+    Some(if around {
+        pair.0..pair.1 + 1
+    } else {
+        pair.0 + 1..pair.1
+    })
+}
+fn lines(chars: &[char]) -> Vec<Line> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            result.push(Line {
+                start,
+                end: index,
+                newline: Some(index),
+            });
+            start = index + 1;
+        }
+    }
+    result.push(Line {
+        start,
+        end: chars.len(),
+        newline: None,
+    });
+    result
+}
+fn row_for_cursor(rows: &[Line], cursor: usize) -> usize {
+    rows.partition_point(|line| line.start <= cursor)
+        .saturating_sub(1)
+}
+fn first_nonblank(chars: &[char], line: Line) -> usize {
+    let mut at = line.start;
+    while at < line.end && (chars[at] == ' ' || chars[at] == '\t') {
+        at += 1;
+    }
+    at.min(line.end.saturating_sub(1).max(line.start))
+}
+fn normal_cursor(chars: &[char], cursor: usize) -> usize {
+    let rows = lines(chars);
+    let at = cursor.min(chars.len());
+    let line = rows[row_for_cursor(&rows, at)];
+    at.min(line.end.saturating_sub(1).max(line.start))
+        .max(line.start)
+}
+fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
+    let rows = lines(chars);
+    let line = rows[row_for_cursor(&rows, cursor)];
+    let at = (cursor..line.end)
+        .find(|index| matches!(chars[*index], '(' | ')' | '[' | ']' | '{' | '}'))?;
+    let (open, close, forward) = match chars[at] {
+        '(' => ('(', ')', true),
+        ')' => ('(', ')', false),
+        '[' => ('[', ']', true),
+        ']' => ('[', ']', false),
+        '{' => ('{', '}', true),
+        '}' => ('{', '}', false),
+        _ => return None,
+    };
+    let mut depth: usize = 1;
+    if forward {
+        for (index, ch) in chars.iter().enumerate().skip(at + 1) {
+            if *ch == open {
+                depth += 1;
+            } else if *ch == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+    } else {
+        for index in (0..at).rev() {
+            if chars[index] == close {
+                depth += 1;
+            } else if chars[index] == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
+}
+fn paragraph(chars: &[char], cursor: usize, count: usize, forward: bool) -> usize {
+    let rows = lines(chars);
+    let mut row = row_for_cursor(&rows, cursor);
+    for _ in 0..count {
+        if forward {
+            while row + 1 < rows.len() && rows[row].start == rows[row].end {
+                row += 1;
+            }
+            while row + 1 < rows.len() && rows[row].start != rows[row].end {
+                row += 1;
+            }
+        } else {
+            row = row.saturating_sub(1);
+            while row > 0 && rows[row].start == rows[row].end {
+                row -= 1;
+            }
+            while row > 0 && rows[row].start != rows[row].end {
+                row -= 1;
+            }
+        }
+    }
+    rows[row].start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn position(state: &VimState, text: &str) -> (usize, usize) {
+        text.chars()
+            .take(state.cursor)
+            .fold((0, 0), |(row, column), ch| {
+                if ch == '\n' {
+                    (row + 1, 0)
+                } else {
+                    (row, column + 1)
+                }
+            })
+    }
+    fn keys(state: &mut VimState, text: &mut String, value: &str) {
+        for ch in value.chars() {
+            state.handle_key(text, VimKey::Char(ch));
+        }
+    }
+    #[test]
+    fn exact_external_selection_keeps_unicode_and_final_newline() {
+        let mut state = VimState::new();
+        let mut text = "ä🙂\n中".to_owned();
+        state.set_selection(&text, 1..3);
+        assert_eq!(state.selection(&text), Some(1..3));
+        let action = state.handle_key(&mut text, VimKey::Char('y'));
+        assert_eq!(action.yanked.unwrap().text, "🙂\n");
+        assert_eq!(text, "ä🙂\n中");
+        assert_eq!(state.mode, VimMode::Normal);
+
+        text = "ä🙂\n".to_owned();
+        state.set_selection_boundaries(&text, 3, 1);
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.selection(&text), Some(1..3));
+        state.handle_key(&mut text, VimKey::Char('o'));
+        assert_eq!(state.cursor, 2);
+        assert_eq!(state.selection(&text), Some(1..3));
+        state.handle_key(&mut text, VimKey::Char('d'));
+        assert_eq!(text, "ä");
+        assert_eq!(state.register().unwrap().text, "🙂\n");
+        state.handle_key(&mut text, VimKey::Char('u'));
+        assert_eq!(text, "ä🙂\n");
+    }
+
+    #[test]
+    fn external_boundaries_and_mouse_clicks_have_distinct_eof_rules() {
+        let mut state = VimState::new();
+        let text = "ä🙂\n中";
+        state.set_selection(text, usize::MAX..usize::MAX);
+        assert_eq!(state.mode, VimMode::Normal);
+        assert_eq!(state.cursor, 4);
+        assert_eq!(state.selection(text), None);
+        state.set_mouse_selection(text, 2, 2, false);
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.mode, VimMode::Normal);
+        state.set_mouse_selection(text, 999, 999, false);
+        assert_eq!(state.cursor, 3);
+        state.set_selection("", 0..999);
+        assert_eq!(state.mode, VimMode::Normal);
+        assert_eq!(state.cursor, 0);
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn mouse_line_selection_does_not_add_the_end_exclusive_line() {
+        for (primary, anchor) in [(2, 0), (0, 2)] {
+            let mut state = VimState::new();
+            let mut text = "a\nb\n".to_owned();
+            state.set_mouse_selection(&text, primary, anchor, true);
+            assert_eq!(state.mode, VimMode::VisualLine);
+            assert_eq!(state.selection(&text), Some(0..2));
+            let action = state.handle_key(&mut text, VimKey::Char('y'));
+            let yank = action.yanked.unwrap();
+            assert!(yank.linewise);
+            assert_eq!(yank.text, "a\n");
+        }
+    }
+
+    #[test]
+    fn mouse_navigation_in_insert_keeps_one_undo_transaction() {
+        let mut state = VimState::new();
+        let mut text = "ab".to_owned();
+        keys(&mut state, &mut text, "i");
+        state.insert_text(&mut text, "ä");
+        state.set_mouse_selection(&text, 3, 1, false);
+        assert_eq!(state.mode, VimMode::Insert);
+        assert_eq!(state.cursor, 3);
+        state.insert_text(&mut text, "🙂");
+        state.finish_insert(&mut text);
+        assert_eq!(text, "äab🙂");
+        assert_eq!(state.undo.len(), 1);
+        state.handle_key(&mut text, VimKey::Char('u'));
+        assert_eq!(text, "ab");
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "äab🙂");
+    }
+
+    #[test]
+    fn pane_navigation_restores_selection_without_forking_history_or_registers() {
+        let mut state = VimState::new();
+        let mut text = "ä🙂\n中xy".to_owned();
+        state.set_selection_boundaries(&text, 3, 1);
+        let first_view = state.navigation();
+        let second_view = VimNavigation::default();
+        state.restore_navigation(&text, &second_view);
+        assert_eq!(state.selection(&text), None);
+        keys(&mut state, &mut text, "x");
+        assert_eq!(text, "🙂\n中xy");
+        let register = state.register().unwrap().clone();
+        state.restore_navigation(&text, &first_view);
+        assert_eq!(state.selection(&text), Some(1..3));
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.register(), Some(&register));
+        assert!(state.can_undo());
+        state.handle_key(&mut text, VimKey::Char('u'));
+        assert_eq!(text, "ä🙂\n中xy");
+        state.restore_navigation(&text, &second_view);
+        assert!(state.can_redo());
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "🙂\n中xy");
+        keys(&mut state, &mut text, ".");
+        assert_eq!(text, "\n中xy");
+    }
+
+    #[test]
+    fn pane_navigation_restores_pending_commands_and_preferred_columns() {
+        let mut state = VimState::new();
+        let mut text = "one two three".to_owned();
+        keys(&mut state, &mut text, "2d");
+        let operator_view = state.navigation();
+        state.restore_navigation(&text, &VimNavigation::default());
+        keys(&mut state, &mut text, "l");
+        assert_eq!(text, "one two three");
+        state.restore_navigation(&text, &operator_view);
+        assert_eq!(state.pending_command(), "2d");
+        keys(&mut state, &mut text, "w");
+        assert_eq!(text, "three");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "one two three");
+
+        text = "abcdef\nx\nabcdef".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "4lj");
+        let short_line_view = state.navigation();
+        state.restore_navigation(&text, &VimNavigation::default());
+        keys(&mut state, &mut text, "l");
+        state.restore_navigation(&text, &short_line_view);
+        keys(&mut state, &mut text, "j");
+        assert_eq!(position(&state, &text), (2, 4));
+    }
+
+    #[test]
+    fn pane_navigation_clamps_after_another_view_shortens_the_document() {
+        let mut state = VimState::new();
+        state.set_selection_boundaries("ä🙂\n中", 4, 1);
+        let view = state.navigation();
+        state.restore_navigation("é", &view);
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.selection("é"), Some(1..1));
+        state.restore_navigation("", &view);
+        assert_eq!(state.cursor, 0);
+        assert_eq!(state.selection(""), Some(0..0));
+    }
+
+    #[test]
+    fn unicode_offsets_and_redo() {
+        let mut state = VimState::new();
+        let mut text = "ä🙂中\nß".to_owned();
+        assert_eq!(state.mode, VimMode::Normal);
+        keys(&mut state, &mut text, "lx");
+        assert_eq!(text, "ä中\nß");
+        assert_eq!(state.register().unwrap().text, "🙂");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "ä🙂中\nß");
+        assert_eq!(state.cursor, 1);
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "ä中\nß");
+    }
+    #[test]
+    fn counts_multiply_and_line_boundaries_work() {
+        let mut state = VimState::new();
+        let mut text = "one two three four five six seven".to_owned();
+        keys(&mut state, &mut text, "2d3w");
+        assert_eq!(text, "seven");
+        for (command, expected) in [
+            ("2dd", "c\nd"),
+            ("d2d", "c\nd"),
+            ("2d2d", ""),
+            ("Gdd", "a\nb\nc"),
+            ("Gdk", "a\nb"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = "a\nb\nc\nd".to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+        }
+    }
+    #[test]
+    fn column_and_punctuation_motions() {
+        let mut state = VimState::new();
+        let mut text = "abcdef\nx\nabcdef".to_owned();
+        keys(&mut state, &mut text, "4ljj");
+        assert_eq!(position(&state, &text), (2, 4));
+        text = "foo.bar baz".to_owned();
+        state.set_cursor(&text, 0);
+        keys(&mut state, &mut text, "w");
+        assert_eq!(state.cursor, 3);
+        keys(&mut state, &mut text, "we");
+        assert_eq!(state.cursor, 6);
+    }
+    #[test]
+    fn change_word_and_insert_are_one_undo_step() {
+        let mut state = VimState::new();
+        let mut text = "hello world".to_owned();
+        keys(&mut state, &mut text, "cw");
+        assert_eq!(text, " world");
+        state.insert_text(&mut text, "é🙂");
+        assert_eq!(state.cursor, 2);
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "hello world");
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "é🙂 world");
+        state = VimState::new();
+        text = "a b c".to_owned();
+        keys(&mut state, &mut text, "2cw");
+        assert_eq!(text, " c");
+    }
+    #[test]
+    fn operator_inclusivity_and_empty_lines() {
+        for (initial, command, expected) in [
+            ("abc", "dw", ""),
+            ("abc", "d$", ""),
+            ("abc", "$dl", "ab"),
+            ("\nabc", "x", "\nabc"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+        }
+    }
+    #[test]
+    fn paste_blank_line_cursor_and_final_newlines() {
+        let mut state = VimState::new();
+        let mut text = "a\nb".to_owned();
+        state.set_register(Yank {
+            text: "\n".to_owned(),
+            linewise: true,
+        });
+        keys(&mut state, &mut text, "p");
+        assert_eq!(text, "a\n\nb");
+        assert_eq!(position(&state, &text), (1, 0));
+        for (initial, command, expected) in [
+            ("a", "yyp", "a\na"),
+            ("a\n", "yyp", "a\na\n"),
+            ("a\nb", "yyGp", "a\nb\na"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+        }
+    }
+    #[test]
+    fn redo_survives_noop_commands_but_not_new_edits() {
+        let mut state = VimState::new();
+        let mut text = "abc".to_owned();
+        keys(&mut state, &mut text, "xu0yyi");
+        state.finish_insert(&mut text);
+        assert!(state.can_redo());
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "bc");
+        keys(&mut state, &mut text, "ux");
+        assert!(!state.can_redo());
+    }
+    #[test]
+    fn open_line_indent_and_external_edits_group() {
+        let mut state = VimState::new();
+        let mut text = "  one\ntwo".to_owned();
+        keys(&mut state, &mut text, "o");
+        assert_eq!(text, "  one\n  \ntwo");
+        state.insert_text(&mut text, "three");
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "  one\ntwo");
+        keys(&mut state, &mut text, "i");
+        text.insert_str(0, "external");
+        state.notify_external_text_change();
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "  one\ntwo");
+    }
+    #[test]
+    fn pending_commands_cancel_and_history_is_bounded() {
+        let mut state = VimState::new();
+        let mut text = "one two three".to_owned();
+        keys(&mut state, &mut text, "3d");
+        state.handle_key(&mut text, VimKey::Escape);
+        keys(&mut state, &mut text, "wdx");
+        assert_eq!(state.cursor, 4);
+        assert_eq!(text, "one two three");
+        assert!(state.pending_command().is_empty());
+        text = "x".repeat(200);
+        state = VimState::new();
+        keys(&mut state, &mut text, &"x".repeat(150));
+        assert_eq!(state.undo.len(), MAX_HISTORY);
+    }
+    #[test]
+    fn visual_character_selection_yank_cut_and_change() {
+        let mut state = VimState::new();
+        let mut text = "ä🙂中 xyz".to_owned();
+        keys(&mut state, &mut text, "vl");
+        assert_eq!(state.selection(&text), Some(0..2));
+        let action = state.handle_key(&mut text, VimKey::Char('y'));
+        assert_eq!(action.yanked.unwrap().text, "ä🙂");
+        assert_eq!(state.mode, VimMode::Normal);
+        assert!(state.selection(&text).is_none());
+        keys(&mut state, &mut text, "vld");
+        assert_eq!(text, "中 xyz");
+        keys(&mut state, &mut text, "u0vlc");
+        state.insert_text(&mut text, "new");
+        state.finish_insert(&mut text);
+        assert_eq!(text, "new中 xyz");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "ä🙂中 xyz");
+    }
+    #[test]
+    fn visual_line_selection_down_and_up() {
+        for command in ["Vjd", "jVkd"] {
+            let mut state = VimState::new();
+            let mut text = "one\ntwo\nthree".to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, "three", "{command}");
+            assert!(state.register().unwrap().linewise);
+            assert_eq!(state.register().unwrap().text, "one\ntwo\n");
+        }
+        let mut state = VimState::new();
+        let mut text = "one\ntwo\nthree".to_owned();
+        keys(&mut state, &mut text, "Vjc");
+        assert_eq!(text, "\nthree");
+        assert_eq!(state.mode, VimMode::Insert);
+        state.insert_text(&mut text, "replacement");
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+    #[test]
+    fn visual_paste_and_indent_are_undoable() {
+        let mut state = VimState::new();
+        let mut text = "one\ntwo\nthree".to_owned();
+        state.set_register(Yank {
+            text: "other\n".to_owned(),
+            linewise: true,
+        });
+        keys(&mut state, &mut text, "Vjp");
+        assert_eq!(text, "other\nthree");
+        keys(&mut state, &mut text, "uggVj>");
+        assert_eq!(text, "    one\n    two\nthree");
+        assert_eq!(state.mode, VimMode::Normal);
+        keys(&mut state, &mut text, "ugg2>>");
+        assert_eq!(text, "    one\n    two\nthree");
+        keys(&mut state, &mut text, "2<<");
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+    #[test]
+    fn find_replace_join_and_matching_bracket() {
+        let mut state = VimState::new();
+        let mut text = "one, two, three".to_owned();
+        keys(&mut state, &mut text, "f,;");
+        assert_eq!(state.cursor, 8);
+        keys(&mut state, &mut text, "0dt,");
+        assert_eq!(text, ", two, three");
+        keys(&mut state, &mut text, "u0d2f,");
+        assert_eq!(text, " three");
+        text = "abc\ndef".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "2r🙂J");
+        assert_eq!(text, "🙂🙂c def");
+        text = "(a(b)c)".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "%");
+        assert_eq!(state.cursor, 6);
+    }
+    #[test]
+    fn text_objects_select_words_pairs_and_quotes() {
+        let mut state = VimState::new();
+        let mut text = "one two three".to_owned();
+        keys(&mut state, &mut text, "wviw");
+        assert_eq!(state.selection(&text), Some(4..7));
+        keys(&mut state, &mut text, "d");
+        assert_eq!(text, "one  three");
+        text = "call(first, nested(value))".to_owned();
+        state = VimState::new();
+        state.set_cursor(&text, 20);
+        keys(&mut state, &mut text, "ci(");
+        assert_eq!(text, "call(first, nested())");
+        state.insert_text(&mut text, "arg");
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "call(first, nested(value))");
+        text = "let s = \"some \\\"quoted\\\" text\";".to_owned();
+        state = VimState::new();
+        state.set_cursor(&text, 12);
+        keys(&mut state, &mut text, "di\"");
+        assert_eq!(text, "let s = \"\";");
+    }
+    #[test]
+    fn oversized_counted_paste_is_rejected_before_allocation() {
+        let mut state = VimState::new();
+        let mut text = "a".to_owned();
+        state.set_register(Yank {
+            text: "b".repeat(2_000),
+            linewise: false,
+        });
+        keys(&mut state, &mut text, "9999p");
+        assert_eq!(text, "a");
+        assert!(state.undo.is_empty());
+    }
+    #[test]
+    fn huge_numeric_counts_saturate_and_motions_stop_at_boundaries() {
+        let mut state = VimState::new();
+        let mut text = "ä🙂\none two\nlast".to_owned();
+        keys(&mut state, &mut text, "999999999999999999999999j");
+        assert_eq!(position(&state, &text), (2, 0));
+        keys(&mut state, &mut text, "gg9999w");
+        assert_eq!(state.cursor, text.chars().count() - 1);
+        keys(&mut state, &mut text, "9999b");
+        assert_eq!(state.cursor, 0);
+        keys(&mut state, &mut text, "9999dd");
+        assert!(text.is_empty());
+        assert_eq!(state.undo.len(), 1);
+    }
+    #[test]
+    fn dot_replays_operators_and_replaces_the_original_count() {
+        let mut state = VimState::new();
+        let mut text = "one two three".to_owned();
+        keys(&mut state, &mut text, "dw.");
+        assert_eq!(text, "three");
+        assert_eq!(state.undo.len(), 2);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "two three");
+        keys(&mut state, &mut text, ".");
+        assert_eq!(text, "three");
+        text = "abcdefghi".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "2x3.");
+        assert_eq!(text, "fghi");
+        keys(&mut state, &mut text, ".");
+        assert_eq!(text, "i");
+        text = "one two three four five six seven eight nine ten".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "d2w3.");
+        assert_eq!(text, "six seven eight nine ten");
+    }
+    #[test]
+    fn dot_replays_external_widget_change_as_one_transaction() {
+        let mut state = VimState::new();
+        let mut text = "one two three".to_owned();
+        keys(&mut state, &mut text, "ciw");
+        text.insert_str(0, "é🙂");
+        state.set_cursor(&text, 2);
+        state.notify_external_text_change();
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "w.");
+        assert_eq!(text, "é🙂 é🙂 three");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "é🙂 two three");
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "é🙂 é🙂 three");
+    }
+    #[test]
+    fn dot_replays_external_multiline_insert_and_adjacent_identical_text() {
+        let mut state = VimState::new();
+        let mut text = "abc\nxyz".to_owned();
+        keys(&mut state, &mut text, "A");
+        text.insert_str(3, "!\n  next");
+        state.set_cursor(&text, 11);
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "G.");
+        assert_eq!(text, "abc!\n  next\nxyz!\n  next");
+        text = "abc".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "ia");
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "$.");
+        assert_eq!(text, "aabac");
+    }
+    #[test]
+    fn counted_insert_and_dot_count_repeat_the_original_typed_text() {
+        let mut state = VimState::new();
+        let mut text = "x".to_owned();
+        keys(&mut state, &mut text, "3iab");
+        state.finish_insert(&mut text);
+        assert_eq!(text, "abababx");
+        keys(&mut state, &mut text, "0.");
+        assert_eq!(text, "ababababababx");
+        keys(&mut state, &mut text, "02.");
+        assert_eq!(text, "ababababababababx");
+    }
+    #[test]
+    fn dot_repeats_visual_selection_and_indent() {
+        let mut state = VimState::new();
+        let mut text = "one\ntwo\nthree\nfour".to_owned();
+        keys(&mut state, &mut text, "Vj>jj.");
+        assert_eq!(text, "    one\n    two\n    three\n    four");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "    one\n    two\nthree\nfour");
+        text = "abcdefghi".to_owned();
+        state = VimState::new();
+        keys(&mut state, &mut text, "v2ld.");
+        assert_eq!(text, "ghi");
+    }
+    #[test]
+    fn word_delete_preserves_current_line_break_when_next_word_is_on_next_line() {
+        for (initial, command, expected) in [
+            ("one\ntwo", "dw", "\ntwo"),
+            ("one two\nthree", "d2w", "\nthree"),
+            ("one\ntwo\nthree", "d2w", "three"),
+            ("one\ntwo three", "d2w", "three"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command} in {initial:?}");
+        }
+    }
+    #[test]
+    fn backward_find_operator_excludes_the_original_cursor_character() {
+        for (command, expected) in [("$dF,", "foo, barz"), ("$dT,", "foo, bar,z")] {
+            let mut state = VimState::new();
+            let mut text = "foo, bar, baz".to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+        }
+    }
+    #[test]
+    fn visual_character_paste_of_a_line_register_adds_line_boundaries() {
+        let mut state = VimState::new();
+        let mut text = "foo bar baz".to_owned();
+        state.set_register(Yank {
+            text: "qux\n".to_owned(),
+            linewise: true,
+        });
+        keys(&mut state, &mut text, "wviwp");
+        assert_eq!(text, "foo \nqux\n baz");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "foo bar baz");
+    }
+    #[test]
+    fn line_change_keeps_code_indent_and_large_visual_indent_is_bounded() {
+        let mut state = VimState::new();
+        let mut text = "    old\n    next".to_owned();
+        keys(&mut state, &mut text, "cc");
+        assert_eq!(text, "    \n    next");
+        assert_eq!(state.cursor, 4);
+        state.insert_text(&mut text, "new");
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "    old\n    next");
+        text = "a\n".repeat(1_000);
+        state = VimState::new();
+        let initial = text.clone();
+        keys(&mut state, &mut text, "VG9999>");
+        assert_eq!(text, initial);
+    }
+    #[test]
+    fn external_normal_edit_is_undoable_and_clears_visual_and_pending_state() {
+        let mut state = VimState::new();
+        let mut text = "original".to_owned();
+        keys(&mut state, &mut text, "v2l");
+        assert!(state.selection(&text).is_some());
+        state.begin_external_edit(&text);
+        text = "replaced".to_owned();
+        assert_eq!(state.mode, VimMode::Normal);
+        assert!(state.selection(&text).is_none());
+        assert!(state.pending_command().is_empty());
+        assert!(state.can_undo());
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "original");
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "replaced");
+        keys(&mut state, &mut text, "u3d");
+        state.begin_external_edit(&text);
+        text = "another".to_owned();
+        assert!(!state.can_redo());
+        assert!(state.pending_command().is_empty());
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "original");
+    }
+    #[test]
+    fn external_insert_edit_stays_in_one_insert_undo_transaction() {
+        let mut state = VimState::new();
+        let mut text = "original".to_owned();
+        keys(&mut state, &mut text, "iX");
+        state.begin_external_edit(&text);
+        text.insert_str(1, "completion");
+        state.set_cursor(&text, 11);
+        state.notify_external_text_change();
+        assert!(state.undo.is_empty());
+        state.finish_insert(&mut text);
+        assert_eq!(state.undo.len(), 1);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "original");
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, "Xcompletionoriginal");
+    }
+    #[test]
+    fn word_motions_visit_empty_lines_but_word_end_skips_them() {
+        for (initial, command, expected) in [
+            ("one\n\n\nthree", "w", (1, 0)),
+            ("one\n\n\nthree", "2w", (2, 0)),
+            ("one\n\n\nthree", "3w", (3, 0)),
+            ("one\n\n\nthree", "Gb", (2, 0)),
+            ("one\n\n\nthree", "G2b", (1, 0)),
+            ("one\n\n\nthree", "G3b", (0, 0)),
+            ("one\n\n\nthree", "2e", (3, 4)),
+            ("one\n   \nthree", "w", (2, 0)),
+            ("one\n   \nthree", "Gb", (0, 0)),
+            ("\n\nthree", "w", (1, 0)),
+            ("\n\nthree", "G2b", (0, 0)),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(position(&state, &text), expected, "{initial:?}, {command}");
+        }
+    }
+    #[test]
+    fn inner_word_counts_include_whitespace_and_around_word_includes_content() {
+        for (initial, command, expected) in [
+            ("one two three", "d2iw", "two three"),
+            ("one two three", "d3iw", " three"),
+            ("one two three", "d2aw", "three"),
+            ("one  two three", "3ldiw", "onetwo three"),
+            ("one  two three", "3ld2iw", "one three"),
+            ("one  two three", "3ldaw", "one three"),
+            ("one  two three", "3ld2aw", "one"),
+            ("foo.bar baz", "d2iW", "baz"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{initial:?}, {command}");
+        }
+    }
+    #[test]
+    fn quoted_objects_find_forward_pairs_and_adjacent_quote_spans() {
+        for (initial, cursor, command, expected) in [
+            ("let s = \"hello\";", 0, "di\"", "let s = \"\";"),
+            ("\"one\" middle \"two\"", 7, "di\"", "\"one\"\"two\""),
+            ("\"one\" middle \"two\"", 0, "di\"", "\"\" middle \"two\""),
+            ("\"one\" middle \"two\"", 4, "di\"", "\"\" middle \"two\""),
+            ("pre \"one\" tail", 5, "2di\"", "pre  tail"),
+            ("pre \"one\" tail", 5, "2da\"", "pre tail"),
+            ("pre \"one\" tail", 13, "di\"", "pre \"one\" tail"),
+            ("pre\n\"one\"", 0, "di\"", "pre\n\"one\""),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            state.set_cursor(&text, cursor);
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{initial:?}, {cursor}, {command}");
+        }
+    }
+    #[test]
+    fn block_objects_search_forward_and_respect_available_nesting() {
+        for (initial, cursor, command, expected) in [
+            ("call(value)", 0, "di(", "call()"),
+            ("pre\n{value}", 0, "di{", "pre\n{}"),
+            ("pre (a (b) c) post", 0, "2di(", "pre (a () c) post"),
+            ("pre (a (b) c) post", 8, "2di(", "pre () post"),
+            ("pre (a (b) c) post", 8, "3di(", "pre (a (b) c) post"),
+            ("pre (a) gap (b)", 0, "2di(", "pre (a) gap (b)"),
+            ("pre (a (b) (c) d)", 0, "3di(", "pre (a (b) (c) d)"),
+            ("(a) gap (b)", 4, "di(", "(a) gap ()"),
+            ("(a) tail", 6, "di(", "(a) tail"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            state.set_cursor(&text, cursor);
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{initial:?}, {cursor}, {command}");
+        }
+    }
+}

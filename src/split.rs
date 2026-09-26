@@ -1,0 +1,1337 @@
+//! Editor panes share documents and edit history, while keeping view/navigation local.
+use super::*;
+pub(super) use crate::cli::SplitOrientation;
+use crate::cli::{DocumentView, LayoutAction};
+use crate::vim::VimNavigation;
+use serde_json::{Value, json};
+
+const MAX_PANES: usize = 8;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum PaneNode {
+    Pane {
+        id: u64,
+    },
+    Split {
+        orientation: SplitOrientation,
+        ratio: f32,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
+}
+
+impl PaneNode {
+    fn ids(&self, ids: &mut Vec<u64>) {
+        match self {
+            Self::Pane { id } => ids.push(*id),
+            Self::Split { first, second, .. } => {
+                first.ids(ids);
+                second.ids(ids);
+            }
+        }
+    }
+    fn first_id(&self) -> u64 {
+        match self {
+            Self::Pane { id } => *id,
+            Self::Split { first, .. } => first.first_id(),
+        }
+    }
+    fn neighbor(&self, target: u64) -> Option<u64> {
+        let Self::Split { first, second, .. } = self else {
+            return None;
+        };
+        if matches!(first.as_ref(), Self::Pane { id } if *id == target) {
+            Some(second.first_id())
+        } else if matches!(second.as_ref(), Self::Pane { id } if *id == target) {
+            Some(first.first_id())
+        } else {
+            first.neighbor(target).or_else(|| second.neighbor(target))
+        }
+    }
+    fn split(&mut self, target: u64, new_id: u64, orientation: SplitOrientation) -> bool {
+        match self {
+            Self::Pane { id } if *id == target => {
+                *self = Self::Split {
+                    orientation,
+                    ratio: 0.5,
+                    first: Box::new(Self::Pane { id: target }),
+                    second: Box::new(Self::Pane { id: new_id }),
+                };
+                true
+            }
+            Self::Pane { .. } => false,
+            Self::Split { first, second, .. } => {
+                first.split(target, new_id, orientation)
+                    || second.split(target, new_id, orientation)
+            }
+        }
+    }
+    fn remove(&mut self, target: u64) -> bool {
+        let Self::Split { first, second, .. } = self else {
+            return false;
+        };
+        if matches!(first.as_ref(), Self::Pane { id } if *id == target) {
+            *self = *second.clone();
+            return true;
+        }
+        if matches!(second.as_ref(), Self::Pane { id } if *id == target) {
+            *self = *first.clone();
+            return true;
+        }
+        first.remove(target) || second.remove(target)
+    }
+    fn resize(&mut self, target: u64, new_ratio: f32) -> bool {
+        let Self::Split {
+            first,
+            second,
+            ratio,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if first.resize(target, new_ratio) || second.resize(target, new_ratio) {
+            return true;
+        }
+        if matches!(first.as_ref(), Self::Pane { id } if *id == target)
+            || matches!(second.as_ref(), Self::Pane { id } if *id == target)
+        {
+            *ratio = new_ratio;
+            return true;
+        }
+        false
+    }
+    fn resize_divider(&mut self, first_id: u64, second_id: u64, new_ratio: f32) -> bool {
+        let Self::Split {
+            first,
+            second,
+            ratio,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if first.first_id() == first_id && second.first_id() == second_id {
+            *ratio = new_ratio;
+            return true;
+        }
+        first.resize_divider(first_id, second_id, new_ratio)
+            || second.resize_divider(first_id, second_id, new_ratio)
+    }
+}
+
+#[derive(Clone)]
+struct PaneDocumentState {
+    navigation: VimNavigation,
+    view: DocumentView,
+    selection: Range<usize>,
+}
+#[derive(Clone)]
+struct Pane {
+    id: u64,
+    documents: Vec<u64>,
+    document: Option<u64>,
+    view: DocumentView,
+    states: HashMap<u64, PaneDocumentState>,
+    tab_strip_active: Option<u64>,
+}
+impl Pane {
+    fn empty(id: u64) -> Self {
+        Self {
+            id,
+            documents: Vec::new(),
+            document: None,
+            view: DocumentView::Source,
+            states: HashMap::new(),
+            tab_strip_active: None,
+        }
+    }
+}
+
+pub(super) struct EditorLayout {
+    root: PaneNode,
+    panes: Vec<Pane>,
+    focused: u64,
+    next_id: u64,
+    rects: HashMap<u64, egui::Rect>,
+    groups_initialized: bool,
+}
+impl Default for EditorLayout {
+    fn default() -> Self {
+        Self {
+            root: PaneNode::Pane { id: 1 },
+            panes: vec![Pane::empty(1)],
+            focused: 1,
+            next_id: 2,
+            rects: HashMap::new(),
+            groups_initialized: false,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct SessionLayout {
+    root: PaneNode,
+    panes: Vec<SessionPane>,
+    focused: u64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct SessionPane {
+    id: u64,
+    project: Option<usize>,
+    tab: Option<usize>,
+    view: DocumentView,
+    cursor: usize,
+    #[serde(default)]
+    documents: Option<Vec<(usize, usize)>>,
+    #[serde(default)]
+    states: Vec<SessionPaneDocument>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct SessionPaneDocument {
+    project: usize,
+    tab: usize,
+    view: DocumentView,
+    cursor: usize,
+    selection: Range<usize>,
+}
+
+impl MorrowApp {
+    fn pane_context(&self) -> u64 {
+        if self.rendering_panes {
+            self.render_pane
+        } else {
+            self.editor_layout.focused
+        }
+    }
+    pub(super) fn document_widget_id(&self, tab_id: u64) -> egui::Id {
+        let pane = self.pane_context();
+        if pane == 1 {
+            egui::Id::new(("document", tab_id))
+        } else {
+            egui::Id::new(("document", tab_id, pane))
+        }
+    }
+    pub(super) fn render_pane_is_focused(&self) -> bool {
+        self.pane_context() == self.editor_layout.focused
+    }
+    pub(super) fn capture_pane_navigation(&mut self) {
+        let pane_id = self.pane_context();
+        let Some(tab) = self.tab() else { return };
+        let (id, state) = (
+            tab.id,
+            PaneDocumentState {
+                navigation: tab.vim.navigation(),
+                view: tab.agent_view,
+                selection: tab.selection.clone(),
+            },
+        );
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            && pane.document == Some(id)
+        {
+            pane.view = state.view;
+            pane.states.insert(id, state);
+        }
+    }
+    pub(super) fn bind_current_pane(&mut self) {
+        self.initialize_pane_groups();
+        let pane_id = self.pane_context();
+        let Some(tab) = self.tab() else {
+            if let Some(pane) = self
+                .editor_layout
+                .panes
+                .iter_mut()
+                .find(|pane| pane.id == pane_id)
+            {
+                pane.document = None;
+            }
+            return;
+        };
+        let (id, default_view, navigation, selection) = (
+            tab.id,
+            tab.agent_view,
+            tab.vim.navigation(),
+            tab.selection.clone(),
+        );
+        let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+        else {
+            return;
+        };
+        if !pane.documents.contains(&id) {
+            pane.documents.push(id);
+        }
+        if pane.document == Some(id) {
+            return;
+        }
+        let state = pane
+            .states
+            .entry(id)
+            .or_insert(PaneDocumentState {
+                navigation,
+                view: default_view,
+                selection,
+            })
+            .clone();
+        pane.document = Some(id);
+        pane.view = state.view;
+        let vim_enabled = self.settings.vim;
+        if let Some(tab) = self.tab_mut() {
+            if tab.loading {
+                tab.vim.cursor = state.navigation.cursor;
+            } else {
+                tab.vim.restore_navigation(&tab.text, &state.navigation);
+            }
+            tab.agent_view = state.view;
+            let range = if vim_enabled && tab.vim.mode != VimMode::Insert {
+                tab.vim
+                    .selection(&tab.text)
+                    .unwrap_or(tab.vim.cursor..tab.vim.cursor)
+            } else {
+                state.selection.clone()
+            };
+            tab.selection = range.clone();
+            tab.pending_selection = Some(range);
+            tab.focus = state.view == DocumentView::Source;
+        }
+    }
+    fn initialize_pane_groups(&mut self) {
+        if self.editor_layout.groups_initialized {
+            return;
+        }
+        let active = self.tab().map(|tab| (tab.id, tab.agent_view));
+        self.editor_layout.groups_initialized = true;
+        if let Some((id, view)) = active
+            && let Some(pane) = self
+                .editor_layout
+                .panes
+                .iter_mut()
+                .find(|pane| pane.id == self.editor_layout.focused)
+        {
+            pane.document = Some(id);
+            pane.view = view;
+        }
+        self.adopt_orphan_documents();
+    }
+    /// The focused pane owns newly opened documents; other groups keep their membership.
+    pub(super) fn adopt_orphan_documents(&mut self) {
+        let assigned: std::collections::HashSet<_> = self
+            .editor_layout
+            .panes
+            .iter()
+            .flat_map(|pane| pane.documents.iter().copied())
+            .collect();
+        let orphaned: Vec<_> = self
+            .projects
+            .iter()
+            .flat_map(|project| project.tabs.iter())
+            .filter(|tab| !assigned.contains(&tab.id))
+            .map(|tab| {
+                (
+                    tab.id,
+                    PaneDocumentState {
+                        navigation: tab.vim.navigation(),
+                        view: tab.agent_view,
+                        selection: tab.selection.clone(),
+                    },
+                )
+            })
+            .collect();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.editor_layout.focused)
+        {
+            for (id, state) in orphaned {
+                pane.documents.push(id);
+                pane.states.insert(id, state);
+            }
+            if pane.document.is_none() {
+                pane.document = pane.documents.first().copied();
+                pane.view = pane
+                    .document
+                    .and_then(|id| pane.states.get(&id))
+                    .map_or(DocumentView::Source, |state| state.view);
+            }
+        }
+    }
+    pub(super) fn current_pane_tab_ids(&self) -> Vec<u64> {
+        self.editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == self.pane_context())
+            .map_or_else(Vec::new, |pane| pane.documents.clone())
+    }
+    pub(super) fn current_pane_id(&self) -> u64 {
+        self.pane_context()
+    }
+    pub(super) fn pane_contains_tab(&self, pane_id: u64, id: u64) -> bool {
+        self.editor_layout
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id && pane.documents.contains(&id))
+    }
+    pub(super) fn pane_tab_is_shared(&self, pane_id: u64, id: u64) -> bool {
+        self.editor_layout
+            .panes
+            .iter()
+            .any(|pane| pane.id != pane_id && pane.documents.contains(&id))
+    }
+    /// Remove only this group's reference. The caller releases the buffer on its last reference.
+    pub(super) fn detach_pane_tab(&mut self, pane_id: u64, id: u64) -> Result<bool, String> {
+        if !self.pane_contains_tab(pane_id, id) {
+            return Err("Tab no longer belongs to this pane; inspect layout status".into());
+        }
+        self.capture_pane_navigation();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            && let Some(index) = pane.documents.iter().position(|document| *document == id)
+        {
+            pane.documents.remove(index);
+            pane.states.remove(&id);
+            if pane.document == Some(id) {
+                pane.document = pane
+                    .documents
+                    .get(index.min(pane.documents.len().saturating_sub(1)))
+                    .copied();
+                if let Some(state) = pane
+                    .document
+                    .and_then(|document| pane.states.get(&document))
+                {
+                    pane.view = state.view;
+                } else {
+                    pane.view = DocumentView::Source;
+                }
+            }
+            pane.tab_strip_active = None;
+        }
+        let unreferenced = !self
+            .editor_layout
+            .panes
+            .iter()
+            .any(|pane| pane.documents.contains(&id));
+        self.collapse_empty_panes();
+        self.restore_focused_pane(true);
+        self.session_dirty = true;
+        Ok(unreferenced)
+    }
+    pub(super) fn remove_document_from_layout(&mut self, id: u64) {
+        for pane in &mut self.editor_layout.panes {
+            if let Some(index) = pane.documents.iter().position(|document| *document == id) {
+                pane.documents.remove(index);
+                if pane.document == Some(id) {
+                    pane.document = pane
+                        .documents
+                        .get(index.min(pane.documents.len().saturating_sub(1)))
+                        .copied();
+                    pane.view = pane
+                        .document
+                        .and_then(|document| pane.states.get(&document))
+                        .map_or(DocumentView::Source, |state| state.view);
+                }
+            }
+            pane.states.remove(&id);
+            if pane.tab_strip_active == Some(id) {
+                pane.tab_strip_active = None;
+            }
+        }
+        self.collapse_empty_panes();
+        self.restore_focused_pane(true);
+        self.session_dirty = true;
+    }
+    /// Reconcile a global buffer removal without importing a project fallback into a group.
+    pub(super) fn reconcile_layout_after_close(&mut self) {
+        let open: std::collections::HashSet<_> = self
+            .projects
+            .iter()
+            .flat_map(|project| project.tabs.iter().map(|tab| tab.id))
+            .collect();
+        for pane in &mut self.editor_layout.panes {
+            pane.documents.retain(|id| open.contains(id));
+            pane.states.retain(|id, _| open.contains(id));
+            if pane.document.is_none_or(|id| !pane.documents.contains(&id)) {
+                pane.document = pane.documents.first().copied();
+                pane.view = pane
+                    .document
+                    .and_then(|document| pane.states.get(&document))
+                    .map_or(DocumentView::Source, |state| state.view);
+            }
+        }
+        self.collapse_empty_panes();
+        self.restore_focused_pane(true);
+    }
+    fn collapse_empty_panes(&mut self) {
+        let empty: Vec<_> = self
+            .editor_layout
+            .panes
+            .iter()
+            .filter(|pane| pane.documents.is_empty())
+            .map(|pane| pane.id)
+            .collect();
+        for id in empty {
+            if self.editor_layout.panes.len() == 1 {
+                break;
+            }
+            let next = self.editor_layout.root.neighbor(id);
+            self.editor_layout.root.remove(id);
+            self.editor_layout.panes.retain(|pane| pane.id != id);
+            self.editor_layout.rects.remove(&id);
+            if self.editor_layout.focused == id {
+                self.editor_layout.focused =
+                    next.unwrap_or_else(|| self.editor_layout.root.first_id());
+                self.render_pane = self.editor_layout.focused;
+                self.completions = None;
+                self.completion_request = None;
+            }
+        }
+    }
+    fn tab_location(&self, id: u64) -> Option<(usize, usize)> {
+        self.projects
+            .iter()
+            .enumerate()
+            .find_map(|(pi, p)| p.tabs.iter().position(|t| t.id == id).map(|ti| (pi, ti)))
+    }
+    fn restore_focused_pane(&mut self, request_focus: bool) {
+        let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|p| p.id == self.editor_layout.focused)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(id) = pane.document else { return };
+        let Some((pi, ti)) = self.tab_location(id) else {
+            return;
+        };
+        self.active_project = pi;
+        self.projects[pi].active_tab = ti;
+        self.render_pane = pane.id;
+        let tab = &mut self.projects[pi].tabs[ti];
+        if let Some(state) = pane.states.get(&id) {
+            if tab.loading {
+                tab.vim.cursor = state.navigation.cursor;
+            } else {
+                tab.vim.restore_navigation(&tab.text, &state.navigation);
+            }
+            tab.selection = if self.settings.vim && tab.vim.mode != VimMode::Insert {
+                tab.vim
+                    .selection(&tab.text)
+                    .unwrap_or(tab.vim.cursor..tab.vim.cursor)
+            } else {
+                state.selection.clone()
+            };
+        }
+        tab.agent_view = pane.view;
+        if request_focus {
+            tab.pending_selection = Some(tab.selection.clone());
+            tab.focus = pane.view == DocumentView::Source;
+        }
+        if request_focus {
+            let widget = self.document_widget_id(id);
+            self.ctx.memory_mut(|memory| {
+                if pane.view == DocumentView::Source {
+                    memory.request_focus(widget);
+                } else if let Some(focused) = memory.focused() {
+                    memory.surrender_focus(focused);
+                }
+            });
+        }
+    }
+    fn focus_editor_pane(&mut self, pane_id: u64) -> Result<(), String> {
+        if !self
+            .editor_layout
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id)
+        {
+            return Err("Pane no longer exists; inspect layout status".into());
+        }
+        if pane_id == self.editor_layout.focused {
+            return Ok(());
+        }
+        if let Some(tab) = self.tab_mut()
+            && tab.vim.finish_insert(&mut tab.text).text_changed
+        {
+            tab.changed();
+        }
+        self.capture_pane_navigation();
+        self.editor_layout.focused = pane_id;
+        self.render_pane = pane_id;
+        self.completions = None;
+        self.completion_request = None;
+        self.restore_focused_pane(true);
+        self.session_dirty = true;
+        Ok(())
+    }
+    pub(super) fn focus_pane_from_pointer(&mut self) {
+        if self.picker.is_some()
+            || self.save_as.is_some()
+            || self.settings_open
+            || self.close_action.is_some()
+            || self.palette.is_some()
+            || self.context_file_dialog.is_some()
+            || egui::Popup::is_any_open(&self.ctx)
+        {
+            return;
+        }
+        let position = self.ctx.input(|i| {
+            i.pointer
+                .any_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
+        if let Some(position) = position {
+            let pane = self
+                .editor_layout
+                .rects
+                .iter()
+                .find_map(|(id, rect)| rect.contains(position).then_some(*id));
+            if let Some(id) = pane {
+                let _ = self.focus_editor_pane(id);
+            }
+        }
+    }
+    fn synchronize_layout(&mut self) {
+        self.initialize_pane_groups();
+        let open: std::collections::HashSet<_> = self
+            .projects
+            .iter()
+            .flat_map(|p| p.tabs.iter().map(|t| t.id))
+            .collect();
+        let markdown_documents: std::collections::HashSet<_> = self
+            .projects
+            .iter()
+            .flat_map(|project| &project.tabs)
+            .filter(|tab| is_markdown(tab.path.as_deref()))
+            .map(|tab| tab.id)
+            .collect();
+        for pane in &mut self.editor_layout.panes {
+            pane.documents.retain(|id| open.contains(id));
+            pane.states.retain(|id, _| open.contains(id));
+            if pane.document.is_none_or(|id| !pane.documents.contains(&id)) {
+                pane.document = pane.documents.first().copied();
+                pane.view = pane
+                    .document
+                    .and_then(|id| pane.states.get(&id))
+                    .map_or(DocumentView::Source, |state| state.view);
+            }
+            if pane
+                .document
+                .is_some_and(|id| !markdown_documents.contains(&id))
+            {
+                pane.view = DocumentView::Source;
+                for (id, state) in &mut pane.states {
+                    if !markdown_documents.contains(id) {
+                        state.view = DocumentView::Source;
+                    }
+                }
+            }
+        }
+        if let Some(tab) = self.tab_mut()
+            && !is_markdown(tab.path.as_deref())
+        {
+            tab.agent_view = DocumentView::Source;
+        }
+        self.collapse_empty_panes();
+        self.capture_pane_navigation();
+    }
+    pub(super) fn split_active(&mut self, orientation: SplitOrientation) -> Result<u64, String> {
+        self.synchronize_layout();
+        if self.editor_layout.panes.len() >= MAX_PANES {
+            return Err(format!("At most {MAX_PANES} panes can be open"));
+        }
+        if self.tab().is_none() {
+            return Err("Open a document before splitting".into());
+        }
+        if let Some(tab) = self.tab_mut()
+            && tab.vim.finish_insert(&mut tab.text).text_changed
+        {
+            tab.changed();
+        }
+        self.capture_pane_navigation();
+        let target = self.editor_layout.focused;
+        let id = self.editor_layout.next_id;
+        self.editor_layout.next_id += 1;
+        let mut pane = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == target)
+            .cloned()
+            .ok_or("Focused pane is unavailable")?;
+        pane.id = id;
+        pane.documents = pane.document.into_iter().collect();
+        pane.states
+            .retain(|document, _| Some(*document) == pane.document);
+        pane.tab_strip_active = None;
+        if !self.editor_layout.root.split(target, id, orientation) {
+            return Err("Focused pane is unavailable".into());
+        }
+        self.editor_layout.panes.push(pane);
+        self.focus_editor_pane(id)?;
+        Ok(id)
+    }
+    pub(super) fn open_to_side(&mut self, path: PathBuf) {
+        match self.split_active(SplitOrientation::Vertical) {
+            Ok(id) => {
+                if let Some(pane) = self
+                    .editor_layout
+                    .panes
+                    .iter_mut()
+                    .find(|pane| pane.id == id)
+                {
+                    pane.documents.clear();
+                    pane.document = None;
+                    pane.states.clear();
+                }
+                self.open_argument(path);
+            }
+            Err(error) => self.status(error, true),
+        }
+    }
+    fn close_editor_pane(&mut self, id: u64) -> Result<(), String> {
+        if self.editor_layout.panes.len() == 1 {
+            return Err("The last pane stays open; close its document instead".into());
+        }
+        if !self.editor_layout.panes.iter().any(|pane| pane.id == id) {
+            return Err("Pane no longer exists".into());
+        }
+        self.capture_pane_navigation();
+        let documents = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.documents.clone())
+            .unwrap_or_default();
+        if self.editor_layout.focused == id {
+            let next = self
+                .editor_layout
+                .root
+                .neighbor(id)
+                .ok_or("Pane has no remaining neighbor")?;
+            self.focus_editor_pane(next)?;
+        }
+        let states = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.states.clone())
+            .unwrap_or_default();
+        self.editor_layout.root.remove(id);
+        self.editor_layout.panes.retain(|pane| pane.id != id);
+        self.editor_layout.rects.remove(&id);
+        let assigned: std::collections::HashSet<_> = self
+            .editor_layout
+            .panes
+            .iter()
+            .flat_map(|pane| pane.documents.iter().copied())
+            .collect();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.editor_layout.focused)
+        {
+            for id in documents.into_iter().filter(|id| !assigned.contains(id)) {
+                pane.documents.push(id);
+                if let Some(state) = states.get(&id) {
+                    pane.states.insert(id, state.clone());
+                }
+            }
+        }
+        self.adopt_orphan_documents();
+        self.session_dirty = true;
+        Ok(())
+    }
+    pub(super) fn layout_status(&self) -> Value {
+        let panes: Vec<_> = self.editor_layout.panes.iter().map(|pane| {
+            let current = self.tab().filter(|t| pane.id == self.editor_layout.focused && Some(t.id) == pane.document);
+            let navigation = current.map(|t|t.vim.navigation()).or_else(||pane.document.and_then(|id|pane.states.get(&id)).map(|state|state.navigation.clone()));
+            let location = pane.document.and_then(|id|self.tab_location(id)).map(|(pi,ti)| {
+                let tab = &self.projects[pi].tabs[ti];
+                let cursor = navigation.as_ref().map_or(0,|nav|nav.cursor);
+                let (line,column) = tab.lines.line_col(&tab.text,tab.revision,cursor);
+                json!({"line":line,"column":column})
+            });
+            json!({"id":pane.id,"tab_id":pane.document,"tab_ids":pane.documents,"view":current.map_or(pane.view,|tab|tab.agent_view),"focused":pane.id==self.editor_layout.focused,"location":location})
+        }).collect();
+        json!({"focused_pane":self.editor_layout.focused,"max_panes":MAX_PANES,"tree":self.editor_layout.root,"panes":panes})
+    }
+    pub(super) fn control_layout(&mut self, change: LayoutAction) -> Result<Value, String> {
+        self.synchronize_layout();
+        match change {
+            LayoutAction::Status {} => {}
+            LayoutAction::Split {
+                orientation,
+                pane_id,
+                tab_id,
+                view,
+            } => {
+                if self.editor_layout.panes.len() >= MAX_PANES {
+                    return Err(format!(
+                        "At most {MAX_PANES} panes can be open; no pane changed"
+                    ));
+                }
+                if let Some(id) = pane_id
+                    && !self.editor_layout.panes.iter().any(|pane| pane.id == id)
+                {
+                    return Err("Pane no longer exists; no pane changed".into());
+                }
+                if let Some(id) = tab_id {
+                    self.tab_location(id).ok_or("Tab no longer exists")?;
+                }
+                let target = tab_id
+                    .or_else(|| {
+                        pane_id.and_then(|id| {
+                            self.editor_layout
+                                .panes
+                                .iter()
+                                .find(|pane| pane.id == id)
+                                .and_then(|pane| pane.document)
+                        })
+                    })
+                    .or_else(|| self.tab().map(|tab| tab.id));
+                if target.is_none() {
+                    return Err("Open a document before splitting; no pane changed".into());
+                }
+                if view == Some(DocumentView::Preview)
+                    && target
+                        .and_then(|id| self.tab_location(id))
+                        .is_none_or(|(pi, ti)| {
+                            !is_markdown(self.projects[pi].tabs[ti].path.as_deref())
+                        })
+                {
+                    return Err("Preview requires a Markdown document; no pane changed".into());
+                }
+                if let Some(id) = pane_id {
+                    self.focus_editor_pane(id)?;
+                }
+                let new_id = self.split_active(orientation)?;
+                if let Some(id) = tab_id {
+                    if let Some(pane) = self
+                        .editor_layout
+                        .panes
+                        .iter_mut()
+                        .find(|pane| pane.id == new_id)
+                    {
+                        pane.documents.clear();
+                        pane.document = None;
+                        pane.states.clear();
+                    }
+                    self.assign_editor_pane(new_id, id, view)?;
+                } else if let Some(view) = view {
+                    self.set_document_view(view);
+                }
+            }
+            LayoutAction::Focus { pane_id } => self.focus_editor_pane(pane_id)?,
+            LayoutAction::Close { pane_id } => self.close_editor_pane(pane_id)?,
+            LayoutAction::CloseTab { pane_id, tab_id } => {
+                self.control_close_pane_tab(pane_id, tab_id)?;
+            }
+            LayoutAction::Assign {
+                pane_id,
+                tab_id,
+                view,
+            } => self.assign_editor_pane(pane_id, tab_id, view)?,
+            LayoutAction::Resize { pane_id, ratio } => {
+                if !ratio.is_finite() || !(0.15..=0.85).contains(&ratio) {
+                    return Err("Split ratio must be between 0.15 and 0.85".into());
+                }
+                if !self.editor_layout.root.resize(pane_id, ratio) {
+                    return Err("Pane has no resizable parent split".into());
+                }
+                self.session_dirty = true;
+            }
+        }
+        self.capture_pane_navigation();
+        Ok(self.layout_status())
+    }
+    fn assign_editor_pane(
+        &mut self,
+        pane_id: u64,
+        tab_id: u64,
+        view: Option<DocumentView>,
+    ) -> Result<(), String> {
+        let (pi, ti) = self.tab_location(tab_id).ok_or("Tab no longer exists")?;
+        if view == Some(DocumentView::Preview)
+            && !is_markdown(self.projects[pi].tabs[ti].path.as_deref())
+        {
+            return Err("Preview requires a Markdown document".into());
+        }
+        self.focus_editor_pane(pane_id)?;
+        self.activate_tab(pi, ti);
+        if let Some(view) = view {
+            self.set_document_view(view);
+        }
+        Ok(())
+    }
+    pub(super) fn split_shortcuts(&mut self, ctx: &egui::Context) -> bool {
+        let ctrl = egui::Modifiers::COMMAND;
+        let alt = ctrl.plus(egui::Modifiers::ALT);
+        let action = if ctx
+            .input_mut(|i| i.consume_key(ctrl.plus(egui::Modifiers::SHIFT), Key::Backslash))
+        {
+            Some("down")
+        } else if ctx.input_mut(|i| i.consume_key(ctrl, Key::Backslash)) {
+            Some("right")
+        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowRight)) {
+            Some("next")
+        } else if ctx.input_mut(|i| i.consume_key(alt, Key::W)) {
+            Some("close")
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            self.split_command(action);
+            true
+        } else {
+            false
+        }
+    }
+    pub(super) fn split_command(&mut self, action: &str) {
+        let result = match action {
+            "right" => self.split_active(SplitOrientation::Vertical).map(|_| ()),
+            "down" => self.split_active(SplitOrientation::Horizontal).map(|_| ()),
+            "close" => self.close_editor_pane(self.editor_layout.focused),
+            "next" => {
+                let mut ids = Vec::new();
+                self.editor_layout.root.ids(&mut ids);
+                let index = ids
+                    .iter()
+                    .position(|id| *id == self.editor_layout.focused)
+                    .unwrap_or(0);
+                self.focus_editor_pane(ids[(index + 1) % ids.len()])
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            self.status(error, true);
+        }
+    }
+    pub(super) fn split_menu_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        for (label, keys, action) in [
+            ("Split right", "Ctrl+\\", "right"),
+            ("Split down", "Ctrl+Shift+\\", "down"),
+            ("Focus next pane", "Ctrl+Alt+Right", "next"),
+            ("Close pane", "Ctrl+Alt+W", "close"),
+        ] {
+            if design::menu_item(ui, label, keys, "Arrange editor panes; documents stay open")
+                .clicked()
+            {
+                self.split_command(action);
+                ui.close();
+            }
+        }
+    }
+    pub(super) fn editor_session_layout(&self) -> SessionLayout {
+        let panes = self
+            .editor_layout
+            .panes
+            .iter()
+            .map(|pane| {
+                let document = if pane.id == self.editor_layout.focused {
+                    self.tab().map(|t| t.id).or(pane.document)
+                } else {
+                    pane.document
+                };
+                let location = document.and_then(|id| self.tab_location(id));
+                let cursor = if pane.id == self.editor_layout.focused {
+                    self.tab().map_or(0, |t| t.vim.cursor)
+                } else {
+                    document
+                        .and_then(|id| pane.states.get(&id))
+                        .map_or(0, |s| s.navigation.cursor)
+                };
+                SessionPane {
+                    id: pane.id,
+                    project: location.map(|l| l.0),
+                    tab: location.map(|l| l.1),
+                    view: pane.view,
+                    cursor,
+                    documents: Some(
+                        pane.documents
+                            .iter()
+                            .filter_map(|id| self.tab_location(*id))
+                            .collect(),
+                    ),
+                    states: pane
+                        .documents
+                        .iter()
+                        .filter_map(|id| {
+                            let (project, index) = self.tab_location(*id)?;
+                            let tab = &self.projects[project].tabs[index];
+                            let current =
+                                pane.id == self.editor_layout.focused && pane.document == Some(*id);
+                            let state = pane.states.get(id);
+                            Some(SessionPaneDocument {
+                                project,
+                                tab: index,
+                                view: if current {
+                                    tab.agent_view
+                                } else {
+                                    state.map_or(tab.agent_view, |state| state.view)
+                                },
+                                cursor: if current {
+                                    tab.vim.cursor
+                                } else {
+                                    state.map_or(tab.vim.cursor, |state| state.navigation.cursor)
+                                },
+                                selection: if current {
+                                    tab.selection.clone()
+                                } else {
+                                    state.map_or_else(
+                                        || tab.selection.clone(),
+                                        |state| state.selection.clone(),
+                                    )
+                                },
+                            })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        SessionLayout {
+            root: self.editor_layout.root.clone(),
+            panes,
+            focused: self.editor_layout.focused,
+        }
+    }
+    pub(super) fn restore_editor_layout(&mut self, session: Option<SessionLayout>) {
+        let Some(session) = session else { return };
+        let mut ids = Vec::new();
+        session.root.ids(&mut ids);
+        let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+        if ids.is_empty()
+            || ids.len() > MAX_PANES
+            || unique.len() != ids.len()
+            || unique.contains(&0)
+            || !unique.contains(&session.focused)
+        {
+            return;
+        }
+        let mut panes = Vec::new();
+        for id in ids {
+            let mut pane = Pane::empty(id);
+            if let Some(saved) = session.panes.iter().find(|p| p.id == id) {
+                if let Some(documents) = &saved.documents {
+                    for (pi, ti) in documents {
+                        if let Some(tab) = self
+                            .projects
+                            .get(*pi)
+                            .and_then(|project| project.tabs.get(*ti))
+                            && !pane.documents.contains(&tab.id)
+                        {
+                            pane.documents.push(tab.id);
+                        }
+                    }
+                }
+                for state in &saved.states {
+                    if let Some(tab) = self
+                        .projects
+                        .get(state.project)
+                        .and_then(|project| project.tabs.get(state.tab))
+                        && pane.documents.contains(&tab.id)
+                    {
+                        let mut navigation = tab.vim.navigation();
+                        navigation.cursor = state.cursor;
+                        pane.states.insert(
+                            tab.id,
+                            PaneDocumentState {
+                                navigation,
+                                view: state.view,
+                                selection: state.selection.clone(),
+                            },
+                        );
+                    }
+                }
+                if let Some(tab) = saved
+                    .project
+                    .and_then(|pi| self.projects.get(pi))
+                    .and_then(|p| saved.tab.and_then(|ti| p.tabs.get(ti)))
+                {
+                    // Old sessions had a shared tab strip. Preserve each split's active
+                    // document and migrate the remaining buffers into the focused group.
+                    if !pane.documents.contains(&tab.id) {
+                        pane.documents.push(tab.id);
+                    }
+                    pane.document = Some(tab.id);
+                    pane.view = saved.view;
+                    let mut navigation = tab.vim.navigation();
+                    navigation.cursor = saved.cursor;
+                    pane.states.entry(tab.id).or_insert(PaneDocumentState {
+                        navigation,
+                        view: saved.view,
+                        selection: saved.cursor..saved.cursor,
+                    });
+                } else {
+                    pane.document = pane.documents.first().copied();
+                }
+            }
+            panes.push(pane);
+        }
+        self.editor_layout = EditorLayout {
+            next_id: panes
+                .iter()
+                .map(|p| p.id)
+                .max()
+                .unwrap_or(1)
+                .saturating_add(1),
+            root: session.root,
+            panes,
+            focused: session.focused,
+            rects: HashMap::new(),
+            groups_initialized: true,
+        };
+        if session
+            .panes
+            .iter()
+            .find(|pane| pane.id == session.focused)
+            .is_some_and(|pane| pane.documents.is_none())
+        {
+            let documents: Vec<_> = self
+                .projects
+                .iter()
+                .flat_map(|project| &project.tabs)
+                .collect();
+            if let Some(pane) = self
+                .editor_layout
+                .panes
+                .iter_mut()
+                .find(|pane| pane.id == session.focused)
+            {
+                pane.documents = documents.iter().map(|tab| tab.id).collect();
+                for tab in documents {
+                    pane.states.entry(tab.id).or_insert(PaneDocumentState {
+                        navigation: tab.vim.navigation(),
+                        view: tab.agent_view,
+                        selection: tab.selection.clone(),
+                    });
+                }
+            }
+        }
+        self.adopt_orphan_documents();
+        self.collapse_empty_panes();
+        self.restore_focused_pane(false);
+    }
+    pub(super) fn split_editor_ui(&mut self, ui: &mut egui::Ui) {
+        self.synchronize_layout();
+        self.focus_pane_from_pointer();
+        let node = self.editor_layout.root.clone();
+        let rect = ui.available_rect_before_wrap();
+        self.rendering_panes = true;
+        self.render_split_node(ui, &node, rect);
+        self.rendering_panes = false;
+        self.restore_focused_pane(false);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+    fn render_split_node(&mut self, ui: &mut egui::Ui, node: &PaneNode, rect: egui::Rect) {
+        match node {
+            PaneNode::Pane { id } => self.render_editor_pane(ui, *id, rect),
+            PaneNode::Split {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => {
+                let ratio = ratio.clamp(0.15, 0.85);
+                let vertical = *orientation == SplitOrientation::Vertical;
+                let length = if vertical {
+                    rect.width()
+                } else {
+                    rect.height()
+                };
+                let size = (length - 5.0).max(0.0) * ratio;
+                let (a, divider, b) = if vertical {
+                    let x = rect.left() + size;
+                    (
+                        egui::Rect::from_min_max(rect.min, egui::pos2(x, rect.bottom())),
+                        egui::Rect::from_min_max(
+                            egui::pos2(x, rect.top()),
+                            egui::pos2(x + 5.0, rect.bottom()),
+                        ),
+                        egui::Rect::from_min_max(egui::pos2(x + 5.0, rect.top()), rect.max),
+                    )
+                } else {
+                    let y = rect.top() + size;
+                    (
+                        egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), y)),
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), y),
+                            egui::pos2(rect.right(), y + 5.0),
+                        ),
+                        egui::Rect::from_min_max(egui::pos2(rect.left(), y + 5.0), rect.max),
+                    )
+                };
+                self.render_split_node(ui, first, a);
+                self.render_split_node(ui, second, b);
+                let response = ui.interact(
+                    divider,
+                    ui.id()
+                        .with(("pane_divider", first.first_id(), second.first_id())),
+                    egui::Sense::drag(),
+                );
+                ui.painter().rect_filled(
+                    divider,
+                    0.0,
+                    if response.hovered() || response.dragged() {
+                        ACCENT.linear_multiply(0.4)
+                    } else {
+                        BORDER
+                    },
+                );
+                if response.dragged()
+                    && let Some(position) = response.interact_pointer_pos()
+                {
+                    let next = if vertical {
+                        (position.x - rect.left()) / (length - 5.0).max(1.0)
+                    } else {
+                        (position.y - rect.top()) / (length - 5.0).max(1.0)
+                    };
+                    self.editor_layout.root.resize_divider(
+                        first.first_id(),
+                        second.first_id(),
+                        next.clamp(0.15, 0.85),
+                    );
+                    self.session_dirty = true;
+                }
+                response
+                    .on_hover_cursor(if vertical {
+                        egui::CursorIcon::ResizeHorizontal
+                    } else {
+                        egui::CursorIcon::ResizeVertical
+                    })
+                    .on_hover_text("Drag to resize editor panes");
+            }
+        }
+    }
+    fn render_editor_pane(&mut self, ui: &mut egui::Ui, pane_id: u64, rect: egui::Rect) {
+        let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|p| p.id == pane_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.editor_layout.rects.insert(pane_id, rect);
+        let active_before = (
+            self.active_project,
+            self.project().map_or(0, |p| p.active_tab),
+        );
+        let metrics = (
+            self.editor_focused,
+            self.editor_rect,
+            self.editor_cursor_rect,
+        );
+        self.render_pane = pane_id;
+        let inactive = pane_id != self.editor_layout.focused;
+        let mut previous = None;
+        if let Some((pi, ti)) = pane.document.and_then(|id| self.tab_location(id)) {
+            self.active_project = pi;
+            self.projects[pi].active_tab = ti;
+            let tab = &mut self.projects[pi].tabs[ti];
+            if inactive {
+                previous = Some((
+                    tab.id,
+                    tab.vim.navigation(),
+                    tab.agent_view,
+                    tab.selection.clone(),
+                    tab.pending_selection.clone(),
+                    tab.focus,
+                    tab.scroll_to_cursor,
+                ));
+                if let Some(state) = pane.states.get(&tab.id) {
+                    if tab.loading {
+                        tab.vim.cursor = state.navigation.cursor;
+                    } else {
+                        tab.vim.restore_navigation(&tab.text, &state.navigation);
+                    }
+                    tab.selection = if self.settings.vim && tab.vim.mode != VimMode::Insert {
+                        tab.vim
+                            .selection(&tab.text)
+                            .unwrap_or(tab.vim.cursor..tab.vim.cursor)
+                    } else {
+                        state.selection.clone()
+                    };
+                }
+                tab.pending_selection = Some(tab.selection.clone());
+                tab.focus = false;
+                tab.scroll_to_cursor = false;
+            }
+            tab.agent_view = pane.view;
+        }
+        self.tab_strip_active = pane.tab_strip_active;
+        let focused = pane_id == self.editor_layout.focused;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("editor_pane", pane_id)),
+            |ui| {
+                ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.editor_pane_ui(ui);
+            },
+        );
+        self.capture_pane_navigation();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id)
+        {
+            pane.tab_strip_active = self.tab_strip_active;
+        }
+        if let Some((id, navigation, view, selection, pending, focus, scroll)) = previous
+            && let Some((pi, ti)) = self.tab_location(id)
+        {
+            let tab = &mut self.projects[pi].tabs[ti];
+            if tab.loading {
+                tab.vim.cursor = navigation.cursor;
+            } else {
+                tab.vim.restore_navigation(&tab.text, &navigation);
+            }
+            tab.agent_view = view;
+            tab.selection = selection;
+            tab.pending_selection = pending;
+            tab.focus = focus;
+            tab.scroll_to_cursor = scroll;
+        }
+        if inactive {
+            self.editor_focused = metrics.0;
+            self.editor_rect = metrics.1;
+            self.editor_cursor_rect = metrics.2;
+        }
+        if self.editor_layout.panes.len() > 1 && focused {
+            ui.painter().line_segment(
+                [rect.left_top(), rect.right_top()],
+                Stroke::new(1.0, ACCENT),
+            );
+        }
+        self.active_project = active_before.0;
+        if let Some(project) = self.projects.get_mut(active_before.0) {
+            project.active_tab = active_before.1.min(project.tabs.len().saturating_sub(1));
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "split_tests.rs"]
+mod tests;

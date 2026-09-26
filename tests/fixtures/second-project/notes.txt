@@ -1,0 +1,1 @@
+A second project can stay open beside the first.

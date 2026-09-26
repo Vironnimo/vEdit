@@ -1,0 +1,423 @@
+{
+  "protocol": 1,
+  "purpose": "Read, edit, save and arrange Morrow documents, query project state, run curated tasks and present marked reviews. Responses describe actual GUI application; asynchronous loads/saves remain pending until status confirms completion.",
+  "coordinates": {
+    "positions": "1-based lines and Unicode scalar columns, including the boundary after a line's last character. CRLF cannot be split.",
+    "edit_selection_find_diagnostics": "range.end is exclusive",
+    "annotations": "end inclusive; omitted end marks the entire start line"
+  },
+  "ids": "Tab and pane IDs belong to the response session (process lifetime). Refresh status after restarting; never guess IDs.",
+  "limits": {
+    "files": 100,
+    "annotations": 500,
+    "tabs_page": 100,
+    "query_page": 500,
+    "read_lines": 500,
+    "edit_ranges": 256,
+    "replace_matches": 10000,
+    "batch_actions": 100,
+    "document_bytes": 8388608,
+    "json_bytes": 1048576
+  },
+  "commands": [
+    {
+      "op": "status"
+    },
+    {
+      "op": "tabs",
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "open",
+      "files": [
+        {
+          "path": "C:/project/plan.md",
+          "view": "preview",
+          "location": {
+            "line": 1,
+            "column": 1
+          },
+          "annotations": [
+            {
+              "start": {
+                "line": 4
+              },
+              "end": {
+                "line": 8,
+                "column": 1
+              },
+              "note": "Review this change",
+              "severity": "info"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "op": "review",
+      "title": "Implementation review",
+      "note": "Read the plan then inspect marked changes",
+      "files": [
+        {
+          "path": "C:/project/plan.md",
+          "view": "preview"
+        }
+      ]
+    },
+    {
+      "op": "focus",
+      "tab_id": 1,
+      "location": {
+        "line": 12,
+        "column": 1
+      },
+      "view": "source"
+    },
+    {
+      "op": "close",
+      "tab_ids": [
+        1
+      ]
+    },
+    {
+      "op": "clear_marks",
+      "tab_ids": []
+    },
+    {
+      "op": "workspace",
+      "path": "C:/project"
+    },
+    {
+      "op": "panel",
+      "panel": "review",
+      "visible": true
+    },
+    {
+      "op": "read",
+      "tab_id": 1,
+      "start_line": 1,
+      "line_count": 100
+    },
+    {
+      "op": "save",
+      "tab_ids": [
+        1
+      ]
+    },
+    {
+      "op": "new",
+      "title": "Review draft",
+      "text": "# Plan\n",
+      "path": "C:/project/new-plan.md"
+    },
+    {
+      "op": "save_as",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "path": "C:/project/plan-copy.md"
+    },
+    {
+      "op": "edit",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "edits": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "column": 1
+            },
+            "end": {
+              "line": 2,
+              "column": 3
+            }
+          },
+          "text": "96"
+        }
+      ]
+    },
+    {
+      "op": "edit",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "set_text": "A complete replacement\n"
+    },
+    {
+      "op": "selection",
+      "tab_id": 1
+    },
+    {
+      "op": "selection",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "range": {
+        "start": {
+          "line": 2,
+          "column": 1
+        },
+        "end": {
+          "line": 4,
+          "column": 1
+        }
+      }
+    },
+    {
+      "op": "settings"
+    },
+    {
+      "op": "settings",
+      "patch": {
+        "vim": true,
+        "autosave": true,
+        "font_size": 14.0,
+        "tab_width": 4,
+        "word_wrap": true,
+        "smooth_scroll": false
+      }
+    },
+    {
+      "op": "command",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "command": "undo"
+    },
+    {
+      "op": "find",
+      "tab_id": 1,
+      "query": "budget",
+      "case_sensitive": false,
+      "whole_word": true,
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "replace",
+      "tab_id": 1,
+      "expected_revision": 3,
+      "query": "budget = 64",
+      "replacement": "budget = 96",
+      "case_sensitive": true,
+      "whole_word": false,
+      "all": true
+    },
+    {
+      "op": "diff",
+      "tab_id": 1,
+      "max_lines": 500
+    },
+    {
+      "op": "diagnostics",
+      "tab_id": 1,
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "search",
+      "query": "cache",
+      "workspace": "C:/project",
+      "case_sensitive": false,
+      "whole_word": false,
+      "limit": 100
+    },
+    {
+      "op": "output",
+      "start_line": 1,
+      "line_count": 100
+    },
+    {
+      "op": "git_status",
+      "workspace": "C:/project",
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "task",
+      "action": "check"
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "status"
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "split",
+        "orientation": "vertical",
+        "tab_id": 1,
+        "view": "source"
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "focus",
+        "pane_id": 1
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "assign",
+        "pane_id": 1,
+        "tab_id": 1,
+        "view": "preview"
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "resize",
+        "pane_id": 1,
+        "ratio": 0.6
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "close",
+        "pane_id": 1
+      }
+    },
+    {
+      "op": "layout",
+      "change": {
+        "action": "close_tab",
+        "pane_id": 1,
+        "tab_id": 1
+      }
+    },
+    {
+      "op": "batch",
+      "stop_on_error": true,
+      "actions": [
+        {
+          "op": "panel",
+          "panel": "review",
+          "visible": true
+        },
+        {
+          "op": "layout",
+          "change": {
+            "action": "split",
+            "orientation": "horizontal",
+            "tab_id": 1
+          }
+        }
+      ]
+    },
+    {
+      "op": "raise"
+    },
+    {
+      "op": "file",
+      "action": {
+        "name": "plan.md",
+        "action": "rename",
+        "path": "C:/project/old.md"
+      }
+    },
+    {
+      "op": "file",
+      "action": {
+        "parent": "C:/project",
+        "action": "create_folder",
+        "name": "plans"
+      }
+    },
+    {
+      "op": "file_job",
+      "job_id": 1
+    }
+  ],
+  "editing": {
+    "revision": "Read/tab responses supply current revision. Required expected_revision must match exactly before any edit, replace, command or save_as. A conflict returns actual_revision and changes nothing.",
+    "atomic_edits": "Supply either set_text (empty string clears) or 1..256 edits. All ranges refer to the same observed text, may be supplied in any order, must not overlap or insert twice at one boundary. Validate every range and resulting size before application. Undo restores the prior text as one transaction.",
+    "save_policy": "Mutations change the in-memory buffer and pause autosave only for that document until a successful explicit save. Preferences stay unchanged. Unsaved text is retained for recovery. No implicit writes.",
+    "insert": "Ordinary Vim Insert is finished as a separate undo transaction. If finishing a counted Insert would change observed text, the request fails counted_insert_active without effects; finish it in the app and read again.",
+    "new": "Creates a buffer only, never writes disk. Omit path for untitled; provided absolute path must not exist.",
+    "save_as": "Requires a nonexistent destination; never overwrites. saving:true means pending: inspect status until saving:false and error:null. save retains current path and its external-change guard.",
+    "selection": "Omit range to inspect selected text/mode/history; set range with expected_revision to focus source and enter Vim Visual (empty range returns Normal). End exclusive.",
+    "find": "Literal case/whole-word search of the current buffer; no GUI Find query or cursor is changed. Use a returned range with selection to reveal it.",
+    "replace": "Literal replacement in the current buffer, all:true by default; all:false replaces the first document match. At most 10000 matches, one undo step; no write.",
+    "commands": [
+      "undo",
+      "redo",
+      "select_all",
+      "clear_selection",
+      "indent",
+      "outdent",
+      "toggle_comment",
+      "duplicate_line",
+      "delete_line",
+      "reload",
+      "find_next",
+      "find_previous",
+      "source",
+      "preview"
+    ],
+    "command_behavior": "Commands focus their document; undo/redo perform one step. Reload refuses dirty buffers and completes asynchronously. find_next/previous use the visible GUI Find query; explicit CLI find remains read-only. Preview requires Markdown."
+  },
+  "layout": {
+    "vertical": "side by side",
+    "horizontal": "top and bottom",
+    "split": "pane_id omitted uses focused pane; tab_id omitted duplicates its active document into the new pane's local tab group, with independent view/cursor/scroll but shared text and undo. Optional view chooses source/preview.",
+    "assign": "Adds or focuses tab_id in the target pane's local tab group; it preserves the document in other panes. Optional view chooses source/preview.",
+    "resize": "pane_id targets a pane's containing split; ratio must be 0.15..0.85",
+    "close": "Closes the pane and transfers its otherwise unrepresented tabs to a surviving pane, preserving dirty buffers. Last pane cannot be closed.",
+    "close_tab": "Removes tab_id from pane_id only. Shared dirty buffers remain in other panes. Refuses without effects if this is the last reference to a dirty or saving buffer. An empty split pane collapses automatically; the sole remaining pane stays open.",
+    "document_close": "op:close removes each clean, non-saving document from every pane; use layout close_tab for local tab closure.",
+    "observation": "status/layout returns focused pane, each pane's active tab_id and ordered local tab_ids, orientation tree and ratios."
+  },
+  "settings": {
+    "get": "omit patch",
+    "patch": "only supplied fields change; null leaves a field unchanged. Applied settings are returned, persistence is queued.",
+    "font_size": "10..24",
+    "tab_width": "1..8",
+    "smooth_scroll": "false by default; input key scrolling works with either setting"
+  },
+  "queries": {
+    "diff": "Bounded contiguous replacement hunk against saved buffer, not Git history; reports truncation.",
+    "diagnostics": "Open document's current cached language-server diagnostics; one-based Unicode range, exclusive end, clamping explicitly reported when positions are stale.",
+    "search": "Completes on a background worker over indexed files on disk; unsaved buffers excluded. Active workspace default, limit/time/byte budgets reported. Never modifies GUI search state.",
+    "git_status": "Cached branch and changed files with age/loading/error; does not trigger refresh.",
+    "output": "Bounded task output text page with actual task status; long-line byte truncation is explicit.",
+    "task": "check/test/build run Cargo against the active workspace's saved files. Require Cargo.toml; never auto-save or replace a running task. stop requests cancellation; inspect output/status for completion."
+  },
+  "batch": {
+    "semantics": "Ordered actions, stop_on_error:true default. Reports each completed response, stopping index and remaining count. No rollback. A per-item partial failure stops just like an error. Retry remaining actions only after inspecting state, never replay successful edits.",
+    "restrictions": "No nested batch, asynchronous background Search or File inside batch; run search/file separately. Read-only batches remain available during a user dialog.",
+    "result_detail": "Results above 128 KiB become compact effect evidence retaining tab IDs/revisions and per-item outcomes, with details_omitted:true. Retrieve omitted text/details separately. If accumulated evidence approaches the transport budget, the batch stops at the next unexecuted action with stopped_reason:result_budget and remaining count; never replay the completed prefix."
+  },
+  "defaults": {
+    "view": "source",
+    "column": 1,
+    "annotation_severity": "info",
+    "open_annotations": "provided nonempty annotations replace marks for that tab; omission preserves them",
+    "review": "replaces previous review marks; focuses first successfully opened file",
+    "open": "focuses last successfully opened file; clean buffers refresh asynchronously from disk",
+    "location_omitted": "reveals first annotation when present; otherwise preserves document cursor",
+    "close": "refuses unsaved/saving tabs",
+    "clear_marks_empty": "clears all marks and review summary",
+    "relative_paths": "CLI open/request use current directory; review manifest paths use manifest directory"
+  },
+  "panels": [
+    "explorer",
+    "search",
+    "source_control",
+    "review",
+    "output",
+    "problems",
+    "settings"
+  ],
+  "strictness": "Unknown/duplicate fields and contradictory constraints fail before effects. A user dialog blocks mutation, but read-only observations remain available.",
+  "file_actions": {
+    "rename": "Renames in the same parent directory without replacing an existing file/folder. Preserves open buffer contents, dirty state, cursor and attached panes; paths update after actual completion. Busy documents/jobs are refused.",
+    "limits": "At most four pending jobs; the newest 32 completed jobs are retained. IDs include the process identity and expire after app restart/eviction. status.file_jobs is bounded and may mark details_truncated; file_job returns full details.",
+    "create_folder": "Creates one new folder under an existing workspace directory without overwrite.",
+    "completion": "File returns accepted:true, applied:false, pending:true, job_id, status:pending and phase:preparing. This proves acceptance only. Poll file_job: status is pending/applied/failed, phase preparing/applying/complete, complete indicates the job ended and applied confirms the filesystem change. A successful query with status:failed is an observed failed operation. Full job evidence includes path/destination/error/updated_tabs; after ambiguous delivery inspect status.file_jobs and files rather than replaying a rename.",
+    "scope": "Registered workspaces only; canonical paths verified in a background worker. New names are single basenames, never paths. Sources that are symbolic links or Windows reparse points are refused."
+  }
+}

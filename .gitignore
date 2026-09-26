@@ -1,0 +1,7 @@
+/target/
+/dist/
+/.morrow-backups/
+/Morrow.lnk
+*.diff.png
+*.old.png
+*.new.png
