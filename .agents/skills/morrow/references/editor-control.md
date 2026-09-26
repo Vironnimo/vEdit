@@ -32,9 +32,13 @@ Agent text mutations stay dirty without autosaving. `save TAB_ID...` explicitly 
 
 `find` locates literal text with case/word options and bounded results. It leaves the GUI search and cursor unchanged; use a returned range with `selection` to reveal a match. The `find_next` and `find_previous` editor commands use the visible GUI search query. `replace` requires the current revision and supports one or all matches. `diff` compares the open buffer with its saved state and returns one contiguous replacement hunk with bounded before/after text. `diagnostics` reports the language server's diagnostics for the specified tab, using exclusive range ends. A `location_clamped` item indicates an outdated or out-of-range diagnostic position. Check language-server readiness and truncation before interpreting an empty or partial result.
 
+Buffers belong to their project. `tabs` lists buffers across all projects and identifies each `workspace`; reading, finding, editing, replacing, or saving an inactive project's buffer leaves the visible project selected. `focus TAB_ID`, setting a selection, and editor `command` actions select that buffer's project and restore its saved panes before revealing it. `workspace DIRECTORY` adds or selects a project and restores its saved layout.
+
+When switching projects to focus a tab, Morrow prefers a pane already displaying it, keeping the focused pane if it matches. Otherwise it uses the focused pane containing the tab, then another containing pane, or adds the tab to the focused group. Omitted `view` preserves that pane's Source/Preview choice; an explicit view changes only the chosen pane. Use layout `focus` to select a particular pane when the same buffer has several views.
+
 ## Arrange panes and preferences
 
-`layout` with `change:{"action":"status"}` reports the split tree and current pane IDs. Split the focused pane to display another open tab:
+`layout` with `change:{"action":"status"}` reports the active project's `workspace`, split tree and current pane IDs. Each project keeps its own tab order, focused pane, Source/Preview views, cursor, selection and scroll positions. Switching projects restores those views together. `status.active_workspace` identifies the visible project; `status.layout` describes only its panes, while `status.tabs` remains a page of buffers across projects. Split the focused pane to display another tab from this project:
 
 ```json
 {
@@ -44,6 +48,8 @@ Agent text mutations stay dirty without autosaving. `save TAB_ID...` explicitly 
 ```
 
 `vertical` places panes side by side; `horizontal` stacks them. `pane_id` optionally identifies which pane to split. Each pane owns its tab bar: layout reports its active `tab_id` and ordered local `tab_ids`. The new pane starts with the selected document; opening files adds them to the focused pane. Use returned pane IDs for `focus`, `assign`, `move_tab`, `resize`, `close_tab`, and `close` layout actions. `assign` adds or focuses a tab in that pane without removing it from other panes, and accepts an optional view. The same Markdown buffer can appear in Source and Preview at once; text and Undo are shared while pane navigation and scroll positions are separate.
+
+Layout actions affect only the active project. Pane IDs remain stable and unique across project switches for the app process, but an inactive project's pane ID is refused; it never selects that project or retargets a different pane. A tab from another project is also refused before effects. First select its project with `workspace` or `focus`, then inspect layout and use that project's actual IDs.
 
 To move a tab to the first position in another pane, supply its source and target IDs:
 
@@ -95,4 +101,6 @@ To create a folder, use `action:{"action":"create_folder","parent":"C:/project",
 
 `batch` runs its `actions` in order and stops on error by default. Use it for actions whose IDs and revisions are already known and remain valid after earlier actions. Results preserve completed steps; it is not a transaction, and returned IDs cannot be substituted into later actions automatically. Nested batches, background project search, and file operations are excluded. For dependent edits or newly opened files, inspect the preceding result before constructing the next request.
 
-An open/review can be partially successful; retry failed opens only, or send a deliberate complete replacement review. A review replaces earlier annotations, so preserve items that should remain. After an edit, old annotations become stale; submit updated ranges against the current buffer if marks are still needed. An active user dialog, Vim search, or tab drag can block mutation; inspect the reported interaction and wait for the user to finish.
+An open/review can be partially successful; retry failed opens only, or send a deliberate complete replacement review. Files stay with their existing open buffer's project, otherwise the deepest registered project containing the path; an unmatched path opens a project for its parent directory. Successful files appear in that project's tab group. `open` leaves the last successful file's project visible; `review` reveals the first successful file's project. A review can span projects: it retains all successful buffers and marks, and `focus TAB_ID` reveals an item from another project in its saved layout. Inspect `tabs` for ownership and `status`/`layout` for the final visible views; an item's success does not mean every reviewed file is visible at once.
+
+A review replaces earlier annotations across projects, so preserve items that should remain. After an edit, old annotations become stale; submit updated ranges against the current buffer if marks are still needed. An active user dialog, Vim search, or tab drag can block mutation; inspect the reported interaction and wait for the user to finish.

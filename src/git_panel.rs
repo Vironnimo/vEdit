@@ -16,6 +16,7 @@ pub(super) enum GitSection {
 
 #[derive(Default)]
 pub(super) struct GitViewState {
+    pub graph: crate::git_graph::Graph,
     pub(super) section: GitSection,
     pub(super) selected_commit: Option<String>,
     pub(super) detail: Option<git::CommitDetails>,
@@ -213,6 +214,8 @@ enum GitUiAction {
     Commit(String),
     SelectCommit(String),
     LoadMore,
+    RetryHistory,
+    RefreshHistory,
     Fetch,
     Pull,
     Push,
@@ -351,9 +354,13 @@ impl MorrowApp {
         if !repo {
             ui.add_space(12.0);
             ui.label(
-                RichText::new("Track this project's changes with Git.")
-                    .size(12.0)
-                    .color(MUTED),
+                RichText::new(if loading {
+                    "Reading repository…"
+                } else {
+                    "Track this project's changes with Git."
+                })
+                .size(12.0)
+                .color(MUTED),
             );
             if !loading
                 && !busy
@@ -506,10 +513,40 @@ impl MorrowApp {
                     }
                 }
                 GitSection::History => {
+                    // The graph grows once per received page, never per painted
+                    // row. This also initializes synthetic screenshot fixtures.
+                    if state.graph.rows.len() > project.recent_commits.len() {
+                        state.graph.clear();
+                    }
+                    state
+                        .graph
+                        .append(&project.recent_commits[state.graph.rows.len()..]);
+                    if project.git_history_update_available
+                        && design::ghost_button(
+                            ui,
+                            "History changed · Refresh",
+                            "Show the latest branches and commits",
+                        )
+                        .clicked()
+                    {
+                        actions.push(GitUiAction::RefreshHistory);
+                    }
                     if let Some(error) = &project.git_history_error {
                         error_note(ui, error);
+                        if design::ghost_button(
+                            ui,
+                            "Retry history",
+                            "Retry the failed history request",
+                        )
+                        .clicked()
+                        {
+                            actions.push(GitUiAction::RetryHistory);
+                        }
                     }
-                    if project.recent_commits.is_empty() && !loading {
+                    if project.recent_commits.is_empty()
+                        && !loading
+                        && project.git_history_error.is_none()
+                    {
                         ui.add_space(20.0);
                         ui.label(RichText::new("No commits yet").size(12.5).color(TEXT));
                         ui.label(
@@ -518,72 +555,94 @@ impl MorrowApp {
                                 .color(MUTED),
                         );
                     }
-                    let more_available = project.recent_commits.len() >= project.git_history_limit;
-                    egui::ScrollArea::vertical()
-                        .id_salt(("git-history", project_index))
-                        .auto_shrink([false, false])
-                        .max_height(
-                            (ui.available_height() - if more_available { 44.0 } else { 0.0 })
-                                .max(65.0),
-                        )
-                        .show_rows(ui, 53.0, project.recent_commits.len(), |ui, range| {
-                            for index in range {
-                                let commit = &project.recent_commits[index];
-                                ui.push_id(&commit.hash, |ui| {
-                                    let response = history_row(
-                                        ui,
-                                        commit,
-                                        state.selected_commit.as_deref() == Some(&commit.hash),
-                                        index + 1 < project.recent_commits.len(),
-                                    );
-                                    if response.clicked() {
-                                        actions
-                                            .push(GitUiAction::SelectCommit(commit.hash.clone()));
+                    let mut near_end = false;
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        egui::ScrollArea::vertical()
+                            .id_salt(("git-history", project_index, project.git_history_generation))
+                            .auto_shrink([false, false])
+                            .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT))
+                            .show_rows(
+                                ui,
+                                HISTORY_ROW_HEIGHT,
+                                project.recent_commits.len(),
+                                |ui, range| {
+                                    near_end =
+                                        history_near_end(range.end, project.recent_commits.len());
+                                    for index in range {
+                                        let commit = &project.recent_commits[index];
+                                        ui.push_id(&commit.hash, |ui| {
+                                            let response = history_row(
+                                                ui,
+                                                commit,
+                                                state.selected_commit.as_deref()
+                                                    == Some(&commit.hash),
+                                                &state.graph.rows[index],
+                                                state.graph.lane_count,
+                                            );
+                                            if response.clicked() {
+                                                actions.push(GitUiAction::SelectCommit(
+                                                    commit.hash.clone(),
+                                                ));
+                                            }
+                                            response.context_menu(|ui| {
+                                                if design::menu_item(
+                                                    ui,
+                                                    "Open commit",
+                                                    "",
+                                                    "Show metadata, message, and changed files",
+                                                )
+                                                .clicked()
+                                                {
+                                                    actions.push(GitUiAction::SelectCommit(
+                                                        commit.hash.clone(),
+                                                    ));
+                                                    ui.close();
+                                                }
+                                                if design::menu_item(
+                                                    ui,
+                                                    "Copy commit hash",
+                                                    "",
+                                                    "Copy the full commit identifier",
+                                                )
+                                                .clicked()
+                                                {
+                                                    ui.ctx().copy_text(commit.hash.clone());
+                                                    ui.close();
+                                                }
+                                            });
+                                        });
                                     }
-                                    response.context_menu(|ui| {
-                                        if design::menu_item(
-                                            ui,
-                                            "Open commit",
-                                            "",
-                                            "Show metadata, message, and changed files",
-                                        )
-                                        .clicked()
-                                        {
-                                            actions.push(GitUiAction::SelectCommit(
-                                                commit.hash.clone(),
-                                            ));
-                                            ui.close();
-                                        }
-                                        if design::menu_item(
-                                            ui,
-                                            "Copy commit hash",
-                                            "",
-                                            "Copy the full commit identifier",
-                                        )
-                                        .clicked()
-                                        {
-                                            ui.ctx().copy_text(commit.hash.clone());
-                                            ui.close();
-                                        }
-                                    });
-                                });
-                            }
+                                },
+                            );
+                    });
+                    ui.add_space(7.0);
+                    if project.git_history_loading || (project.recent_commits.is_empty() && loading)
+                    {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                         });
-                    if more_available {
-                        ui.add_space(9.0);
-                        if ui
-                            .add_enabled_ui(!loading && !busy, |ui| {
-                                design::ghost_button(
-                                    ui,
-                                    "Load more commits",
-                                    "Load the next page of commit history",
-                                )
+                    } else if project.git_history_error.is_none()
+                        && !project.recent_commits.is_empty()
+                    {
+                        ui.label(
+                            RichText::new(if project.git_history_has_more {
+                                "Scroll for earlier commits"
+                            } else {
+                                "End of available history"
                             })
-                            .inner
-                            .clicked()
-                        {
-                            actions.push(GitUiAction::LoadMore);
-                        }
+                            .size(10.5)
+                            .color(MUTED),
+                        );
+                    }
+                    if near_end
+                        && project.git_history_has_more
+                        && !project.git_history_loading
+                        && project.git_history_error.is_none()
+                        && !busy
+                    {
+                        actions.push(GitUiAction::LoadMore);
                     }
                 }
             }
@@ -623,14 +682,7 @@ impl MorrowApp {
         let mut open = state.detail_open;
         let hash = state.selected_commit.clone().unwrap_or_default();
         let mut actions = Vec::new();
-        if self.diff.is_none()
-            && !egui::Popup::is_any_open(&self.ctx)
-            && self
-                .ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
-        {
-            open = false;
-        }
+        let child_open = self.diff.is_some();
         if let Some(detail) = &state.detail
             && detail.hash == hash
             && state
@@ -649,15 +701,14 @@ impl MorrowApp {
                 })),
             ));
         }
-        egui::Window::new(format!("Commit {}", short_hash(&hash)))
-            .id(egui::Id::new(("git-commit-details", index)))
-            .open(&mut open)
-            .default_size(Vec2::new(760.0, 560.0))
-            .default_pos(self.ctx.input(|input| input.content_rect()).center() - Vec2::new(380.0, 280.0))
-            .min_size(Vec2::new(440.0, 300.0))
-            .resizable(true)
-            .collapsible(false)
-            .show(&self.ctx, |ui| {
+        let modal = crate::git_diff_view::dialog(
+            &self.ctx,
+            egui::Id::new(("git-commit-details", index)),
+            &format!("Commit {}", short_hash(&hash)),
+            "Close commit details",
+            Vec2::new(760.0, 560.0),
+            !child_open,
+            |ui| {
                 if state.detail_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -666,7 +717,8 @@ impl MorrowApp {
                 }
                 if let Some(error) = &state.detail_error {
                     error_note(ui, error);
-                    if design::ghost_button(ui, "Try again", "Retry loading this commit").clicked() {
+                    if design::ghost_button(ui, "Try again", "Retry loading this commit").clicked()
+                    {
                         actions.push(GitUiAction::SelectCommit(hash.clone()));
                     }
                 }
@@ -676,7 +728,16 @@ impl MorrowApp {
                     if detail.hash != hash {
                         return;
                     }
-                    let (subject, body) = detail.message.split_once('\n').unwrap_or((&detail.message, ""));
+                    let (subject, body) = detail
+                        .message
+                        .split_once('\n')
+                        .unwrap_or((&detail.message, ""));
+                    // The close header stays fixed; even unusually long commit
+                    // metadata and octopus-merge parents must fit below it.
+                    egui::ScrollArea::vertical()
+                        .id_salt(("git-commit-content", &hash))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                     ui.label(RichText::new(subject).size(19.0).strong().color(TEXT));
                     ui.add_space(5.0);
                     ui.horizontal_wrapped(|ui| {
@@ -702,10 +763,6 @@ impl MorrowApp {
                     }
                     ui.add_space(5.0);
                     ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt(("git-commit-content", &hash))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
                             if !body.trim().is_empty() {
                                 ui.add_space(8.0);
                                 ui.label(RichText::new(body.trim()).size(12.5).color(TEXT));
@@ -724,10 +781,18 @@ impl MorrowApp {
                             draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &mut actions);
                         });
                 }
-            });
+            },
+        );
+        if !child_open && (modal.inner || modal.should_close()) {
+            open = false;
+        }
         state.detail_open = open;
         project.git_view = state;
-        self.perform_git_ui_actions(index, &root, actions);
+        if open {
+            self.perform_git_ui_actions(index, &root, actions);
+        } else {
+            self.restore_git_overlay_focus();
+        }
     }
 
     fn perform_git_ui_actions(
@@ -762,6 +827,16 @@ impl MorrowApp {
                 }
                 GitUiAction::SelectCommit(hash) => self.request_git_commit(project_index, hash),
                 GitUiAction::LoadMore => self.load_more_git_history(),
+                GitUiAction::RetryHistory => {
+                    let project = &mut self.projects[project_index];
+                    project.git_history_error = None;
+                    if project.git_history_snapshot.is_some() && project.git_history_has_more {
+                        self.load_more_git_history();
+                    } else {
+                        self.refresh_git_history(project_index);
+                    }
+                }
+                GitUiAction::RefreshHistory => self.refresh_git_history(project_index),
                 GitUiAction::Fetch => self.git_action(root.to_path_buf(), GitAction::Fetch),
                 GitUiAction::Pull => self.git_action(root.to_path_buf(), GitAction::Pull),
                 GitUiAction::Push => self.git_action(root.to_path_buf(), GitAction::Push),
@@ -1452,14 +1527,32 @@ fn compact_number(value: u64) -> String {
     }
 }
 
+const HISTORY_ROW_HEIGHT: f32 = 70.0;
+
+fn history_near_end(visible_end: usize, loaded: usize) -> bool {
+    loaded > 0 && visible_end.saturating_add(4) >= loaded
+}
+
+fn graph_color(index: usize) -> Color32 {
+    [
+        ACCENT,
+        BLUE,
+        ORANGE,
+        RED,
+        Color32::from_rgb(191, 155, 238),
+        Color32::from_rgb(109, 199, 222),
+    ][index % 6]
+}
+
 fn history_row(
     ui: &mut egui::Ui,
     commit: &git::CommitSummary,
     selected: bool,
-    has_next: bool,
+    graph: &crate::git_graph::GraphRow,
+    lanes: usize,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(1.0), 53.0),
+        Vec2::new(ui.available_width().max(1.0), HISTORY_ROW_HEIGHT),
         egui::Sense::click(),
     );
     response.widget_info(|| {
@@ -1483,57 +1576,155 @@ fn history_row(
                 },
             );
         }
-        let node = egui::pos2(rect.left() + 11.0, rect.top() + 17.0);
-        painter.line_segment(
-            [egui::pos2(node.x, rect.top()), node - Vec2::new(0.0, 4.0)],
-            Stroke::new(1.0, BORDER),
-        );
-        if has_next {
-            painter.line_segment(
-                [
-                    node + Vec2::new(0.0, 4.0),
-                    egui::pos2(node.x, rect.bottom() + 4.0),
-                ],
-                Stroke::new(1.0, BORDER),
-            );
+        let lanes = lanes.max(graph.lane_count).max(1);
+        let graph_width = (20.0 + lanes.saturating_sub(1) as f32 * 12.0)
+            .min((rect.width() * 0.34).clamp(20.0, 98.0));
+        let pitch = if lanes > 1 {
+            (graph_width - 16.0) / (lanes - 1) as f32
+        } else {
+            0.0
+        };
+        let lane_x = |lane: usize| rect.left() + 9.0 + lane as f32 * pitch;
+        let middle = rect.center().y;
+        for (edges, top, bottom) in [
+            (&graph.incoming, rect.top(), middle),
+            (&graph.outgoing, middle, rect.bottom()),
+        ] {
+            for edge in edges {
+                let from = egui::pos2(lane_x(edge.from_lane), top);
+                let to = egui::pos2(lane_x(edge.to_lane), bottom);
+                let bend = (top + bottom) * 0.5;
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    [from, egui::pos2(from.x, bend), egui::pos2(to.x, bend), to],
+                    false,
+                    Color32::TRANSPARENT,
+                    Stroke::new(1.6, graph_color(edge.color)),
+                ));
+            }
         }
-        painter.circle_filled(node, 3.5, if selected { ACCENT } else { MUTED });
-        let left = rect.left() + 25.0;
-        let hash = truncated_text(
-            ui,
-            short_hash(&commit.hash),
-            FontId::monospace(10.0),
-            MUTED,
-            55.0,
+        let node = egui::pos2(lane_x(graph.node_lane), middle);
+        let color = graph_color(graph.node_color);
+        painter.circle_filled(
+            node,
+            5.0,
+            if selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                PANEL
+            },
         );
-        let hash_width = hash.size().x;
-        painter.galley(
-            egui::pos2(rect.right() - hash_width - 5.0, rect.top() + 11.0),
-            hash,
-            MUTED,
-        );
+        if commit.parents.len() > 1 {
+            painter.circle_stroke(node, 4.0, Stroke::new(1.7, color));
+            painter.circle_filled(node, 1.5, color);
+        } else {
+            painter.circle_filled(node, 3.5, color);
+        }
+        let left = rect.left() + graph_width + 5.0;
         let subject = truncated_text(
             ui,
             &commit.subject,
             FontId::proportional(12.0),
             TEXT,
-            rect.right() - left - hash_width - 15.0,
+            rect.right() - left - 6.0,
         );
         painter.galley(egui::pos2(left, rect.top() + 9.0), subject, TEXT);
         let detail = truncated_text(
             ui,
-            &format!("{} · {}", commit.author, commit.date),
+            &format!(
+                "{} · {} · {}",
+                short_hash(&commit.hash),
+                commit.author,
+                commit.date
+            ),
             FontId::proportional(10.5),
             MUTED,
             rect.right() - left - 8.0,
         );
-        painter.galley(egui::pos2(left, rect.top() + 31.0), detail, MUTED);
+        painter.galley(egui::pos2(left, rect.top() + 29.0), detail, MUTED);
+        let mut badge_x = left;
+        for (index, reference) in commit.refs.iter().take(2).enumerate() {
+            let color = match reference.kind {
+                git::RefKind::Local | git::RefKind::Head => ACCENT,
+                git::RefKind::Remote => BLUE,
+                git::RefKind::Tag => ORANGE,
+            };
+            let label = if reference.current && reference.kind == git::RefKind::Local {
+                format!("HEAD · {}", reference.name)
+            } else {
+                reference.name.clone()
+            };
+            let hidden = commit.refs.len() - index - 1;
+            let reserve = if hidden > 0 { 29.0 } else { 0.0 };
+            let available = rect.right() - 6.0 - badge_x - reserve;
+            if available < 25.0 {
+                break;
+            }
+            let width = (ui
+                .painter()
+                .layout_no_wrap(label.clone(), FontId::proportional(9.5), color)
+                .size()
+                .x
+                + 12.0)
+                .min(available)
+                .min(135.0);
+            let badge = egui::Rect::from_min_size(
+                egui::pos2(badge_x, rect.top() + 48.0),
+                Vec2::new(width, 17.0),
+            );
+            painter.rect_filled(badge, 4.0, color.gamma_multiply(0.13));
+            ui.put(
+                badge.shrink2(Vec2::new(4.0, 0.0)),
+                egui::Label::new(RichText::new(label).size(9.5).color(color)).truncate(),
+            )
+            .on_hover_text(format!(
+                "{}{}",
+                if reference.current {
+                    "Current HEAD: "
+                } else {
+                    ""
+                },
+                reference.name
+            ));
+            badge_x = badge.right() + 4.0;
+            if hidden > 0 && (index == 1 || rect.right() - badge_x < 55.0) {
+                painter.text(
+                    egui::pos2(badge_x, rect.top() + 49.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("+{hidden}"),
+                    FontId::proportional(10.0),
+                    MUTED,
+                );
+                break;
+            }
+        }
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!(
-            "{}\n{} · {}\n{}\nOpen commit details",
-            commit.subject, commit.author, commit.date, commit.hash
+            "{}\n{} · {}\n{}{}\nOpen commit details",
+            commit.subject,
+            commit.author,
+            commit.date,
+            commit.hash,
+            if commit.refs.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n{}",
+                    commit
+                        .refs
+                        .iter()
+                        .map(|reference| {
+                            if reference.current {
+                                format!("HEAD → {}", reference.name)
+                            } else {
+                                reference.name.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                )
+            }
         ))
 }
 

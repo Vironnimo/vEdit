@@ -6,7 +6,7 @@
     "edit_selection_find_diagnostics": "range.end is exclusive",
     "annotations": "end inclusive; omitted end marks the entire start line"
   },
-  "ids": "Tab and pane IDs belong to the response session (process lifetime). Bookmark IDs persist across restarts. Obtain IDs from their current list/status responses; never guess IDs.",
+  "ids": "Tab and pane IDs belong to the response session (process lifetime). Pane IDs remain unique and stable across project switches; inactive pane IDs are refused, never retargeted. Bookmark IDs persist across restarts. Obtain IDs from their current list/status responses; never guess IDs.",
   "limits": {
     "files": 100,
     "annotations": 500,
@@ -412,6 +412,8 @@
     "command_behavior": "Commands focus their document; undo/redo perform one step. Reload refuses dirty buffers and completes asynchronously. find_next/previous use the visible GUI Find query; explicit CLI find remains read-only. Preview requires Markdown."
   },
   "layout": {
+    "scope": "Each project owns its tab groups, split tree, focused pane, views, navigation and scroll positions. workspace selects/restores that project; focus/tab selection/editor command selects the document's owning project. Layout actions operate only on the active workspace; inactive pane IDs and foreign-project tab IDs are refused before effects. Select the project then inspect its layout before arranging panes.",
+    "document_focus": "When switching projects for op:focus, prefer a pane displaying tab_id (focused matching pane first), then the focused containing group, then another containing group, otherwise add to the focused group. Omitted view preserves its saved view; explicit view changes only that pane. Layout focus selects a specific active-project pane.",
     "vertical": "side by side",
     "horizontal": "top and bottom",
     "split": "pane_id omitted uses focused pane; tab_id omitted duplicates its active document into the new pane's local tab group, with independent view/cursor/scroll but shared text and undo. Optional view chooses source/preview.",
@@ -421,7 +423,7 @@
     "close_tab": "Removes tab_id from pane_id only. Shared dirty buffers remain in other panes. Refuses without effects if this is the last reference to a dirty or saving buffer. An empty split pane collapses automatically; the sole remaining pane stays open.",
     "move_tab": "Moves tab_id from source_pane_id to target pane_id and focuses it; equal pane IDs reorder its local tab group. Required index is the final zero-based target position after removing any existing target reference (0..remaining target length, at most 100000); no clamping. Missing panes, missing source membership or invalid index apply no change. A cross-pane move preserves document text/undo and source navigation/view/scroll; if the target already contains that tab, its existing state is retained and reordered. An empty source split collapses. No document is closed or saved. The result returns the updated tree, ordered groups and focus; after uncertain delivery inspect layout before retrying.",
     "document_close": "op:close removes each clean, non-saving document from every pane; use layout close_tab for local tab closure.",
-    "observation": "status/layout returns focused pane, each pane's active tab_id and ordered local tab_ids, orientation tree and ratios."
+    "observation": "status.active_workspace identifies the visible project. status.layout and layout return workspace, focused pane, each pane's active tab_id and ordered local tab_ids, views, locations, orientation tree and ratios for that project only. tabs remains a page across projects with each buffer's workspace; read/edit/replace/save on inactive buffers do not change the visible project."
   },
   "settings": {
     "get": "omit patch",
@@ -457,8 +459,8 @@
     "column": 1,
     "annotation_severity": "info",
     "open_annotations": "provided nonempty annotations replace marks for that tab; omission preserves them",
-    "review": "replaces previous review marks; focuses first successfully opened file",
-    "open": "focuses last successfully opened file; clean buffers refresh asynchronously from disk",
+    "review": "replaces previous review marks across projects; retains all successful buffers/marks in their owning project's groups and reveals the first success's project. Use focus TAB_ID to reveal another project's item; success does not imply all files are visible together.",
+    "open": "keeps existing buffer ownership; otherwise uses deepest registered containing project or creates a project for the parent directory. Reveals last success's project; clean buffers refresh asynchronously from disk",
     "location_omitted": "reveals first annotation when present; otherwise preserves document cursor",
     "close": "refuses unsaved/saving tabs",
     "clear_marks_empty": "clears all marks and review summary",

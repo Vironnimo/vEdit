@@ -36,6 +36,7 @@ impl MorrowApp {
     }
 
     pub(super) fn apply_pending_agent_locations(&mut self) {
+        let mut located = Vec::new();
         for tab in self
             .projects
             .iter_mut()
@@ -54,6 +55,7 @@ impl MorrowApp {
                         tab.set_cursor(offset..offset);
                         tab.focus = tab.agent_view == DocumentView::Source;
                         tab.agent_location_error = None;
+                        located.push(tab.id);
                     }
                     Ok(_) => {
                         tab.agent_location_error = Some(
@@ -73,6 +75,9 @@ impl MorrowApp {
                     tab.agent_location_error = Some(error);
                 }
             }
+        }
+        for id in located {
+            self.sync_external_document_navigation(id);
         }
     }
 
@@ -150,6 +155,8 @@ impl MorrowApp {
                 {
                     return Response::failure("invalid_location", error);
                 }
+                self.set_active_project_context(project);
+                self.focus_existing_project_tab(project, index);
                 self.activate_tab(project, index);
                 if let Some(view) = view {
                     self.set_document_view(view);
@@ -433,8 +440,7 @@ impl MorrowApp {
                     .map(|(index, _)| index)
             });
             if let Some(index) = target {
-                let active = self.projects[index].active_tab;
-                self.activate_tab(index, active);
+                self.switch_project(index);
             } else if let Some(parent) = path.parent() {
                 if let Some(tab) = self.tab_mut() {
                     let action = tab.vim.finish_insert(&mut tab.text);
@@ -444,7 +450,12 @@ impl MorrowApp {
                 }
                 self.add_project(parent.to_owned());
             }
-            self.open_file(path.clone());
+            if let Some((project, index)) = existing {
+                self.focus_existing_project_tab(project, index);
+                self.activate_tab(project, index);
+            } else {
+                self.open_file(path.clone());
+            }
             let project = self.active_project;
             let index = self.projects[project].active_tab;
             self.set_document_view(file.view);
@@ -494,6 +505,8 @@ impl MorrowApp {
             self.sidebar = SidebarView::Review;
             self.sidebar_visible = true;
             if let Some((project, index)) = first {
+                self.set_active_project_context(project);
+                self.focus_existing_project_tab(project, index);
                 self.activate_tab(project, index);
             }
         }

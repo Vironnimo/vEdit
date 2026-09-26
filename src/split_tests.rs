@@ -1100,7 +1100,7 @@ fn session_restores_inactive_markdown_tabs_with_each_groups_view_and_cursor() {
     app.focus_editor_pane(1).unwrap();
     app.activate_tab(0, 0);
     let session = app.session();
-    let stored = serde_json::to_string(&session.layout).unwrap();
+    let stored = serde_json::to_string(&session.projects[0].layout).unwrap();
     let mut restarted = fixture();
     for (tab, saved) in restarted.projects[0]
         .tabs

@@ -109,11 +109,45 @@ pub struct RepoStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitSummary {
     pub hash: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<CommitRef>,
     pub author: String,
     /// Date formatted by Git as `YYYY-MM-DD`.
     pub date: String,
     pub subject: String,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefKind {
+    Local,
+    Remote,
+    Tag,
+    Head,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRef {
+    pub hash: String,
+    pub name: String,
+    pub kind: RefKind,
+    pub current: bool,
+}
+
+/// Immutable traversal roots and decorations. Pages use these object IDs, so a
+/// fetch or commit between requests cannot reorder an already displayed graph.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistorySnapshot {
+    pub tips: Vec<String>,
+    pub refs: Vec<CommitRef>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryPage {
+    pub commits: Vec<CommitSummary>,
+    pub has_more: bool,
+}
+
+pub const HISTORY_PAGE_SIZE: usize = 60;
 
 /// Line changes reported by Git. Binary files deliberately have no line counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -630,28 +664,149 @@ fn added_file_stats(bytes: &[u8]) -> LineStats {
     }
 }
 
-/// Return up to `limit` commits, newest first.
+/// Return up to `limit` commits in topological order across repository branches.
+#[cfg(test)]
 pub fn recent_log(root: &Path, limit: usize) -> GitResult<Vec<CommitSummary>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    // NUL separates fields and record separator separates commits, so spaces in
-    // subjects/authors do not need quoting or parsing heuristics.
-    let format = "%H%x00%an%x00%ad%x00%s%x1e";
-    let mut args = string_args(&["log", "--date=short"]);
-    args.push(OsString::from(format!("--format={format}")));
-    args.push(OsString::from("-n"));
-    args.push(OsString::from(limit.to_string()));
-    let output = raw_git(root, &args, "read recent history")?;
-    if !output.status.success() {
-        // `git log` cannot run before the first commit. Verify that the branch
-        // is unborn rather than concealing corrupt refs or missing directories.
-        if output.status.code() == Some(128) && !has_head(root)? {
-            return Ok(Vec::new());
+    let snapshot = history_snapshot(root)?;
+    Ok(history_page(root, &snapshot, 0, limit)?.commits)
+}
+
+pub fn history_snapshot(root: &Path) -> GitResult<HistorySnapshot> {
+    let branch = current_branch(root)?;
+    let head = if has_head(root)? {
+        let output = checked_git(
+            root,
+            &string_args(&["rev-parse", "--verify", "HEAD"]),
+            "read history HEAD",
+        )?;
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        None
+    };
+    let output = checked_git(
+        root,
+        &string_args(&[
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname)%00%(symref)%00%(*objectname)%00%(*objecttype)%00%(objecttype)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ]),
+        "read history branches",
+    )?;
+    let mut snapshot = HistorySnapshot::default();
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
         }
-        return Err(command_error("read recent history", &output));
+        let fields: Vec<_> = line.split(|byte| *byte == 0).collect();
+        if fields.len() != 6 {
+            return Err(GitError::new("read history branches", "invalid ref record"));
+        }
+        // origin/HEAD is an alias of a remote branch, not an extra branch tip.
+        if !fields[2].is_empty() {
+            continue;
+        }
+        let name = String::from_utf8_lossy(fields[1]);
+        let (name, kind) = if let Some(name) = name.strip_prefix("refs/heads/") {
+            (name, RefKind::Local)
+        } else if let Some(name) = name.strip_prefix("refs/remotes/") {
+            (name, RefKind::Remote)
+        } else if let Some(name) = name.strip_prefix("refs/tags/") {
+            (name, RefKind::Tag)
+        } else {
+            continue;
+        };
+        let hash = if kind == RefKind::Tag && !fields[3].is_empty() {
+            if fields[4] != b"commit" {
+                continue;
+            }
+            fields[3]
+        } else {
+            if fields[5] != b"commit" {
+                continue;
+            }
+            fields[0]
+        };
+        let hash = String::from_utf8_lossy(hash).into_owned();
+        validate_commit_hash(&hash)?;
+        snapshot.refs.push(CommitRef {
+            current: kind == RefKind::Local
+                && branch.as_deref() == Some(name)
+                && head.as_deref() == Some(&hash),
+            hash,
+            name: name.to_owned(),
+            kind,
+        });
     }
-    parse_log(&output.stdout)
+    if let Some(head) = head {
+        validate_commit_hash(&head)?;
+        if !snapshot.refs.iter().any(|reference| reference.current) {
+            snapshot.refs.push(CommitRef {
+                hash: head,
+                name: "HEAD".into(),
+                kind: RefKind::Head,
+                current: true,
+            });
+        }
+    }
+    snapshot.refs.sort_by(|left, right| {
+        (!left.current, left.kind, &left.name).cmp(&(!right.current, right.kind, &right.name))
+    });
+    snapshot.tips = snapshot
+        .refs
+        .iter()
+        .map(|reference| reference.hash.clone())
+        .collect();
+    snapshot.tips.sort();
+    snapshot.tips.dedup();
+    Ok(snapshot)
+}
+
+pub fn history_page(
+    root: &Path,
+    snapshot: &HistorySnapshot,
+    offset: usize,
+    limit: usize,
+) -> GitResult<HistoryPage> {
+    if limit == 0 || snapshot.tips.is_empty() {
+        return Ok(HistoryPage::default());
+    }
+    for hash in &snapshot.tips {
+        validate_commit_hash(hash)?;
+    }
+    let mut args = string_args(&[
+        "log",
+        "--topo-order",
+        "--date=short",
+        "--no-show-signature",
+        "--format=%H%x00%P%x00%an%x00%ad%x00%s%x00",
+        "--stdin",
+    ]);
+    args.push(OsString::from(format!("--skip={offset}")));
+    args.push(OsString::from(format!(
+        "--max-count={}",
+        limit.saturating_add(1)
+    )));
+    // stdin avoids Windows' command-line length limit for repositories with
+    // thousands of branches. Only validated full object IDs enter this input.
+    let input = snapshot.tips.join("\n") + "\n";
+    let output = raw_git_with_input(root, &args, "read history page", Some(input.into_bytes()))?;
+    if !output.status.success() {
+        return Err(command_error("read history page", &output));
+    }
+    let mut commits = parse_log(&output.stdout)?;
+    let has_more = commits.len() > limit;
+    commits.truncate(limit);
+    for commit in &mut commits {
+        commit.refs = snapshot
+            .refs
+            .iter()
+            .filter(|reference| reference.hash == commit.hash)
+            .cloned()
+            .collect();
+    }
+    Ok(HistoryPage { commits, has_more })
 }
 
 fn unstage(root: &Path, paths: &[PathBuf]) -> GitResult<()> {
@@ -726,6 +881,15 @@ fn validate_paths(paths: &[PathBuf], operation: &str) -> GitResult<()> {
 }
 
 fn raw_git(root: &Path, args: &[OsString], operation: &str) -> GitResult<Output> {
+    raw_git_with_input(root, args, operation, None)
+}
+
+fn raw_git_with_input(
+    root: &Path,
+    args: &[OsString],
+    operation: &str,
+    input: Option<Vec<u8>>,
+) -> GitResult<Output> {
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
@@ -755,7 +919,7 @@ fn raw_git(root: &Path, args: &[OsString], operation: &str) -> GitResult<Output>
     let network = args
         .first()
         .is_some_and(|arg| matches!(arg.to_str(), Some("push" | "fetch" | "pull")));
-    run_bounded(
+    run_bounded_with_input(
         command,
         if network {
             NETWORK_TIMEOUT
@@ -764,20 +928,36 @@ fn raw_git(root: &Path, args: &[OsString], operation: &str) -> GitResult<Output>
         },
         OUTPUT_LIMIT,
         operation,
+        input,
     )
 }
 
 /// Drain both pipes concurrently: waiting before reading can deadlock as soon
 /// as a hook, diff or remote writes more than one pipe buffer. The limit and
 /// deadline cover pipe draining as well as the Git process itself.
+#[cfg(test)]
 fn run_bounded(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
     output_limit: usize,
     operation: &str,
 ) -> GitResult<Output> {
+    run_bounded_with_input(command, timeout, output_limit, operation, None)
+}
+
+fn run_bounded_with_input(
+    mut command: Command,
+    timeout: Duration,
+    output_limit: usize,
+    operation: &str,
+    input: Option<Vec<u8>>,
+) -> GitResult<Output> {
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -800,9 +980,25 @@ fn run_bounded(
     let stdout = process.child.stdout.take().expect("stdout was piped");
     let stderr = process.child.stderr.take().expect("stderr was piped");
     let (sender, receiver) = mpsc::channel();
-    for (is_stdout, reader) in [
-        (true, Box::new(stdout) as Box<dyn Read + Send>),
-        (false, Box::new(stderr) as Box<dyn Read + Send>),
+    let mut input_done = input.is_none();
+    if let Some(input) = input {
+        let mut stdin = process.child.stdin.take().expect("stdin was piped");
+        let sender = sender.clone();
+        thread::Builder::new()
+            .name("git-input".into())
+            .spawn(move || {
+                use std::io::Write;
+                let result = stdin.write_all(&input).map(|()| Vec::new());
+                drop(stdin);
+                let _ = sender.send((2_u8, result));
+            })
+            .map_err(|error| {
+                GitError::new(operation, format!("could not write Git input: {error}"))
+            })?;
+    }
+    for (stream, reader) in [
+        (0_u8, Box::new(stdout) as Box<dyn Read + Send>),
+        (1_u8, Box::new(stderr) as Box<dyn Read + Send>),
     ] {
         let sender = sender.clone();
         thread::Builder::new()
@@ -824,7 +1020,7 @@ fn run_bounded(
                         Err(error) => break Err(error),
                     }
                 };
-                let _ = sender.send((is_stdout, result));
+                let _ = sender.send((stream, result));
             })
             .map_err(|error| {
                 GitError::new(operation, format!("could not read Git output: {error}"))
@@ -847,6 +1043,7 @@ fn run_bounded(
         if let Some(status) = status
             && stdout.is_some()
             && stderr.is_some()
+            && input_done
         {
             return Ok(Output {
                 status,
@@ -865,12 +1062,12 @@ fn run_bounded(
             ));
         }
         match receiver.recv_timeout(remaining.min(Duration::from_millis(10))) {
-            Ok((is_stdout, result)) => {
+            Ok((stream, result)) => {
                 let bytes = result.map_err(|error| GitError::new(operation, error.to_string()))?;
-                if is_stdout {
-                    stdout = Some(bytes);
-                } else {
-                    stderr = Some(bytes);
+                match stream {
+                    0 => stdout = Some(bytes),
+                    1 => stderr = Some(bytes),
+                    _ => input_done = true,
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1230,38 +1427,36 @@ fn change_from_code(code: char) -> FileChange {
 
 fn parse_log(bytes: &[u8]) -> GitResult<Vec<CommitSummary>> {
     let mut commits = Vec::new();
-    for record in bytes.split(|byte| *byte == 0x1e) {
-        let record = record
-            .iter()
-            .skip_while(|byte| **byte == b'\r' || **byte == b'\n')
-            .copied()
-            .collect::<Vec<_>>();
-        if record.is_empty() {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    while let Some(hash) = fields.next() {
+        let hash = String::from_utf8_lossy(hash).trim().to_owned();
+        if hash.is_empty() {
             continue;
         }
-        let mut fields = record.split(|byte| *byte == 0);
-        let hash = fields.next();
-        let author = fields.next();
-        let date = fields.next();
-        let subject = fields.next();
-        match (hash, author, date, subject) {
-            (Some(hash), Some(author), Some(date), Some(subject)) => {
-                commits.push(CommitSummary {
-                    hash: String::from_utf8_lossy(hash).trim().to_owned(),
-                    author: String::from_utf8_lossy(author).into_owned(),
-                    date: String::from_utf8_lossy(date).into_owned(),
-                    subject: String::from_utf8_lossy(subject)
-                        .trim_end_matches(['\r', '\n'])
-                        .to_owned(),
-                });
-            }
-            _ => {
-                return Err(GitError::new(
-                    "parse recent history",
-                    "Git returned an unexpected log record",
-                ));
-            }
+        let (Some(parents), Some(author), Some(date), Some(subject)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(GitError::new(
+                "parse recent history",
+                "Git returned an unexpected log record",
+            ));
+        };
+        validate_commit_hash(&hash)?;
+        let parents: Vec<_> = String::from_utf8_lossy(parents)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        for parent in &parents {
+            validate_commit_hash(parent)?;
         }
+        commits.push(CommitSummary {
+            hash,
+            parents,
+            refs: Vec::new(),
+            author: String::from_utf8_lossy(author).into_owned(),
+            date: String::from_utf8_lossy(date).into_owned(),
+            subject: String::from_utf8_lossy(subject).into_owned(),
+        });
     }
     Ok(commits)
 }
@@ -1323,6 +1518,13 @@ mod tests {
             stage_all(&self.0).unwrap();
             commit(&self.0, message).unwrap();
         }
+
+        fn head_hash(&self) -> String {
+            String::from_utf8(self.git(&["rev-parse", "--verify", "HEAD"]).stdout)
+                .unwrap()
+                .trim()
+                .to_owned()
+        }
     }
 
     impl Drop for TestRepository {
@@ -1343,6 +1545,189 @@ mod tests {
                 thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+
+    #[test]
+    fn history_has_real_merge_parents_local_remote_refs_and_annotated_tags() {
+        let repository = TestRepository::new();
+        repository.write("base.txt", "base\n");
+        repository.commit_all("Base");
+        repository.git(&["checkout", "-b", "feature/split-views"]);
+        repository.write("feature.txt", "feature\n");
+        repository.commit_all("Feature");
+        let feature = repository.head_hash();
+        repository.git(&["checkout", "main"]);
+        repository.write("main.txt", "main\n");
+        repository.commit_all("Main");
+        repository.git(&["merge", "--no-ff", "--no-edit", "feature/split-views"]);
+        let merge = repository.head_hash();
+        repository.git(&["update-ref", "refs/remotes/origin/main", &merge]);
+        repository.git(&[
+            "update-ref",
+            "refs/remotes/origin/feature/split-views",
+            &feature,
+        ]);
+        repository.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        repository.git(&["tag", "-a", "v0.4.4", "-m", "Release"]);
+        let blob =
+            String::from_utf8(repository.git(&["rev-parse", "HEAD:base.txt"]).stdout).unwrap();
+        repository.git(&["update-ref", "refs/tags/a-blob-tag", blob.trim()]);
+        let snapshot = history_snapshot(&repository.0).unwrap();
+        assert!(
+            snapshot
+                .refs
+                .iter()
+                .any(|reference| reference.current && reference.name == "main")
+        );
+        assert!(
+            snapshot
+                .refs
+                .iter()
+                .any(|reference| reference.kind == RefKind::Remote
+                    && reference.name == "origin/main")
+        );
+        assert!(
+            snapshot
+                .refs
+                .iter()
+                .any(|reference| reference.kind == RefKind::Tag
+                    && reference.name == "v0.4.4"
+                    && reference.hash == merge)
+        );
+        assert!(
+            !snapshot
+                .refs
+                .iter()
+                .any(|reference| reference.name == "origin/HEAD" || reference.name == "a-blob-tag")
+        );
+        let page = history_page(&repository.0, &snapshot, 0, 20).unwrap();
+        assert!(!page.has_more);
+        assert_eq!(page.commits.len(), 4);
+        assert_eq!(page.commits[0].hash, merge);
+        assert_eq!(page.commits[0].parents.len(), 2);
+        assert_eq!(page.commits[0].parents[1], feature);
+        assert!(
+            page.commits[0]
+                .refs
+                .iter()
+                .any(|reference| reference.current)
+        );
+        let positions: HashMap<_, _> = page
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(index, commit)| (&commit.hash, index))
+            .collect();
+        for (index, commit) in page.commits.iter().enumerate() {
+            for parent in &commit.parents {
+                assert!(
+                    positions[parent] > index,
+                    "parents must follow all their children"
+                );
+            }
+        }
+        repository.git(&["checkout", "--detach", &feature]);
+        let detached = history_snapshot(&repository.0).unwrap();
+        assert!(detached.refs.iter().any(|reference| reference.current
+            && reference.kind == RefKind::Head
+            && reference.hash == feature));
+        assert!(
+            !detached
+                .refs
+                .iter()
+                .any(|reference| reference.current && reference.kind == RefKind::Local)
+        );
+    }
+
+    #[test]
+    fn history_pages_cover_long_history_and_stay_frozen_when_refs_move() {
+        let repository = TestRepository::new();
+        // One import produces enough genuine commits to cross several pages
+        // without spawning a Git process for each fixture commit.
+        let mut input = String::new();
+        for mark in 1..=137 {
+            let message = format!("History {mark}\n");
+            let contents = format!("Revision {mark}\n");
+            input.push_str(&format!("commit refs/heads/main\nmark :{mark}\ncommitter Morrow Test <test@example.invalid> {} +0000\ndata {}\n{}",
+                1_700_000_000 + mark, message.len(), message));
+            if mark > 1 {
+                input.push_str(&format!("from :{}\n", mark - 1));
+            }
+            input.push_str(&format!(
+                "M 100644 inline history.txt\ndata {}\n{}\n",
+                contents.len(),
+                contents
+            ));
+        }
+        input.push_str("done\n");
+        let output = raw_git_with_input(
+            &repository.0,
+            &string_args(&["fast-import", "--quiet", "--done"]),
+            "build history fixture",
+            Some(input.into_bytes()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let snapshot = history_snapshot(&repository.0).unwrap();
+        let full = history_page(&repository.0, &snapshot, 0, 1000).unwrap();
+        assert_eq!(full.commits.len(), 137);
+        let first = history_page(&repository.0, &snapshot, 0, HISTORY_PAGE_SIZE).unwrap();
+        assert!(first.has_more);
+        assert_eq!(first.commits.len(), HISTORY_PAGE_SIZE);
+        // A rewound local branch and a new remote branch must not change the
+        // traversal or decorations already being browsed.
+        repository.git(&["update-ref", "refs/heads/main", &full.commits[10].hash]);
+        repository.git(&[
+            "update-ref",
+            "refs/remotes/origin/review",
+            &full.commits[5].hash,
+        ]);
+        assert_ne!(snapshot, history_snapshot(&repository.0).unwrap());
+        let mut commits = first.commits;
+        while commits.len() < full.commits.len() {
+            let page =
+                history_page(&repository.0, &snapshot, commits.len(), HISTORY_PAGE_SIZE).unwrap();
+            assert!(!page.commits.is_empty());
+            let has_more = page.has_more;
+            commits.extend(page.commits);
+            assert_eq!(has_more, commits.len() < full.commits.len());
+        }
+        assert_eq!(commits, full.commits);
+        assert!(
+            !history_page(&repository.0, &snapshot, commits.len(), HISTORY_PAGE_SIZE)
+                .unwrap()
+                .has_more
+        );
+    }
+
+    #[test]
+    fn remote_only_unmerged_branch_is_in_history() {
+        let repository = TestRepository::new();
+        repository.write("base.txt", "base\n");
+        repository.commit_all("Base");
+        repository.git(&["checkout", "-b", "review"]);
+        repository.write("review.txt", "review\n");
+        repository.commit_all("Remote review");
+        let review = repository.head_hash();
+        repository.git(&["checkout", "main"]);
+        repository.git(&["update-ref", "refs/remotes/origin/review", &review]);
+        repository.git(&["branch", "-D", "review"]);
+        let snapshot = history_snapshot(&repository.0).unwrap();
+        let page = history_page(&repository.0, &snapshot, 0, 10).unwrap();
+        let commit = page
+            .commits
+            .iter()
+            .find(|commit| commit.hash == review)
+            .unwrap();
+        assert_eq!(commit.subject, "Remote review");
+        assert!(commit.refs.iter().any(
+            |reference| reference.name == "origin/review" && reference.kind == RefKind::Remote
+        ));
+        assert_eq!(page.commits.len(), 2);
     }
 
     #[test]
@@ -1470,7 +1855,7 @@ mod tests {
             1
         );
         repository.commit_all("Changed without conversion helpers");
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         // A working-tree path with the same spelling must not make Git treat a
         // full immutable revision as an ambiguous path argument.
         repository.write(&hash, "untracked path named after the commit\n");
@@ -1646,7 +2031,7 @@ mod tests {
         repository.commit_all(
             "Root subject\n\nA complete multiline body.\nSecond paragraph with ü and tabs\ttoo.",
         );
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.hash, hash);
         assert!(details.parents.is_empty());
@@ -1706,7 +2091,7 @@ mod tests {
         let initial = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
         repository.write("old ü name.txt", initial);
         repository.commit_all("Initial");
-        let parent = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let parent = repository.head_hash();
         fs::rename(
             repository.0.join("old ü name.txt"),
             repository.0.join("new ü name.txt"),
@@ -1728,7 +2113,7 @@ mod tests {
         assert!(staged_patch.contains("rename from ") && staged_patch.contains("rename to "));
         assert!(staged_patch.contains("+eleven\n"));
         commit(&repository.0, "Rename with one added line").unwrap();
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.parents, vec![parent]);
         assert_eq!(details.files.len(), 1);
@@ -1768,7 +2153,7 @@ mod tests {
         assert!(!patch.contains("changed source only"));
         assert!(!patch.contains("b/source.txt"));
         commit(&repository.0, "Copy and independently change its source").unwrap();
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         let mut details = commit_details(&repository.0, &hash).unwrap();
         let copy = details
             .files
@@ -1799,9 +2184,11 @@ mod tests {
         repository.git(&["checkout", "main"]);
         repository.write("main.txt", "main branch\n");
         repository.commit_all("Main");
-        let first_parent = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        // The graph includes all branch tips. Sibling tips may share dates;
+        // the first row is not an alias for the checked-out branch's HEAD.
+        let first_parent = repository.head_hash();
         repository.git(&["merge", "--no-ff", "--no-edit", "feature"]);
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.parents.len(), 2);
         assert_eq!(details.parents[0], first_parent);
@@ -1868,7 +2255,7 @@ mod tests {
             }
         );
         commit(&repository.0, "Control characters").unwrap();
-        let hash = recent_log(&repository.0, 1).unwrap()[0].hash.clone();
+        let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.files[0].path, file);
         assert_eq!(details.files[0].stats, stats.staged[file]);

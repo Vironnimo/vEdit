@@ -79,22 +79,31 @@ fn stale_result(app: &mut MorrowApp, root: PathBuf, generation: u64) {
 }
 
 #[test]
-fn focusing_a_split_from_another_project_invalidates_cached_and_running_search() {
+fn switching_project_restores_its_splits_and_invalidates_cached_and_running_search() {
     let mut app = fixture();
     let left = app.current_pane_id();
     let right = app
         .split_active(crate::cli::SplitOrientation::Vertical)
         .unwrap();
-    app.switch_project(1);
-    app.control_layout(crate::cli::LayoutAction::Focus { pane_id: left })
-        .unwrap();
-    assert_eq!(app.active_project, 0);
     let (root, cancel, generation) = old_search(&mut app);
-    app.control_layout(crate::cli::LayoutAction::Focus { pane_id: right })
-        .unwrap();
+    app.switch_project(1);
     assert_eq!(app.active_project, 1);
     assert_search_context_reset(&app, &cancel, generation);
     stale_result(&mut app, root, generation);
+    assert!(
+        app.control_layout(crate::cli::LayoutAction::Focus { pane_id: left })
+            .is_err()
+    );
+    assert!(
+        app.control_layout(crate::cli::LayoutAction::Focus { pane_id: right })
+            .is_err()
+    );
+    app.switch_project(0);
+    app.control_layout(crate::cli::LayoutAction::Focus { pane_id: left })
+        .unwrap();
+    app.control_layout(crate::cli::LayoutAction::Focus { pane_id: right })
+        .unwrap();
+    assert_eq!(app.active_project, 0);
     for project in &app.projects {
         assert_eq!(project.tabs[0].text, DOCUMENT);
         assert!(!project.tabs[0].dirty);
@@ -386,22 +395,30 @@ fn missing_first_project_restores_the_correct_focused_project_groups_and_views()
         std::thread::sleep(Duration::from_millis(2));
         app.poll();
     }
-    let screen = harness(app);
+    let mut screen = harness(app);
     assert_eq!(screen.state().active_project, 0);
     assert_eq!(screen.state().project().unwrap().root, files.0.join("B"));
     assert_eq!(screen.state().tab().unwrap().vim.cursor, 8);
     assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
     let restored = serde_json::to_value(screen.state().editor_session_layout()).unwrap();
     assert_eq!(restored["focused"], 2);
-    for (index, project, view, cursor) in [(0, 0, "source", 8), (1, 1, "preview", 17)] {
-        assert_eq!(restored["panes"][index]["project"], project);
-        assert_eq!(restored["panes"][index]["view"], view);
-        assert_eq!(restored["panes"][index]["cursor"], cursor);
-        assert_eq!(
-            restored["panes"][index]["documents"],
-            serde_json::json!([[project, 0]])
-        );
-    }
+    assert_eq!(restored["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(restored["panes"][0]["project"], 0);
+    assert_eq!(restored["panes"][0]["view"], "source");
+    assert_eq!(restored["panes"][0]["cursor"], 8);
+    assert_eq!(
+        restored["panes"][0]["documents"],
+        serde_json::json!([[0, 0]])
+    );
+    screen.state_mut().switch_project(1);
+    screen.run_steps(2);
+    let other = serde_json::to_value(screen.state().editor_session_layout()).unwrap();
+    assert_eq!(other["focused"], 3);
+    assert_eq!(other["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(other["panes"][0]["project"], 1);
+    assert_eq!(other["panes"][0]["view"], "preview");
+    assert_eq!(other["panes"][0]["cursor"], 17);
+    assert_eq!(other["panes"][0]["documents"], serde_json::json!([[1, 0]]));
     assert!(screen.state().projects.iter().all(|project| {
         project
             .tabs

@@ -93,6 +93,24 @@ All six surfaces total 7,981 tokens, including metadata. The schema retains 31 o
 
 Raw help/schema and skill payloads, SHA-256 hashes, bytes, and token counts are retained in `target/agent-interface-audit/after-0.4.3/`. The repeatable capture is `target/agent-interface-audit/measure-0.4.3.py`, supplied with the production CLI executable path. The historical first-use trial remains separate from the scripted implementation checks.
 
+## Context cost: 0.4.3 to 0.4.4
+
+The packaged 0.4.4 CLI and repository skill were captured with the same complete UTF-8 byte serialization and `tiktoken` 0.14.0 `o200k_base` tokenizer as 0.4.3. Offline help/schema capture does not start or mutate the GUI. Provider wrappers and billing semantics are excluded; UI metadata is counted separately.
+
+| Surface | 0.4.3 | 0.4.4 | Delta |
+| --- | ---: | ---: | ---: |
+| `SKILL.md`, including frontmatter | 802 | 802 | 0 |
+| Conditional editor-control reference | 2,392 | 2,841 | +449 |
+| Conditional review reference | 628 | 628 | 0 |
+| Production CLI help | 1,027 | 1,162 | +135 |
+| Production CLI schema | 3,083 | 3,346 | +263 |
+| Instruction/discovery total | 7,932 | 8,779 | +847 |
+| UI metadata, counted separately | 49 | 49 | 0 |
+
+Including metadata, all six surfaces total 8,828 tokens. The schema retains 31 operations. The additional guidance describes per-project layouts, active-project pane admission, stable pane IDs across switches, global buffer inspection/mutation, explicit document focus and cross-project open/review outcomes. This is a context increase; no token saving or new first-use model success is claimed.
+
+Exact payloads, SHA-256 hashes, bytes and token counts are retained in `target/agent-interface-audit/after-0.4.4/`; the capture script is `target/agent-interface-audit/measure-0.4.4.py`. Measurement used the final packaged `dist/Morrow/morrow-cli.exe`, with historical trial evidence left separate.
+
 ## Historical 0.4.0 verification
 
 The 0.4.0 repository skill passed `skill-creator/scripts/quick_validate.py`; all supporting reference links resolved, and the packaged production schema exposed 30 distinct operations. Structural validation checks packaging and placeholders, rather than proving task success.
@@ -152,3 +170,17 @@ Scripted checks against the running packaged Windows 0.4.3 receiver passed all n
 The test harness now uses process-owned recovery paths under `target/test-state` and suppresses session, disk-refresh, recovery, and Git timers while rendering fixtures. During this work, an earlier fixture's shared temporary recovery path was found in two saved session entries. Their original project files were intact. Before cleanup, the profile, session, and buffer contents were backed up; only the exact fixture text and those two confirmed recovery aliases were cleared. A normal close and restart restored the original files, groups, positions, and preferences with fresh, distinct recovery paths. Evidence is retained in `target/interaction-live-0.4.3/startup-recovery-backup/` and `startup-restoration-proof.json`. The final full suite was then checked independently against the live receiver and recovery session; `after-headless-tests-proof.json` confirms it caused no further changes.
 
 The final offline discovery capture used `dist/Morrow/morrow-cli.exe`, confirmed 31 operations, and produced the 0.4.3 context counts above. Packaged GUI and CLI executable hashes match the release build outputs. The skill remains in the repository and portable package, without installation into the user's personal skills directory. No new model-first-use trial or visual-latency measurement was performed.
+
+## 0.4.4 project layouts, Git graph and modal verification
+
+Final implementation checks passed **696 tests**: 657 application tests and 39 CLI tests, with seven tests ignored in the standard suite. All 29 strict screenshot comparisons passed, including the new bounded commit and nested diff modals. Formatting and strict Clippy passed; the separately invoked Windows captured-output startup regression also passed. Results are retained in `target/verification-0.4.4/final-app-tests.log`, `final-cli-tests.log`, `final-clippy.log` and `windows-startup-regression.log`.
+
+Eleven project-layout regressions cover independent tab groups and split trees, Source/Preview, selections, scroll positions, shared document Undo, inactive-project buffer operations, rejection of foreign pane/tab IDs, restart restoration, missing project roots and migration of old shared tab strips. Existing pointer and keyboard project-switch tests retain their draft and no-reload assertions while checking the new per-project ownership. A legacy decoder regression caught lost or reordered tabs; the final decoder restores every owning project's file order without carrying foreign tabs into its groups.
+
+Fourteen palette regressions use actual egui keyboard and pointer events to verify Home/End/Page Up/Down, selection visibility, the persistent scrollbar and dismissal without click-through. Eleven Git modal checks cover topmost-only outside click and Escape, source/preview focus restoration, pending/error diffs, a held tab-drag release when a modal first opens, and bounded long commit metadata with a visible close control. Independent CLI and modal source reviews were performed; the modal review's metadata overflow and first-frame input findings were repaired before the final run. These checks use the headless egui input harness, not native Windows pointer automation.
+
+Git tests cover real repository merges, local/remote/tag references, first-parent diffs, unmerged remote-only branches, and frozen pagination beyond the first page while refs move. Pure graph tests cover lane continuity, merge edges, branch colors and page boundaries. History UI checks verify one pending page, append-only graph preparation, stale generation/offset rejection, error retry, automatic near-end loading and preservation of scroll/pages during status refresh. An explicit refresh starts a new history snapshot when references change.
+
+The packaged Windows 0.4.4 receiver passed seven scripted assertions against the user's actual saved session: all files and preferences restored, original active project retained, each project's own ordered tab strip and selected view restored, pane IDs unique across projects, project-switch round trip restoring layouts/cursors/views/revisions, all project layouts persisted with bookmarks unchanged, and unchanged hashes of the original project files. The existing tiny-project and vBot projects were switched and the original active project restored; no buffer text was edited. The pre-upgrade recovery directory was backed up, and the final headless suite left its session hash unchanged. Receiving-state requests, responses, persisted session and proof are in `target/project-layout-live-0.4.4/`.
+
+Production GUI and CLI executables match their release build hashes. The repository skill and supporting documentation are included in the portable package, without personal skill installation. Offline discovery confirms 31 operations and the exact context counts above. No new model-first-use trial, native-pointer evaluation or visual-latency measurement was performed.

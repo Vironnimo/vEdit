@@ -72,8 +72,23 @@ fn painted(screen: &Harness<'_, MorrowApp>, pane: u64, label: &str) -> bool {
         .any(|shape| contains(&shape.shape, rect, label))
 }
 
+fn arrangement(app: &MorrowApp) -> serde_json::Value {
+    let mut layout = serde_json::to_value(app.editor_session_layout()).unwrap();
+    // Rendering initializes viewport offsets and the native cursor selection.
+    // This comparison checks the split tree, groups, views and saved Vim cursors.
+    for pane in layout["panes"].as_array_mut().unwrap() {
+        for state in pane["states"].as_array_mut().unwrap() {
+            let state = state.as_object_mut().unwrap();
+            state.remove("source_scroll");
+            state.remove("preview_scroll");
+            state.remove("selection");
+        }
+    }
+    layout
+}
+
 #[test]
-fn session_restores_focused_empty_workspace_and_keeps_existing_group_documents() {
+fn session_restores_empty_project_and_retains_other_projects_split_documents() {
     let mut app = fixture();
     let original = app.projects[0]
         .tabs
@@ -82,18 +97,33 @@ fn session_restores_focused_empty_workspace_and_keeps_existing_group_documents()
         .collect::<Vec<_>>();
     app.tab_mut().unwrap().vim.cursor = 12;
     app.capture_pane_navigation();
+    let left = app.current_pane_id();
     let right = app.split_active(SplitOrientation::Vertical).unwrap();
+    app.tab_mut().unwrap().vim.cursor = 24;
+    app.capture_pane_navigation();
     app.switch_project(1);
     assert!(app.tab().is_none());
+    let blank = app.current_pane_id();
     let session = app.session();
-    let saved = serde_json::to_value(session.layout).unwrap();
+    assert!(
+        session.layout.is_none(),
+        "new sessions store layouts inside their projects"
+    );
+    let saved = serde_json::to_value(&session.projects[1].layout).unwrap();
     assert_eq!(
-        saved["panes"][1]["empty_workspace"],
+        saved["panes"][0]["empty_workspace"],
         serde_json::to_value(&app.projects[1].root).unwrap()
     );
+    assert_eq!(saved["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["focused"], blank);
     let mut restored = fixture();
-    restored.set_active_project_context(session.active_project);
-    restored.restore_editor_layout(serde_json::from_value(saved).unwrap());
+    let entries = session
+        .projects
+        .into_iter()
+        .enumerate()
+        .map(|(index, project)| (index, project.layout))
+        .collect();
+    restored.restore_project_layouts(entries, session.active_project);
     let fresh = restored.projects[0]
         .tabs
         .iter()
@@ -102,32 +132,46 @@ fn session_restores_focused_empty_workspace_and_keeps_existing_group_documents()
     assert!(fresh.iter().all(|id| !original.contains(id)));
     let mut screen = harness(restored);
     assert_eq!(screen.state().active_project, 1);
-    assert_eq!(screen.state().editor_layout.focused, right);
+    assert_eq!(screen.state().editor_layout.focused, blank);
     assert!(screen.state().tab().is_none());
+    assert_eq!(screen.state().editor_layout.panes.len(), 1);
+    assert!(screen.state().current_pane_tab_ids().is_empty());
+    assert!(painted(&screen, blank, "Your workspace is ready."));
+    assert!(!painted(&screen, blank, SOURCE));
+    screen.state_mut().switch_project(0);
+    screen.run_steps(2);
+    assert_eq!(screen.state().editor_layout.focused, right);
+    assert_eq!(screen.state().editor_layout.panes.len(), 2);
     assert_eq!(screen.state().editor_layout.panes[0].documents, fresh);
     assert_eq!(
         screen.state().editor_layout.panes[1].documents,
         vec![fresh[0]]
     );
-    assert!(painted(&screen, right, "Your workspace is ready."));
-    assert!(!painted(&screen, right, SOURCE));
-    screen.state_mut().focus_editor_pane(1).unwrap();
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 24);
+    assert!(painted(&screen, right, SOURCE));
+    screen.state_mut().focus_editor_pane(left).unwrap();
     screen.run_steps(2);
     assert_eq!(screen.state().tab().unwrap().vim.cursor, 12);
     assert_eq!(screen.state().tab().unwrap().text, SOURCE);
-    screen.state_mut().focus_editor_pane(right).unwrap();
+    screen.state_mut().switch_project(1);
     screen.run_steps(2);
     assert_eq!(screen.state().active_project, 1);
     assert!(screen.state().tab().is_none());
+    assert_eq!(screen.state().current_pane_id(), blank);
+    assert!(screen.state().current_pane_tab_ids().is_empty());
 }
 
 #[test]
-fn inactive_empty_view_stays_blank_when_its_workspace_gets_a_document_in_another_pane() {
+fn new_document_in_empty_project_preserves_other_projects_split_arrangement() {
     let mut app = fixture();
     let right = app.split_active(SplitOrientation::Vertical).unwrap();
+    app.tab_mut().unwrap().vim.cursor = 18;
+    app.capture_pane_navigation();
+    let a_layout = arrangement(&app);
     app.switch_project(1);
-    app.focus_editor_pane(1).unwrap();
-    app.switch_project(1);
+    let blank = app.current_pane_id();
+    assert_eq!(app.editor_layout.panes.len(), 1);
+    assert!(app.current_pane_tab_ids().is_empty());
     app.new_file();
     let new_id = app.tab().unwrap().id;
     let text = "ONLY_B_DOCUMENT_BODY\n";
@@ -135,63 +179,61 @@ fn inactive_empty_view_stays_blank_when_its_workspace_gets_a_document_in_another
         .unwrap()
         .apply(editor::replace_selection("", 0..0, text));
     let mut screen = harness(app);
-    assert!(painted(&screen, 1, text));
-    assert!(!painted(&screen, right, text));
-    assert!(painted(&screen, right, "Your workspace is ready."));
+    assert!(painted(&screen, blank, text));
+    assert!(!painted(&screen, blank, SOURCE));
+    assert_eq!(screen.state().editor_layout.panes.len(), 1);
     assert_eq!(screen.state().tab().unwrap().id, new_id);
-    screen.state_mut().focus_editor_pane(right).unwrap();
+    screen.state_mut().switch_project(0);
     screen.run_steps(2);
-    assert!(screen.state().tab().is_none());
-    assert_eq!(screen.state().active_project, 1);
-    screen.event(egui::Event::Text("iMUST_NOT_EDIT".into()));
+    assert_eq!(arrangement(screen.state()), a_layout);
+    assert_eq!(screen.state().current_pane_id(), right);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 18);
+    assert!(painted(&screen, right, SOURCE));
+    assert!(!painted(&screen, right, text));
+    screen.state_mut().switch_project(1);
     screen.run_steps(2);
+    assert_eq!(screen.state().current_pane_id(), blank);
+    assert_eq!(screen.state().current_pane_tab_ids(), vec![new_id]);
+    assert_eq!(screen.state().tab().unwrap().id, new_id);
     assert_eq!(screen.state().projects[1].tabs[0].text, text);
-    screen.state_mut().new_file();
-    screen.run_steps(2);
-    assert!(screen.state().tab().is_some());
-    assert_ne!(screen.state().tab().unwrap().id, new_id);
-    assert!(
-        screen
-            .state()
-            .editor_layout
-            .panes
-            .iter()
-            .find(|pane| pane.id == right)
-            .unwrap()
-            .empty_workspace
-            .is_none()
-    );
+    assert!(screen.state().tab().unwrap().dirty);
     assert_eq!(screen.state().projects[0].tabs.len(), 2);
-    assert_eq!(screen.state().projects[1].tabs.len(), 2);
-    assert_eq!(screen.state().projects[1].tabs[0].text, text);
+    assert_eq!(screen.state().projects[1].tabs.len(), 1);
 }
 
 #[test]
-fn moving_a_tab_into_an_intentional_empty_view_replaces_the_placeholder() {
+fn moving_another_projects_tab_into_the_empty_project_is_rejected_without_changes() {
     let mut app = fixture();
     let tab_id = app.tab().unwrap().id;
+    let left = app.current_pane_id();
     let right = app.split_active(SplitOrientation::Vertical).unwrap();
+    let a_layout = serde_json::to_value(app.editor_session_layout()).unwrap();
     app.switch_project(1);
     assert!(app.tab().is_none());
-    app.control_layout(LayoutAction::MoveTab {
-        source_pane_id: 1,
-        pane_id: right,
+    let blank = app.current_pane_id();
+    let b_layout = serde_json::to_value(app.editor_session_layout()).unwrap();
+    let result = app.control_layout(LayoutAction::MoveTab {
+        source_pane_id: left,
+        pane_id: blank,
         tab_id,
         index: 0,
-    })
-    .unwrap();
-    assert_eq!(app.tab().unwrap().id, tab_id);
-    assert_eq!(app.active_project, 0);
-    assert!(
-        app.editor_layout
-            .panes
-            .iter()
-            .find(|pane| pane.id == right)
-            .unwrap()
-            .empty_workspace
-            .is_none()
+    });
+    assert!(result.is_err());
+    assert_eq!(app.active_project, 1);
+    assert!(app.tab().is_none());
+    assert!(app.current_pane_tab_ids().is_empty());
+    assert_eq!(
+        serde_json::to_value(app.editor_session_layout()).unwrap(),
+        b_layout
     );
     assert_eq!(app.projects[0].tabs.len(), 2);
+    app.switch_project(0);
+    assert_eq!(
+        serde_json::to_value(app.editor_session_layout()).unwrap(),
+        a_layout
+    );
+    assert_eq!(app.current_pane_id(), right);
+    assert_eq!(app.tab().unwrap().id, tab_id);
     assert_eq!(app.tab().unwrap().text, SOURCE);
     assert!(!app.tab().unwrap().dirty);
 }
@@ -208,10 +250,21 @@ fn orphan_adoption_and_unrelated_document_close_preserve_the_empty_selection() {
     app.projects[0].tabs.push(extra);
     app.adopt_orphan_documents();
     assert!(app.tab().is_none());
+    assert!(app.current_pane_tab_ids().is_empty());
+    let blank = app.current_pane_id();
+    let b_layout = serde_json::to_value(app.editor_session_layout()).unwrap();
+    app.switch_project(0);
     assert!(app.current_pane_tab_ids().contains(&extra_id));
+    app.switch_project(1);
     app.perform_close(CloseAction::Tab(extra_id));
     assert!(app.tab().is_none());
     assert_eq!(app.active_project, 1);
+    assert_eq!(app.current_pane_id(), blank);
+    assert!(app.current_pane_tab_ids().is_empty());
+    assert_eq!(
+        serde_json::to_value(app.editor_session_layout()).unwrap(),
+        b_layout
+    );
     assert_eq!(app.projects[0].tabs.len(), 2);
     app.restore_focused_pane(false);
     assert!(app.tab().is_none());

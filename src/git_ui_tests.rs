@@ -75,21 +75,54 @@ fn git_workspace() -> MorrowApp {
         },
     );
     project.commit_message = "Improve repository navigation".into();
-    for (hash, subject, date) in [
-        ('a', "Improve repository navigation", "2026-09-26"),
-        ('b', "Keep Markdown and source together", "2026-09-25"),
-        ('c', "Preserve selections in split views", "2026-09-24"),
-        ('d', "Create the editor workspace", "2026-09-23"),
+    for (hash, parents, subject, date) in [
+        ('a', "bc", "Improve repository navigation", "2026-09-26"),
+        ('b', "d", "Keep Markdown and source together", "2026-09-25"),
+        ('c', "d", "Preserve selections in split views", "2026-09-24"),
+        ('d', "", "Create the editor workspace", "2026-09-23"),
     ] {
         project.recent_commits.push(git::CommitSummary {
             hash: hash.to_string().repeat(40),
+            parents: parents
+                .chars()
+                .map(|parent| parent.to_string().repeat(40))
+                .collect(),
+            refs: match hash {
+                'a' => vec![git::CommitRef {
+                    hash: "a".repeat(40),
+                    name: "main".into(),
+                    kind: git::RefKind::Local,
+                    current: true,
+                }],
+                'b' => vec![git::CommitRef {
+                    hash: "b".repeat(40),
+                    name: "origin/main".into(),
+                    kind: git::RefKind::Remote,
+                    current: false,
+                }],
+                'c' => vec![
+                    git::CommitRef {
+                        hash: "c".repeat(40),
+                        name: "feature/split-views".into(),
+                        kind: git::RefKind::Local,
+                        current: false,
+                    },
+                    git::CommitRef {
+                        hash: "c".repeat(40),
+                        name: "origin/feature/split-views".into(),
+                        kind: git::RefKind::Remote,
+                        current: false,
+                    },
+                ],
+                _ => Vec::new(),
+            },
             author: "Alex Taylor".into(),
             date: date.into(),
             subject: subject.into(),
         });
     }
     let details = git::CommitDetails {
-        hash: "a".repeat(40), parents: vec!["b".repeat(40)], author: "Alex Taylor".into(), author_email: "alex@example.test".into(), date: "2026-09-26T14:32:18+02:00".into(),
+        hash: "a".repeat(40), parents: vec!["b".repeat(40), "c".repeat(40)], author: "Alex Taylor".into(), author_email: "alex@example.test".into(), date: "2026-09-26T14:32:18+02:00".into(),
         message: "Improve repository navigation\n\nGroup changed files by folder and keep staged changes separate.\nCommit details now show the complete message and historical patches.\n\nReviewed with the editor's Vim navigation enabled.\n".into(),
         files: vec![
             git::CommitFile { path: "src/git_panel.rs".into(), original_path: None, status: git::FileChange::Added, stats: git::LineStats { added: 128, removed: 0, binary: false } },

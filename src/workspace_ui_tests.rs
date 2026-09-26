@@ -121,17 +121,39 @@ fn tab_groups(app: &MorrowApp) -> serde_json::Value {
     })
 }
 
-fn split_fixture() -> MorrowApp {
+fn split_fixture() -> (MorrowApp, Vec<serde_json::Value>) {
     let mut app = fixture(3);
     app.split_active(crate::cli::SplitOrientation::Vertical)
         .unwrap();
-    // Each destination is already present in the focused group. Switching must
-    // only change the displayed document, leaving both ordered groups intact.
-    app.switch_project(1);
-    app.switch_project(2);
+    // Each project owns its complete arrangement: A has two split groups,
+    // while B and C each begin with one group containing only their document.
+    let mut groups = Vec::new();
+    for project in 0..3 {
+        app.switch_project(project);
+        groups.push(tab_groups(&app));
+    }
     app.switch_project(0);
     visual_draft(&mut app);
-    app
+    (app, groups)
+}
+
+fn assert_groups_belong_to_project(app: &MorrowApp, project: usize) {
+    let own_ids = app.projects[project]
+        .tabs
+        .iter()
+        .map(|tab| tab.id)
+        .collect::<Vec<_>>();
+    for pane in app.layout_status()["panes"].as_array().unwrap() {
+        assert!(
+            pane["tab_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|id| { own_ids.contains(&id.as_u64().unwrap()) }),
+            "project groups must contain only their own documents"
+        );
+        assert!(own_ids.contains(&pane["tab_id"].as_u64().unwrap()));
+    }
 }
 
 #[test]
@@ -146,8 +168,9 @@ fn project_switcher_is_on_the_left_before_the_file_menu() {
 
 #[test]
 fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
-    let mut screen = harness(split_fixture());
-    let original_groups = tab_groups(screen.state());
+    let (app, expected_groups) = split_fixture();
+    let mut screen = harness(app);
+    assert_eq!(tab_groups(screen.state()), expected_groups[0]);
     screen.get_by_label("Switch project").click();
     screen.run_steps(3);
     assert!(screen.state().workspace_picker_open());
@@ -162,7 +185,9 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     screen.run_steps(3);
     assert_eq!(screen.state().active_project, 1);
     assert!(!screen.state().workspace_picker_open());
-    assert_eq!(tab_groups(screen.state()), original_groups);
+    assert_eq!(tab_groups(screen.state()), expected_groups[1]);
+    assert_eq!(screen.state().tab_drag_pane_ids().len(), 1);
+    assert_groups_belong_to_project(screen.state(), 1);
     assert_draft(screen.state(), 0);
     screen.get_by_label("Switch project").click();
     screen.run_steps(3);
@@ -175,7 +200,9 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     assert_eq!(tab.vim.mode, VimMode::Visual);
     assert_eq!(tab.vim.selection(&tab.text), Some(6..12));
     assert_eq!(tab.selection, 6..12);
-    assert_eq!(tab_groups(screen.state()), original_groups);
+    assert_eq!(tab_groups(screen.state()), expected_groups[0]);
+    assert_eq!(screen.state().tab_drag_pane_ids().len(), 2);
+    assert_groups_belong_to_project(screen.state(), 0);
     assert_draft(screen.state(), 0);
     assert!(screen.state().projects.iter().all(|project| {
         project.index_generation == 0 && project.tabs.iter().all(|tab| !tab.loading)
@@ -184,20 +211,24 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
 
 #[test]
 fn project_cycle_shortcuts_wrap_without_reloading_or_losing_selection() {
-    let mut screen = harness(split_fixture());
-    let original_groups = tab_groups(screen.state());
+    let (app, expected_groups) = split_fixture();
+    let mut screen = harness(app);
+    assert_eq!(tab_groups(screen.state()), expected_groups[0]);
     for expected in [1, 2, 0] {
         project_shortcut(&mut screen, Key::PageDown);
         assert_eq!(screen.state().active_project, expected);
-        assert_eq!(tab_groups(screen.state()), original_groups);
+        assert_eq!(tab_groups(screen.state()), expected_groups[expected]);
+        assert_groups_belong_to_project(screen.state(), expected);
         assert_draft(screen.state(), 0);
     }
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.vim.mode, VimMode::Visual);
     assert_eq!(tab.vim.selection(&tab.text), Some(6..12));
+    assert_eq!(tab.selection, 6..12);
     project_shortcut(&mut screen, Key::PageUp);
     assert_eq!(screen.state().active_project, 2);
-    assert_eq!(tab_groups(screen.state()), original_groups);
+    assert_eq!(tab_groups(screen.state()), expected_groups[2]);
+    assert_groups_belong_to_project(screen.state(), 2);
     assert!(screen.state().projects.iter().all(|project| {
         project.index_generation == 0 && project.tabs.iter().all(|tab| !tab.loading)
     }));

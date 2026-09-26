@@ -104,6 +104,7 @@ struct SessionProject {
     active_file: Option<PathBuf>,
     tabs: Vec<SessionTab>,
     active_tab_index: Option<usize>,
+    layout: Option<split::SessionLayout>,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -120,6 +121,8 @@ struct Project {
     root: PathBuf,
     tabs: Vec<EditorTab>,
     active_tab: usize,
+    /// Parked while another project is active; buffers always stay in this project.
+    layout: Option<split::EditorLayout>,
     index: Option<Arc<workspace::WorkspaceIndex>>,
     indexing: bool,
     index_cancel: Arc<AtomicBool>,
@@ -133,7 +136,12 @@ struct Project {
     git_stats: git::WorkingTreeStats,
     git_stats_error: Option<String>,
     recent_commits: Vec<git::CommitSummary>,
-    git_history_limit: usize,
+    git_history_snapshot: Option<git::HistorySnapshot>,
+    git_history_loading: bool,
+    git_history_has_more: bool,
+    git_history_generation: u64,
+    git_history_update_available: bool,
+    git_history_refresh_requested: bool,
     git_history_error: Option<String>,
     git_view: git_panel::GitViewState,
     git_error: Option<String>,
@@ -153,6 +161,7 @@ impl Project {
             root,
             tabs: Vec::new(),
             active_tab: 0,
+            layout: None,
             index: None,
             indexing: false,
             index_cancel: Arc::new(AtomicBool::new(false)),
@@ -166,7 +175,12 @@ impl Project {
             git_stats: git::WorkingTreeStats::default(),
             git_stats_error: None,
             recent_commits: Vec::new(),
-            git_history_limit: 40,
+            git_history_snapshot: None,
+            git_history_loading: false,
+            git_history_has_more: false,
+            git_history_generation: 0,
+            git_history_update_available: false,
+            git_history_refresh_requested: false,
             git_history_error: None,
             git_view: git_panel::GitViewState::default(),
             git_error: None,
@@ -282,8 +296,11 @@ struct GitSnapshot {
     files: Vec<git::FileStatus>,
     stats: git::WorkingTreeStats,
     stats_error: Option<String>,
-    commits: Vec<git::CommitSummary>,
-    history_error: Option<String>,
+    history: Result<GitHistoryRefresh, String>,
+}
+struct GitHistoryRefresh {
+    snapshot: git::HistorySnapshot,
+    page: Option<git::HistoryPage>,
 }
 struct ActiveScreenJump {
     tab_id: u64,
@@ -324,6 +341,12 @@ enum WorkerResult {
         root: PathBuf,
         hash: String,
         result: Result<git::CommitDetails, String>,
+    },
+    GitHistory {
+        root: PathBuf,
+        generation: u64,
+        offset: usize,
+        result: Result<git::HistoryPage, String>,
     },
     GitAction {
         root: PathBuf,
@@ -511,6 +534,8 @@ pub struct MorrowApp {
     review: Option<crate::cli::ReviewSummary>,
     tab_strip_active: Option<u64>,
     editor_layout: split::EditorLayout,
+    layout_project: Option<PathBuf>,
+    next_pane_id: u64,
     tab_drag: tab_drag::TabDragState,
     render_pane: u64,
     rendering_panes: bool,
@@ -552,13 +577,30 @@ impl MorrowApp {
         active_project: usize,
         mut layout: Option<split::SessionLayout>,
     ) {
+        let layouts: Vec<_> = projects
+            .iter()
+            .map(|project| project.layout.clone())
+            .collect();
         let mapping = self.restore_session_projects(projects);
         let restored_active = mapping.get(active_project).copied().flatten().unwrap_or(0);
-        self.set_active_project_context(restored_active);
         if let Some(layout) = &mut layout {
             layout.remap_projects(&mapping);
         }
-        self.restore_editor_layout(layout);
+        let restored_layouts = layouts
+            .into_iter()
+            .enumerate()
+            .filter_map(|(original, saved)| {
+                let project = mapping.get(original).copied().flatten()?;
+                let saved = saved
+                    .map(|mut saved| {
+                        saved.remap_projects(&mapping);
+                        saved
+                    })
+                    .or_else(|| layout.clone());
+                Some((project, saved))
+            })
+            .collect::<Vec<_>>();
+        self.restore_project_layouts(restored_layouts, restored_active);
     }
     fn restore_session_projects(&mut self, entries: Vec<SessionProject>) -> Vec<Option<usize>> {
         let mut mapping = vec![None; entries.len()];
@@ -713,6 +755,8 @@ impl MorrowApp {
             review: None,
             tab_strip_active: None,
             editor_layout: split::EditorLayout::default(),
+            layout_project: None,
+            next_pane_id: 2,
             tab_drag: tab_drag::TabDragState::default(),
             render_pane: 1,
             rendering_panes: false,
@@ -868,8 +912,12 @@ impl MorrowApp {
             self.completion_request = None;
         }
         self.capture_pane_navigation();
-        self.clear_empty_workspace();
+        let switching_project = self.active_project != project_index;
         self.set_active_project_context(project_index);
+        if switching_project {
+            self.focus_existing_project_tab(project_index, tab_index);
+        }
+        self.clear_empty_workspace();
         let project = &mut self.projects[project_index];
         project.active_tab = tab_index;
         let preview = project
@@ -896,7 +944,7 @@ impl MorrowApp {
     }
     fn set_active_project_context(&mut self, index: usize) {
         let previous_root = self.project().map(|project| project.root.clone());
-        self.active_project = index;
+        self.activate_project_layout(index);
         self.clear_project_search_for_root_change(previous_root);
     }
     fn clear_project_search_for_root_change(&mut self, previous_root: Option<PathBuf>) {
@@ -1079,6 +1127,7 @@ impl MorrowApp {
             }
             CloseAction::Project(index) => {
                 if index < self.projects.len() {
+                    self.capture_pane_navigation();
                     let previous_root = self.project().map(|project| project.root.clone());
                     let p = self.projects.remove(index);
                     p.index_cancel.store(true, Ordering::Relaxed);
@@ -1091,6 +1140,7 @@ impl MorrowApp {
                     self.active_project = self
                         .active_project
                         .min(self.projects.len().saturating_sub(1));
+                    self.activate_project_layout(self.active_project);
                     self.clear_project_search_for_root_change(previous_root);
                 }
             }
@@ -1334,8 +1384,30 @@ impl MorrowApp {
                                 p.git_changes = s.files;
                                 p.git_stats = s.stats;
                                 p.git_stats_error = s.stats_error;
-                                p.recent_commits = s.commits;
-                                p.git_history_error = s.history_error;
+                                match s.history {
+                                    Ok(history) => {
+                                        if let Some(page) = history.page {
+                                            static NEXT_HISTORY: AtomicU64 = AtomicU64::new(1);
+                                            p.git_history_generation =
+                                                NEXT_HISTORY.fetch_add(1, Ordering::Relaxed);
+                                            p.git_history_loading = false;
+                                            p.git_history_has_more = page.has_more;
+                                            p.recent_commits = page.commits;
+                                            p.git_view.graph.clear();
+                                            p.git_view.graph.append(&p.recent_commits);
+                                            p.git_history_error = None;
+                                            p.git_history_update_available = false;
+                                            p.git_history_snapshot = Some(history.snapshot);
+                                        } else {
+                                            // Keep browsing and paging the original object
+                                            // IDs until the user chooses to refresh history.
+                                            p.git_history_update_available =
+                                                p.git_history_snapshot.as_ref()
+                                                    != Some(&history.snapshot);
+                                        }
+                                    }
+                                    Err(error) => p.git_history_error = Some(error),
+                                }
                                 p.git_error = None;
                             }
                             Err(e) => p.git_error = Some(e),
@@ -1367,6 +1439,28 @@ impl MorrowApp {
                                     p.git_view.detail_error = Some(error);
                                 }
                             }
+                        }
+                    }
+                }
+                WorkerResult::GitHistory {
+                    root,
+                    generation,
+                    offset,
+                    result,
+                } => {
+                    if let Some(p) = self.projects.iter_mut().find(|p| p.root == root)
+                        && p.git_history_generation == generation
+                        && p.recent_commits.len() == offset
+                    {
+                        p.git_history_loading = false;
+                        match result {
+                            Ok(page) => {
+                                p.git_history_has_more = page.has_more;
+                                p.git_view.graph.append(&page.commits);
+                                p.recent_commits.extend(page.commits);
+                                p.git_history_error = None;
+                            }
+                            Err(error) => p.git_history_error = Some(error),
                         }
                     }
                 }
@@ -1555,7 +1649,9 @@ impl MorrowApp {
         }
         p.git_loading = true;
         let root = p.root.clone();
-        let history_limit = p.git_history_limit;
+        let previous_history = p.git_history_snapshot.clone();
+        let refresh_history = std::mem::take(&mut p.git_history_refresh_requested);
+        let previous_history_error = p.git_history_error.clone().filter(|_| !refresh_history);
         self.worker(move || {
             let result = (|| {
                 let repo = git::repository_root(&root).map_err(|e| e.to_string())?;
@@ -1566,10 +1662,26 @@ impl MorrowApp {
                         Ok(stats) => (stats, None),
                         Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
                     };
-                    let (commits, history_error) = match git::recent_log(&repo, history_limit) {
-                        Ok(commits) => (commits, None),
-                        Err(error) => (Vec::new(), Some(error.to_string())),
-                    };
+                    let history = (|| {
+                        if let Some(error) = previous_history_error {
+                            return Err(error);
+                        }
+                        let snapshot =
+                            git::history_snapshot(&repo).map_err(|error| error.to_string())?;
+                        let page = if refresh_history
+                            || previous_history
+                                .as_ref()
+                                .is_none_or(|history| history.tips.is_empty())
+                        {
+                            Some(
+                                git::history_page(&repo, &snapshot, 0, git::HISTORY_PAGE_SIZE)
+                                    .map_err(|error| error.to_string())?,
+                            )
+                        } else {
+                            None
+                        };
+                        Ok(GitHistoryRefresh { snapshot, page })
+                    })();
                     Ok(GitSnapshot {
                         root: Some(repo),
                         branch: status.branch,
@@ -1577,8 +1689,7 @@ impl MorrowApp {
                         files: status.files,
                         stats,
                         stats_error,
-                        commits,
-                        history_error,
+                        history,
                     })
                 } else {
                     Ok(GitSnapshot {
@@ -1588,8 +1699,10 @@ impl MorrowApp {
                         files: Vec::new(),
                         stats: git::WorkingTreeStats::default(),
                         stats_error: None,
-                        commits: Vec::new(),
-                        history_error: None,
+                        history: Ok(GitHistoryRefresh {
+                            snapshot: git::HistorySnapshot::default(),
+                            page: Some(git::HistoryPage::default()),
+                        }),
                     })
                 }
             })();
@@ -1640,10 +1753,38 @@ impl MorrowApp {
         });
     }
     fn load_more_git_history(&mut self) {
-        if let Some(project) = self.projects.get_mut(self.active_project) {
-            project.git_history_limit = project.git_history_limit.saturating_add(40);
-            self.refresh_git(self.active_project, true);
+        let Some(project) = self.projects.get_mut(self.active_project) else {
+            return;
+        };
+        if project.git_history_loading
+            || !project.git_history_has_more
+            || project.git_history_error.is_some()
+        {
+            return;
         }
+        let (Some(repository), Some(snapshot)) = (
+            project.git_root.clone(),
+            project.git_history_snapshot.clone(),
+        ) else {
+            return;
+        };
+        project.git_history_loading = true;
+        let root = project.root.clone();
+        let generation = project.git_history_generation;
+        let offset = project.recent_commits.len();
+        self.worker(move || WorkerResult::GitHistory {
+            root,
+            generation,
+            offset,
+            result: git::history_page(&repository, &snapshot, offset, git::HISTORY_PAGE_SIZE)
+                .map_err(|error| error.to_string()),
+        });
+    }
+    fn refresh_git_history(&mut self, index: usize) {
+        if let Some(project) = self.projects.get_mut(index) {
+            project.git_history_refresh_requested = true;
+        }
+        self.refresh_git(index, true);
     }
     fn request_git_diff(&mut self, root: PathBuf, path: PathBuf, staged: bool, untracked: bool) {
         let title = format!(
@@ -2110,13 +2251,14 @@ impl MorrowApp {
                         })
                         .collect(),
                     active_tab_index: Some(p.active_tab),
+                    layout: self.project_session_layout(&p.root),
                 })
                 .collect(),
             active_project: self.active_project,
             sidebar: Some(self.sidebar),
             autosave: Some(self.settings.autosave),
             settings: Some(self.settings.clone()),
-            layout: Some(self.editor_session_layout()),
+            layout: None,
             bookmarks: self.bookmarks.items.clone(),
         }
     }
@@ -2321,6 +2463,36 @@ impl MorrowApp {
         self.palette_query.clear();
         self.palette_selected = 0;
         self.palette_focus = true;
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = false;
+        }
+        if let Some(focused) = self.ctx.memory(|memory| memory.focused()) {
+            self.ctx
+                .memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        self.ctx.request_repaint();
+    }
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.palette_focus = false;
+        if let Some(focused) = self.ctx.memory(|memory| memory.focused()) {
+            self.ctx
+                .memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+        }
+        if let Some(tab) = self.tab()
+            && tab.agent_view == crate::cli::DocumentView::Source
+            && !tab.loading
+            && tab.error.is_none()
+        {
+            let id = self.document_widget_id(tab.id);
+            if self.ctx.read_response(id).is_some() {
+                self.ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        self.ctx.request_repaint();
     }
     fn run_task(&mut self, command: String) {
         if self.task.is_some() {
@@ -3360,8 +3532,10 @@ impl MorrowApp {
             });
     }
     fn switch_project(&mut self, index: usize) {
-        if let Some(project) = self.projects.get(index) {
-            self.activate_tab(index, project.active_tab);
+        if index < self.projects.len() {
+            self.set_active_project_context(index);
+            self.bind_current_pane();
+            self.session_dirty = true;
         }
     }
     fn activity(&mut self, ui: &mut egui::Ui) {
@@ -3460,7 +3634,11 @@ impl MorrowApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if small_button(ui, "↻", "Refresh project").clicked() {
                             self.index_project(self.active_project);
-                            self.refresh_git(self.active_project, true);
+                            if self.sidebar == SidebarView::SourceControl {
+                                self.refresh_git_history(self.active_project);
+                            } else {
+                                self.refresh_git(self.active_project, true);
+                            }
                         }
                         if self.sidebar == SidebarView::Explorer
                             && small_button(ui, "+", "New file · Ctrl+N").clicked()
@@ -5610,30 +5788,25 @@ impl MorrowApp {
         let ctx = self.ctx.clone();
         self.context_file_dialog_ui(&ctx);
         if let Some(palette) = self.palette {
-            let mut open = true;
+            let mut close = false;
             let mut choose = None;
             let mut line = None;
             let mut retry_index = false;
-            egui::Window::new(match palette {
-                Palette::Files => "Open a file",
-                Palette::Commands => "Command palette",
-                Palette::Line => "Go to line",
-            })
-            .id(egui::Id::new("palette"))
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .fixed_size([
-                590.0,
-                if palette == Palette::Line {
-                    110.0
-                } else {
-                    440.0
-                },
-            ])
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 125.0])
-            .open(&mut open)
-            .show(&ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::new("palette"))
+                .area(egui::Modal::default_area(egui::Id::new("palette"))
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, 125.0]))
+                .backdrop_color(Color32::from_black_alpha(70))
+                .show(&ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 70.0).clamp(280.0, 590.0));
+                let navigate = palette != Palette::Line;
+                let down = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+                let up = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+                let first = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Home));
+                let last = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::End));
+                let page_down = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageDown));
+                let page_up = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageUp));
+                let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+                ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(match palette {
                         Palette::Files => "QUICK OPEN",
@@ -5644,10 +5817,17 @@ impl MorrowApp {
                     .strong()
                     .color(ACCENT),
                 );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let response = design::ghost_button(ui, "×", "Close picker (Esc)");
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button,
+                        ui.is_enabled(), "Close picker"));
+                    close = response.clicked();
+                });
+                });
                 ui.add_space(8.0);
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.palette_query)
-                        .id_salt("palette_input")
+                        .id(egui::Id::new("palette_input"))
                         .hint_text(match palette {
                             Palette::Files => "Search by file name or path…",
                             Palette::Commands => "What would you like to do?",
@@ -5656,16 +5836,14 @@ impl MorrowApp {
                         .desired_width(f32::INFINITY)
                         .font(FontId::proportional(15.0)),
                 );
-                if self.palette_focus {
+                if self.palette_focus && !ui.is_sizing_pass() {
                     response.request_focus();
                     self.palette_focus = false;
                 }
-                if response.changed() {
+                let query_changed = response.changed();
+                if query_changed {
                     self.palette_selected = 0;
                 }
-                let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
-                let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
-                let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
                 ui.add_space(9.0);
                 ui.separator();
                 if palette == Palette::Line {
@@ -5710,16 +5888,38 @@ impl MorrowApp {
                             })
                             .unwrap_or_default()
                     };
+                    let results_height = (ctx.content_rect().height() - 285.0).clamp(96.0, 340.0);
+                    let page_size = (results_height / 48.0).floor().max(1.0) as usize;
                     if down && !options.is_empty() {
                         self.palette_selected = (self.palette_selected + 1).min(options.len() - 1);
                     }
                     if up {
                         self.palette_selected = self.palette_selected.saturating_sub(1);
                     }
+                    if first {
+                        self.palette_selected = 0;
+                    }
+                    if last {
+                        self.palette_selected = options.len().saturating_sub(1);
+                    }
+                    if page_down {
+                        self.palette_selected = self.palette_selected.saturating_add(page_size);
+                    }
+                    if page_up {
+                        self.palette_selected = self.palette_selected.saturating_sub(page_size);
+                    }
                     self.palette_selected =
                         self.palette_selected.min(options.len().saturating_sub(1));
+                    ui.scope(|ui| {
+                    // Reserve a solid scrollbar column, including before hover. The
+                    // track also makes keyboard navigation's scroll position visible.
+                    ui.spacing_mut().scroll.floating = false;
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     egui::ScrollArea::vertical()
-                        .max_height(340.0)
+                        .id_salt("palette_results")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                        .animated(false)
+                        .max_height(results_height)
                         .show(ui, |ui| {
                             for (i, (name, detail, path)) in options.iter().enumerate() {
                                 let response = ui
@@ -5736,7 +5936,8 @@ impl MorrowApp {
                                 if response.clicked() || enter && i == self.palette_selected {
                                     choose = Some((name.clone(), path.clone()));
                                 }
-                                if (down || up) && i == self.palette_selected {
+                                if (down || up || first || last || page_down || page_up || query_changed)
+                                    && i == self.palette_selected {
                                     response.scroll_to_me(None);
                                 }
                             }
@@ -5790,23 +5991,27 @@ impl MorrowApp {
                                 }
                             }
                         });
+                    });
                     ui.separator();
                     ui.label(
-                        RichText::new("↑ ↓ to navigate    Enter to open    Esc to close")
+                        RichText::new("↑ ↓ to navigate    Page ↑ ↓ to scroll    Enter to open    Esc to close")
                             .size(10.5)
                             .color(MUTED),
                     );
                 }
             });
-            let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+            close |= modal.should_close()
+                || modal
+                    .backdrop_response
+                    .clicked_by(egui::PointerButton::Secondary)
+                || modal
+                    .backdrop_response
+                    .clicked_by(egui::PointerButton::Middle);
             if retry_index {
                 self.index_project(self.active_project);
             }
-            if !open || escape || choose.is_some() || line.is_some() {
-                self.palette = None;
-                if let Some(t) = self.tab_mut() {
-                    t.focus = true;
-                }
+            if close || choose.is_some() || line.is_some() {
+                self.close_palette();
             }
             if let Some((name, path)) = choose {
                 if let Some(path) = path {
@@ -6064,22 +6269,15 @@ impl MorrowApp {
             }
         }
         self.git_detail_ui();
-        if self.diff.is_some()
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
-            && !egui::Popup::is_any_open(&ctx)
-        {
-            self.close_diff();
-        }
         if let Some((title, text)) = &self.diff {
-            let mut open = true;
-            egui::Window::new(title)
-                .id(egui::Id::new("git_patch_window"))
-                .open(&mut open)
-                .collapsible(false)
-                .default_pos(ctx.content_rect().center() - Vec2::new(475.0, 310.0))
-                .default_size([950.0, 620.0])
-                .min_size([440.0, 280.0])
-                .show(&ctx, |ui| {
+            let modal = crate::git_diff_view::dialog(
+                &ctx,
+                egui::Id::new("git_patch_window"),
+                title,
+                "Close diff",
+                Vec2::new(950.0, 620.0),
+                true,
+                |ui| {
                     if self.diff_loading {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -6090,19 +6288,40 @@ impl MorrowApp {
                     } else {
                         self.diff_view.show(ui, title, text);
                     }
-                });
-            if !open {
+                },
+            );
+            if modal.inner || modal.should_close() {
                 self.close_diff();
             }
         }
     }
     fn close_diff(&mut self) {
         self.diff = None;
+        self.diff_loading = false;
+        self.diff_error = None;
+        self.diff_view.reset_focus();
+        self.restore_git_overlay_focus();
+    }
+    fn restore_git_overlay_focus(&mut self) {
         self.ctx.memory_mut(|memory| {
             if let Some(id) = memory.focused() {
                 memory.surrender_focus(id);
             }
         });
+        if self.git_detail_open() {
+            if let Some(tab) = self.tab_mut() {
+                tab.focus = false;
+            }
+            let modal_id = egui::Id::new(("git-commit-details", self.active_project));
+            if let Some(id) = self
+                .ctx
+                .data(|data| data.get_temp::<egui::Id>(modal_id.with("close_focus")))
+            {
+                self.ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+            self.ctx.request_repaint();
+            return;
+        }
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
@@ -7103,12 +7322,23 @@ impl MorrowApp {
 mod visual_tests;
 
 #[cfg(test)]
+#[path = "git_history_tests.rs"]
+mod git_history_tests;
+#[cfg(test)]
 #[path = "git_ui_tests.rs"]
 mod git_ui_tests;
 
 #[cfg(test)]
+#[path = "git_modal_tests.rs"]
+mod git_modal_tests;
+
+#[cfg(test)]
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+
+#[cfg(test)]
+#[path = "palette_ui_tests.rs"]
+mod palette_ui_tests;
 
 #[cfg(test)]
 #[path = "intel_tests.rs"]
@@ -7125,3 +7355,7 @@ mod editor_ux_tests;
 #[cfg(test)]
 #[path = "workspace_context_tests.rs"]
 mod workspace_context_tests;
+
+#[cfg(test)]
+#[path = "project_layout_tests.rs"]
+mod project_layout_tests;

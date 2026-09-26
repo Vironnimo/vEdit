@@ -8,6 +8,7 @@ mod design;
 mod editor;
 mod git;
 mod git_diff_view;
+mod git_graph;
 mod lsp;
 mod markdown;
 mod paths;

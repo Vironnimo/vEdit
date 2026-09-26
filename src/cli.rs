@@ -506,6 +506,9 @@ Coordinates are 1-based lines and Unicode character columns, never byte offsets.
 Opening is applied on the GUI thread; loading:true is pending, so inspect status
 until the tab is ready. Existing unsaved text is preserved. Close refuses dirty
 tabs. Batches report per-item results; retry only failed items.
+Each project keeps its own tab groups, splits and views. workspace selects its
+saved layout; focus selects the named tab's project. Buffer read/edit/save do not
+switch projects. status.layout includes workspace and only its current panes.
 
 Review example:
 {"title":"Plan","files":[{"path":"plan.md","view":"preview"},
@@ -515,6 +518,9 @@ End coordinates are inclusive. Without end, the entire start line is marked.
 Review replaces previous review marks. Marked files reveal their first mark
 unless location is supplied. Open/review refresh clean buffers from disk;
 unsaved buffers remain intact.
+Files stay in their owning project. A multi-project review keeps every successful
+buffer and mark and reveals the first success's project; open reveals the last.
+Use focus TAB_ID to reveal another project's review item.
 
 Use request JSON_FILE for atomic edits, save-as, selection changes and ordered
 batches. Get the tab revision from read/tabs first; edit/replace/command/save_as
@@ -529,9 +535,13 @@ vertical means side by side, horizontal means top/bottom. To reorder or move a
 tab, send {"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,
 "index":0}. Use actual IDs from layout; index is the final zero-based target
 position after removing any existing target reference. The result returns the
-updated groups and focus; an empty source split collapses. Use schema for complete
-shapes and task/disk-search limitations. Batch stops at first failed/partial step
-by default and reports completed steps; it never rolls back or replays them.
+updated groups and focus; an empty source split collapses. Layout actions require
+panes and tabs from the active workspace. Pane IDs remain unique/stable across
+project switches; inactive IDs fail without effects.
+Select the project first, then inspect layout and use its current IDs. Use schema
+for complete request shapes and task/disk-search limits. Batch stops at the first
+failed/partial step by default and reports completed steps; it never rolls back
+or replays them.
 "#;
 
 pub enum Parsed {

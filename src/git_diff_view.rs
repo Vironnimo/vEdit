@@ -7,6 +7,60 @@ use std::ops::Range;
 const FONT_SIZE: f32 = 12.0;
 const TAB_WIDTH: usize = 4;
 
+/// A resizable Git dialog with a real input-blocking backdrop. Parent dialogs
+/// remain visible but disabled while a child diff owns the modal stack.
+pub(crate) fn dialog(
+    ctx: &egui::Context,
+    id: egui::Id,
+    title: &str,
+    close_label: &str,
+    preferred_size: Vec2,
+    enabled: bool,
+    content: impl FnOnce(&mut egui::Ui),
+) -> egui::ModalResponse<bool> {
+    let maximum = (ctx.content_rect().size() - Vec2::splat(64.0)).max(Vec2::new(260.0, 200.0));
+    let minimum = Vec2::new(440.0, 280.0).min(maximum);
+    let modal = egui::Modal::new(id).show(ctx, |ui| {
+        if !enabled {
+            ui.disable();
+        }
+        egui::Resize::default()
+            .id(id.with("size"))
+            .default_size(preferred_size.min(maximum))
+            .min_size(minimum)
+            .max_size(maximum)
+            .with_stroke(false)
+            .show(ui, |ui| {
+                let mut close = false;
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [(ui.available_width() - 36.0).max(60.0), 26.0],
+                        egui::Label::new(RichText::new(title).size(15.0).strong())
+                            .truncate()
+                            .halign(egui::Align::Min),
+                    )
+                    .on_hover_text(title);
+                    let response = ui
+                        .add_sized([26.0, 26.0], egui::Button::new("×").frame(false))
+                        .on_hover_text(format!("{close_label} · Esc or click outside"));
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, close_label)
+                    });
+                    ctx.data_mut(|data| data.insert_temp(id.with("close_focus"), response.id));
+                    if enabled && ctx.memory(|memory| memory.focused().is_none()) {
+                        response.request_focus();
+                    }
+                    close |= response.clicked();
+                });
+                ui.separator();
+                content(ui);
+                close
+            })
+    });
+    ctx.data_mut(|data| data.insert_temp(id.with("content_rect"), modal.response.rect));
+    modal
+}
+
 #[derive(Default)]
 pub(crate) struct DiffView {
     patch: ParsedPatch,
@@ -18,6 +72,10 @@ pub(crate) struct DiffView {
 }
 
 impl DiffView {
+    pub(crate) fn reset_focus(&mut self) {
+        self.last_frame = None;
+    }
+
     /// Show a read-only patch. The raw patch is also what the copy action returns.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, title: &str, text: &str) {
         let frame = ui.ctx().cumulative_frame_nr();

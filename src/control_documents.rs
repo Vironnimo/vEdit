@@ -500,6 +500,8 @@ impl MorrowApp {
         tab.vim.set_selection(&tab.text, cursor..cursor);
         tab.pending_agent_location = None;
         tab.agent_location_error = None;
+        let id = tab.id;
+        self.sync_external_document_navigation(id);
         self.session_dirty = true;
         changed
     }

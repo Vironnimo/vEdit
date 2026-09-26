@@ -127,12 +127,16 @@ impl MarkdownCache {
             self.trim_documents();
         }
     }
-    #[cfg(test)]
     pub(crate) fn view_scroll(&self, document: u64, pane: egui::Id) -> Option<f32> {
         self.documents
             .iter()
             .find(|entry| entry.id == document && entry.pane == pane)
             .map(|entry| entry.scroll_y)
+    }
+    pub(crate) fn restore_view_scroll(&mut self, document: u64, pane: egui::Id, offset: f32) {
+        if offset.is_finite() && offset >= 0.0 {
+            self.restore_scroll.insert((pane, document), offset);
+        }
     }
     #[cfg(test)]
     pub(crate) fn table_scroll(&self, document: u64, pane: egui::Id, source: usize) -> Option<f32> {
