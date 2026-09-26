@@ -16,6 +16,7 @@ mod recovery;
 mod render;
 mod screen_jump;
 mod search;
+mod selection_scroll;
 mod single_instance;
 mod tasks;
 mod vim;

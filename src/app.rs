@@ -5046,9 +5046,16 @@ impl MorrowApp {
         let wheel_offset = (!settings.smooth_scroll)
             .then(|| crate::render::instant_scroll_offset(ui, scroll_id))
             .flatten();
+        let selection_drag = source_interaction
+            && !source_command_pending
+            && pane_focused
+            && !tab.loading
+            && ctx.is_being_dragged(id)
+            && ctx.input(|input| input.focused && input.pointer.primary_down());
+        crate::selection_scroll::begin_drag(&ctx, scroll_id, selection_drag);
         let mut scroll = egui::ScrollArea::new([!settings.word_wrap, true])
             .id_salt(("document_scroll", tab.id))
-            .animated(settings.smooth_scroll)
+            .animated(settings.smooth_scroll && !selection_drag)
             .scroll_source(egui::scroll_area::ScrollSource {
                 mouse_wheel: settings.smooth_scroll,
                 ..Default::default()
@@ -5061,7 +5068,10 @@ impl MorrowApp {
             scroll = scroll.scroll_offset(offset);
             tab.scroll_to_cursor = false;
         }
-        let scroll_output = scroll.show(ui, |ui| {
+        if selection_drag && let Some(state) = egui::scroll_area::State::load(&ctx, scroll_id) {
+            scroll = scroll.scroll_offset(wheel_offset.unwrap_or(state.offset));
+        }
+        let scroll_output = scroll.show_viewport(ui, |ui, viewport| {
             // egui collapses native selection when another widget owns IME
             // events. Keep this document's range while Find or a toolbar has
             // focus, including a programmatic match selected before rendering.
@@ -5166,6 +5176,10 @@ impl MorrowApp {
                 || output.response.clicked()
                 || output.response.double_clicked()
                 || output.response.triple_clicked());
+            crate::selection_scroll::scroll_selection(
+                ui, &output.response, scroll_id, viewport.min.to_vec2(), !settings.word_wrap,
+                source_interaction && pane_focused && !source_command_pending && !tab.loading,
+            );
             let restored_native_selection =
                 !pointer_selection && !output.response.changed() && unfocused_selection.is_some();
             if restored_native_selection && let Some(range) = unfocused_selection {
@@ -7034,6 +7048,10 @@ mod vim_clipboard_tests;
 #[cfg(test)]
 #[path = "focus_feedback_tests.rs"]
 mod focus_feedback_tests;
+
+#[cfg(test)]
+#[path = "selection_scroll_tests.rs"]
+mod selection_scroll_tests;
 
 impl MorrowApp {
     fn sync_languages(&mut self, force: bool) {
