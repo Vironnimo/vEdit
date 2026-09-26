@@ -117,13 +117,20 @@ fn initial_index_loading_and_error_leave_background_menu_available() {
 }
 
 #[test]
-fn collapsed_root_keeps_background_creation_menu() {
+fn project_heading_never_collapses_files_and_collapsed_child_keeps_background_menu() {
     let (_fixture, app) = Fixture::new(true);
     let root_title = file_title(&app.projects[0].root);
     let mut screen = harness(app);
     screen.get_by_label(&root_title).click();
     screen.run_steps(2);
-    assert!(screen.query_by_label("notes.txt").is_none());
+    assert!(screen.query_by_label("notes.txt").is_some());
+    screen.get_by_label("src").click();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("lib.txt").is_some());
+    screen.get_by_label("src").click();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("lib.txt").is_none());
+    assert!(screen.query_by_label("notes.txt").is_some());
     right_click(&mut screen, egui::pos2(100.0, 350.0));
     assert_workspace_menu(&screen);
 }

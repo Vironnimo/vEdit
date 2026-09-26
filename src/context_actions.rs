@@ -90,7 +90,12 @@ pub(super) fn editor_menu(
             }
         }
         ui.separator();
-        if design::menu_item(ui, "Find in file", "Ctrl+F", "Find text in this document").clicked() {
+        if design::menu_item(
+            ui,
+            "Find in file",
+            "Ctrl+F in Insert",
+            "Find literal text. Vim Normal: / searches and Ctrl+F scrolls a page. Insert: Ctrl+F opens Find.",
+        ).clicked() {
             action = Some(EditorAction::Find);
             ui.close();
         }
@@ -703,7 +708,7 @@ impl MorrowApp {
                 let Some(tab) = self.tab_by_id_mut(id) else {
                     return;
                 };
-                if tab.loading || tab.saving {
+                if tab.loading {
                     return;
                 }
                 tab.focus = true;
@@ -719,6 +724,32 @@ impl MorrowApp {
                     .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
             EditorAction::Copy | EditorAction::Cut => {
+                if action == EditorAction::Cut && self.settings.vim {
+                    let Some(tab) = self.tab_by_id_mut(id) else {
+                        return;
+                    };
+                    if tab.loading {
+                        return;
+                    }
+                    if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
+                        let result = tab.vim.cut_visual(&mut tab.text);
+                        if result.text_changed {
+                            tab.changed();
+                        }
+                        tab.selection = tab
+                            .vim
+                            .selection(&tab.text)
+                            .unwrap_or(tab.vim.cursor..tab.vim.cursor);
+                        tab.pending_selection = Some(tab.selection.clone());
+                        tab.focus = true;
+                        tab.scroll_to_cursor = true;
+                        if let Some(yank) = result.yanked {
+                            self.ctx.copy_text(yank.text.clone());
+                            self.register = Some(yank);
+                        }
+                        return;
+                    }
+                }
                 if action == EditorAction::Cut {
                     self.context_native_undo_checkpoint(id);
                 }
@@ -739,7 +770,7 @@ impl MorrowApp {
                     linewise: tab.vim.mode == VimMode::VisualLine,
                 };
                 tab.vim.set_register(yank.clone());
-                if action == EditorAction::Cut && !tab.loading && !tab.saving {
+                if action == EditorAction::Cut && !tab.loading {
                     let edit = editor::replace_selection(&tab.text, tab.selection.clone(), "");
                     let cursor = edit.selection.start;
                     tab.apply(edit);
@@ -775,7 +806,7 @@ impl MorrowApp {
                 let Some(tab) = self.tab_by_id_mut(id) else {
                     return;
                 };
-                if tab.loading || tab.saving {
+                if tab.loading {
                     return;
                 }
                 let insert = tab.vim.finish_insert(&mut tab.text);
@@ -845,7 +876,7 @@ impl MorrowApp {
         let Some(tab) = self.tab_by_id_mut(id) else {
             return;
         };
-        if tab.loading || tab.saving {
+        if tab.loading {
             return;
         }
         let mut state = native_history_state(&ctx, id, widget);
@@ -895,7 +926,7 @@ impl MorrowApp {
         let Some(tab) = self.tab_by_id_mut(pending.id) else {
             return;
         };
-        if tab.revision != pending.revision || tab.loading || tab.saving {
+        if tab.revision != pending.revision || tab.loading {
             self.status("Paste cancelled because the document changed", true);
             return;
         }

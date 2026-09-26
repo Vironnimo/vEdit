@@ -81,17 +81,23 @@ impl MorrowApp {
             return Response::failure("invalid_request", error);
         }
         let observation = control_observation(&request);
+        let dialog = self.control_dialog();
         let closing_settings = matches!(
             request,
             Request::Panel {
                 panel: Panel::Settings,
                 visible: false
             }
-        ) && self.control_dialog() == Some("settings");
-        if !observation && !closing_settings && self.control_dialog().is_some() {
+        ) && dialog == Some("settings");
+        if !observation
+            && !closing_settings
+            && let Some(dialog) = dialog
+        {
             return Response::failure(
                 "user_dialog_open",
-                "An app dialog, palette or command prompt needs the user's attention. No control action was applied; inspect status after the user finishes it.",
+                format!(
+                    "The user's {dialog} interaction is active. No control action was applied; inspect status after the user finishes it."
+                ),
             );
         }
         if let Some(tab_id) = match &request {
@@ -580,6 +586,8 @@ impl MorrowApp {
             Some("settings")
         } else if self.palette.is_some() {
             Some("palette")
+        } else if self.workspace_picker_open() {
+            Some("project_picker")
         } else if self.diff.is_some() {
             Some("diff")
         } else if self.git_detail_open() {
@@ -592,6 +600,10 @@ impl MorrowApp {
             Some("screen_jump")
         } else if self.vim_command.is_some() {
             Some("vim_command")
+        } else if self.vim_search_active() {
+            Some("vim_search")
+        } else if self.tab_drag_active() {
+            Some("tab_drag")
         } else if self.context_file_dialog.is_some() {
             Some("file_operation")
         } else {
@@ -852,6 +864,92 @@ mod tests {
         });
         assert!(response.ok);
         assert!(!app.settings_open);
+    }
+    #[test]
+    fn vim_search_allows_observation_but_preserves_user_state_against_control_mutations() {
+        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut project = Project::new(std::env::temp_dir());
+        let mut tab = EditorTab::new(None, "search fixture".into());
+        tab.text = "abc foo 😀 bar\n".into();
+        tab.saved_text = tab.text.clone();
+        let id = tab.id;
+        tab.vim.set_selection(&tab.text, 1..3);
+        tab.selection = tab.vim.selection(&tab.text).unwrap();
+        let origin = (tab.vim.mode, tab.vim.cursor, tab.selection.clone());
+        project.tabs.push(tab);
+        app.projects.push(project);
+        app.bind_current_pane();
+        let pane = app.current_pane_id();
+        let mut search = std::mem::take(&mut app.find);
+        search.start(app.tab_mut().unwrap(), pane, false);
+        search.character(app.tab_mut().unwrap(), 'f');
+        app.find = search;
+        assert!(app.vim_search_active());
+        assert_eq!(app.tab().unwrap().vim.cursor, 4);
+        let preview = (
+            app.tab().unwrap().vim.mode,
+            app.tab().unwrap().vim.cursor,
+            app.tab().unwrap().selection.clone(),
+        );
+        let layout = app.layout_status();
+        let revision = app.tab().unwrap().revision;
+
+        let status = app.control_request(Request::Status {});
+        assert!(status.ok);
+        assert_eq!(status.result["dialog"], "vim_search");
+        let read = app.control_request(Request::Read {
+            tab_id: id,
+            start_line: 1,
+            line_count: 10,
+        });
+        assert!(read.ok);
+        assert_eq!(read.result["text"], "abc foo 😀 bar\n");
+        let edit = Request::Edit {
+            tab_id: id,
+            expected_revision: revision,
+            edits: Vec::new(),
+            set_text: Some("external change".into()),
+        };
+        for mutation in [
+            edit.clone(),
+            Request::Layout {
+                change: cli::LayoutAction::MoveTab {
+                    source_pane_id: pane,
+                    pane_id: pane,
+                    tab_id: id,
+                    index: 0,
+                },
+            },
+        ] {
+            let result = app.control_request(mutation);
+            assert!(!result.ok);
+            assert_eq!(result.error.unwrap().code, "user_dialog_open");
+        }
+        assert_eq!(app.layout_status(), layout);
+        let tab = app.tab().unwrap();
+        assert_eq!(tab.text, "abc foo 😀 bar\n");
+        assert_eq!(tab.revision, revision);
+        assert!(!tab.dirty);
+        assert_eq!(
+            (tab.vim.mode, tab.vim.cursor, tab.selection.clone()),
+            preview
+        );
+        assert!(app.vim_search_active());
+
+        // Continuing the real search verifies that its draft pattern survived.
+        let mut search = std::mem::take(&mut app.find);
+        search.character(app.tab_mut().unwrap(), 'o');
+        app.find = search;
+        assert_eq!(app.tab().unwrap().vim.cursor, 4);
+        app.cancel_vim_search(true);
+        assert!(!app.vim_search_active());
+        let tab = app.tab().unwrap();
+        assert_eq!(
+            (tab.vim.mode, tab.vim.cursor, tab.selection.clone()),
+            origin
+        );
+        assert!(app.control_request(edit).ok);
+        assert_eq!(app.tab().unwrap().text, "external change");
     }
     #[test]
     fn canonical_duplicates_preserve_first_marks_and_batch_order() {

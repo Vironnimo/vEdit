@@ -1,4 +1,4 @@
-# Morrow 0.4.2
+# Morrow 0.4.3
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -23,17 +23,19 @@ Alternativ startet `cargo run --release` die Anwendung. Ein Ordner oder eine Dat
 
 Beim ersten Start mit **Ctrl+Shift+O** Projektordner hinzufügen. **Ctrl+O**, das Hinzufügen von Projekten und **Save as…** verwenden die nativen Windows-Dialoge. Beim Öffnen können mehrere Dateien beziehungsweise Projektordner ausgewählt werden. Oben zwischen Projekten wechseln, links Dateien öffnen oder mit **Ctrl+P** nach Dateinamen und Pfaden suchen. **Ctrl+Shift+P** öffnet die Befehlspalette; dort sind auch Aktionen ohne Tastenkürzel erreichbar.
 
+Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öffnet die durchsuchbare Liste; Namen, Pfade sowie offene und geänderte Dateien helfen bei der Auswahl. Pfeiltasten und **Enter** wechseln direkt zum Projekt, **Esc** schließt die Liste. **Ctrl+Alt+PageDown** / **Ctrl+Alt+PageUp** wechseln zum nächsten beziehungsweise vorherigen offenen Projekt. Die Dateien bleiben geöffnet und ungespeicherte Änderungen erhalten. Weitere Projektordner lassen sich über die Liste mit dem nativen Dialog hinzufügen. Im Explorer steht der aktive Projektname als feste Überschrift über seinem Dateibaum.
+
 ## Arbeiten im Editor
 
 - Syntaxfarben, Zeilennummern, aktuelle Zeile und Dateipfad helfen bei der Orientierung.
 - Ein Klick setzt den Cursor. Ziehen und Doppelklick wählen Text aus, ein Dreifachklick ganze Zeilen. Im Vim-Normalmodus wird daraus eine Visual-Auswahl; im Insert-Modus bleibt die Texteingabe aktiv.
-- **Ctrl+F** sucht in der Datei, **Ctrl+H** öffnet Suchen und Ersetzen. Groß-/Kleinschreibung und ganze Wörter lassen sich einstellen; es wird nach wörtlichem Text gesucht.
+- Im Insert-Modus oder bei ausgeschaltetem Vim sucht **Ctrl+F** in der Datei; **Ctrl+H** öffnet Suchen und Ersetzen. Im Normalmodus startet `/` die Vim-Suche. Groß-/Kleinschreibung und ganze Wörter lassen sich in Find/Replace einstellen; dort wird nach wörtlichem Text gesucht.
 - **Ctrl+Shift+F** durchsucht das aktive Projekt. Ein Treffer öffnet die passende Datei an der Fundstelle.
 - **Settings** (**Ctrl+,**) bietet Vim an/aus, die Leader-Taste, automatisches Speichern, Schriftgröße, Einrückungsbreite, Zeilenumbruch und **Smooth scrolling**. Vim und automatisches Speichern sind standardmäßig eingeschaltet; weiches Scrollen ist standardmäßig ausgeschaltet und lässt sich für Editor und Markdown-Vorschau aktivieren.
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
 - Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** rückt ein, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um und **Alt+Shift+↓** dupliziert Zeilen. Neue Zeilen übernehmen die Einrückung.
 
-Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergrund. Der Explorer berücksichtigt `.gitignore` und überspringt unter anderem `.git`, `target`, `node_modules` und generierte Build-Ordner. Symbolische Links werden im Index nicht verfolgt. Bei erreichten Such- oder Indexgrenzen erscheint ein Hinweis; dann hilft ein kleinerer Projektordner oder eine genauere Suche.
+Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergrund. Auch die Suche in großen offenen Dateien berechnet ihre Treffer im Hintergrund; währenddessen zeigt sie **Searching…** und verwirft überholte Ergebnisse bei weiterer Eingabe oder einem Dateiwechsel. Der Explorer berücksichtigt `.gitignore` und überspringt unter anderem `.git`, `target`, `node_modules` und generierte Build-Ordner. Symbolische Links werden im Index nicht verfolgt. Bei erreichten Such- oder Indexgrenzen erscheint ein Hinweis; dann hilft ein kleinerer Projektordner oder eine genauere Suche.
 
 Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Auf der freien Fläche im Explorer lassen sich neue Dateien und Ordner direkt im Projekt anlegen; dort sind auch Projektpfad, Windows-Explorer und Aktualisieren erreichbar. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
 
@@ -42,6 +44,8 @@ Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Date
 | Aktion | Tastenkürzel |
 | --- | --- |
 | Projektordner hinzufügen | Ctrl+Shift+O |
+| Offenes Projekt auswählen | Ctrl+Alt+P |
+| Nächstes / vorheriges Projekt | Ctrl+Alt+PageDown / Ctrl+Alt+PageUp |
 | Datei über Dialog öffnen | Ctrl+O |
 | Datei im Projekt finden | Ctrl+P |
 | Befehlspalette | Ctrl+Shift+P |
@@ -97,9 +101,13 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 | Letzte Änderung wiederholen | `.`; auch Insert-Änderungen werden erfasst |
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
 | Blättern | Ctrl+F / Ctrl+B; Ctrl+D / Ctrl+U für halbe Seiten |
-| Suchen | `/` öffnet die Suche, `n` / `N` wechseln Treffer; `*` / `#` suchen das Wort unter dem Cursor |
+| Suchen | `/` sucht vorwärts, `?` rückwärts; `n` wiederholt die Richtung, `N` kehrt sie um. `*` / `#` suchen das Wort unter dem Cursor |
 
 Das unbenannte Kopierregister wird zwischen Tabs geteilt: etwa in einer Datei `yy`, in einer anderen `p`. Kopierte oder gelöschte Inhalte werden zusätzlich in die Systemzwischenablage geschrieben. Jeder Tab hat seine eigene Undo-Historie; eine zusammenhängende Insert-Änderung wird als Schritt behandelt.
+
+Die Vim-Suche springt schon während der Eingabe zum Treffer und markiert alle sichtbaren Ergebnisse. **Enter** bestätigt und gibt den Editor frei, **Esc** bricht ab und stellt die Ausgangsposition wieder her. Eine leere bestätigte Eingabe wiederholt das letzte Suchmuster. Im Visual-Modus erweitert die Suche die Auswahl; `n` und `N` unterstützen Zählwerte wie `3n`. `:noh` blendet die Treffer-Markierungen aus und behält das Suchmuster für den nächsten Sprung.
+
+Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Muster ignoriert sie, `\C` erzwingt sie. Reguläre Ausdrücke verwenden die Rust-Regex-Syntax, etwa `foo|bar`, `\w`, `^` und `$`; der vollständige Vim-Regex-Dialekt und Such-Offsets sind nicht enthalten. Die normale Find/Replace-Leiste sucht weiterhin nach wörtlichem Text.
 
 Über `:` stehen diese Befehle zur Verfügung:
 
@@ -107,13 +115,13 @@ Das unbenannte Kopierregister wird zwischen Tabs geteilt: etwa in einer Datei `y
 - `:q` Tab schließen, `:wq` / `:x` speichern und schließen.
 - `:q!` Tab schließen und ungespeicherte Änderungen verwerfen.
 - `:e src/main.rs` eine Datei relativ zum Projekt öffnen.
-- `:42` zu Zeile 42 springen; `:noh` das Suchfeld ausblenden.
+- `:42` zu Zeile 42 springen; `:noh` die Treffer-Markierungen ausblenden.
 
 Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Markdown lesen
 
-Markdown-Dateien bieten rechts oberhalb des Dokuments **Source** und **Preview**. **Ctrl+Shift+V** wechselt zwischen beiden Ansichten. Der Quelltext bleibt ein normaler Vim-Editor; **Shift+V** wählt weiterhin ganze Zeilen aus.
+Markdown-Dateien bieten rechts in der Tab-Leiste ein Vorschau-Symbol. Es leuchtet, wenn die Vorschau aktiv ist; ein Klick oder **Ctrl+Shift+V** wechselt zwischen Quelltext und Vorschau. Der Quelltext bleibt ein normaler Vim-Editor; **Shift+V** wählt weiterhin ganze Zeilen aus.
 
 Die Vorschau zeigt Überschriften, Listen, Aufgaben, Tabellen, Zitate, Codeblöcke und Links. Text ist auswählbar; Codeblöcke lassen sich kopieren. Ein Doppelklick auf einen Block öffnet die passende Quelltextzeile. In der Vorschau scrollen `j` / `k`, **Ctrl+D** / **Ctrl+U**, `gg` und **Shift+G**. Bilder werden als Links angezeigt, HTML bleibt Text. Die Ansicht wird pro Datei beim Neustart wiederhergestellt.
 
@@ -122,6 +130,8 @@ Die Vorschau zeigt Überschriften, Listen, Aufgaben, Tabellen, Zitate, Codeblöc
 **View → Split right** oder **Split down** teilt den Editor. Der neue Bereich beginnt mit der aktuellen Datei und verwaltet seine eigene Tab-Leiste. Dateien öffnen, **Ctrl+Tab**, **Ctrl+W**, **Close others** und **Close saved tabs** wirken auf diesen Bereich. Wenn sein letzter Tab geschlossen wird, verschwindet der Split; der letzte Editorbereich bleibt als leere Arbeitsfläche bestehen.
 
 Jeder Bereich hat seine eigene Navigation und Scrollposition. Unterschiedliche Dateien können nebeneinander stehen; bei Markdown sind auch Quelltext und Vorschau derselben Datei möglich. Beide Ansichten bearbeiten denselben Text und teilen dessen Undo-Historie. Ein Tab schließt nur seine Ansicht: Ist die Datei noch in einem anderen Bereich offen, bleiben ungespeicherter Text und Undo erhalten. Die Trennlinie lässt sich ziehen. **Focus next pane** wechselt den Fokus; **Close pane** entfernt den Bereich und übernimmt seine sonst nirgends offenen Tabs in den verbleibenden Bereich.
+
+Tabs lassen sich mit der Maus innerhalb einer Tab-Leiste umsortieren oder in einen anderen Bereich verschieben. Ein Einfügemarker zeigt die Position; auch die Dokumentfläche des Zielbereichs nimmt Tabs an. Wird der letzte Tab aus einem Bereich verschoben, schließt sich dieser Bereich. Der Text, ungespeicherte Änderungen und Undo bleiben erhalten. **Esc** oder Loslassen außerhalb eines Zielbereichs bricht das Ziehen ab.
 
 ## Mit Agenten arbeiten
 
@@ -147,7 +157,7 @@ Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App
 | --- | --- |
 | Dokumente | Öffnen, neue Entwürfe, offenen Text lesen, Änderungen, Suchen/Ersetzen, Auswahl, Undo/Redo, Speichern und Save as |
 | Dateien | Dateien und Ordner umbenennen, neue Ordner erstellen, Abschluss und Fehler der Hintergrundoperation abfragen |
-| Ansichten | Fokus, Cursorposition, Source/Preview, Splits erstellen, Dokumente zuweisen, Bereiche fokussieren, schließen und skalieren |
+| Ansichten | Fokus, Cursorposition, Source/Preview, Splits erstellen, Tabs sortieren oder zwischen Bereichen verschieben, Dokumente zuweisen, Bereiche fokussieren, schließen und skalieren |
 | Editoraktionen | Einrücken, Kommentare umschalten, Zeilen duplizieren/löschen, Treffer wechseln, unveränderte Dateien neu laden |
 | Einstellungen | Vim, Leader-Taste, Autosave, Schriftgröße, Tab-Breite, Zeilenumbruch und weiches Scrollen lesen oder gezielt ändern |
 | Bookmarks | Gespeicherte Stellen auflisten, setzen, benennen, entfernen und anspringen |

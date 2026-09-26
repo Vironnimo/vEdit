@@ -111,6 +111,19 @@ struct InsertDelta {
 struct RepeatChange {
     keys: Vec<VimKey>,
     insert: Option<InsertDelta>,
+    search: Option<SearchMotion>,
+    visual: Option<VisualRepeat>,
+}
+
+/// Native selections have no keystroke history. Store their area rather than
+/// replaying an incomplete prefix or attempting to reconstruct mouse motions.
+#[derive(Clone, Debug)]
+struct VisualRepeat {
+    linewise: bool,
+    rows: usize,
+    columns: usize,
+    includes_newline: bool,
+    to_line_end: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +131,19 @@ struct InsertReplay {
     keys: Vec<VimKey>,
     baseline: String,
     cursor: usize,
+    search: Option<SearchMotion>,
+}
+
+/// An application-level search motion. Keeping the pattern with a change lets
+/// dot repeat resolve the same exclusive motion at the new cursor.
+#[derive(Clone, Debug)]
+pub struct SearchMotion {
+    pub query: String,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+    pub backwards: bool,
+    pub count: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +165,8 @@ pub struct VimNavigation {
     preferred_column: Option<usize>,
     last_find: Option<Find>,
     command_keys: Vec<VimKey>,
+    motion_epoch: u64,
+    visual_to_line_end: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +189,8 @@ pub struct VimState {
     last_change: Option<RepeatChange>,
     insert_replay: Option<InsertReplay>,
     replaying: bool,
+    motion_epoch: u64,
+    visual_to_line_end: bool,
 }
 
 impl Default for VimState {
@@ -183,6 +213,8 @@ impl Default for VimState {
             last_change: None,
             insert_replay: None,
             replaying: false,
+            motion_epoch: 0,
+            visual_to_line_end: false,
         }
     }
 }
@@ -202,6 +234,8 @@ impl VimState {
             preferred_column: self.preferred_column,
             last_find: self.last_find,
             command_keys: self.command_keys.clone(),
+            motion_epoch: self.motion_epoch,
+            visual_to_line_end: self.visual_to_line_end,
         }
     }
 
@@ -218,6 +252,8 @@ impl VimState {
         self.preferred_column = navigation.preferred_column;
         self.last_find = navigation.last_find;
         self.command_keys.clone_from(&navigation.command_keys);
+        self.motion_epoch = navigation.motion_epoch;
+        self.visual_to_line_end = navigation.visual_to_line_end;
         if self.mode == VimMode::Insert && self.insert_origin.is_none() {
             self.insert_origin = Some(self.snapshot(text));
             self.insert_count = 1;
@@ -225,6 +261,7 @@ impl VimState {
                 keys: vec![VimKey::Char('i')],
                 baseline: text.to_owned(),
                 cursor: self.cursor,
+                search: None,
             });
         }
     }
@@ -239,6 +276,8 @@ impl VimState {
     /// Like `set_selection`, preserving which end of the selection is active.
     /// `anchor` and `cursor` are half-open boundaries, as used by a text widget.
     pub fn set_selection_boundaries(&mut self, text: &str, anchor: usize, cursor: usize) {
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        self.visual_to_line_end = false;
         let len = text.chars().count();
         let anchor = anchor.min(len);
         let cursor = cursor.min(len);
@@ -271,6 +310,7 @@ impl VimState {
         linewise: bool,
     ) {
         if self.mode == VimMode::Insert {
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
             self.cursor = primary.min(text.chars().count());
             self.visual_anchor = None;
             self.cancel_pending_command();
@@ -287,6 +327,8 @@ impl VimState {
     }
 
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        self.visual_to_line_end = false;
         let chars: Vec<char> = text.chars().collect();
         self.cursor = if self.mode == VimMode::Insert {
             cursor.min(chars.len())
@@ -347,6 +389,226 @@ impl VimState {
     pub fn cancel_pending_command(&mut self) {
         self.clear_command();
         self.command_keys.clear();
+    }
+
+    /// Cut the completed Visual area, discarding only unfinished command input.
+    /// Geometry makes dot reliable for keyboard, mouse and external selections,
+    /// even when a pending r/i/g/count or the bounded key history is incomplete.
+    pub fn cut_visual(&mut self, text: &mut String) -> Action {
+        if !matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+            return Action::default();
+        }
+        let Some(range) = self.selection(text).filter(|range| !range.is_empty()) else {
+            self.leave_visual();
+            self.cancel_pending_command();
+            return Action {
+                consumed: true,
+                mode_changed: true,
+                ..Action::default()
+            };
+        };
+        let old_cursor = self.cursor;
+        let old_mode = self.mode;
+        let chars: Vec<_> = text.chars().collect();
+        let rows = lines(&chars);
+        let first = row_for_cursor(&rows, range.start);
+        let last = if old_mode == VimMode::VisualLine {
+            row_for_cursor(
+                &rows,
+                self.cursor.max(self.visual_anchor.unwrap_or(self.cursor)),
+            )
+        } else {
+            row_for_cursor(&rows, range.end - 1)
+        };
+        let visual = VisualRepeat {
+            linewise: old_mode == VimMode::VisualLine,
+            rows: last.saturating_sub(first) + 1,
+            columns: if first == last {
+                range.len()
+            } else {
+                range.end - rows[last].start
+            },
+            includes_newline: chars.get(range.end - 1) == Some(&'\n'),
+            to_line_end: self.visual_to_line_end,
+        };
+        self.cancel_pending_command();
+        let (consumed, text_changed, yanked) = self.apply_visual(text, 'd', 1);
+        self.clamp_cursor(text);
+        if text_changed && !self.replaying {
+            self.last_change = Some(RepeatChange {
+                keys: vec![VimKey::Char('d')],
+                insert: None,
+                search: None,
+                visual: Some(visual),
+            });
+        }
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        Action {
+            consumed,
+            text_changed,
+            yanked,
+            cursor_changed: self.cursor != old_cursor,
+            mode_changed: self.mode != old_mode,
+        }
+    }
+
+    fn repeat_visual_cut(
+        &mut self,
+        text: &mut String,
+        visual: &VisualRepeat,
+    ) -> (bool, bool, Option<Yank>) {
+        let before = self.snapshot(text);
+        let chars: Vec<_> = text.chars().collect();
+        let rows = lines(&chars);
+        let first = row_for_cursor(&rows, self.cursor);
+        let last = first.saturating_add(visual.rows - 1).min(rows.len() - 1);
+        let line = rows[last];
+        self.cancel_pending_command();
+        self.visual_anchor = Some(self.cursor);
+        self.mode = if visual.linewise {
+            VimMode::VisualLine
+        } else {
+            VimMode::Visual
+        };
+        self.cursor = if visual.linewise {
+            line.start
+        } else {
+            let start = if visual.rows == 1 {
+                self.cursor
+            } else {
+                line.start
+            };
+            let limit = if visual.includes_newline && line.newline.is_some() {
+                line.end
+            } else {
+                line.end.saturating_sub(1).max(line.start)
+            };
+            if visual.to_line_end {
+                limit
+            } else {
+                start
+                    .saturating_add(visual.columns.saturating_sub(1))
+                    .min(limit)
+            }
+        };
+        self.replaying = true;
+        let result = self.apply_visual(text, 'd', 1);
+        self.replaying = false;
+        self.clamp_cursor(text);
+        if result.1 {
+            self.record(before);
+        }
+        self.cancel_pending_command();
+        result
+    }
+
+    /// Consume a search count while retaining a waiting d/c/y operator. Search
+    /// previews may move the caret, but the operator commits only on Enter/n.
+    pub fn take_search_count(&mut self) -> usize {
+        let count = self.take_count().clamp(1, MAX_COUNT);
+        match self.pending {
+            Some(Pending::Operator(_, prefix)) => count.saturating_mul(prefix).min(MAX_COUNT),
+            None => count,
+            _ => {
+                self.cancel_pending_command();
+                count
+            }
+        }
+    }
+
+    pub fn motion_epoch(&self) -> u64 {
+        self.motion_epoch
+    }
+
+    pub fn search_operator_pending(&self) -> bool {
+        matches!(self.pending, Some(Pending::Operator(_, _)))
+    }
+
+    /// Apply an exclusive logical search target before Normal mode clamps its
+    /// visible caret away from newlines/EOF. This shares registers and history
+    /// with ordinary Vim operators.
+    pub fn apply_search_motion(
+        &mut self,
+        text: &mut String,
+        target: usize,
+        motion: SearchMotion,
+    ) -> Action {
+        let old_cursor = self.cursor;
+        let old_mode = self.mode;
+        let operator = match self.pending {
+            Some(Pending::Operator(op, _)) => Some(op),
+            _ => None,
+        };
+        self.cancel_pending_command();
+        let (consumed, text_changed, yanked) = if let Some(op) = operator {
+            let chars: Vec<_> = text.chars().collect();
+            let rows = lines(&chars);
+            let start = old_cursor.min(target).min(chars.len());
+            let mut end = old_cursor.max(target).min(chars.len());
+            let first_row = row_for_cursor(&rows, start);
+            let last_row = row_for_cursor(&rows, end);
+            // Vim's exclusive-motion adjustment: a target at column one does
+            // not include that line. From indentation it becomes linewise;
+            // otherwise the preceding newline remains outside the range.
+            let linewise = last_row > first_row
+                && end == rows[last_row].start
+                && start <= first_nonblank(&chars, rows[first_row]);
+            let result = if linewise {
+                self.apply_lines(text, op, first_row, last_row - 1)
+            } else {
+                if last_row > first_row && end == rows[last_row].start {
+                    end = rows[last_row - 1].end;
+                }
+                if matches!(op, Operator::Indent | Operator::Outdent) {
+                    self.apply_lines(
+                        text,
+                        op,
+                        first_row,
+                        row_for_cursor(&rows, end.saturating_sub(1).max(start)),
+                    )
+                } else {
+                    self.apply_range(text, op, start..end)
+                }
+            };
+            if op == Operator::Yank {
+                self.cursor = if linewise {
+                    first_nonblank(&chars, rows[first_row])
+                } else {
+                    start
+                };
+            }
+            if !self.replaying {
+                let keys = vec![VimKey::Char(op.key())];
+                if self.mode == VimMode::Insert {
+                    self.insert_replay = Some(InsertReplay {
+                        keys,
+                        baseline: text.clone(),
+                        cursor: self.cursor,
+                        search: Some(motion),
+                    });
+                } else if result.1 {
+                    self.last_change = Some(RepeatChange {
+                        keys,
+                        insert: None,
+                        search: Some(motion),
+                        visual: None,
+                    });
+                }
+            }
+            result
+        } else {
+            self.set_cursor(text, target);
+            (true, false, None)
+        };
+        self.clamp_cursor(text);
+        self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        Action {
+            consumed,
+            text_changed,
+            cursor_changed: self.cursor != old_cursor,
+            mode_changed: self.mode != old_mode,
+            yanked,
+        }
     }
 
     /// Selected characters; the end is exclusive. Line selections include their
@@ -453,8 +715,15 @@ impl VimState {
     }
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine)
+            && self.pending.is_none()
+            && matches!(key, VimKey::Char('d' | 'x'))
+        {
+            return self.cut_visual(text);
+        }
         let old_cursor = self.cursor;
         let old_mode = self.mode;
+        let old_count = self.count;
         let insert_changed = old_mode == VimMode::Insert
             && self
                 .insert_origin
@@ -491,6 +760,7 @@ impl VimState {
                     keys: std::mem::take(&mut self.command_keys),
                     baseline: text.clone(),
                     cursor: self.cursor,
+                    search: None,
                 });
             } else if old_mode == VimMode::Insert && self.mode != VimMode::Insert {
                 if let Some(replay) = self.insert_replay.take()
@@ -500,17 +770,50 @@ impl VimState {
                         keys: replay.keys,
                         insert: inserted_delta
                             .or_else(|| Some(insert_delta(&replay.baseline, text, replay.cursor))),
+                        search: replay.search,
+                        visual: None,
                     });
                 }
             } else if text_changed && !history_command && !dot_command {
                 self.last_change = Some(RepeatChange {
                     keys: std::mem::take(&mut self.command_keys),
                     insert: None,
+                    search: None,
+                    visual: None,
                 });
             }
             if self.mode == VimMode::Normal && self.pending.is_none() && self.count == 0 {
                 self.command_keys.clear();
             }
+        }
+        if self.cursor != old_cursor
+            || text_changed
+            || matches!(
+                key,
+                VimKey::Char(
+                    'h' | 'l'
+                        | 'j'
+                        | 'k'
+                        | 'w'
+                        | 'b'
+                        | 'e'
+                        | 'W'
+                        | 'B'
+                        | 'E'
+                        | '^'
+                        | '$'
+                        | 'G'
+                        | '%'
+                        | '{'
+                        | '}'
+                        | ';'
+                        | ','
+                ) | VimKey::Enter
+                    | VimKey::Backspace
+            )
+            || key == VimKey::Char('0') && old_count == 0
+        {
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
         }
         Action {
             consumed,
@@ -682,6 +985,7 @@ impl VimState {
                 return self.apply_range(text, op, range);
             }
             self.mode = VimMode::Visual;
+            self.visual_to_line_end = false;
             self.visual_anchor = Some(range.start);
             self.cursor = range.end.saturating_sub(1).max(range.start);
             return (true, false, None);
@@ -728,6 +1032,7 @@ impl VimState {
                         return self.apply_lines(text, op, row_for_cursor(&rows, self.cursor), row);
                     }
                     self.cursor = first_nonblank(&chars, rows[row]);
+                    self.visual_to_line_end = false;
                     self.preferred_column = None;
                     return (true, false, None);
                 }
@@ -848,6 +1153,7 @@ impl VimState {
                 } else {
                     if self.visual_anchor.is_none() {
                         self.visual_anchor = Some(self.cursor);
+                        self.visual_to_line_end = false;
                     }
                     self.mode = target;
                 }
@@ -979,6 +1285,7 @@ impl VimState {
     }
     fn leave_visual(&mut self) {
         self.visual_anchor = None;
+        self.visual_to_line_end = false;
         if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
             self.mode = VimMode::Normal;
         }
@@ -1032,6 +1339,9 @@ impl VimState {
     }
 
     fn move_cursor(&mut self, chars: &[char], key: char, count: usize, explicit: bool) {
+        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) && !matches!(key, 'j' | 'k') {
+            self.visual_to_line_end = key == '$';
+        }
         let rows = lines(chars);
         let row = row_for_cursor(&rows, self.cursor);
         let line = rows[row];
@@ -1603,6 +1913,7 @@ impl VimState {
             return self.apply_range(text, op, range);
         }
         self.cursor = target;
+        self.visual_to_line_end = false;
         self.preferred_column = None;
         (true, false, None)
     }
@@ -1665,7 +1976,14 @@ impl VimState {
         if change.keys.is_empty() {
             return (true, false, None);
         }
-        if explicit {
+        if let Some(visual) = &change.visual {
+            // Vim repeats the saved Visual area size from the current cursor;
+            // a count supplied to dot is ignored for Visual operators.
+            return self.repeat_visual_cut(text, visual);
+        }
+        if let Some(search) = change.search.as_mut().filter(|_| explicit) {
+            search.count = count;
+        } else if explicit {
             // A count on dot replaces the original command count, as in Vim.
             let digits = change
                 .keys
@@ -1710,6 +2028,32 @@ impl VimState {
                 yank = action.yanked;
             }
         }
+        if let Some(motion) = &change.search {
+            let target = crate::search::search(
+                text,
+                &motion.query,
+                motion.case_sensitive,
+                motion.whole_word,
+                motion.regex,
+            )
+            .ok()
+            .and_then(|matches| {
+                crate::search::next_match(
+                    &matches,
+                    self.cursor,
+                    motion.backwards,
+                    motion.count,
+                    false,
+                )
+            })
+            .map(|(range, _)| range.start);
+            if let Some(target) = target {
+                let action = self.apply_search_motion(text, target, motion.clone());
+                yank = action.yanked;
+            } else {
+                self.cancel_pending_command();
+            }
+        }
         if let Some(delta) = &change.insert
             && self.mode == VimMode::Insert
         {
@@ -1717,6 +2061,7 @@ impl VimState {
                 keys: change.keys.clone(),
                 baseline: text.clone(),
                 cursor: self.cursor,
+                search: change.search.clone(),
             });
             let len = text.chars().count();
             let start = self
@@ -2166,6 +2511,276 @@ fn paragraph(chars: &[char], cursor: usize, count: usize, forward: bool) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_visual_cut_discards_unfinished_prefixes_and_repeats_completed_area() {
+        for prefix in ["", "r", "i", "a", "f", "g", "23", "2f", "g2"] {
+            let original = "ä🙂中defghi";
+            let mut text = original.to_owned();
+            let mut state = VimState::new();
+            keys(&mut state, &mut text, &format!("vll{prefix}"));
+            assert_eq!(state.selection(&text), Some(0..3), "{prefix}");
+            let action = state.cut_visual(&mut text);
+            assert_eq!(text, "defghi", "{prefix}");
+            assert_eq!(
+                action.yanked,
+                Some(Yank {
+                    text: "ä🙂中".into(),
+                    linewise: false
+                })
+            );
+            assert!(action.text_changed && action.mode_changed);
+            assert_eq!(state.pending_command(), "");
+            keys(&mut state, &mut text, ".w");
+            assert_eq!(text, "ghi", "{prefix}");
+            assert_eq!(state.pending_command(), "");
+            assert_eq!(state.register().unwrap().text, "def");
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, "defghi");
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, original);
+        }
+    }
+
+    #[test]
+    fn native_linewise_cut_ignores_pending_counts_and_dot_counts() {
+        let original = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        let mut text = original.to_owned();
+        let mut state = VimState::new();
+        keys(&mut state, &mut text, "Vj23r");
+        let action = state.cut_visual(&mut text);
+        assert_eq!(text, "three\nfour\nfive\nsix\n");
+        assert_eq!(
+            action.yanked,
+            Some(Yank {
+                text: "one\ntwo\n".into(),
+                linewise: true
+            })
+        );
+        keys(&mut state, &mut text, "9.");
+        assert_eq!(text, "five\nsix\n");
+        assert_eq!(state.register().unwrap().text, "three\nfour\n");
+        assert!(state.register().unwrap().linewise);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "three\nfour\nfive\nsix\n");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, original);
+    }
+
+    #[test]
+    fn mouse_and_external_visual_cuts_repeat_without_any_typed_motion_history() {
+        for mouse in [false, true] {
+            let mut text = "abcdefghi".to_owned();
+            let mut state = VimState::new();
+            if mouse {
+                state.set_mouse_selection(&text, 3, 0, false);
+            } else {
+                state.set_selection_boundaries(&text, 3, 0);
+            }
+            keys(&mut state, &mut text, "i");
+            state.cut_visual(&mut text);
+            keys(&mut state, &mut text, ".w");
+            assert_eq!(text, "ghi");
+            assert_eq!(state.pending_command(), "");
+            keys(&mut state, &mut text, "uu");
+            assert_eq!(text, "abcdefghi");
+        }
+        let mut text = "abcdefghi".to_owned();
+        let mut state = VimState::new();
+        state.set_mouse_selection(&text, 3, 0, false);
+        keys(&mut state, &mut text, "d.w");
+        assert_eq!(text, "ghi");
+        assert_eq!(state.pending_command(), "");
+    }
+
+    #[test]
+    fn multiline_native_visual_cut_repeats_line_count_and_last_line_column() {
+        let original = "ab\ncdef\nXYZuvw\n";
+        let mut text = original.to_owned();
+        let mut state = VimState::new();
+        state.set_selection(&text, 1..5);
+        state.cut_visual(&mut text);
+        assert_eq!(text, "aef\nXYZuvw\n");
+        keys(&mut state, &mut text, ".");
+        assert_eq!(text, "aZuvw\n");
+        assert_eq!(state.register().unwrap().text, "ef\nXY");
+        assert!(!state.register().unwrap().linewise);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "aef\nXYZuvw\n");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, original);
+    }
+
+    #[test]
+    fn visual_cut_replay_is_independent_of_key_history_and_motion_count_limits() {
+        let area = MAX_COUNT + 2;
+        let mut text = format!("{}{}", "a".repeat(area), "z".repeat(area));
+        let mut state = VimState::new();
+        state.set_selection(&text, 0..area);
+        state.cut_visual(&mut text);
+        assert_eq!(text.len(), area);
+        keys(&mut state, &mut text, ".");
+        assert!(text.is_empty());
+        assert_eq!(state.register().unwrap().text.len(), area);
+
+        text = "a".repeat(213);
+        state = VimState::new();
+        keys(&mut state, &mut text, &format!("v{}d.", "l".repeat(70)));
+        assert_eq!(text.len(), 71);
+        assert_eq!(state.pending_command(), "");
+    }
+
+    #[test]
+    fn native_cut_does_not_change_normal_mode_or_literal_visual_replacement() {
+        let mut text = "abcdefghi".to_owned();
+        let mut state = VimState::new();
+        keys(&mut state, &mut text, "d");
+        assert_eq!(state.cut_visual(&mut text), Action::default());
+        assert_eq!(state.pending_command(), "d");
+        state.handle_key(&mut text, VimKey::Escape);
+        keys(&mut state, &mut text, "vllrd");
+        assert_eq!(text, "ddddefghi");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "abcdefghi");
+    }
+
+    #[test]
+    fn visual_cut_of_empty_document_exits_visual_without_arming_a_command() {
+        for mode in ['v', 'V'] {
+            for operator in ['d', 'x'] {
+                let mut text = String::new();
+                let mut state = VimState::new();
+                state.handle_key(&mut text, VimKey::Char(mode));
+                let action = state.handle_key(&mut text, VimKey::Char(operator));
+                assert!(action.consumed && action.mode_changed);
+                assert!(!action.text_changed);
+                assert_eq!(state.mode, VimMode::Normal);
+                assert_eq!(state.pending_command(), "");
+                assert!(!state.can_undo());
+            }
+        }
+    }
+
+    #[test]
+    fn native_visual_cut_preserves_explicit_line_end_intent_not_mouse_coincidence() {
+        let original = "one\nlonger\nend";
+        for explicit in [false, true] {
+            let mut text = original.to_owned();
+            let mut state = VimState::new();
+            if explicit {
+                keys(&mut state, &mut text, "v$r");
+            } else {
+                state.set_mouse_selection(&text, 3, 0, false);
+            }
+            state.cut_visual(&mut text);
+            assert_eq!(text, "\nlonger\nend");
+            keys(&mut state, &mut text, "j.");
+            assert_eq!(text, if explicit { "\n\nend" } else { "\nger\nend" });
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, "\nlonger\nend");
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, original);
+        }
+    }
+
+    fn search_motion(query: &str, backwards: bool, count: usize) -> SearchMotion {
+        SearchMotion {
+            query: query.into(),
+            case_sensitive: true,
+            whole_word: false,
+            regex: true,
+            backwards,
+            count,
+        }
+    }
+
+    #[test]
+    fn external_search_motion_preserves_operator_count_and_exact_newline_target() {
+        let mut state = VimState::new();
+        let mut text = "one\ntwo\n".to_owned();
+        keys(&mut state, &mut text, "2d3");
+        assert_eq!(state.take_search_count(), 6);
+        assert!(state.search_operator_pending());
+        let action = state.apply_search_motion(&mut text, 3, search_motion(r"\n", false, 6));
+        assert!(action.text_changed);
+        assert_eq!(text, "\ntwo\n");
+        assert_eq!(action.yanked.unwrap().text, "one");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "one\ntwo\n");
+    }
+
+    #[test]
+    fn exclusive_search_at_column_one_adjusts_to_linewise_or_previous_line_end() {
+        for (cursor, expected, linewise, register) in [
+            (0, "two\n", true, "  one\n"),
+            (2, "two\n", true, "  one\n"),
+            (3, "  o\ntwo\n", false, "ne"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = "  one\ntwo\n".to_owned();
+            state.set_cursor(&text, cursor);
+            keys(&mut state, &mut text, "d");
+            state.take_search_count();
+            let action = state.apply_search_motion(&mut text, 6, search_motion("two", false, 1));
+            assert_eq!(text, expected);
+            assert_eq!(
+                action.yanked,
+                Some(Yank {
+                    text: register.into(),
+                    linewise
+                })
+            );
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, "  one\ntwo\n");
+        }
+    }
+
+    #[test]
+    fn backwards_search_yank_moves_to_start_without_changing_text() {
+        let mut state = VimState::new();
+        let mut text = "one foo two".to_owned();
+        state.set_cursor(&text, 8);
+        keys(&mut state, &mut text, "y");
+        let action = state.apply_search_motion(&mut text, 4, search_motion("foo", true, 1));
+        assert_eq!(text, "one foo two");
+        assert!(!state.can_undo());
+        assert_eq!(state.cursor, 4);
+        assert_eq!(action.yanked.unwrap().text, "foo ");
+    }
+
+    #[test]
+    fn dot_replays_search_delete_pattern_and_replacement_count_at_new_cursor() {
+        let mut state = VimState::new();
+        let original = "one foo two foo three foo four foo end";
+        let mut text = original.to_owned();
+        keys(&mut state, &mut text, "d");
+        state.apply_search_motion(&mut text, 4, search_motion("foo", false, 1));
+        assert_eq!(text, "foo two foo three foo four foo end");
+        keys(&mut state, &mut text, ".");
+        assert_eq!(text, "foo three foo four foo end");
+        keys(&mut state, &mut text, "u2.");
+        assert_eq!(text, "foo four foo end");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "foo two foo three foo four foo end");
+    }
+
+    #[test]
+    fn search_change_dot_repeats_insert_and_each_operation_has_one_undo() {
+        let mut state = VimState::new();
+        let mut text = "one foo two foo end".to_owned();
+        keys(&mut state, &mut text, "c");
+        state.apply_search_motion(&mut text, 4, search_motion("foo", false, 1));
+        assert_eq!(state.mode, VimMode::Insert);
+        state.insert_text(&mut text, "X ");
+        state.finish_insert(&mut text);
+        assert_eq!(text, "X foo two foo end");
+        keys(&mut state, &mut text, "w.");
+        assert_eq!(text, "X X foo end");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "X foo two foo end");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "one foo two foo end");
+    }
     fn position(state: &VimState, text: &str) -> (usize, usize) {
         text.chars()
             .take(state.cursor)

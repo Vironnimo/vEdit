@@ -132,6 +132,7 @@ struct Pane {
     id: u64,
     documents: Vec<u64>,
     document: Option<u64>,
+    empty_workspace: Option<PathBuf>,
     view: DocumentView,
     states: HashMap<u64, PaneDocumentState>,
     tab_strip_active: Option<u64>,
@@ -142,6 +143,7 @@ impl Pane {
             id,
             documents: Vec::new(),
             document: None,
+            empty_workspace: None,
             view: DocumentView::Source,
             states: HashMap::new(),
             tab_strip_active: None,
@@ -183,6 +185,8 @@ struct SessionPane {
     tab: Option<usize>,
     view: DocumentView,
     cursor: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_workspace: Option<PathBuf>,
     #[serde(default)]
     documents: Option<Vec<(usize, usize)>>,
     #[serde(default)]
@@ -197,7 +201,56 @@ struct SessionPaneDocument {
     selection: Range<usize>,
 }
 
+impl SessionLayout {
+    pub(super) fn remap_projects(&mut self, mapping: &[Option<usize>]) {
+        for pane in &mut self.panes {
+            pane.project = pane
+                .project
+                .and_then(|index| mapping.get(index).copied().flatten());
+            if pane.project.is_none() {
+                pane.tab = None;
+            }
+            if let Some(documents) = &mut pane.documents {
+                documents.retain_mut(|(project, _)| {
+                    if let Some(restored) = mapping.get(*project).copied().flatten() {
+                        *project = restored;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            pane.states.retain_mut(|state| {
+                if let Some(restored) = mapping.get(state.project).copied().flatten() {
+                    state.project = restored;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+}
+
 impl MorrowApp {
+    pub(super) fn pane_has_empty_workspace(&self) -> bool {
+        self.editor_layout.panes.iter().any(|pane| {
+            pane.id == self.pane_context()
+                && pane.document.is_none()
+                && pane.empty_workspace.is_some()
+        })
+    }
+    pub(super) fn clear_empty_workspace(&mut self) {
+        let pane_id = self.pane_context();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+        {
+            pane.empty_workspace = None;
+        }
+    }
     fn pane_context(&self) -> u64 {
         if self.rendering_panes {
             self.render_pane
@@ -242,6 +295,7 @@ impl MorrowApp {
         self.initialize_pane_groups();
         let pane_id = self.pane_context();
         let Some(tab) = self.tab() else {
+            let empty_workspace = self.project().map(|project| project.root.clone());
             if let Some(pane) = self
                 .editor_layout
                 .panes
@@ -249,6 +303,8 @@ impl MorrowApp {
                 .find(|pane| pane.id == pane_id)
             {
                 pane.document = None;
+                pane.empty_workspace = empty_workspace;
+                pane.view = DocumentView::Source;
             }
             return;
         };
@@ -269,6 +325,7 @@ impl MorrowApp {
         if !pane.documents.contains(&id) {
             pane.documents.push(id);
         }
+        pane.empty_workspace = None;
         if pane.document == Some(id) {
             return;
         }
@@ -355,7 +412,7 @@ impl MorrowApp {
                 pane.documents.push(id);
                 pane.states.insert(id, state);
             }
-            if pane.document.is_none() {
+            if pane.document.is_none() && pane.empty_workspace.is_none() {
                 pane.document = pane.documents.first().copied();
                 pane.view = pane
                     .document
@@ -385,6 +442,172 @@ impl MorrowApp {
             .panes
             .iter()
             .any(|pane| pane.id != pane_id && pane.documents.contains(&id))
+    }
+    /// Move a group's reference, never the shared buffer or its edit history.
+    /// `index` is the final position after an existing destination reference is removed.
+    pub(super) fn move_pane_tab(
+        &mut self,
+        source_pane_id: u64,
+        pane_id: u64,
+        tab_id: u64,
+        index: usize,
+    ) -> Result<(), String> {
+        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, true)
+    }
+    pub(super) fn drop_pane_tab(
+        &mut self,
+        source_pane_id: u64,
+        pane_id: u64,
+        tab_id: u64,
+        index: usize,
+    ) -> Result<(), String> {
+        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, false)
+    }
+    fn move_pane_tab_inner(
+        &mut self,
+        source_pane_id: u64,
+        pane_id: u64,
+        tab_id: u64,
+        index: usize,
+        request_focus: bool,
+    ) -> Result<(), String> {
+        let source = self
+            .editor_layout
+            .panes
+            .iter()
+            .position(|p| p.id == source_pane_id)
+            .ok_or("Source pane no longer exists; inspect layout status")?;
+        let destination = self
+            .editor_layout
+            .panes
+            .iter()
+            .position(|p| p.id == pane_id)
+            .ok_or("Destination pane no longer exists; inspect layout status")?;
+        if !self.editor_layout.panes[source].documents.contains(&tab_id)
+            || self.tab_location(tab_id).is_none()
+        {
+            return Err("Tab no longer belongs to the source pane; inspect layout status".into());
+        }
+        let existing = self.editor_layout.panes[destination]
+            .documents
+            .contains(&tab_id);
+        let length = self.editor_layout.panes[destination].documents.len() - usize::from(existing);
+        if index > length {
+            return Err(format!(
+                "Tab position must be between 0 and {length}; no pane changed"
+            ));
+        }
+        self.cancel_vim_search(false);
+        // Validation precedes capture or finishing Insert: rejected requests have no effect.
+        let changes_document_focus =
+            self.editor_layout.focused != pane_id || self.tab().is_none_or(|tab| tab.id != tab_id);
+        if changes_document_focus
+            && let Some(tab) = self.tab_mut()
+            && tab.vim.finish_insert(&mut tab.text).text_changed
+        {
+            tab.changed();
+        }
+        self.capture_pane_navigation();
+        if source_pane_id != pane_id {
+            self.transfer_tab_preview(source_pane_id, pane_id, tab_id, existing);
+            if !existing
+                && let Some(offset) = self
+                    .find
+                    .restore_scroll
+                    .get(&(source_pane_id, tab_id))
+                    .copied()
+                    .or_else(|| {
+                        self.find
+                            .view_scroll
+                            .get(&(source_pane_id, tab_id))
+                            .map(|(_, offset)| *offset)
+                    })
+            {
+                self.find.restore_scroll.insert((pane_id, tab_id), offset);
+            }
+            self.find.restore_scroll.remove(&(source_pane_id, tab_id));
+            self.find.view_scroll.remove(&(source_pane_id, tab_id));
+        }
+        let source_state = self.editor_layout.panes[source]
+            .states
+            .get(&tab_id)
+            .cloned()
+            .or_else(|| {
+                self.tab_location(tab_id).map(|(pi, ti)| {
+                    let tab = &self.projects[pi].tabs[ti];
+                    PaneDocumentState {
+                        navigation: tab.vim.navigation(),
+                        view: tab.agent_view,
+                        selection: tab.selection.clone(),
+                    }
+                })
+            })
+            .expect("validated open tab");
+        {
+            let pane = &mut self.editor_layout.panes[source];
+            let old = pane.documents.iter().position(|id| *id == tab_id).unwrap();
+            pane.documents.remove(old);
+            if source != destination {
+                pane.states.remove(&tab_id);
+                if pane.document == Some(tab_id) {
+                    pane.document = pane
+                        .documents
+                        .get(old.min(pane.documents.len().saturating_sub(1)))
+                        .copied();
+                    pane.view = pane
+                        .document
+                        .and_then(|id| pane.states.get(&id))
+                        .map_or(DocumentView::Source, |state| state.view);
+                }
+            }
+            pane.tab_strip_active = None;
+        }
+        {
+            let pane = &mut self.editor_layout.panes[destination];
+            pane.documents.retain(|id| *id != tab_id);
+            pane.documents.insert(index, tab_id);
+            // A shared destination's cursor/view remains local; a newly moved view travels.
+            let state = pane.states.entry(tab_id).or_insert(source_state);
+            pane.document = Some(tab_id);
+            pane.empty_workspace = None;
+            pane.view = state.view;
+            pane.tab_strip_active = None;
+        }
+        self.editor_layout.focused = pane_id;
+        self.render_pane = pane_id;
+        self.completions = None;
+        self.completion_request = None;
+        self.collapse_empty_panes();
+        self.restore_focused_pane(request_focus);
+        if !request_focus && let Some(tab) = self.tab_mut() {
+            // A drop runs after the frame's editors. Request focus from the next
+            // rendered widget, once its AccessKit node exists in that pane.
+            tab.pending_selection = Some(tab.selection.clone());
+            tab.focus = tab.agent_view == DocumentView::Source;
+        }
+        if !request_focus {
+            self.ctx.memory_mut(|memory| {
+                if let Some(focused) = memory.focused() {
+                    memory.surrender_focus(focused);
+                }
+            });
+        }
+        self.session_dirty = true;
+        Ok(())
+    }
+    pub(super) fn tab_drag_pane_rects(&self) -> Vec<(u64, egui::Rect)> {
+        self.editor_layout
+            .rects
+            .iter()
+            .map(|(id, rect)| (*id, *rect))
+            .collect()
+    }
+    pub(super) fn tab_drag_pane_ids(&self) -> Vec<u64> {
+        self.editor_layout
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect()
     }
     /// Remove only this group's reference. The caller releases the buffer on its last reference.
     pub(super) fn detach_pane_tab(&mut self, pane_id: u64, id: u64) -> Result<bool, String> {
@@ -458,15 +681,34 @@ impl MorrowApp {
             .iter()
             .flat_map(|project| project.tabs.iter().map(|tab| tab.id))
             .collect();
+        let roots: std::collections::HashSet<_> = self
+            .projects
+            .iter()
+            .map(|project| project.root.clone())
+            .collect();
         for pane in &mut self.editor_layout.panes {
             pane.documents.retain(|id| open.contains(id));
             pane.states.retain(|id, _| open.contains(id));
-            if pane.document.is_none_or(|id| !pane.documents.contains(&id)) {
+            if pane
+                .empty_workspace
+                .as_ref()
+                .is_some_and(|root| !roots.contains(root))
+            {
+                pane.empty_workspace = None;
+            }
+            if pane
+                .document
+                .is_some_and(|id| !pane.documents.contains(&id))
+                || pane.document.is_none() && pane.empty_workspace.is_none()
+            {
                 pane.document = pane.documents.first().copied();
                 pane.view = pane
                     .document
                     .and_then(|document| pane.states.get(&document))
                     .map_or(DocumentView::Source, |state| state.view);
+            }
+            if pane.document.is_some() {
+                pane.empty_workspace = None;
             }
         }
         self.collapse_empty_panes();
@@ -513,11 +755,28 @@ impl MorrowApp {
         else {
             return;
         };
-        let Some(id) = pane.document else { return };
+        let Some(id) = pane.document else {
+            if let Some(index) = pane.empty_workspace.as_ref().and_then(|root| {
+                self.projects
+                    .iter()
+                    .position(|project| &project.root == root)
+            }) {
+                self.set_active_project_context(index);
+                self.render_pane = pane.id;
+                if request_focus {
+                    self.ctx.memory_mut(|memory| {
+                        if let Some(focused) = memory.focused() {
+                            memory.surrender_focus(focused);
+                        }
+                    });
+                }
+            }
+            return;
+        };
         let Some((pi, ti)) = self.tab_location(id) else {
             return;
         };
-        self.active_project = pi;
+        self.set_active_project_context(pi);
         self.projects[pi].active_tab = ti;
         self.render_pane = pane.id;
         let tab = &mut self.projects[pi].tabs[ti];
@@ -563,6 +822,7 @@ impl MorrowApp {
         if pane_id == self.editor_layout.focused {
             return Ok(());
         }
+        self.cancel_vim_search(false);
         if let Some(tab) = self.tab_mut()
             && tab.vim.finish_insert(&mut tab.text).text_changed
         {
@@ -579,6 +839,7 @@ impl MorrowApp {
     }
     pub(super) fn focus_pane_from_pointer(&mut self) {
         if self.picker.is_some()
+            || self.workspace_picker_open()
             || self.save_as.is_some()
             || self.settings_open
             || self.close_action.is_some()
@@ -619,15 +880,34 @@ impl MorrowApp {
             .filter(|tab| is_markdown(tab.path.as_deref()))
             .map(|tab| tab.id)
             .collect();
+        let roots: std::collections::HashSet<_> = self
+            .projects
+            .iter()
+            .map(|project| project.root.clone())
+            .collect();
         for pane in &mut self.editor_layout.panes {
             pane.documents.retain(|id| open.contains(id));
             pane.states.retain(|id, _| open.contains(id));
-            if pane.document.is_none_or(|id| !pane.documents.contains(&id)) {
+            if pane
+                .empty_workspace
+                .as_ref()
+                .is_some_and(|root| !roots.contains(root))
+            {
+                pane.empty_workspace = None;
+            }
+            if pane
+                .document
+                .is_some_and(|id| !pane.documents.contains(&id))
+                || pane.document.is_none() && pane.empty_workspace.is_none()
+            {
                 pane.document = pane.documents.first().copied();
                 pane.view = pane
                     .document
                     .and_then(|id| pane.states.get(&id))
                     .map_or(DocumentView::Source, |state| state.view);
+            }
+            if pane.document.is_some() {
+                pane.empty_workspace = None;
             }
             if pane
                 .document
@@ -849,6 +1129,14 @@ impl MorrowApp {
                 tab_id,
                 view,
             } => self.assign_editor_pane(pane_id, tab_id, view)?,
+            LayoutAction::MoveTab {
+                source_pane_id,
+                pane_id,
+                tab_id,
+                index,
+            } => {
+                self.move_pane_tab(source_pane_id, pane_id, tab_id, index)?;
+            }
             LayoutAction::Resize { pane_id, ratio } => {
                 if !ratio.is_finite() || !(0.15..=0.85).contains(&ratio) {
                     return Err("Split ratio must be between 0.15 and 0.85".into());
@@ -965,6 +1253,7 @@ impl MorrowApp {
                     tab: location.map(|l| l.1),
                     view: pane.view,
                     cursor,
+                    empty_workspace: pane.empty_workspace.clone(),
                     documents: Some(
                         pane.documents
                             .iter()
@@ -1030,6 +1319,10 @@ impl MorrowApp {
         for id in ids {
             let mut pane = Pane::empty(id);
             if let Some(saved) = session.panes.iter().find(|p| p.id == id) {
+                pane.empty_workspace = saved
+                    .empty_workspace
+                    .clone()
+                    .filter(|root| self.projects.iter().any(|project| &project.root == root));
                 if let Some(documents) = &saved.documents {
                     for (pi, ti) in documents {
                         if let Some(tab) = self
@@ -1072,6 +1365,7 @@ impl MorrowApp {
                         pane.documents.push(tab.id);
                     }
                     pane.document = Some(tab.id);
+                    pane.empty_workspace = None;
                     pane.view = saved.view;
                     let mut navigation = tab.vim.navigation();
                     navigation.cursor = saved.cursor;
@@ -1081,7 +1375,11 @@ impl MorrowApp {
                         selection: saved.cursor..saved.cursor,
                     });
                 } else {
-                    pane.document = pane.documents.first().copied();
+                    pane.document = if pane.empty_workspace.is_some() {
+                        None
+                    } else {
+                        pane.documents.first().copied()
+                    };
                 }
             }
             panes.push(pane);
@@ -1132,6 +1430,7 @@ impl MorrowApp {
     }
     pub(super) fn split_editor_ui(&mut self, ui: &mut egui::Ui) {
         self.synchronize_layout();
+        self.begin_tab_drag_frame();
         self.focus_pane_from_pointer();
         let node = self.editor_layout.root.clone();
         let rect = ui.available_rect_before_wrap();
@@ -1139,6 +1438,7 @@ impl MorrowApp {
         self.render_split_node(ui, &node, rect);
         self.rendering_panes = false;
         self.restore_focused_pane(false);
+        self.finish_tab_drag_frame(ui);
         ui.allocate_rect(rect, egui::Sense::hover());
     }
     fn render_split_node(&mut self, ui: &mut egui::Ui, node: &PaneNode, rect: egui::Rect) {
@@ -1277,6 +1577,14 @@ impl MorrowApp {
                 tab.scroll_to_cursor = false;
             }
             tab.agent_view = pane.view;
+        } else if let Some(pi) = pane.empty_workspace.as_ref().and_then(|root| {
+            self.projects
+                .iter()
+                .position(|project| &project.root == root)
+        }) {
+            // Rendering another pane temporarily borrows its workspace, without
+            // switching the focused pane's search or exposing another document.
+            self.active_project = pi;
         }
         self.tab_strip_active = pane.tab_strip_active;
         let focused = pane_id == self.editor_layout.focused;
@@ -1285,6 +1593,7 @@ impl MorrowApp {
                 .max_rect(rect)
                 .id_salt(("editor_pane", pane_id)),
             |ui| {
+                self.register_tab_drag_pane_ui(pane_id, ui.id());
                 ui.set_clip_rect(rect.intersect(ui.clip_rect()));
                 ui.spacing_mut().item_spacing.y = 0.0;
                 self.editor_pane_ui(ui);
@@ -1332,6 +1641,12 @@ impl MorrowApp {
     }
 }
 
+#[cfg(test)]
+#[path = "empty_workspace_tests.rs"]
+mod empty_workspace_tests;
+#[cfg(test)]
+#[path = "tab_drag_tests.rs"]
+mod tab_drag_tests;
 #[cfg(test)]
 #[path = "split_tests.rs"]
 mod tests;

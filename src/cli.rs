@@ -218,6 +218,12 @@ pub enum LayoutAction {
         pane_id: u64,
         tab_id: u64,
     },
+    MoveTab {
+        source_pane_id: u64,
+        pane_id: u64,
+        tab_id: u64,
+        index: usize,
+    },
     Assign {
         pane_id: u64,
         tab_id: u64,
@@ -519,7 +525,11 @@ Send either set_text or nonoverlapping edits referring to the same revision:
 {"op":"edit","tab_id":1,"expected_revision":3,"edits":[{"range":{
 "start":{"line":2,"column":1},"end":{"line":2,"column":3}},"text":"96"}]}
 layout changes use {"action":"split","orientation":"vertical","tab_id":1};
-vertical means side by side, horizontal means top/bottom. Use schema for complete
+vertical means side by side, horizontal means top/bottom. To reorder or move a
+tab, send {"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,
+"index":0}. Use actual IDs from layout; index is the final zero-based target
+position after removing any existing target reference. The result returns the
+updated groups and focus; an empty source split collapses. Use schema for complete
 shapes and task/disk-search limitations. Batch stops at first failed/partial step
 by default and reports completed steps; it never rolls back or replays them.
 "#;
@@ -1431,6 +1441,21 @@ pub fn validate(request: &Request) -> Result<(), String> {
                 validate_id(*pane_id)?;
                 validate_id(*tab_id)?;
             }
+            LayoutAction::MoveTab {
+                source_pane_id,
+                pane_id,
+                tab_id,
+                index,
+            } => {
+                validate_id(*source_pane_id)?;
+                validate_id(*pane_id)?;
+                validate_id(*tab_id)?;
+                if *index > 100_000 {
+                    return Err(
+                        "Tab index must be 0..100000 and within the target tab group".into(),
+                    );
+                }
+            }
             LayoutAction::Resize { pane_id, ratio } => {
                 validate_id(*pane_id)?;
                 if !ratio.is_finite() || !(0.15..=0.85).contains(ratio) {
@@ -2030,6 +2055,102 @@ mod tests {
             panic!()
         };
         assert_eq!((pane_id, tab_id), (2, 42));
+        assert!(!start);
+    }
+    #[test]
+    fn tab_move_preserves_explicit_panes_position_and_requires_every_constraint() {
+        for (source_pane_id, pane_id, index) in [(1, 2, 0), (2, 2, 3), (3, 1, 100_000)] {
+            let request: Request = serde_json::from_value(json!({
+                "op": "layout",
+                "change": { "action": "move_tab", "source_pane_id": source_pane_id,
+                    "pane_id": pane_id, "tab_id": 42, "index": index }
+            }))
+            .unwrap();
+            validate(&request).unwrap();
+            let Request::Layout {
+                change:
+                    LayoutAction::MoveTab {
+                        source_pane_id: actual_source,
+                        pane_id: actual_target,
+                        tab_id,
+                        index: actual_index,
+                    },
+            } = request
+            else {
+                panic!()
+            };
+            assert_eq!(
+                (actual_source, actual_target, tab_id, actual_index),
+                (source_pane_id, pane_id, 42, index)
+            );
+        }
+        for (source_pane_id, pane_id, tab_id, index) in [
+            (0, 2, 42, 0),
+            (1, 0, 42, 0),
+            (1, 2, 0, 0),
+            (1, 2, 42, 100_001),
+        ] {
+            let request: Request = serde_json::from_value(json!({
+                "op": "layout",
+                "change": { "action": "move_tab", "source_pane_id": source_pane_id,
+                    "pane_id": pane_id, "tab_id": tab_id, "index": index }
+            }))
+            .unwrap();
+            assert!(validate(&request).is_err());
+        }
+        let valid = json!({"action":"move_tab","source_pane_id":1,
+            "pane_id":2,"tab_id":42,"index":0});
+        for missing in ["source_pane_id", "pane_id", "tab_id", "index"] {
+            let mut change = valid.clone();
+            change.as_object_mut().unwrap().remove(missing);
+            assert!(serde_json::from_value::<LayoutAction>(change).is_err());
+        }
+        for invalid in [
+            json!({"action":"move_tab","source_pane_id":1,"target_pane_id":2,"tab_id":42,"index":0}),
+            json!({"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,"index":-1}),
+            json!({"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,"index":1.5}),
+            json!({"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,"index":0,"view":"preview"}),
+            json!({"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,"index":0,"copy":true}),
+        ] {
+            assert!(serde_json::from_value::<LayoutAction>(invalid).is_err());
+        }
+    }
+    #[test]
+    fn layout_change_file_parser_preserves_zero_based_tab_move() {
+        let path = std::env::temp_dir().join(format!(
+            "morrow-layout-move-tab-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path,
+            b"\xef\xbb\xbf{\"action\":\"move_tab\",\"source_pane_id\":3,\"pane_id\":2,\"tab_id\":42,\"index\":0}")
+            .unwrap();
+        let result = parse_args([
+            OsString::from("--no-start"),
+            OsString::from("layout"),
+            path.as_os_str().to_owned(),
+        ]);
+        std::fs::remove_file(&path).unwrap();
+        let Parsed::Command {
+            request:
+                Request::Layout {
+                    change:
+                        LayoutAction::MoveTab {
+                            source_pane_id,
+                            pane_id,
+                            tab_id,
+                            index,
+                        },
+                },
+            start,
+        } = result.unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((source_pane_id, pane_id, tab_id, index), (3, 2, 42, 0));
         assert!(!start);
     }
     #[test]

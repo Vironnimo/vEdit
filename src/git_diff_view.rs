@@ -14,11 +14,19 @@ pub(crate) struct DiffView {
     generation: u64,
     measured_width: f32,
     details_open: bool,
+    last_frame: Option<u64>,
 }
 
 impl DiffView {
     /// Show a read-only patch. The raw patch is also what the copy action returns.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, title: &str, text: &str) {
+        let frame = ui.ctx().cumulative_frame_nr();
+        let focus_contents = self
+            .last_frame
+            .is_none_or(|last| frame > last.saturating_add(1))
+            || self.title != title
+            || self.patch.source != text;
+        self.last_frame = Some(frame);
         self.update(title, text);
         let palette = Palette::new(ui);
         ui.horizontal_wrapped(|ui| {
@@ -27,6 +35,9 @@ impl DiffView {
                 RichText::new("Unified diff")
                     .size(12.0)
                     .color(palette.muted),
+            )
+            .on_hover_text(
+                "Scroll: j / k · Page Up / Down · Ctrl+F / B · Home / End. Esc closes the diff.",
             );
             if self.patch.files > 1 {
                 let noun = if self.patch.files == 1 {
@@ -130,6 +141,22 @@ impl DiffView {
                 // Use that same wrapper so wheel offsets and limits refer to
                 // its persisted state rather than an unrelated empty state.
                 let scroll_id = ui.make_persistent_id(egui::IdSalt::new(salt));
+                let body_id = ui.make_persistent_id("diff_keyboard_surface");
+                let body = ui.interact(
+                    ui.available_rect_before_wrap().intersect(ui.clip_rect()),
+                    body_id,
+                    Sense::click(),
+                );
+                body.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Other,
+                        ui.is_enabled(),
+                        "Diff contents",
+                    )
+                });
+                if focus_contents || body.clicked() {
+                    body.request_focus();
+                }
                 let mut scroll = egui::ScrollArea::both()
                     .id_salt(salt)
                     .auto_shrink([false, false])
@@ -138,8 +165,17 @@ impl DiffView {
                         mouse_wheel: false,
                         ..Default::default()
                     });
-                if let Some(offset) =
-                    render::instant_scroll_offset_axes(ui, scroll_id, egui::Vec2b::TRUE)
+                let wheel_offset =
+                    render::instant_scroll_offset_axes(ui, scroll_id, egui::Vec2b::TRUE);
+                if let Some(offset) = keyboard_scroll_offset(
+                    ui,
+                    scroll_id,
+                    body_id,
+                    row_height,
+                    self.patch.presentation.len(),
+                    wheel_offset,
+                )
+                .or(wheel_offset)
                 {
                     scroll = scroll.scroll_offset(offset);
                 }
@@ -267,6 +303,105 @@ impl DiffView {
                 }
             });
     }
+}
+
+fn keyboard_scroll_offset(
+    ui: &egui::Ui,
+    scroll_id: egui::Id,
+    body_id: egui::Id,
+    row_height: f32,
+    rows: usize,
+    wheel_offset: Option<Vec2>,
+) -> Option<Vec2> {
+    let ctx = ui.ctx();
+    if !ui.is_enabled() || egui::Popup::is_any_open(ctx) {
+        return None;
+    }
+    let top = ctx.memory(|memory| memory.areas().top_layer_id(ui.layer_id().order));
+    if top.is_some_and(|top| top != ui.layer_id()) {
+        return None;
+    }
+    // Opening the diff focuses its contents. A subsequent focus transfer to any
+    // toolbar control or text widget must keep that control's own key handling.
+    if let Some(focused) = ctx.memory(|memory| memory.focused())
+        && focused != body_id
+    {
+        return None;
+    }
+    let viewport_height = ui.available_height().max(row_height);
+    let maximum = ctx
+        .data(|data| data.get_temp::<Vec2>(scroll_id.with("document_scroll_limit")))
+        .map_or_else(
+            || (rows as f32 * row_height - viewport_height).max(0.0),
+            |limit| limit.y,
+        );
+    let mut offset = wheel_offset.unwrap_or_else(|| {
+        egui::scroll_area::State::load(ctx, scroll_id)
+            .unwrap_or_default()
+            .offset
+    });
+    let mut changed = false;
+    ctx.input_mut(|input| {
+        let has_text_j = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Text(text) if text.contains('j')));
+        let has_text_k = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Text(text) if text.contains('k')));
+        let plain = input.modifiers.is_none();
+        input.events.retain(|event| {
+            if plain
+                && let egui::Event::Text(text) = event
+                && !text.is_empty()
+                && text.chars().all(|ch| matches!(ch, 'j' | 'k'))
+            {
+                for ch in text.chars() {
+                    offset.y = (offset.y + if ch == 'j' { row_height } else { -row_height })
+                        .clamp(0.0, maximum);
+                }
+                changed = true;
+                return false;
+            }
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            let destination = if modifiers.is_none() {
+                match key {
+                    egui::Key::J => Some(offset.y + if has_text_j { 0.0 } else { row_height }),
+                    egui::Key::K => Some(offset.y - if has_text_k { 0.0 } else { row_height }),
+                    egui::Key::PageDown => Some(offset.y + viewport_height * 0.9),
+                    egui::Key::PageUp => Some(offset.y - viewport_height * 0.9),
+                    egui::Key::Home => Some(0.0),
+                    egui::Key::End => Some(maximum),
+                    _ => None,
+                }
+            } else if modifiers.ctrl && !modifiers.alt && !modifiers.shift && !modifiers.mac_cmd {
+                match key {
+                    egui::Key::F => Some(offset.y + viewport_height * 0.9),
+                    egui::Key::B => Some(offset.y - viewport_height * 0.9),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(destination) = destination {
+                offset.y = destination.clamp(0.0, maximum);
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+    });
+    changed.then_some(offset)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1252,6 +1387,152 @@ mod tests {
         assert!(away.iter().any(|(text, _)| text.starts_with("+payload 99")));
         let (returned, _) = show_pass(&context, &mut view, &patch, size, wheel(-42.0), 0.3);
         assert!(returned.iter().any(|(text, _)| text == "+payload 9999"));
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn diff_keyboard_scrolls_once_per_key_text_pair_and_reaches_both_ends() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let patch = format!(
+            "@@ -0,0 +1,1000 @@\n{}",
+            (0..1000)
+                .map(|index| format!("+payload {index}\n"))
+                .collect::<String>()
+        );
+        let size = Vec2::new(550.0, 260.0);
+        let (initial, _) = show_pass(&context, &mut view, &patch, size, vec![], 0.0);
+        let before = initial
+            .iter()
+            .find(|(text, _)| text == "+payload 2")
+            .unwrap()
+            .1
+            .top();
+        let (down, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![
+                key_event(egui::Key::J, egui::Modifiers::NONE),
+                egui::Event::Text("j".into()),
+            ],
+            0.1,
+        );
+        let after = down
+            .iter()
+            .find(|(text, _)| text == "+payload 2")
+            .unwrap()
+            .1
+            .top();
+        assert!(
+            (15.0..30.0).contains(&(before - after)),
+            "moved {} points",
+            before - after
+        );
+        let (last, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![key_event(egui::Key::End, egui::Modifiers::NONE)],
+            0.2,
+        );
+        assert!(last.iter().any(|(text, _)| text == "+payload 999"));
+        let (first, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![key_event(egui::Key::Home, egui::Modifiers::NONE)],
+            0.3,
+        );
+        assert!(first.iter().any(|(text, _)| text == "+payload 0"));
+        let (page, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![key_event(egui::Key::PageDown, egui::Modifiers::NONE)],
+            0.4,
+        );
+        assert!(!page.iter().any(|(text, _)| text == "+payload 0"));
+        let (back, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![key_event(egui::Key::B, egui::Modifiers::CTRL)],
+            0.5,
+        );
+        assert!(back.iter().any(|(text, _)| text == "+payload 0"));
+    }
+
+    #[test]
+    fn focused_text_field_retains_its_input_and_diff_does_not_scroll() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let mut query = String::new();
+        let patch = format!(
+            "@@ -0,0 +1,1000 @@\n{}",
+            (0..1000)
+                .map(|index| format!("+payload {index}\n"))
+                .collect::<String>()
+        );
+        let mut pass = |events, time| {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Default::default(),
+                        Vec2::new(550.0, 300.0),
+                    )),
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let field = ui.text_edit_singleline(&mut query);
+                        view.show(ui, "Review", &patch);
+                        field.request_focus();
+                    });
+                },
+            );
+            let painted = collect_text(&output.shapes);
+            output.drop_without_applying_deltas();
+            painted
+        };
+        let initial = pass(vec![], 0.0);
+        let typed = pass(
+            vec![
+                egui::Event::Text("j".into()),
+                key_event(egui::Key::PageDown, egui::Modifiers::NONE),
+            ],
+            0.1,
+        );
+        let before = initial
+            .iter()
+            .find(|(text, _)| text == "+payload 2")
+            .unwrap()
+            .1
+            .top();
+        let after = typed
+            .iter()
+            .find(|(text, _)| text == "+payload 2")
+            .unwrap()
+            .1
+            .top();
+        assert_eq!(before, after);
+        assert_eq!(query, "j");
     }
 
     #[test]

@@ -22,12 +22,18 @@ use std::{
 mod context_actions;
 #[path = "control.rs"]
 mod control;
+#[path = "find.rs"]
+mod find;
 #[path = "git_panel.rs"]
 mod git_panel;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "split.rs"]
 mod split;
+#[path = "tab_drag.rs"]
+mod tab_drag;
+#[path = "workspace_ui.rs"]
+mod workspace_ui;
 
 const BG: Color32 = Color32::from_rgb(17, 20, 27);
 const PANEL: Color32 = Color32::from_rgb(22, 26, 34);
@@ -427,6 +433,7 @@ struct CompletionPopup {
 pub struct MorrowApp {
     projects: Vec<Project>,
     active_project: usize,
+    workspace_ui: workspace_ui::WorkspaceUiState,
     sidebar: SidebarView,
     sidebar_visible: bool,
     settings: Settings,
@@ -451,7 +458,9 @@ pub struct MorrowApp {
     find_word: bool,
     find_focus: bool,
     find_match: Option<usize>,
+    find: find::FindState,
     project_query: String,
+    project_search_focus: bool,
     project_search: Option<workspace::SearchResults>,
     search_running: bool,
     search_generation: u64,
@@ -502,6 +511,7 @@ pub struct MorrowApp {
     review: Option<crate::cli::ReviewSummary>,
     tab_strip_active: Option<u64>,
     editor_layout: split::EditorLayout,
+    tab_drag: tab_drag::TabDragState,
     render_pane: u64,
     rendering_panes: bool,
 }
@@ -525,7 +535,34 @@ impl MorrowApp {
             app.settings.autosave = autosave;
         }
         app.sidebar = session.sidebar.unwrap_or_default();
-        for entry in session.projects {
+        app.restore_session_workspace(session.projects, session.active_project, session.layout);
+        for index in 0..app.projects.len() {
+            app.index_project(index);
+        }
+        app.session_dirty = false;
+        for argument in std::env::args_os().skip(1) {
+            app.open_argument(PathBuf::from(argument));
+        }
+        app.start_control();
+        app
+    }
+    fn restore_session_workspace(
+        &mut self,
+        projects: Vec<SessionProject>,
+        active_project: usize,
+        mut layout: Option<split::SessionLayout>,
+    ) {
+        let mapping = self.restore_session_projects(projects);
+        let restored_active = mapping.get(active_project).copied().flatten().unwrap_or(0);
+        self.set_active_project_context(restored_active);
+        if let Some(layout) = &mut layout {
+            layout.remap_projects(&mapping);
+        }
+        self.restore_editor_layout(layout);
+    }
+    fn restore_session_projects(&mut self, entries: Vec<SessionProject>) -> Vec<Option<usize>> {
+        let mut mapping = vec![None; entries.len()];
+        for (original, entry) in entries.into_iter().enumerate() {
             let root = entry.root;
             if !root.is_dir() {
                 continue;
@@ -553,7 +590,7 @@ impl MorrowApp {
                 if let Some(recovery) = &saved.recovery_path {
                     tab.recovery_path = recovery.clone();
                 }
-                app.load_tab(tab.id, saved.path, saved.recovery_path);
+                self.load_tab(tab.id, saved.path, saved.recovery_path);
                 project.tabs.push(tab);
             }
             project.active_tab = entry
@@ -566,21 +603,10 @@ impl MorrowApp {
                         .unwrap_or(0)
                 })
                 .min(project.tabs.len().saturating_sub(1));
-            app.projects.push(project);
+            mapping[original] = Some(self.projects.len());
+            self.projects.push(project);
         }
-        app.active_project = session
-            .active_project
-            .min(app.projects.len().saturating_sub(1));
-        app.restore_editor_layout(session.layout);
-        for index in 0..app.projects.len() {
-            app.index_project(index);
-        }
-        app.session_dirty = false;
-        for argument in std::env::args_os().skip(1) {
-            app.open_argument(PathBuf::from(argument));
-        }
-        app.start_control();
-        app
+        mapping
     }
     fn open_argument(&mut self, input: PathBuf) {
         let path = fs::canonicalize(&input).unwrap_or(input);
@@ -609,6 +635,7 @@ impl MorrowApp {
         Self {
             projects: Vec::new(),
             active_project: 0,
+            workspace_ui: workspace_ui::WorkspaceUiState::default(),
             sidebar: SidebarView::Explorer,
             sidebar_visible: true,
             settings: Settings::default(),
@@ -633,7 +660,9 @@ impl MorrowApp {
             find_word: false,
             find_focus: false,
             find_match: None,
+            find: find::FindState::default(),
             project_query: String::new(),
+            project_search_focus: false,
             project_search: None,
             search_running: false,
             search_generation: 0,
@@ -684,6 +713,7 @@ impl MorrowApp {
             review: None,
             tab_strip_active: None,
             editor_layout: split::EditorLayout::default(),
+            tab_drag: tab_drag::TabDragState::default(),
             render_pane: 1,
             rendering_panes: false,
         }
@@ -701,10 +731,16 @@ impl MorrowApp {
         self.projects.get(self.active_project)
     }
     fn tab(&self) -> Option<&EditorTab> {
+        if self.pane_has_empty_workspace() {
+            return None;
+        }
         let p = self.project()?;
         p.tabs.get(p.active_tab)
     }
     fn tab_mut(&mut self) -> Option<&mut EditorTab> {
+        if self.pane_has_empty_workspace() {
+            return None;
+        }
         let p = self.projects.get_mut(self.active_project)?;
         p.tabs.get_mut(p.active_tab)
     }
@@ -821,6 +857,7 @@ impl MorrowApp {
         let different = self.active_project != project_index
             || self.project().is_some_and(|p| p.active_tab != tab_index);
         if different {
+            self.cancel_vim_search(false);
             if let Some(tab) = self.tab_mut() {
                 let action = tab.vim.finish_insert(&mut tab.text);
                 if action.text_changed {
@@ -831,14 +868,8 @@ impl MorrowApp {
             self.completion_request = None;
         }
         self.capture_pane_navigation();
-        if self.active_project != project_index {
-            self.project_search = None;
-            self.search_cancel.store(true, Ordering::Relaxed);
-            self.search_generation += 1;
-            self.search_running = false;
-            self.search_dirty = !self.project_query.is_empty();
-        }
-        self.active_project = project_index;
+        self.clear_empty_workspace();
+        self.set_active_project_context(project_index);
         let project = &mut self.projects[project_index];
         project.active_tab = tab_index;
         let preview = project
@@ -862,6 +893,22 @@ impl MorrowApp {
         }
         self.session_dirty = true;
         self.bind_current_pane();
+    }
+    fn set_active_project_context(&mut self, index: usize) {
+        let previous_root = self.project().map(|project| project.root.clone());
+        self.active_project = index;
+        self.clear_project_search_for_root_change(previous_root);
+    }
+    fn clear_project_search_for_root_change(&mut self, previous_root: Option<PathBuf>) {
+        if previous_root.as_deref() == self.project().map(|project| project.root.as_path()) {
+            return;
+        }
+        self.project_search = None;
+        self.search_cancel.store(true, Ordering::Relaxed);
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_running = false;
+        self.search_dirty = self.project().is_some() && !self.project_query.trim().is_empty();
+        self.search_last_edit = Instant::now();
     }
     fn new_file(&mut self) {
         if let Some(p) = self.projects.get_mut(self.active_project) {
@@ -1032,6 +1079,7 @@ impl MorrowApp {
             }
             CloseAction::Project(index) => {
                 if index < self.projects.len() {
+                    let previous_root = self.project().map(|project| project.root.clone());
                     let p = self.projects.remove(index);
                     p.index_cancel.store(true, Ordering::Relaxed);
                     for t in p.tabs {
@@ -1043,6 +1091,7 @@ impl MorrowApp {
                     self.active_project = self
                         .active_project
                         .min(self.projects.len().saturating_sub(1));
+                    self.clear_project_search_for_root_change(previous_root);
                 }
             }
             CloseAction::Exit => {
@@ -1124,6 +1173,7 @@ impl MorrowApp {
                     result,
                     recovery,
                 } => {
+                    self.find.invalidate(id);
                     let ctx = self.ctx.clone();
                     if let Some(tab) = self.tab_by_id_mut(id) {
                         tab.loading = false;
@@ -2310,6 +2360,7 @@ impl MorrowApp {
             || self.navigation_modal_open()
             || self.navigation_pending()
             || self.screen_jump.is_some()
+            || self.vim_search_active()
             || self.context_file_dialog.is_some()
         {
             return;
@@ -2386,8 +2437,7 @@ impl MorrowApp {
             });
         }
         if ctx.input_mut(|i| i.consume_key(shift, Key::F)) {
-            self.sidebar = SidebarView::Search;
-            self.sidebar_visible = true;
+            self.open_project_search();
         } else if !vim_modal && ctx.input_mut(|i| i.consume_key(command, Key::F)) {
             self.find_visible = true;
             self.find_focus = true;
@@ -2458,6 +2508,7 @@ impl MorrowApp {
         }
     }
     fn handle_vim(&mut self) {
+        self.validate_vim_search();
         if !self.settings.vim
             || egui::Popup::is_any_open(&self.ctx)
             || self
@@ -2479,6 +2530,9 @@ impl MorrowApp {
             return;
         }
         let ctx = self.ctx.clone();
+        if self.vim_search_active() && ctx.input(|input| input.pointer.any_pressed()) {
+            self.cancel_vim_search(false);
+        }
         let Some(tab) = self.tab() else {
             return;
         };
@@ -2674,14 +2728,85 @@ impl MorrowApp {
             tab.pending_selection = Some(selection);
             tab.scroll_to_cursor = true;
         }
+        fn copy_and_cancel(
+            tab: &mut EditorTab,
+            native_insert: &mut Vec<egui::Event>,
+            width: usize,
+            clipboard: &mut Option<Yank>,
+        ) {
+            flush_insert(tab, native_insert, width);
+            let selection = tab
+                .vim
+                .selection(&tab.text)
+                .unwrap_or_else(|| tab.selection.clone());
+            if !selection.is_empty() {
+                let yank = Yank {
+                    text: tab
+                        .text
+                        .chars()
+                        .skip(selection.start)
+                        .take(selection.len())
+                        .collect(),
+                    linewise: tab.vim.mode == VimMode::VisualLine,
+                };
+                tab.vim.set_register(yank.clone());
+                *clipboard = Some(yank);
+            }
+            let action = tab.vim.handle_key(&mut tab.text, VimKey::Escape);
+            apply_action(tab, action, clipboard);
+        }
+        fn cut_selection(
+            tab: &mut EditorTab,
+            native_insert: &mut Vec<egui::Event>,
+            width: usize,
+            clipboard: &mut Option<Yank>,
+        ) {
+            flush_insert(tab, native_insert, width);
+            if tab.loading {
+                return;
+            }
+            if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
+                let action = tab.vim.cut_visual(&mut tab.text);
+                apply_action(tab, action, clipboard);
+                return;
+            }
+            if tab.selection.is_empty() {
+                return;
+            }
+            let yank = Yank {
+                text: tab
+                    .text
+                    .chars()
+                    .skip(tab.selection.start)
+                    .take(tab.selection.len())
+                    .collect(),
+                linewise: false,
+            };
+            let edit = editor::replace_selection(&tab.text, tab.selection.clone(), "");
+            tab.apply(edit);
+            tab.vim.set_cursor(&tab.text, tab.selection.start);
+            tab.vim.notify_external_text_change();
+            tab.vim.set_register(yank.clone());
+            *clipboard = Some(yank);
+            tab.scroll_to_cursor = true;
+        }
+        fn publish_search_yank(
+            tab: &mut EditorTab,
+            find: &mut find::FindState,
+            clipboard: &mut Option<Yank>,
+        ) {
+            if let Some(yank) = find.take_yank() {
+                tab.vim.set_register(yank.clone());
+                *clipboard = Some(yank);
+            }
+        }
 
         let events = ctx.input(|input| input.events.clone());
         let mut retained = Vec::with_capacity(events.len());
         let mut native_insert = Vec::new();
         let mut prompt: Option<char> = None;
         let mut prompt_text = String::new();
-        let mut search_direction = None;
-        let mut search_word = None;
+        let mut vim_searched = false;
         let mut definition = false;
         let mut clipboard = None;
         let register = self.register.clone();
@@ -2691,16 +2816,45 @@ impl MorrowApp {
                 .floor()
                 .max(1.0) as isize
         });
+        let pane_id = self.current_pane_id();
+        let mut find = std::mem::take(&mut self.find);
         if let Some(tab) = self.tab_mut() {
             tab.vim.set_indent_width(width);
             if let Some(register) = register {
                 tab.vim.set_register(register);
             }
             for event in events {
+                if find.prompt.is_some() || find.waiting() {
+                    match event {
+                        egui::Event::Text(text)
+                        | egui::Event::Paste(text)
+                        | egui::Event::Ime(egui::ImeEvent::Commit(text)) => find.text(tab, &text),
+                        egui::Event::Copy => find.key(tab, Key::C, egui::Modifiers::CTRL),
+                        egui::Event::Cut | egui::Event::Ime(_) => {}
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } => find.key(tab, key, modifiers),
+                        other => retained.push(other),
+                    }
+                    publish_search_yank(tab, &mut find, &mut clipboard);
+                    continue;
+                }
                 if prompt.is_some() {
                     match event {
                         egui::Event::Text(text) => prompt_text.push_str(&text),
                         egui::Event::Paste(text) => prompt_text.push_str(&text),
+                        egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                            prompt_text.push_str(&text)
+                        }
+                        egui::Event::Copy => {
+                            prompt = None;
+                            prompt_text.clear();
+                            copy_and_cancel(tab, &mut native_insert, width, &mut clipboard);
+                        }
+                        egui::Event::Cut | egui::Event::Ime(_) => {}
                         egui::Event::Key {
                             key: Key::Backspace,
                             pressed: true,
@@ -2715,6 +2869,43 @@ impl MorrowApp {
                         other => retained.push(other),
                     }
                     continue;
+                }
+                match &event {
+                    egui::Event::Copy => {
+                        copy_and_cancel(tab, &mut native_insert, width, &mut clipboard);
+                        continue;
+                    }
+                    egui::Event::Cut => {
+                        cut_selection(tab, &mut native_insert, width, &mut clipboard);
+                        continue;
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(_))
+                        if tab.vim.mode == VimMode::Insert =>
+                    {
+                        native_insert.push(event);
+                        flush_insert(tab, &mut native_insert, width);
+                        continue;
+                    }
+                    egui::Event::Ime(_) => continue,
+                    egui::Event::Key {
+                        key: Key::C,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
+                        copy_and_cancel(tab, &mut native_insert, width, &mut clipboard);
+                        continue;
+                    }
+                    egui::Event::Key {
+                        key: Key::X,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
+                        cut_selection(tab, &mut native_insert, width, &mut clipboard);
+                        continue;
+                    }
+                    _ => {}
                 }
                 if tab.vim.mode == VimMode::Insert {
                     if matches!(
@@ -2744,6 +2935,12 @@ impl MorrowApp {
                     egui::Event::Text(text) => {
                         let mut characters = text.chars().peekable();
                         while let Some(ch) = characters.next() {
+                            if find.prompt.is_some() || find.waiting() {
+                                let remaining: String =
+                                    std::iter::once(ch).chain(characters).collect();
+                                find.text(tab, &remaining);
+                                break;
+                            }
                             if tab.vim.mode == VimMode::Insert {
                                 let remaining: String =
                                     std::iter::once(ch).chain(characters).collect();
@@ -2751,39 +2948,27 @@ impl MorrowApp {
                                 break;
                             }
                             if !tab.vim.expects_literal_character() {
-                                if matches!(ch, ':' | '/' | '?') {
+                                if matches!(ch, '/' | '?') {
+                                    vim_searched = true;
+                                    find.start(tab, pane_id, ch == '?');
+                                    continue;
+                                }
+                                if ch == ':' {
                                     tab.vim.cancel_pending_command();
                                     prompt = Some(ch);
                                     prompt_text.extend(characters);
                                     break;
                                 }
                                 if matches!(ch, 'n' | 'N') {
-                                    tab.vim.cancel_pending_command();
-                                    search_direction = Some(ch == 'N');
+                                    vim_searched = true;
+                                    find.repeat(tab, ch == 'N');
+                                    publish_search_yank(tab, &mut find, &mut clipboard);
                                     continue;
                                 }
                                 if matches!(ch, '*' | '#') {
-                                    tab.vim.cancel_pending_command();
-                                    let chars: Vec<char> = tab.text.chars().collect();
-                                    let mut start = tab.vim.cursor.min(chars.len());
-                                    let mut end = start;
-                                    while start > 0
-                                        && (chars[start - 1].is_alphanumeric()
-                                            || chars[start - 1] == '_')
-                                    {
-                                        start -= 1;
-                                    }
-                                    while end < chars.len()
-                                        && (chars[end].is_alphanumeric() || chars[end] == '_')
-                                    {
-                                        end += 1;
-                                    }
-                                    if start < end {
-                                        search_word = Some((
-                                            chars[start..end].iter().collect::<String>(),
-                                            ch == '#',
-                                        ));
-                                    }
+                                    vim_searched = true;
+                                    find.word(tab, ch == '#');
+                                    publish_search_yank(tab, &mut find, &mut clipboard);
                                     continue;
                                 }
                                 if ch == 'd'
@@ -2866,70 +3051,25 @@ impl MorrowApp {
                 }
             }
         }
+        self.find = find;
+        if vim_searched {
+            self.find_visible = false;
+        }
+        self.find_message();
         retained.extend(native_insert);
         ctx.input_mut(|input| input.events = retained);
         if let Some(yank) = clipboard {
             ctx.copy_text(yank.text.clone());
             self.register = Some(yank);
         }
-        match prompt {
-            Some(':') => self.vim_command = Some(prompt_text),
-            Some('/' | '?') => {
-                self.find_text = prompt_text;
-                self.find_match = None;
-                self.find_visible = true;
-                self.find_focus = true;
-            }
-            _ => {}
-        }
-        if let Some((word, backwards)) = search_word {
-            self.find_text = word;
-            self.find_word = true;
-            self.find_match = None;
-            self.find_next(backwards);
-        }
-        if let Some(backwards) = search_direction {
-            self.find_next(backwards);
+        if let Some(':') = prompt {
+            self.vim_command = Some(prompt_text);
         }
         if definition {
             self.request_definition();
         }
     }
 
-    fn find_options(&self) -> editor::SearchOptions {
-        editor::SearchOptions {
-            case_sensitive: self.find_case,
-            whole_word: self.find_word,
-        }
-    }
-    fn find_next(&mut self, backwards: bool) {
-        let options = self.find_options();
-        let query = self.find_text.clone();
-        let current = self.find_match;
-        let Some(tab) = self.tab_mut() else { return };
-        let matches = editor::find_matches(&tab.text, &query, options);
-        if matches.is_empty() {
-            self.find_match = None;
-            return;
-        }
-        let at = current.unwrap_or(tab.vim.cursor);
-        let found = if backwards {
-            matches
-                .iter()
-                .rev()
-                .find(|r| r.start < at)
-                .or_else(|| matches.last())
-        } else {
-            matches
-                .iter()
-                .find(|r| r.start > at || current.is_none() && r.start == at)
-                .or_else(|| matches.first())
-        }
-        .unwrap()
-        .clone();
-        tab.set_cursor(found.clone());
-        self.find_match = Some(found.start);
-    }
     fn header(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("header")
             .frame(
@@ -2951,6 +3091,8 @@ impl MorrowApp {
                         brand(ui, 21.0);
                         ui.label(RichText::new("morrow").size(16.0).strong().color(TEXT));
                         ui.add_space(15.0);
+                        self.workspace_header_button(ui);
+                        ui.add_space(10.0);
                         design::menu(ui, "File", "Files, projects and saving", |ui| {
                             if design::menu_item(
                                 ui,
@@ -3079,8 +3221,7 @@ impl MorrowApp {
                             )
                             .clicked()
                             {
-                                self.sidebar = SidebarView::Search;
-                                self.sidebar_visible = true;
+                                self.open_project_search();
                                 ui.close();
                             }
                             if design::menu_item(
@@ -3214,63 +3355,6 @@ impl MorrowApp {
                             {
                                 self.open_palette(Palette::Files);
                             }
-                            if let Some(project) = self.project() {
-                                let name = file_title(&project.root);
-                                let root = crate::paths::display(&project.root);
-                                let projects: Vec<_> = self
-                                    .projects
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, p)| {
-                                        (i, file_title(&p.root), crate::paths::display(&p.root))
-                                    })
-                                    .collect();
-                                design::menu(ui, &format!("{name}  ▾"), &root, |ui| {
-                                    ui.label(RichText::new("WORKSPACES").size(10.0).color(MUTED));
-                                    for (i, name, path) in projects {
-                                        if design::menu_item(
-                                            ui,
-                                            &name,
-                                            if i == self.active_project {
-                                                "active"
-                                            } else {
-                                                ""
-                                            },
-                                            &path,
-                                        )
-                                        .clicked()
-                                        {
-                                            self.switch_project(i);
-                                            ui.close();
-                                        }
-                                    }
-                                    ui.separator();
-                                    if design::menu_item(
-                                        ui,
-                                        "Add project",
-                                        "Ctrl+Shift+O",
-                                        "Keep another project in this window",
-                                    )
-                                    .clicked()
-                                    {
-                                        self.pick_project();
-                                        ui.close();
-                                    }
-                                    if design::menu_item(
-                                        ui,
-                                        "Close project",
-                                        "",
-                                        "Close this workspace; unsaved edits are confirmed",
-                                    )
-                                    .clicked()
-                                    {
-                                        self.request_close(CloseAction::Project(
-                                            self.active_project,
-                                        ));
-                                        ui.close();
-                                    }
-                                });
-                            }
                         });
                     });
             });
@@ -3307,6 +3391,11 @@ impl MorrowApp {
                     {
                         if self.sidebar == view {
                             self.sidebar_visible = !self.sidebar_visible;
+                            if view == SidebarView::Search && self.sidebar_visible {
+                                self.open_project_search();
+                            }
+                        } else if view == SidebarView::Search {
+                            self.open_project_search();
                         } else {
                             self.sidebar = view;
                             self.sidebar_visible = true;
@@ -3395,6 +3484,7 @@ impl MorrowApp {
         let index = p.index.clone();
         let loading = p.indexing;
         let error = p.index_error.clone();
+        self.explorer_project_heading(ui, &root);
         if loading {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -3427,28 +3517,6 @@ impl MorrowApp {
             .on_hover_text(index.warnings.join("\n"));
         }
         let active = self.tab().and_then(|t| t.path.clone());
-        let mut root_state = egui::collapsing_header::CollapsingState::load_with_default_open(
-            ui.ctx(),
-            ui.make_persistent_id(("explorer_root", &root)),
-            true,
-        );
-        let root_response = design::left_row(
-            ui,
-            &file_title(&root),
-            Some((if root_state.is_open() { "v" } else { ">" }, MUTED)),
-            false,
-            &crate::paths::display(&root),
-        );
-        self.file_context_menu(&root_response, &root, true);
-        if root_response.clicked() {
-            root_state.toggle(ui);
-        }
-        let show_root = root_state.is_open();
-        root_state.store(ui.ctx());
-        if !show_root {
-            self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
-            return;
-        }
         egui::ScrollArea::vertical()
             .id_salt(("tree", &root))
             .auto_shrink([false, false])
@@ -3523,12 +3591,33 @@ impl MorrowApp {
             );
         }
     }
+    fn open_project_search(&mut self) {
+        self.sidebar = SidebarView::Search;
+        self.sidebar_visible = true;
+        self.project_search_focus = true;
+        self.cancel_vim_search(false);
+        self.cancel_navigation();
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = false;
+        }
+        if let Some(focused) = self.ctx.memory(|memory| memory.focused()) {
+            self.ctx
+                .memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        self.ctx.request_repaint();
+    }
     fn project_search_ui(&mut self, ui: &mut egui::Ui) {
+        let query_id = egui::Id::new("project_search_query");
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.project_query)
+                .id(query_id)
                 .hint_text("Find text in project…")
                 .desired_width(f32::INFINITY),
         );
+        if self.project_search_focus && !ui.is_sizing_pass() {
+            response.request_focus();
+            self.project_search_focus = false;
+        }
         if response.changed() {
             self.search_dirty = true;
             self.search_last_edit = Instant::now();
@@ -3819,6 +3908,9 @@ impl MorrowApp {
         if self.render_pane_is_focused() && self.vim_command.is_some() {
             self.ex_ui(ui);
         }
+        if self.render_pane_is_focused() && self.vim_search_active() {
+            self.vim_search_ui(ui);
+        }
         let error = self.tab().and_then(|t| t.error.clone());
         if let Some(error) = error {
             egui::Frame::new()
@@ -3879,6 +3971,7 @@ impl MorrowApp {
         }
     }
     fn set_document_view(&mut self, view: crate::cli::DocumentView) {
+        self.cancel_vim_search(false);
         let ctx = self.ctx.clone();
         if let Some(tab) = self.tab_mut() {
             if view == crate::cli::DocumentView::Preview && !is_markdown(tab.path.as_deref()) {
@@ -4011,18 +4104,34 @@ impl MorrowApp {
                         .as_ref()
                         .map(|p| crate::paths::display(p.strip_prefix(&project.root).unwrap_or(p)))
                         .unwrap_or_else(|| tab.title.clone());
+                    let label = if self.projects.len() > 1 {
+                        format!("{} · {path}", file_title(&project.root))
+                    } else {
+                        path
+                    };
+                    let tooltip = tab.path.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "{}\nOpen this review document",
+                                crate::paths::display(&project.root)
+                            )
+                        },
+                        |path| {
+                            format!("{}\nOpen this review document", crate::paths::display(path))
+                        },
+                    );
                     ui.add_space(5.0);
                     if ui
                         .push_id(id, |ui| {
                             design::left_row(
                                 ui,
-                                &path,
+                                &label,
                                 Some((
                                     file_badge(tab.path.as_deref().unwrap_or(Path::new(""))),
                                     file_color(tab.path.as_deref()),
                                 )),
                                 active,
-                                "Open this review document",
+                                &tooltip,
                             )
                         })
                         .inner
@@ -4121,6 +4230,7 @@ impl MorrowApp {
             })
             .collect();
         let active_id = self.tab().map(|tab| tab.id);
+        let mut tab_drop_rects = Vec::new();
         let reveal_active = self.tab_strip_active != active_id;
         self.tab_strip_active = active_id;
         let mut select = None;
@@ -4132,13 +4242,13 @@ impl MorrowApp {
         let view = self.tab().map(|tab| tab.agent_view).unwrap_or_default();
         ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let compact_view = markdown && ui.available_width() < 320.0;
-        let controls_width = if compact_view { 116.0 } else if markdown { 177.0 } else { 57.0 };
+        let controls_width = if markdown { 38.0 } else { 0.0 };
         let tab_width = (ui.available_width() - controls_width).max(20.0);
         ui.allocate_ui_with_layout(Vec2::new(tab_width, 37.0), Layout::left_to_right(Align::Center), |ui| {
-        egui::ScrollArea::horizontal()
+        let tab_scroll = egui::ScrollArea::horizontal()
             .id_salt("document_tabs")
             .auto_shrink([false, true])
+            .scroll_source(egui::scroll_area::ScrollSource { drag: egui::scroll_area::DragScroll::Never, ..Default::default() })
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
@@ -4152,7 +4262,8 @@ impl MorrowApp {
                         );
                         let width = (title_galley.size().x + 65.0).clamp(125.0, 230.0);
                         let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(width, 37.0), egui::Sense::click());
+                            ui.allocate_exact_size(Vec2::new(width, 37.0), egui::Sense::click_and_drag());
+                        tab_drop_rects.push((*id, rect));
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title)
                         });
@@ -4202,6 +4313,9 @@ impl MorrowApp {
                             ui.make_persistent_id(("tab_close", id)),
                             egui::Sense::click(),
                         );
+                        if !close_rect.contains(ui.input(|input| input.pointer.press_origin().unwrap_or_default())) {
+                            self.start_tab_drag(&response, *id, title);
+                        }
                         if selected || hovered || close_response.hovered() {
                             if close_response.hovered() {
                                 ui.painter().rect_filled(close_rect, 4.0, HOVER);
@@ -4249,18 +4363,30 @@ impl MorrowApp {
                             close = Some(*id);
                         }
                         if response.clicked()
+                            && !self.tab_drag_active()
                             && !close_rect.contains(
                                 ui.input(|input| input.pointer.interact_pos().unwrap_or_default()),
                             )
                         {
                             select = Some((*project_index, *tab_index));
                         }
+                        let mut tooltip = path.as_ref()
+                            .map(|p| crate::paths::display(p))
+                            .unwrap_or_else(|| "Untitled document".into());
+                        if *dirty {
+                            tooltip.push_str("\nUnsaved changes");
+                        }
+                        if *marks > 0 {
+                            tooltip.push_str(&format!("\n{marks} review note{}", if *marks == 1 { "" } else { "s" }));
+                        }
+                        if *loading {
+                            tooltip.push_str("\nLoading…");
+                        } else if *saving {
+                            tooltip.push_str("\nSaving…");
+                        }
+                        tooltip.push_str("\nDrag to reorder or move to another editor pane");
                         response
-                            .on_hover_text(
-                                path.as_ref()
-                                    .map(|p| crate::paths::display(p))
-                                    .unwrap_or_else(|| "Unsaved draft".into()),
-                            )
+                            .on_hover_text(tooltip)
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
                     ui.add_space(7.0);
@@ -4269,35 +4395,14 @@ impl MorrowApp {
                     }
                 });
             });
+        self.register_tab_drop_strip(&tab_scroll, std::mem::take(&mut tab_drop_rects));
         });
+        if markdown {
         ui.allocate_ui_with_layout(Vec2::new(controls_width, 37.0), Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(7.0);
-            design::menu(ui, "Split", "Arrange this document in separate editor panes", |ui| self.split_menu_ui(ui));
-            if markdown {
-                ui.add_space(4.0);
-                if compact_view {
-                    let label = if view == crate::cli::DocumentView::Preview { "Preview" } else { "Source" };
-                    let response = design::menu(ui, label, "Choose Markdown source or preview - Ctrl+Shift+V", |ui| {
-                        if design::menu_item(ui, "Source", if view == crate::cli::DocumentView::Source { "active" } else { "" }, "Edit Markdown with Vim").clicked() {
-                            self.set_document_view(crate::cli::DocumentView::Source);
-                            ui.close();
-                        }
-                        if design::menu_item(ui, "Preview", if view == crate::cli::DocumentView::Preview { "active" } else { "" }, "Read formatted Markdown").clicked() {
-                            self.set_document_view(crate::cli::DocumentView::Preview);
-                            ui.close();
-                        }
-                    });
-                    ui.painter().line_segment([response.rect.left_bottom(), response.rect.right_bottom()], Stroke::new(1.5, ACCENT));
-                } else {
-                let preview_response = design::ghost_button(ui, "Preview", "Read formatted Markdown - Ctrl+Shift+V. Double-click a block to reveal its source.");
-                let source_response = design::ghost_button(ui, "Source", "Edit Markdown with Vim - Ctrl+Shift+V");
-                let active = if view == crate::cli::DocumentView::Preview { &preview_response } else { &source_response };
-                ui.painter().line_segment([active.rect.left_bottom(), active.rect.right_bottom()], Stroke::new(1.5, ACCENT));
-                if source_response.clicked() { self.set_document_view(crate::cli::DocumentView::Source); }
-                if preview_response.clicked() { self.set_document_view(crate::cli::DocumentView::Preview); }
-                }
-            }
+            ui.add_space(5.0);
+            self.markdown_preview_toggle(ui, view == crate::cli::DocumentView::Preview);
         });
+        }
         });
         if let Some((project, index)) = select {
             self.activate_tab(project, index);
@@ -4313,6 +4418,28 @@ impl MorrowApp {
         }
     }
     fn text_editor(&mut self, ui: &mut egui::Ui) {
+        let search_matches = self.editor_search_matches();
+        let search_pane_id = self.current_pane_id();
+        let search_cursor = self
+            .tab()
+            .map_or(0, |tab| self.find.active_cursor(tab, search_pane_id));
+        let tab_pointer_interaction = self.tab_pointer_interaction_active();
+        let source_interaction = ui.is_enabled()
+            && !tab_pointer_interaction
+            && !egui::Popup::is_any_open(&self.ctx)
+            && self.palette.is_none()
+            && self.picker.is_none()
+            && !self.settings_open
+            && self.save_as.is_none()
+            && self.close_action.is_none()
+            && self.vim_command.is_none()
+            && self.diff.is_none()
+            && !self.git_detail_open()
+            && !self.navigation_modal_open()
+            && self.context_file_dialog.is_none()
+            && !self.find_focus;
+        let source_command_pending =
+            self.navigation_pending() || self.screen_jump.is_some() || self.vim_search_active();
         let syntax = self.syntax.clone();
         let viewport_width = ui.available_width();
         let diagnostics = self
@@ -4328,8 +4455,18 @@ impl MorrowApp {
         let Some(document_id) = self.tab().map(|tab| tab.id) else {
             return;
         };
+        let restore_search_scroll = self
+            .find
+            .restore_scroll
+            .remove(&(search_pane_id, document_id));
         let id = self.document_widget_id(document_id);
         let pane_focused = self.render_pane_is_focused();
+        if !source_interaction && !tab_pointer_interaction {
+            // Give external dialogs their own keyboard/IME input before the
+            // source widget is rendered. Tab drags retain editor focus so
+            // cancellation can return to the unchanged modal selection.
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
         let mut jump = self.screen_jump.take();
         if let Some(tab) = self.tab()
             && self
@@ -4369,8 +4506,7 @@ impl MorrowApp {
         let mut bookmark_click = None;
         if !settings.vim
             && pane_focused
-            && ui.is_enabled()
-            && !egui::Popup::is_any_open(&ctx)
+            && source_interaction
             && ctx.memory(|memory| memory.has_focus(id))
         {
             let redo = ctx.input_mut(|input| {
@@ -4388,6 +4524,8 @@ impl MorrowApp {
         let Some(tab) = self.tab_mut() else { return };
         let mode = tab.vim.mode;
         let modal = settings.vim && mode != VimMode::Insert;
+        let source_editable =
+            source_interaction && !source_command_pending && !modal && !tab.loading;
         let pending = tab.pending_selection.take();
         if let Some(range) = pending {
             let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
@@ -4411,7 +4549,7 @@ impl MorrowApp {
             })
             .flatten();
         // Editing shortcuts use the widget's current character selection.
-        if pane_focused && ctx.memory(|m| m.has_focus(id)) && !modal {
+        if pane_focused && source_editable && ctx.memory(|m| m.has_focus(id)) {
             let mut edit = None;
             let indent = " ".repeat(settings.tab_width);
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Slash)) {
@@ -4492,6 +4630,10 @@ impl MorrowApp {
         if let Some(offset) = wheel_offset {
             scroll = scroll.scroll_offset(offset);
         }
+        if let Some(offset) = restore_search_scroll {
+            scroll = scroll.scroll_offset(offset);
+            tab.scroll_to_cursor = false;
+        }
         let scroll_output = scroll.show(ui, |ui| {
             // egui collapses native selection when another widget owns IME
             // events. Keep this document's range while Find or a toolbar has
@@ -4526,9 +4668,18 @@ impl MorrowApp {
                 // native half-open selection endpoint.
                 ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
             }
-            let mut output = egui::TextEdit::multiline(&mut tab.text)
+            // Immutable TextBuffer still permits native click/drag selection.
+            // Mutable source is exposed only when this editor owns editing.
+            let mut readonly_text: &str;
+            let editor = if source_editable {
+                egui::TextEdit::multiline(&mut tab.text)
+            } else {
+                readonly_text = tab.text.as_str();
+                egui::TextEdit::multiline(&mut readonly_text)
+            };
+            let mut output = editor
                 .id(id)
-                .interactive(pane_focused)
+                .interactive(pane_focused && source_interaction)
                 .frame(egui::Frame::new().inner_margin(Margin {
                     left: 56,
                     right: 24,
@@ -4551,7 +4702,7 @@ impl MorrowApp {
                 .layouter(&mut layouter)
                 .show(ui);
             ui.visuals_mut().text_cursor.stroke = native_caret;
-            if tab.focus && pane_focused {
+            if tab.focus && pane_focused && source_interaction {
                 if !output.response.has_focus() {
                     output.response.request_focus();
                     ctx.memory_mut(|memory| {
@@ -4576,12 +4727,12 @@ impl MorrowApp {
             }
             // TextEditOutput.cursor_range predates pointer processing in
             // egui. The stored state contains the actual click/drag result.
-            let pointer_selection = output.response.is_pointer_button_down_on()
+            let pointer_selection = source_interaction && (output.response.is_pointer_button_down_on()
                 && ui.input(|input| input.pointer.primary_down())
                 || output.response.dragged_by(egui::PointerButton::Primary)
                 || output.response.clicked()
                 || output.response.double_clicked()
-                || output.response.triple_clicked();
+                || output.response.triple_clicked());
             let restored_native_selection =
                 !pointer_selection && !output.response.changed() && unfocused_selection.is_some();
             if restored_native_selection && let Some(range) = unfocused_selection {
@@ -4599,7 +4750,7 @@ impl MorrowApp {
                         output.response.triple_clicked()
                             || mode == VimMode::VisualLine && ui.input(|i| i.modifiers.shift),
                     );
-                } else if !modal && tab.vim.cursor != range.primary.index.0 {
+                } else if source_interaction && !modal && tab.vim.cursor != range.primary.index.0 {
                     tab.vim.set_cursor(&tab.text, range.primary.index.0);
                     if !settings.vim {
                         // A non-modal caret is an insertion boundary,
@@ -4612,10 +4763,17 @@ impl MorrowApp {
                 tab.vim.notify_external_text_change();
                 tab.changed();
             }
+            if modal && !pointer_selection {
+                // A menu owns focus while egui may collapse its native range.
+                // Build its actions from the actual Vim area, not that
+                // temporary widget range; keep live drag anchors untouched.
+                tab.selection = tab.vim.selection(&tab.text)
+                    .unwrap_or(tab.vim.cursor..tab.vim.cursor);
+            }
             context_action = context_actions::editor_menu(
                 ui,
                 &output.response,
-                !tab.loading && !tab.saving && tab.error.is_none(),
+                !tab.loading,
                 !tab.selection.is_empty(),
             );
             let cursor = egui::text::CCursor::new(tab.vim.cursor);
@@ -4636,6 +4794,7 @@ impl MorrowApp {
                 .take(last)
                 .skip(first)
                 .collect();
+            find::paint_matches(ui, &output.galley, output.galley_pos, &visible_rows, &search_matches, search_cursor);
             if pane_focused && let Some(jump) = jump.as_mut()
                 && jump.tab_id == tab.id && jump.revision == tab.revision
             {
@@ -4868,6 +5027,10 @@ impl MorrowApp {
             }
         });
         crate::render::remember_scroll_limits(&ctx, &scroll_output);
+        self.find.view_scroll.insert(
+            (search_pane_id, document_id),
+            (scroll_output.id, scroll_output.state.offset),
+        );
         self.editor_focused = focused;
         self.editor_rect = rect;
         self.editor_cursor_rect = caret_rect;
@@ -4880,114 +5043,277 @@ impl MorrowApp {
         }
     }
     fn find_ui(&mut self, ui: &mut egui::Ui) {
+        let find_id = ui.make_persistent_id("find_query");
+        let replace_id = ui.make_persistent_id("replace_query");
+        let interactive = !self.settings_open
+            && self.palette.is_none()
+            && self.picker.is_none()
+            && self.close_action.is_none()
+            && self.save_as.is_none()
+            && self.diff.is_none()
+            && !self.git_detail_open()
+            && !self.navigation_modal_open()
+            && !self.navigation_pending()
+            && self.screen_jump.is_none()
+            && self.vim_command.is_none()
+            && self.find.prompt.is_none()
+            && self.context_file_dialog.is_none();
+        let mut close = false;
+        let mut replace_one = false;
+        let mut replace_all = false;
+        let controls = |app: &mut Self, ui: &mut egui::Ui| {
+            let case = ui
+                .toggle_value(&mut app.find_case, "Aa")
+                .on_hover_text("Match upper and lower case exactly");
+            case.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    true,
+                    app.find_case,
+                    "Match case",
+                )
+            });
+            let word = ui
+                .toggle_value(&mut app.find_word, "ab")
+                .on_hover_text("Match whole words only");
+            word.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    true,
+                    app.find_word,
+                    "Whole word",
+                )
+            });
+            if case.changed() || word.changed() {
+                app.find_match = None;
+                if !app.find_text.is_empty() {
+                    app.find_next(false);
+                }
+                if let Some(tab) = app.tab_mut() {
+                    tab.focus = false;
+                }
+            }
+            let matches = app.editor_search_matches();
+            ui.add_enabled_ui(!matches.is_empty(), |ui| {
+                let previous = small_button(ui, "↑", "Previous match · Shift+F3");
+                previous.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        "Previous match",
+                    )
+                });
+                let next = small_button(ui, "↓", "Next match · F3 or Enter");
+                next.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        "Next match",
+                    )
+                });
+                if previous.clicked() || next.clicked() {
+                    app.find_next(previous.clicked());
+                    if let Some(tab) = app.tab_mut() {
+                        tab.focus = false;
+                    }
+                }
+            });
+            let current = app
+                .tab()
+                .and_then(|tab| {
+                    let cursor = app.find.active_cursor(tab, app.current_pane_id());
+                    let index = matches.partition_point(|range| range.start < cursor);
+                    matches
+                        .get(index)
+                        .filter(|range| range.start == cursor)
+                        .map(|_| index)
+                })
+                .map_or(0, |index| index + 1);
+            let searching = app.find_search_running();
+            ui.label(
+                RichText::new(if searching {
+                    "Searching…".into()
+                } else {
+                    format!("{current} of {}", matches.len())
+                })
+                .size(11.0)
+                .color(
+                    if !searching && !app.find_text.is_empty() && matches.is_empty() {
+                        ORANGE
+                    } else {
+                        MUTED
+                    },
+                ),
+            )
+            .on_hover_text(if searching {
+                "Searching this document in the background; keep typing to refine the query"
+            } else if matches.is_empty() {
+                "No matching text in this document"
+            } else {
+                "Current match and total matches · F3 / Shift+F3 to navigate"
+            });
+        };
         egui::Frame::new()
             .fill(SURFACE)
             .inner_margin(Margin::symmetric(12, 7))
             .show(ui, |ui| {
+                if !interactive { ui.disable(); }
+                ui.spacing_mut().item_spacing.y = 5.0;
+                let compact = ui.available_width() < 570.0;
                 ui.horizontal(|ui| {
-                    if small_button(
+                    let available = ui.available_width();
+                    let toggle = small_button(
                         ui,
                         if self.replace_visible { "▾" } else { "▸" },
                         "Toggle replace",
-                    )
-                    .clicked()
-                    {
+                    );
+                    toggle.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, self.replace_visible, "Show replace"));
+                    if toggle.clicked() {
                         self.replace_visible = !self.replace_visible;
                     }
+                    let query_width = (available - if compact { 72.0 } else { 290.0 }).clamp(30.0, 360.0);
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.find_text)
+                            .id(find_id)
                             .hint_text("Find in this file")
-                            .desired_width(230.0),
-                    );
+                            .desired_width(query_width),
+                    ).on_hover_text("Find literal text · Enter / F3: next · Shift+F3: previous · Esc: close. Vim Normal: / searches; Ctrl+F scrolls a page. Insert: Ctrl+F opens Find.");
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Find in file"));
                     if self.find_focus {
                         response.request_focus();
                         self.find_focus = false;
+                        if let Some(tab) = self.tab_mut() {
+                            tab.focus = false;
+                        }
                     }
                     if response.changed() {
                         self.find_match = None;
-                    }
-                    if (response.has_focus() || response.lost_focus())
-                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
-                    {
-                        self.find_next(false);
+                        if !self.find_text.is_empty() { self.find_next(false); }
                         response.request_focus();
                         if let Some(tab) = self.tab_mut() {
                             tab.focus = false;
                         }
                     }
-                    ui.toggle_value(&mut self.find_case, "Aa")
-                        .on_hover_text("Match case");
-                    ui.toggle_value(&mut self.find_word, "ab")
-                        .on_hover_text("Whole word");
-                    if small_button(ui, "↑", "Previous · Shift+F3").clicked() {
-                        self.find_next(true);
-                    }
-                    if small_button(ui, "↓", "Next · F3").clicked() {
-                        self.find_next(false);
-                    }
-                    let count = self
-                        .tab()
-                        .map(|t| {
-                            editor::find_matches(&t.text, &self.find_text, self.find_options())
-                                .len()
-                        })
-                        .unwrap_or(0);
-                    ui.label(
-                        RichText::new(format!("{count} matches"))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "×", "Close find").clicked() {
-                            self.find_visible = false;
-                            if let Some(t) = self.tab_mut() {
-                                t.focus = true;
-                            }
+                    if (response.has_focus() || response.lost_focus())
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+                    {
+                        if !self.find_text.is_empty() { self.find_next(false); }
+                        response.request_focus();
+                        if let Some(tab) = self.tab_mut() {
+                            tab.focus = false;
                         }
+                    }
+                    if !compact { controls(self, ui); }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let response = small_button(ui, "×", "Close find · Esc");
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Close find"));
+                        close |= response.clicked();
                     });
                 });
+                if compact { ui.horizontal_wrapped(|ui| { controls(self, ui); }); }
                 if self.replace_visible {
                     ui.horizontal(|ui| {
-                        ui.add_space(32.0);
-                        ui.add(
+                        let width = (ui.available_width() - if compact { 12.0 } else { 174.0 }).clamp(30.0, 360.0);
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.replace_text)
+                                .id(replace_id)
                                 .hint_text("Replace with")
-                                .desired_width(230.0),
-                        );
-                        if ui.button("Replace").clicked() {
-                            let query = self.find_text.clone();
-                            let replacement = self.replace_text.clone();
-                            let options = self.find_options();
-                            if let Some(t) = self.tab_mut()
-                                && let Some(range) = editor::find_matches(&t.text, &query, options)
-                                    .into_iter()
-                                    .find(|r| r.start >= t.vim.cursor)
-                            {
-                                t.apply(editor::replace_selection(&t.text, range, &replacement));
-                            }
-                            self.find_next(false);
+                                .desired_width(width),
+                        ).on_hover_text("Replacement text · Enter: replace this match · Esc: close Find and Replace");
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Replace with"));
+                        if (response.has_focus() || response.lost_focus()) && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+                            replace_one = true;
                         }
-                        if ui.button("Replace all").clicked() {
-                            let query = self.find_text.clone();
-                            let replacement = self.replace_text.clone();
-                            let options = self.find_options();
-                            if let Some(t) = self.tab_mut() {
-                                let (edit, count) = editor::replace_all(
-                                    &t.text,
-                                    t.selection.clone(),
-                                    &query,
-                                    &replacement,
-                                    options,
-                                );
-                                if count > 0 {
-                                    t.apply(edit);
-                                }
-                                self.status(format!("Replaced {count} matches"), false);
-                            }
+                        if !compact {
+                            let enabled = self.tab().is_some_and(|tab| !tab.loading && !tab.saving && tab.error.is_none()) && !self.editor_search_matches().is_empty();
+                            ui.add_enabled_ui(enabled, |ui| {
+                                replace_one |= design::ghost_button(ui, "Replace", "Replace the current match and move to the next").clicked();
+                                replace_all |= design::ghost_button(ui, "Replace all", "Replace every match in this document").clicked();
+                            });
                         }
                     });
+                    if compact {
+                        let enabled = self.tab().is_some_and(|tab| !tab.loading && !tab.saving && tab.error.is_none()) && !self.editor_search_matches().is_empty();
+                        ui.add_enabled_ui(enabled, |ui| { ui.horizontal_wrapped(|ui| {
+                            replace_one |= design::ghost_button(ui, "Replace", "Replace the current match and move to the next").clicked();
+                            replace_all |= design::ghost_button(ui, "Replace all", "Replace every match in this document").clicked();
+                        }); });
+                    }
                 }
             });
+        // Escape belongs to the whole toolbar, including Replace and option buttons.
+        close |= interactive
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
+        if close {
+            self.find_visible = false;
+            ui.ctx().memory_mut(|memory| {
+                if let Some(id) = memory.focused() {
+                    memory.surrender_focus(id);
+                }
+            });
+            if let Some(tab) = self.tab_mut() {
+                tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+            }
+            return;
+        }
+        let editable = self
+            .tab()
+            .is_some_and(|tab| !tab.loading && !tab.saving && tab.error.is_none());
+        if editable && replace_one {
+            let matches = self.editor_search_matches();
+            let cursor = self.tab().map_or(0, |tab| tab.vim.cursor);
+            if let Some(range) = matches
+                .iter()
+                .find(|range| range.start >= cursor)
+                .or_else(|| matches.first())
+                .cloned()
+            {
+                let replacement = self.replace_text.clone();
+                if let Some(tab) = self.tab_mut() {
+                    let edit = editor::replace_selection(&tab.text, range, &replacement);
+                    let cursor = edit.selection.end;
+                    tab.apply(edit);
+                    tab.vim.cursor = cursor;
+                }
+                self.find_match = None;
+                // Start at the replacement's end so removing a match cannot skip
+                // the next match that has just moved into that same position.
+                let no_matches = self.editor_search_matches().is_empty();
+                if no_matches && !self.find_search_running() {
+                    self.status("Replaced the last match", false);
+                } else {
+                    self.find_next(false);
+                }
+                if let Some(tab) = self.tab_mut() {
+                    tab.focus = false;
+                }
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(replace_id));
+            }
+        }
+        if editable && replace_all {
+            let query = self.find_text.clone();
+            let replacement = self.replace_text.clone();
+            let options = self.find_options();
+            if let Some(tab) = self.tab_mut() {
+                let (edit, count) = editor::replace_all(
+                    &tab.text,
+                    tab.selection.clone(),
+                    &query,
+                    &replacement,
+                    options,
+                );
+                if count > 0 {
+                    tab.apply(edit);
+                }
+                tab.focus = false;
+                self.find_match = None;
+                self.status(format!("Replaced {count} matches"), false);
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(replace_id));
+            }
+        }
     }
     fn reload_current(&mut self) {
         if let Some(t) = self.tab_mut() {
@@ -5062,7 +5388,10 @@ impl MorrowApp {
                         self.save_current();
                     }
                 }
-                "noh" | "nohlsearch" => self.find_visible = false,
+                "noh" | "nohlsearch" => {
+                    self.find_visible = false;
+                    self.find.highlighted = false;
+                }
                 _ => {
                     if let Ok(line) = command.parse::<usize>() {
                         if let Some(t) = self.tab_mut() {
@@ -5081,80 +5410,95 @@ impl MorrowApp {
         }
     }
     fn welcome(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.15).max(35.0));
-            brand(ui, 58.0);
-            ui.add_space(22.0);
-            ui.label(
-                RichText::new("A quieter place to build.")
-                    .size(34.0)
-                    .strong()
-                    .color(TEXT),
-            );
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new("Your projects. Your motions. Room to focus.")
-                    .size(15.0)
-                    .color(MUTED),
-            );
-            ui.add_space(35.0);
-            if accent_button(ui, "Open a project folder").clicked() {
-                self.pick_project();
-            }
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new("Ctrl + Shift + O")
-                    .monospace()
-                    .size(11.0)
-                    .color(MUTED),
-            );
-            ui.add_space(46.0);
-            egui::Frame::new()
-                .fill(PANEL)
-                .stroke(Stroke::new(1.0, BORDER))
-                .corner_radius(10.0)
-                .inner_margin(24)
-                .show(ui, |ui| {
-                    ui.set_max_width(460.0);
+        let available_height = ui.available_height();
+        let compact = available_height < 700.0;
+        let space = if compact { 0.6 } else { 1.0 };
+        egui::ScrollArea::vertical()
+            .id_salt("welcome")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(if compact {
+                        18.0
+                    } else {
+                        (available_height * 0.15).max(35.0)
+                    });
+                    brand(ui, if compact { 48.0 } else { 58.0 });
+                    ui.add_space(22.0 * space);
                     ui.label(
-                        RichText::new("BUILT AROUND YOUR FLOW")
-                            .size(10.5)
+                        RichText::new("A quieter place to build.")
+                            .size(if compact { 28.0 } else { 34.0 })
                             .strong()
-                            .color(ACCENT),
+                            .color(TEXT),
                     );
-                    ui.add_space(12.0);
-                    for (label, keys) in [
-                        ("Vim motions & visual selections", "v / V"),
-                        ("Find a file", "Ctrl P"),
-                        ("Search the whole project", "Ctrl Shift F"),
-                        ("Commands at your fingertips", "Ctrl Shift P"),
-                    ] {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(label).size(12.0).color(TEXT));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(keys).monospace().size(11.0).color(MUTED));
-                            });
-                        });
-                        ui.add_space(6.0);
+                    ui.add_space(10.0 * space);
+                    ui.label(
+                        RichText::new("Your projects. Your motions. Room to focus.")
+                            .size(15.0)
+                            .color(MUTED),
+                    );
+                    ui.add_space(35.0 * space);
+                    if accent_button(ui, "Open a project folder").clicked() {
+                        self.pick_project();
                     }
+                    ui.add_space(12.0 * space);
+                    ui.label(
+                        RichText::new("Ctrl + Shift + O")
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                    ui.add_space(46.0 * space);
+                    egui::Frame::new()
+                        .fill(PANEL)
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .corner_radius(10.0)
+                        .inner_margin(if compact { 16 } else { 24 })
+                        .show(ui, |ui| {
+                            ui.set_max_width(460.0);
+                            ui.label(
+                                RichText::new("BUILT AROUND YOUR FLOW")
+                                    .size(10.5)
+                                    .strong()
+                                    .color(ACCENT),
+                            );
+                            ui.add_space(12.0);
+                            for (label, keys) in [
+                                ("Vim motions & visual selections", "v / V"),
+                                ("Find a file", "Ctrl P"),
+                                ("Search the whole project", "Ctrl Shift F"),
+                                ("Commands at your fingertips", "Ctrl Shift P"),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(label).size(12.0).color(TEXT));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(keys).monospace().size(11.0).color(MUTED),
+                                        );
+                                    });
+                                });
+                                ui.add_space(6.0);
+                            }
+                        });
+                    ui.add_space(25.0 * space);
+                    ui.label(
+                        RichText::new(format!("MORROW  /  {}", env!("CARGO_PKG_VERSION")))
+                            .size(10.0)
+                            .color(MUTED.linear_multiply(0.6)),
+                    );
                 });
-            ui.add_space(25.0);
-            ui.label(
-                RichText::new(format!("MORROW  /  {}", env!("CARGO_PKG_VERSION")))
-                    .size(10.0)
-                    .color(MUTED.linear_multiply(0.6)),
-            );
-        });
+            });
     }
 }
 
 const COMMANDS: &[(&str, &str)] = &[
+    ("Switch project", "Ctrl Alt P"),
     ("Add project folder", "Ctrl Shift O"),
     ("Open file", "Ctrl O"),
     ("New file", "Ctrl N"),
     ("Save current file", "Ctrl S"),
     ("Save all files", "Ctrl Shift S"),
-    ("Find in file", "Ctrl F"),
+    ("Find in file", "Ctrl F in Insert"),
     ("Replace in file", "Ctrl H"),
     ("Search project", "Ctrl Shift F"),
     ("Go to line", "Ctrl G"),
@@ -5185,6 +5529,7 @@ const COMMANDS: &[(&str, &str)] = &[
 impl MorrowApp {
     fn command_action(&mut self, label: &str) {
         match label {
+            "Switch project" => self.open_workspace_picker(),
             "Add project folder" => self.pick_project(),
             "Open file" => self.pick_file(),
             "New file" => self.new_file(),
@@ -5200,8 +5545,7 @@ impl MorrowApp {
                 self.find_focus = true;
             }
             "Search project" => {
-                self.sidebar = SidebarView::Search;
-                self.sidebar_visible = true;
+                self.open_project_search();
             }
             "Go to line" => self.open_palette(Palette::Line),
             "Toggle bookmark" => self.toggle_bookmark(),
@@ -5269,6 +5613,7 @@ impl MorrowApp {
             let mut open = true;
             let mut choose = None;
             let mut line = None;
+            let mut retry_index = false;
             egui::Window::new(match palette {
                 Palette::Files => "Open a file",
                 Palette::Commands => "Command palette",
@@ -5397,7 +5742,52 @@ impl MorrowApp {
                             }
                             if options.is_empty() {
                                 ui.add_space(10.0);
-                                ui.label(RichText::new("No matches").color(MUTED));
+                                if palette == Palette::Files {
+                                    match self.project() {
+                                        Some(project) if project.indexing => {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(
+                                                    RichText::new("Indexing files…").color(MUTED),
+                                                );
+                                            });
+                                        }
+                                        Some(project) if project.index_error.is_some() => {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Could not load this project's files.",
+                                                )
+                                                .color(ORANGE),
+                                            );
+                                            if let Some(error) = &project.index_error {
+                                                ui.label(
+                                                    RichText::new(error).size(11.0).color(MUTED),
+                                                );
+                                            }
+                                            retry_index = ui.button("Retry indexing").clicked();
+                                        }
+                                        Some(_) => {
+                                            ui.label(
+                                                RichText::new(
+                                                    if self.palette_query.trim().is_empty() {
+                                                        "No files found in this project"
+                                                    } else {
+                                                        "No matches"
+                                                    },
+                                                )
+                                                .color(MUTED),
+                                            );
+                                        }
+                                        None => {
+                                            ui.label(
+                                                RichText::new("Open a project to find its files.")
+                                                    .color(MUTED),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    ui.label(RichText::new("No matches").color(MUTED));
+                                }
                             }
                         });
                     ui.separator();
@@ -5409,6 +5799,9 @@ impl MorrowApp {
                 }
             });
             let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+            if retry_index {
+                self.index_project(self.active_project);
+            }
             if !open || escape || choose.is_some() || line.is_some() {
                 self.palette = None;
                 if let Some(t) = self.tab_mut() {
@@ -5430,16 +5823,23 @@ impl MorrowApp {
             }
         }
         if self.settings_open {
-            let mut open = true;
             let mut done = false;
-            egui::Window::new("Settings")
-                .collapsible(false)
-                .resizable(false)
-                .default_width(420.0)
-                .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(&ctx, |ui| {
-                    ui.add_space(7.0);
+            let mut changed = false;
+            let modal = egui::Modal::new(egui::Id::new("settings_dialog")).show(&ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 48.0).clamp(280.0, 420.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Settings").size(20.0).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close = small_button(ui, "×", "Close settings · Esc");
+                        close.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Close settings"));
+                        done |= close.clicked();
+                    });
+                });
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings_contents")
+                    .max_height((ctx.content_rect().height() - 190.0).clamp(120.0, 540.0))
+                    .show(ui, |ui| {
                     ui.label(
                         RichText::new("MAKE IT YOURS")
                             .size(10.5)
@@ -5447,14 +5847,17 @@ impl MorrowApp {
                             .color(ACCENT),
                     );
                     ui.add_space(12.0);
-                    ui.checkbox(&mut self.settings.vim, "Vim motions (default)");
-                    egui::ComboBox::from_label("Leader key")
+                    changed |= ui.checkbox(&mut self.settings.vim, "Vim motions (default)")
+                        .on_hover_text("Use Normal, Insert, Visual and Visual Line modes. Changes apply immediately.")
+                        .changed();
+                    changed |= egui::ComboBox::from_label("Leader key")
                         .selected_text(if self.settings.leader_key == " " { "Space" } else { &self.settings.leader_key })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.settings.leader_key, " ".into(), "Space (default)");
-                            ui.selectable_value(&mut self.settings.leader_key, ",".into(), "Comma");
-                            ui.selectable_value(&mut self.settings.leader_key, "\\".into(), "Backslash");
-                        });
+                            let mut changed = ui.selectable_value(&mut self.settings.leader_key, " ".into(), "Space (default)").changed();
+                            changed |= ui.selectable_value(&mut self.settings.leader_key, ",".into(), "Comma").changed();
+                            changed |= ui.selectable_value(&mut self.settings.leader_key, "\\".into(), "Backslash").changed();
+                            changed
+                        }).inner.unwrap_or(false);
                     ui.label(RichText::new("Leader m: bookmark · Leader b: bookmarks · Leader Leader f: jump").size(10.5).color(MUTED));
                     ui.label(
                         RichText::new(
@@ -5464,27 +5867,27 @@ impl MorrowApp {
                         .color(MUTED),
                     );
                     ui.add_space(10.0);
-                    ui.checkbox(
+                    changed |= ui.checkbox(
                         &mut self.settings.autosave,
                         "Save files automatically after a pause",
-                    );
+                    ).on_hover_text("Save edits after you stop typing. Agent drafts remain manual until explicitly saved.").changed();
                     ui.label(
                         RichText::new("Recovery copies are kept even with auto save off.")
                             .size(11.0)
                             .color(MUTED),
                     );
                     ui.add_space(10.0);
-                    ui.checkbox(&mut self.settings.word_wrap, "Wrap long lines");
-                    ui.checkbox(&mut self.settings.smooth_scroll, "Smooth scrolling")
-                        .on_hover_text("Animate source and Markdown scrolling; turn off for immediate movement.");
+                    changed |= ui.checkbox(&mut self.settings.word_wrap, "Wrap long lines").on_hover_text("Fit long source lines to the editor pane · Alt+Z").changed();
+                    changed |= ui.checkbox(&mut self.settings.smooth_scroll, "Smooth scrolling")
+                        .on_hover_text("Animate source and Markdown scrolling; turn off for immediate movement.").changed();
                     ui.add_space(10.0);
-                    ui.add(
+                    changed |= ui.add(
                         egui::Slider::new(&mut self.settings.font_size, 10.0..=24.0)
                             .text("Editor font size"),
-                    );
-                    ui.add(
+                    ).changed();
+                    changed |= ui.add(
                         egui::Slider::new(&mut self.settings.tab_width, 1..=8).text("Indent width"),
-                    );
+                    ).changed();
                     ui.add_space(16.0);
                     ui.separator();
                     ui.label(
@@ -5499,25 +5902,73 @@ impl MorrowApp {
                         "i a I A · o O · r · x · dd · cw · cc · D C",
                         "v V · y d c p · > < · u · Ctrl R",
                         "Counts: 3w · 2dd · d2w     Find: f F t T ; ,",
+                        "Search: / ? · n N · * #     Pages: Ctrl F B D U",
                         "Commands: :w :wa :q :wq :e path :42",
                     ] {
                         ui.label(RichText::new(text).monospace().size(11.5).color(TEXT));
                     }
-                    ui.add_space(12.0);
-                    if ui.button("Done").clicked() {
-                        done = true;
+                    ui.add_space(4.0);
+                    });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Changes apply immediately · Esc closes").size(10.5).color(MUTED));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        done |= design::primary_button(ui, "Done", Vec2::new(70.0, 28.0)).clicked();
+                    });
+                });
+            });
+            self.settings_open = !(done || modal.should_close());
+            self.session_dirty |= changed;
+            if !self.settings_open {
+                ctx.memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
                     }
                 });
-            self.settings_open = open && !done;
-            self.session_dirty = true;
+                if let Some(tab) = self.tab_mut() {
+                    tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+                }
+                ctx.request_repaint();
+            }
         }
         if let Some(action) = self.close_action
             && self.save_as.is_none()
         {
+            let documents: Vec<_> = self
+                .projects
+                .iter()
+                .enumerate()
+                .flat_map(|(index, project)| {
+                    project.tabs.iter().filter_map(move |tab| {
+                        let affected = match action {
+                            CloseAction::Tab(id) | CloseAction::PaneTab { id, .. } => tab.id == id,
+                            CloseAction::Project(project_index) => index == project_index,
+                            CloseAction::Exit => true,
+                        };
+                        if !affected || !(tab.dirty || tab.saving) {
+                            return None;
+                        }
+                        let relative = tab.path.as_ref().map_or_else(
+                            || tab.title.clone(),
+                            |path| {
+                                crate::paths::display(
+                                    path.strip_prefix(&project.root).unwrap_or(path),
+                                )
+                            },
+                        );
+                        let full_path = tab.path.as_ref().unwrap_or(&project.root);
+                        Some((
+                            format!("{} · {relative}", file_title(&project.root)),
+                            crate::paths::display(full_path),
+                        ))
+                    })
+                })
+                .collect();
             let mut save = false;
             let mut discard = false;
             let mut cancel = false;
-            egui::Modal::new(egui::Id::new("unsaved_changes")).show(&ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(&ctx, |ui| {
                 ui.set_width(390.0);
                 ui.label(
                     RichText::new("Keep your changes?")
@@ -5526,7 +5977,29 @@ impl MorrowApp {
                         .color(TEXT),
                 );
                 ui.add_space(10.0);
-                ui.label(RichText::new("Some files have unsaved changes.").color(MUTED));
+                ui.label(
+                    RichText::new(format!(
+                        "{} {} with unsaved changes.",
+                        documents.len(),
+                        if documents.len() == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        },
+                    ))
+                    .color(MUTED),
+                );
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("unsaved_documents")
+                    .max_height((ctx.content_rect().height() * 0.25).clamp(70.0, 180.0))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (label, path) in &documents {
+                            ui.add(egui::Label::new(RichText::new(label).size(12.0)).truncate())
+                                .on_hover_text(path);
+                        }
+                    });
                 if self.close_after_save {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -5555,9 +6028,17 @@ impl MorrowApp {
                     }
                 });
             });
-            if cancel {
+            if cancel || modal.should_close() {
                 self.close_action = None;
                 self.close_after_save = false;
+                if let Some(tab) = self.tab_mut() {
+                    tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+                }
+                if let Some(tab) = self.tab()
+                    && tab.agent_view == crate::cli::DocumentView::Source
+                {
+                    ctx.memory_mut(|memory| memory.request_focus(self.document_widget_id(tab.id)));
+                }
             }
             if discard {
                 self.perform_close(action);
@@ -5587,7 +6068,7 @@ impl MorrowApp {
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
             && !egui::Popup::is_any_open(&ctx)
         {
-            self.diff = None;
+            self.close_diff();
         }
         if let Some((title, text)) = &self.diff {
             let mut open = true;
@@ -5611,9 +6092,27 @@ impl MorrowApp {
                     }
                 });
             if !open {
-                self.diff = None;
+                self.close_diff();
             }
         }
+    }
+    fn close_diff(&mut self) {
+        self.diff = None;
+        self.ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+        }
+        if let Some(tab) = self.tab()
+            && tab.agent_view == crate::cli::DocumentView::Source
+        {
+            let id = self.document_widget_id(tab.id);
+            self.ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        self.ctx.request_repaint();
     }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
         self.syntax.begin_frame(ui);
@@ -5626,9 +6125,12 @@ impl MorrowApp {
         self.poll_languages();
         self.focus_pane_from_pointer();
         self.context_paste_poll();
-        let navigation_pending = self.navigation_keys();
-        let jumping = self.screen_jump_keys();
-        if !navigation_pending && !jumping {
+        self.validate_vim_search();
+        let dragging_tab = self.tab_drag_keys();
+        let switching_project = !dragging_tab && self.workspace_keys();
+        let navigation_pending = !dragging_tab && !switching_project && self.navigation_keys();
+        let jumping = !dragging_tab && !switching_project && self.screen_jump_keys();
+        if !dragging_tab && !switching_project && !navigation_pending && !jumping {
             self.shortcuts();
             self.handle_vim();
         }
@@ -5663,6 +6165,7 @@ impl MorrowApp {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
         self.editor_ui(ui);
+        self.finish_workspace_action();
         self.overlays();
         self.navigation_ui();
         self.completion_ui();
@@ -5689,6 +6192,16 @@ impl eframe::App for MorrowApp {
     }
 }
 
+#[cfg(test)]
+fn recovery_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-state")
+        .join(std::process::id().to_string())
+        .join("recovery")
+}
+
+#[cfg(not(test))]
 fn recovery_directory() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -5990,6 +6503,10 @@ mod tests;
 #[path = "interaction_tests.rs"]
 mod interaction_tests;
 
+#[cfg(test)]
+#[path = "native_input_tests.rs"]
+mod native_input_tests;
+
 impl MorrowApp {
     fn sync_languages(&mut self, force: bool) {
         for p in &mut self.projects {
@@ -6282,6 +6799,7 @@ impl MorrowApp {
             || self.navigation_modal_open()
             || self.navigation_pending()
             || self.screen_jump.is_some()
+            || self.vim_search_active()
             || self.tab().is_none_or(|t| {
                 !self
                     .ctx
@@ -6291,7 +6809,12 @@ impl MorrowApp {
             self.completions = None;
             return false;
         }
-        if self.completions.is_none() {
+        if self
+            .completions
+            .as_ref()
+            .is_none_or(|popup| popup.items.is_empty())
+        {
+            self.completions = None;
             return false;
         }
         let ctx = self.ctx.clone();
@@ -6306,6 +6829,7 @@ impl MorrowApp {
         let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
         let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
         if let Some(p) = &mut self.completions {
+            p.selected = p.selected.min(p.items.len().saturating_sub(1));
             if down {
                 p.selected = (p.selected + 1).min(p.items.len().saturating_sub(1));
             }
@@ -6313,35 +6837,79 @@ impl MorrowApp {
                 p.selected = p.selected.saturating_sub(1);
             }
         }
+        if down || up {
+            ctx.data_mut(|data| {
+                data.remove::<(u64, i32, usize, usize)>(egui::Id::new("completion_selected_row"));
+            });
+        }
         if ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::NONE, Key::Enter)
                 || i.consume_key(egui::Modifiers::NONE, Key::Tab)
         }) {
-            let selected = self.completions.as_ref().unwrap().selected;
+            let popup = self.completions.as_ref().unwrap();
+            let selected = popup.selected;
+            let identity = (popup.tab_id, popup.version, popup.cursor, selected);
+            let hidden = ctx
+                .data(|data| {
+                    data.get_temp::<((u64, i32, usize, usize), bool)>(egui::Id::new(
+                        "completion_visible_selection",
+                    ))
+                })
+                .is_some_and(|(shown, visible)| shown == identity && !visible);
+            if hidden {
+                // Reveal an off-screen selection before allowing keyboard acceptance.
+                ctx.data_mut(|data| {
+                    data.remove::<(u64, i32, usize, usize)>(egui::Id::new(
+                        "completion_selected_row",
+                    ));
+                });
+                return true;
+            }
             self.apply_completion(selected);
             return true;
         }
         false
     }
     fn completion_ui(&mut self) {
-        let Some(p) = &self.completions else { return };
+        let Some(p) = &self.completions else {
+            self.ctx.data_mut(|data| {
+                data.remove::<(u64, i32, usize, usize)>(egui::Id::new("completion_selected_row"));
+                data.remove::<((u64, i32, usize, usize), bool)>(egui::Id::new(
+                    "completion_visible_selection",
+                ));
+            });
+            return;
+        };
         let mut selected = None;
         let ctx = self.ctx.clone();
         let bounds = ctx.input(|i| i.content_rect());
+        let selection = p.selected.min(p.items.len().saturating_sub(1));
+        let identity = (p.tab_id, p.version, p.cursor, selection);
+        let reveal_id = egui::Id::new("completion_selected_row");
+        let reveal =
+            ctx.data(|data| data.get_temp::<(u64, i32, usize, usize)>(reveal_id)) != Some(identity);
+        ctx.data_mut(|data| data.insert_temp(reveal_id, identity));
         let caret = self.editor_cursor_rect.unwrap_or_else(|| {
             egui::Rect::from_min_size(
                 egui::pos2(bounds.left() + 320.0, bounds.top() + 150.0),
                 Vec2::ZERO,
             )
         });
-        let popup_height = (p.items.len().min(8) as f32 * 29.0 + 45.0).min(320.0);
+        let row_height = 48.0;
+        let list_height = (p.items.len().min(6) as f32 * row_height)
+            .min((bounds.height() - 180.0).max(row_height));
+        let popup_height = list_height + 65.0;
+        let width = (bounds.width() - 32.0).clamp(200.0, 490.0);
         let top = if caret.bottom() + popup_height > bounds.bottom() - 40.0 {
             (caret.top() - popup_height).max(bounds.top() + 70.0)
         } else {
             caret.bottom() + 4.0
         };
         let position = egui::pos2(
-            caret.left().min(bounds.right() - 520.0).max(bounds.left()),
+            caret
+                .left()
+                .min(bounds.right() - width - 12.0)
+                .max(bounds.left() + 12.0),
             top,
         );
         egui::Window::new("Suggestions")
@@ -6349,35 +6917,80 @@ impl MorrowApp {
             .resizable(false)
             .collapsible(false)
             .title_bar(false)
-            .default_width(490.0)
+            .fixed_size([width, popup_height])
             .fixed_pos(position)
             .show(&ctx, |ui| {
-                ui.label(
-                    RichText::new("SUGGESTIONS  ·  Enter to accept")
-                        .size(10.0)
-                        .color(ACCENT),
-                );
-                egui::ScrollArea::vertical()
-                    .max_height(270.0)
-                    .show(ui, |ui| {
-                        for (i, item) in p.items.iter().take(100).enumerate() {
-                            if ui
-                                .push_id(i, |ui| {
-                                    design::detail_row(
-                                        ui,
-                                        &item.label,
-                                        item.detail.as_deref().unwrap_or(""),
-                                        i == p.selected,
-                                        "Accept this suggestion",
-                                    )
-                                })
-                                .inner
-                                .clicked()
-                            {
-                                selected = Some(i);
-                            }
+                ui.label(RichText::new("SUGGESTIONS").size(10.0).color(ACCENT));
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let scroll_id = ui.make_persistent_id("completion_results");
+                let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt("completion_results")
+                    .animated(false)
+                    .max_height(list_height);
+                if reveal {
+                    let offset = egui::scroll_area::State::load(&ctx, scroll_id)
+                        .map_or(0.0, |state| state.offset.y);
+                    let top = selection as f32 * row_height;
+                    let bottom = top + row_height;
+                    let offset = if top < offset {
+                        top
+                    } else if bottom > offset + list_height {
+                        bottom - list_height
+                    } else {
+                        offset
+                    };
+                    scroll = scroll.vertical_scroll_offset(offset.max(0.0));
+                }
+                let output = scroll.show_rows(ui, row_height, p.items.len(), |ui, rows| {
+                    for i in rows {
+                        let item = &p.items[i];
+                        let hint = format!(
+                            "{}{}\nEnter / Tab to accept · Esc dismisses",
+                            item.label,
+                            item.detail
+                                .as_ref()
+                                .map(|detail| format!("\n{detail}"))
+                                .unwrap_or_default()
+                        );
+                        let response = ui
+                            .push_id(i, |ui| {
+                                design::detail_row(
+                                    ui,
+                                    &item.label,
+                                    item.detail.as_deref().unwrap_or(""),
+                                    i == selection,
+                                    &hint,
+                                )
+                            })
+                            .inner;
+                        if response.clicked() {
+                            selected = Some(i);
                         }
-                    });
+                    }
+                });
+                let selected_top =
+                    output.inner_rect.top() + selection as f32 * row_height - output.state.offset.y;
+                let visible = output.inner_rect.intersect(ui.clip_rect());
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new("completion_visible_selection"),
+                        (
+                            identity,
+                            selected_top >= visible.top() - 0.5
+                                && selected_top + row_height <= visible.bottom() + 0.5,
+                        ),
+                    );
+                });
+                ui.add_space(7.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} of {} · ↑ ↓ choose · Enter / Tab accepts · Esc closes",
+                        selection + 1,
+                        p.items.len()
+                    ))
+                    .size(10.5)
+                    .color(MUTED),
+                );
             });
         if let Some(i) = selected {
             self.apply_completion(i);
@@ -6385,6 +6998,7 @@ impl MorrowApp {
     }
     fn problems_ui(&mut self, ui: &mut egui::Ui) {
         let Some(p) = self.project() else { return };
+        let root = p.root.clone();
         let rows: Vec<_> = p
             .diagnostics
             .iter()
@@ -6422,7 +7036,7 @@ impl MorrowApp {
                     let label = format!(
                         "{}  {}:{}:{}   {}",
                         if d.severity == 1 { "Error" } else { "Warning" },
-                        file_title(&path),
+                        crate::paths::display(path.strip_prefix(&root).unwrap_or(&path)),
                         d.range.start.line + 1,
                         d.range.start.character + 1,
                         d.message.lines().next().unwrap_or("")
@@ -6437,10 +7051,11 @@ impl MorrowApp {
                         )
                         .sense(egui::Sense::click()),
                     );
+                    let tooltip = format!("{}\n{}", crate::paths::display(&path), d.message);
                     if response.clicked() {
                         jump = Some((path, d.range.start));
                     }
-                    response.on_hover_text(d.message);
+                    response.on_hover_text(tooltip);
                 }
             });
         if let Some((path, position)) = jump {
@@ -6498,3 +7113,15 @@ mod navigation_tests;
 #[cfg(test)]
 #[path = "intel_tests.rs"]
 mod intel_tests;
+
+#[cfg(test)]
+#[path = "workspace_ux_tests.rs"]
+mod workspace_ux_tests;
+
+#[cfg(test)]
+#[path = "editor_ux_tests.rs"]
+mod editor_ux_tests;
+
+#[cfg(test)]
+#[path = "workspace_context_tests.rs"]
+mod workspace_context_tests;

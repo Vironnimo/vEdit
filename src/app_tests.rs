@@ -525,6 +525,7 @@ fn asynchronous_restore_keeps_disk_baseline_and_recovers_a_dirty_named_buffer() 
     tab.loading = true;
     let id = tab.id;
     app.projects[0].tabs.push(tab);
+    app.activate_tab(0, 0);
     app.load_tab(id, Some(path), Some(recovery));
 
     wait_until(&mut app, |app| !app.tab().unwrap().loading);

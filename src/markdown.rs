@@ -1,7 +1,7 @@
 //! Cached CommonMark preview. HTML stays inert and images never fetch remotely.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
@@ -31,8 +31,10 @@ pub(crate) struct PreviewResponse {
 pub(crate) struct MarkdownCache {
     documents: VecDeque<CachedDocument>,
     reveal: Option<(u64, usize)>,
+    restore_scroll: HashMap<(egui::Id, u64), f32>,
 }
 
+#[derive(Clone)]
 struct CachedDocument {
     id: u64,
     pane: egui::Id,
@@ -47,6 +49,8 @@ struct CachedDocument {
     scroll_y: f32,
     content_height: f32,
     pending_g: Option<f64>,
+    table_scroll: HashMap<usize, f32>,
+    restore_tables: HashMap<usize, f32>,
 }
 
 #[derive(Debug)]
@@ -100,6 +104,61 @@ struct Span {
 }
 
 impl MarkdownCache {
+    /// Carry a moved view's measured layout and reading position to its new pane.
+    /// The editor only calls this when the target does not already own that tab.
+    pub(crate) fn transfer_view(&mut self, document: u64, source: egui::Id, destination: egui::Id) {
+        if source == destination {
+            return;
+        }
+        if let Some(mut entry) = self
+            .documents
+            .iter()
+            .find(|entry| entry.id == document && entry.pane == source)
+            .cloned()
+        {
+            self.documents
+                .retain(|cached| cached.id != document || cached.pane != destination);
+            entry.pane = destination;
+            entry.pending_g = None;
+            entry.restore_tables = entry.table_scroll.clone();
+            self.restore_scroll
+                .insert((destination, document), entry.scroll_y);
+            self.documents.push_front(entry);
+            self.trim_documents();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn view_scroll(&self, document: u64, pane: egui::Id) -> Option<f32> {
+        self.documents
+            .iter()
+            .find(|entry| entry.id == document && entry.pane == pane)
+            .map(|entry| entry.scroll_y)
+    }
+    #[cfg(test)]
+    pub(crate) fn table_scroll(&self, document: u64, pane: egui::Id, source: usize) -> Option<f32> {
+        self.documents
+            .iter()
+            .find(|entry| entry.id == document && entry.pane == pane)
+            .and_then(|entry| entry.table_scroll.get(&source).copied())
+    }
+    fn trim_documents(&mut self) {
+        while self.documents.len() > MAX_DOCUMENTS
+            || (self.documents.len() > 1
+                && self
+                    .documents
+                    .iter()
+                    .map(|entry| entry.text.len())
+                    .sum::<usize>()
+                    > MAX_CACHE_BYTES)
+        {
+            self.documents.pop_back();
+        }
+        self.restore_scroll.retain(|(pane, id), _| {
+            self.documents
+                .iter()
+                .any(|entry| entry.pane == *pane && entry.id == *id)
+        });
+    }
     /// Reveal a one-based source line in the corresponding preview document.
     /// The request is consumed only when that document is rendered.
     pub(crate) fn reveal_line(&mut self, document: u64, line: usize) {
@@ -157,9 +216,15 @@ impl MarkdownCache {
                 scroll_y: 0.0,
                 content_height: 0.0,
                 pending_g: None,
+                table_scroll: HashMap::new(),
+                restore_tables: HashMap::new(),
             });
         }
         let mut entry = entry.expect("created preview document");
+        let restored_scroll = self.restore_scroll.remove(&(pane, id));
+        if let Some(offset) = restored_scroll {
+            entry.scroll_y = offset;
+        }
         let reveal_target = self
             .reveal
             .filter(|(document, _)| *document == id)
@@ -255,6 +320,9 @@ impl MarkdownCache {
         {
             scroll = scroll.scroll_offset(offset);
         }
+        if let Some(offset) = restored_scroll {
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
         if let Some(offset) = requested_scroll {
             scroll = scroll.vertical_scroll_offset(offset);
         }
@@ -293,6 +361,8 @@ impl MarkdownCache {
                                         reveal_source: reveal_target.map(|(_, source)| source),
                                         markdown_source: text,
                                         smooth_scroll,
+                                        table_scroll: &mut entry.table_scroll,
+                                        restore_tables: &mut entry.restore_tables,
                                     };
                                     renderer.block(ui, block, false);
                                 });
@@ -311,17 +381,7 @@ impl MarkdownCache {
             ui.ctx().request_repaint();
         }
         self.documents.push_front(entry);
-        while self.documents.len() > MAX_DOCUMENTS
-            || (self.documents.len() > 1
-                && self
-                    .documents
-                    .iter()
-                    .map(|entry| entry.text.len())
-                    .sum::<usize>()
-                    > MAX_CACHE_BYTES)
-        {
-            self.documents.pop_back();
-        }
+        self.trim_documents();
         result
     }
 }
@@ -709,6 +769,8 @@ struct Renderer<'a> {
     reveal_source: Option<usize>,
     markdown_source: &'a str,
     smooth_scroll: bool,
+    table_scroll: &'a mut HashMap<usize, f32>,
+    restore_tables: &'a mut HashMap<usize, f32>,
 }
 
 struct InlineLayout {
@@ -822,6 +884,7 @@ impl Renderer<'_> {
             .collect::<Vec<_>>();
         let table_height = prepared.iter().map(|row| row.height).sum::<f32>();
         let salt = ("markdown_table", ui.id(), source);
+        let scroll_id = ui.make_persistent_id(egui::IdSalt::new(salt));
         let mut scroll = egui::ScrollArea::horizontal()
             .id_salt(salt)
             .auto_shrink([false, true])
@@ -830,6 +893,14 @@ impl Renderer<'_> {
                 mouse_wheel: self.smooth_scroll,
                 ..Default::default()
             });
+        if let Some(offset) = self.restore_tables.remove(&source) {
+            // Tables use nested UI IDs, which change when a view moves. Seed
+            // their own scroll state before wheel handling in the new pane.
+            let mut state = egui::scroll_area::State::load(ui.ctx(), scroll_id).unwrap_or_default();
+            state.offset.x = offset;
+            state.store(ui.ctx(), scroll_id);
+            scroll = scroll.horizontal_scroll_offset(offset);
+        }
         if !self.smooth_scroll {
             // The centered Markdown column starts with a zero requested height.
             // Its content grows during layout, so use the measured table extent
@@ -844,7 +915,7 @@ impl Renderer<'_> {
             );
             if let Some(offset) = crate::render::instant_scroll_offset_axes(
                 &wheel_ui,
-                ui.make_persistent_id(egui::IdSalt::new(salt)),
+                scroll_id,
                 egui::Vec2b::new(true, false),
             ) {
                 scroll = scroll.scroll_offset(offset);
@@ -918,6 +989,7 @@ impl Renderer<'_> {
             );
         });
         crate::render::remember_scroll_limits(ui.ctx(), &output);
+        self.table_scroll.insert(source, output.state.offset.x);
     }
 
     fn block(&mut self, ui: &mut egui::Ui, block: &Block, compact: bool) {

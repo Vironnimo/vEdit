@@ -184,7 +184,7 @@ fn clicking_preview_toolbar_releases_focus_for_reading_motions() {
     tab.saved_text = tab.text.clone();
     let original = tab.text.clone();
     let mut screen = harness(app);
-    screen.get_by_label("Preview").click();
+    screen.get_by_label("Toggle Markdown preview").click();
     screen.run_steps(2);
     assert_eq!(
         screen.state().tab().unwrap().agent_view,
@@ -745,18 +745,124 @@ fn opening_editor_context_menu_preserves_visual_selection() {
     assert_eq!(screen.state().tab().unwrap().selection, 6..12);
     assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Visual);
     assert!(egui::Popup::is_any_open(&screen.ctx));
-    screen.get_by_label("Copy Ctrl+C").click();
-    screen.run_steps(1);
+    let copy_point = screen.get_by_label("Copy Ctrl+C").rect().center();
+    let mut copied = false;
+    for event in [
+        egui::Event::PointerMoved(copy_point),
+        egui::Event::PointerButton {
+            pos: copy_point,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::PointerButton {
+            pos: copy_point,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ] {
+        screen.input_mut().events.push(event);
+        screen.run_steps(1);
+        copied |= screen.output().platform_output.commands.iter().any(
+            |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "second"),
+        );
+    }
+    assert!(
+        copied,
+        "Copy must emit its clipboard command during the actual click frames"
+    );
+    assert_eq!(screen.state().register.as_ref().unwrap().text, "second");
+}
+
+#[test]
+fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
+    let mut app = fixture();
+    app.projects[0].active_tab = 1;
+    let tab = app.tab_mut().unwrap();
+    tab.text = "abcdefghij\n".into();
+    tab.saved_text = tab.text.clone();
+    tab.vim.set_selection(&tab.text, 0..3);
+    tab.vim.handle_key(&mut tab.text, VimKey::Char('r'));
+    tab.selection = 0..3;
+    tab.pending_selection = Some(0..3);
+    tab.saving = true;
+    tab.error = Some("Save failed; use Save As".into());
+    let mut screen = harness(app);
+
+    let choose = |screen: &mut Harness<'static, MorrowApp>, label: &str| {
+        let point = point_at_character(screen, 1);
+        screen
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(point));
+        screen.run_steps(1);
+        for pressed in [true, false] {
+            screen.input_mut().events.push(egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            screen.run_steps(1);
+        }
+        screen.run_steps(2);
+        assert!(egui::Popup::is_any_open(&screen.ctx));
+        let choice = screen.get_by_label(label).rect().center();
+        let mut copied = Vec::new();
+        for event in [
+            egui::Event::PointerMoved(choice),
+            egui::Event::PointerButton {
+                pos: choice,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: choice,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ] {
+            screen.input_mut().events.push(event);
+            screen.run_steps(1);
+            for command in &screen.output().platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    copied.push(text.clone());
+                }
+            }
+        }
+        screen.run_steps(2);
+        assert!(!egui::Popup::is_any_open(&screen.ctx));
+        copied
+    };
+
+    assert_eq!(choose(&mut screen, "Cut Ctrl+X"), ["abc"]);
+    assert_eq!(screen.state().tab().unwrap().text, "defghij\n");
+    assert_eq!(screen.state().register.as_ref().unwrap().text, "abc");
+    assert!(!screen.state().register.as_ref().unwrap().linewise);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
     assert!(
         screen
-            .output()
-            .platform_output
-            .commands
-            .iter()
-            .any(|command| matches!(command,
-                egui::OutputCommand::CopyText(text) if text == "second"
-            ))
+            .state()
+            .tab()
+            .unwrap()
+            .vim
+            .pending_command()
+            .is_empty()
     );
+    screen.event(egui::Event::Text(".".into()));
+    screen.run_steps(1);
+    assert_eq!(screen.state().tab().unwrap().text, "ghij\n");
+    screen.event(egui::Event::Text("u".into()));
+    screen.run_steps(1);
+    assert_eq!(screen.state().tab().unwrap().text, "defghij\n");
+    choose(&mut screen, "Undo u / Ctrl+Z");
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(tab.text, "abcdefghij\n");
+    assert!(tab.saving);
+    assert_eq!(tab.error.as_deref(), Some("Save failed; use Save As"));
 }
 
 #[test]

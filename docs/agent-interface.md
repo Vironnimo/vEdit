@@ -9,6 +9,7 @@ The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinar
 - Buffer edits use current tab IDs and an exact `expected_revision`, validate the full change before applying it, create an Undo step, and pause autosave for that document until a successful explicit save. A stale revision applies no mutation. Normal Vim Insert is finished separately; a counted Insert that would change observed text is refused without effects.
 - Editing, selections, search matches, and diagnostic ranges have exclusive ends. Review annotation endpoints are inclusive. All positions use 1-based Unicode scalar coordinates; CRLF boundaries are preserved.
 - Each pane owns an ordered tab group. Layout results expose its active `tab_id` and local `tab_ids`, usable pane IDs, split orientations, and ratios. A new split starts with the selected document; new opens join the focused pane. Assigning a document adds and focuses it in the target pane without removing other references. Panes share document text and Undo, while their cursor, view, and scrolling are separate.
+- Layout `move_tab` takes source and destination pane IDs, a tab ID, and its final zero-based index after removing any destination duplicate. Equal pane IDs reorder a local group. It validates before effects, focuses the destination, and collapses an empty source split. The source view, cursor, selection, and scrolling move with the tab; an existing destination view retains its own state. Inspect the returned layout after uncertain delivery because a successful move can remove the source pane.
 - Layout `close_tab` removes one pane's reference to a document. It preserves a dirty or saving document shown elsewhere, and refuses to remove its final reference. Removing the final local tab collapses an empty split pane; the sole pane remains available. Ordinary `close TAB_ID...` closes clean, non-saving documents in every pane. Closing a whole pane transfers documents absent from the other panes to a surviving pane, preserving unsaved work; the last pane cannot be closed.
 - Settings patches affect supplied preferences and persist. File rename/folder creation run as tracked background jobs; task dispatch and file-job dispatch are separate from completion.
 - Bookmarks are session metadata across projects and retain their own IDs across restarts. Listing defaults to 100 records, accepts pages of 1–500, and supplies `next_offset`/`has_more`. Records expose path, line, column, and label, without stored document text. Toggle, rename, and removal do not edit or save documents; a jump may still have a pending file load. Toggle removes an existing line bookmark, so callers inspect the list after uncertain delivery before retrying.
@@ -74,6 +75,24 @@ Including UI metadata, all six surfaces total 6,604 before and 7,515 after, also
 
 Raw payloads, hashes, byte counts, and token counts are retained in `target/agent-interface-audit/after-0.4.2/`. `target/agent-interface-audit/measure-0.4.2.py` accepts a built CLI path and captures its actual help/schema output alongside the repository skill files. No new first-use model trial or comparable argument/result cost measurement was performed for bookmarks or leader preferences. The historical 0.4.0 success and 0.4.1 scripted checks below remain unchanged and do not establish first-use success for these additions.
 
+## Context cost: 0.4.2 to 0.4.3
+
+The 0.4.3 release CLI and repository skill use the same exact UTF-8 byte capture and `tiktoken` 0.14.0 `o200k_base` tokenizer as 0.4.2. Offline help and schema do not start or mutate the GUI. Provider wrappers and billing semantics are excluded; UI metadata is counted separately.
+
+| Surface | 0.4.2 | 0.4.3 | Delta |
+| --- | ---: | ---: | ---: |
+| `SKILL.md`, including frontmatter | 802 | 802 | 0 |
+| Conditional editor-control reference | 2,174 | 2,392 | +218 |
+| Conditional review reference | 628 | 628 | 0 |
+| Production CLI help | 951 | 1,027 | +76 |
+| Production CLI schema | 2,911 | 3,083 | +172 |
+| Instruction/discovery total | 7,466 | 7,932 | +466 |
+| UI metadata, counted separately | 49 | 49 | 0 |
+
+All six surfaces total 7,981 tokens, including metadata. The schema retains 31 operations; `move_tab` adds a typed layout action for atomic reorder and cross-pane movement. Its guidance explains final indices, destination deduplication, preserved view state, collapsed source panes, and inspection after uncertain delivery. This is a context increase; no token saving or new model-first-use success is claimed.
+
+Raw help/schema and skill payloads, SHA-256 hashes, bytes, and token counts are retained in `target/agent-interface-audit/after-0.4.3/`. The repeatable capture is `target/agent-interface-audit/measure-0.4.3.py`, supplied with the production CLI executable path. The historical first-use trial remains separate from the scripted implementation checks.
+
 ## Historical 0.4.0 verification
 
 The 0.4.0 repository skill passed `skill-creator/scripts/quick_validate.py`; all supporting reference links resolved, and the packaged production schema exposed 30 distinct operations. Structural validation checks packaging and placeholders, rather than proving task success.
@@ -119,3 +138,17 @@ Scripted checks against the packaged Windows 0.4.2 receiver created and renamed 
 The final offline help/schema capture used `dist/Morrow/morrow-cli.exe`; it confirmed 31 operations and the context counts listed above without GUI mutation. Packaged GUI and CLI executable hashes matched their release build outputs. The skill stays in the repository and portable package; it was not installed into the user's personal skills directory.
 
 These are implementation and rendering checks. They do not establish general first-use agent success, visual latency on other machines, or user approval.
+
+## 0.4.3 workspace, input and interaction verification
+
+The final implementation checks passed **644 tests**: 605 application tests and 39 CLI tests, with seven tests ignored in the standard suite. All 27 strict screenshot comparisons passed. Formatting and strict Clippy passed; the separately invoked Windows captured-output startup regression also passed. Final results are retained in `target/verification-0.4.3/release-final-tests.log`, `release-final-clippy.log`, and `windows-startup-regression.log`.
+
+Three bug reviewers and two UX reviewers checked editor input, search, pane ownership, CLI admission, project navigation, dialogs, completion, Git, and Markdown presentation. Their fixes were integrated before the final run. Headless egui pointer, keyboard, and wheel events exercise tab insertion markers, reorder and cross-pane movement, cancellation, preserved Insert/Visual state and shared Undo, preview and table scroll retention, project-picker focus, context Copy/Cut/Paste, IME, and narrow or long-content controls. Drag screenshots wait for bounded syntax readiness rather than depending on worker timing.
+
+Search regressions check Unicode and whole-word semantics, incremental Vim `/` and `?`, counts and search operators, all visible highlights, cancellation, and rejection of stale background results. A separate optimized-core measurement scanned an 8 MiB one-character fixture with all 8,388,608 matches retained: literal scans took 108.8–116.3 ms, and the regex scan took 360.4 ms; conversion to shared results is measured separately. This measures isolated search work, not GUI latency. The dense result array uses 128 MiB; retained-cache budgets exclude results pinned by visible panes. Raw samples are in `target/verification-0.4.3/search-performance.log`.
+
+Scripted checks against the running packaged Windows 0.4.3 receiver passed all nine assertions: same-pane reorder, cross-pane movement, destination deduplication, empty-source collapse, dirty Unicode preservation, shared Undo/Redo, invalid-index rejection without effects, protection of the final dirty view, and restoration of the original session. Only unnamed test-owned drafts were edited during these checks. Original tabs, pane layout, cursor positions, settings, panels, bookmarks, and project-file hashes were preserved; requests and independent receiving-state checks are in `target/interaction-live-0.4.3/{trace,proof}.json`.
+
+The test harness now uses process-owned recovery paths under `target/test-state` and suppresses session, disk-refresh, recovery, and Git timers while rendering fixtures. During this work, an earlier fixture's shared temporary recovery path was found in two saved session entries. Their original project files were intact. Before cleanup, the profile, session, and buffer contents were backed up; only the exact fixture text and those two confirmed recovery aliases were cleared. A normal close and restart restored the original files, groups, positions, and preferences with fresh, distinct recovery paths. Evidence is retained in `target/interaction-live-0.4.3/startup-recovery-backup/` and `startup-restoration-proof.json`. The final full suite was then checked independently against the live receiver and recovery session; `after-headless-tests-proof.json` confirms it caused no further changes.
+
+The final offline discovery capture used `dist/Morrow/morrow-cli.exe`, confirmed 31 operations, and produced the 0.4.3 context counts above. Packaged GUI and CLI executable hashes match the release build outputs. The skill remains in the repository and portable package, without installation into the user's personal skills directory. No new model-first-use trial or visual-latency measurement was performed.

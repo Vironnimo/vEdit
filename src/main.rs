@@ -14,6 +14,7 @@ mod paths;
 mod recovery;
 mod render;
 mod screen_jump;
+mod search;
 mod single_instance;
 mod tasks;
 mod vim;

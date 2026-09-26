@@ -87,6 +87,7 @@ impl MorrowApp {
         }
         let ctx = self.ctx.clone();
         let eligible = self.settings.vim
+            && !self.vim_search_active()
             && self.screen_jump.is_none()
             && !egui::Popup::is_any_open(&ctx)
             && self.palette.is_none()

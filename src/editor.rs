@@ -399,50 +399,18 @@ pub fn smart_newline(text: &str, selection: Range<usize>, indent: &str) -> EditR
     result
 }
 
-fn word_char(ch: char) -> bool {
-    ch == '_' || ch.is_alphanumeric()
-}
-
 /// Find non-overlapping literal matches. Empty queries produce no matches.
 /// Case-insensitive matching uses Unicode lowercase while retaining the original
 /// character boundaries; a match never selects half of a lowercase expansion.
 pub fn find_matches(text: &str, query: &str, options: SearchOptions) -> Vec<Range<usize>> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut searchable = String::new();
-    let mut boundaries = Vec::with_capacity(chars.len() + 1);
-    for &ch in &chars {
-        boundaries.push(searchable.len());
-        if options.case_sensitive {
-            searchable.push(ch);
-        } else {
-            searchable.extend(ch.to_lowercase());
-        }
-    }
-    boundaries.push(searchable.len());
-    let query = if options.case_sensitive {
-        query.to_owned()
-    } else {
-        query.to_lowercase()
-    };
-    searchable
-        .match_indices(&query)
-        .filter_map(|(start, matched)| {
-            let start = boundaries.binary_search(&start).ok()?;
-            let end = boundaries
-                .binary_search(&(boundaries[start] + matched.len()))
-                .ok()?;
-            if options.whole_word
-                && (start > 0 && word_char(chars[start - 1])
-                    || end < chars.len() && word_char(chars[end]))
-            {
-                return None;
-            }
-            Some(start..end)
-        })
-        .collect()
+    crate::search::search(
+        text,
+        query,
+        options.case_sensitive,
+        options.whole_word,
+        false,
+    )
+    .unwrap_or_default()
 }
 
 /// Replace all literal matches, returning the number replaced. The selection
@@ -588,5 +556,20 @@ mod tests {
         assert_eq!(result.text, "abc");
         assert_eq!(result.selection, 3..3);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn whole_word_replace_changes_only_the_matches_shown_in_find() {
+        let text = "git\u{301} git git\u{203f}other";
+        let options = SearchOptions {
+            case_sensitive: true,
+            whole_word: true,
+        };
+        let highlighted = crate::search::search(text, "git", true, true, false).unwrap();
+        assert_eq!(highlighted, vec![5..8]);
+        assert_eq!(find_matches(text, "git", options), highlighted);
+        let (result, count) = replace_all(text, 0..0, "git", "svn", options);
+        assert_eq!(count, highlighted.len());
+        assert_eq!(result.text, "git\u{301} svn git\u{203f}other");
     }
 }

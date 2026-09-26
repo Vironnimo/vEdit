@@ -331,6 +331,16 @@
       }
     },
     {
+      "op": "layout",
+      "change": {
+        "action": "move_tab",
+        "source_pane_id": 1,
+        "pane_id": 2,
+        "tab_id": 1,
+        "index": 0
+      }
+    },
+    {
       "op": "batch",
       "stop_on_error": true,
       "actions": [
@@ -409,6 +419,7 @@
     "resize": "pane_id targets a pane's containing split; ratio must be 0.15..0.85",
     "close": "Closes the pane and transfers its otherwise unrepresented tabs to a surviving pane, preserving dirty buffers. Last pane cannot be closed.",
     "close_tab": "Removes tab_id from pane_id only. Shared dirty buffers remain in other panes. Refuses without effects if this is the last reference to a dirty or saving buffer. An empty split pane collapses automatically; the sole remaining pane stays open.",
+    "move_tab": "Moves tab_id from source_pane_id to target pane_id and focuses it; equal pane IDs reorder its local tab group. Required index is the final zero-based target position after removing any existing target reference (0..remaining target length, at most 100000); no clamping. Missing panes, missing source membership or invalid index apply no change. A cross-pane move preserves document text/undo and source navigation/view/scroll; if the target already contains that tab, its existing state is retained and reordered. An empty source split collapses. No document is closed or saved. The result returns the updated tree, ordered groups and focus; after uncertain delivery inspect layout before retrying.",
     "document_close": "op:close removes each clean, non-saving document from every pane; use layout close_tab for local tab closure.",
     "observation": "status/layout returns focused pane, each pane's active tab_id and ordered local tab_ids, orientation tree and ratios."
   },

@@ -43,7 +43,15 @@ Agent text mutations stay dirty without autosaving. `save TAB_ID...` explicitly 
 }
 ```
 
-`vertical` places panes side by side; `horizontal` stacks them. `pane_id` optionally identifies which pane to split. Each pane owns its tab bar: layout reports its active `tab_id` and ordered local `tab_ids`. The new pane starts with the selected document; opening files adds them to the focused pane. Use returned pane IDs for `focus`, `assign`, `resize`, `close_tab`, and `close` layout actions. `assign` adds or focuses a tab in that pane without removing it from other panes, and accepts an optional view. The same Markdown buffer can appear in Source and Preview at once; text and Undo are shared while pane navigation and scroll positions are separate.
+`vertical` places panes side by side; `horizontal` stacks them. `pane_id` optionally identifies which pane to split. Each pane owns its tab bar: layout reports its active `tab_id` and ordered local `tab_ids`. The new pane starts with the selected document; opening files adds them to the focused pane. Use returned pane IDs for `focus`, `assign`, `move_tab`, `resize`, `close_tab`, and `close` layout actions. `assign` adds or focuses a tab in that pane without removing it from other panes, and accepts an optional view. The same Markdown buffer can appear in Source and Preview at once; text and Undo are shared while pane navigation and scroll positions are separate.
+
+To move a tab to the first position in another pane, supply its source and target IDs:
+
+```json
+{"op":"layout","change":{"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,"index":0}}
+```
+
+Equal source and target pane IDs reorder that pane's tabs. `index` is required and means the final zero-based position after removing any existing target reference; `0` places the tab first, and the remaining target length appends it. Values outside that group, missing panes, and missing source membership are refused before effects. Moving focuses the target and tab, preserves unsaved text and Undo, and carries the source navigation, view, and scroll state unless the target already has its own state for that tab. An empty source split collapses. The result includes the updated groups, tree, and focus; use it to continue with valid pane IDs. After uncertain delivery, inspect layout before retrying because a successful move may have removed the source pane.
 
 To close only one pane's tab, use the actual IDs from layout:
 
@@ -87,4 +95,4 @@ To create a folder, use `action:{"action":"create_folder","parent":"C:/project",
 
 `batch` runs its `actions` in order and stops on error by default. Use it for actions whose IDs and revisions are already known and remain valid after earlier actions. Results preserve completed steps; it is not a transaction, and returned IDs cannot be substituted into later actions automatically. Nested batches, background project search, and file operations are excluded. For dependent edits or newly opened files, inspect the preceding result before constructing the next request.
 
-An open/review can be partially successful; retry failed opens only, or send a deliberate complete replacement review. A review replaces earlier annotations, so preserve items that should remain. After an edit, old annotations become stale; submit updated ranges against the current buffer if marks are still needed. An open user dialog can block mutation; inspect the reported dialog and leave its decision to the user.
+An open/review can be partially successful; retry failed opens only, or send a deliberate complete replacement review. A review replaces earlier annotations, so preserve items that should remain. After an edit, old annotations become stale; submit updated ranges against the current buffer if marks are still needed. An active user dialog, Vim search, or tab drag can block mutation; inspect the reported interaction and wait for the user to finish.

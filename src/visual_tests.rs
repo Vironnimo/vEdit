@@ -106,6 +106,17 @@ pub(super) fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
         .build_ui_state(
             |ui, app: &mut MorrowApp| {
                 app.ctx = ui.ctx().clone();
+                // Rendering fixtures must never schedule disk, Git, or
+                // recovery work while waiting for background highlighting.
+                app.last_disk_check = Instant::now();
+                app.last_session_save = Instant::now();
+                app.session_dirty = false;
+                for project in &mut app.projects {
+                    project.last_git_refresh = Instant::now();
+                    for tab in &mut project.tabs {
+                        tab.last_edit = Instant::now();
+                    }
+                }
                 app.draw_ui(ui);
             },
             app,
@@ -126,7 +137,7 @@ fn document(root: &Path, relative: &str, text: &str) -> EditorTab {
     let mut tab = EditorTab::new(Some(root.join(relative)), file_title(Path::new(relative)));
     tab.text = text.into();
     tab.saved_text = text.into();
-    tab.recovery_path = std::env::temp_dir().join("morrow-visual-unused-recovery.txt");
+    tab.recovery_path = recovery_directory().join(format!("visual-{}.txt", tab.id));
     tab
 }
 
@@ -213,9 +224,38 @@ fn source_highlighting_pending(app: &MorrowApp) -> bool {
 }
 
 #[test]
+fn project_switcher_screenshot() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    workspace(&mut app);
+    for (folder, dirty) in [
+        ("agent-plans", true),
+        ("api-service", false),
+        ("game-client", false),
+    ] {
+        let root = PathBuf::from("C:/Development/projects").join(folder);
+        let mut project = Project::new(root.clone());
+        project.last_git_refresh = Instant::now();
+        if folder != "game-client" {
+            let mut tab = document(&root, "README.md", MARKDOWN_DOCUMENT);
+            if dirty {
+                tab.text.push_str("\nPending notes\n");
+                tab.changed();
+            }
+            project.tabs.push(tab);
+        }
+        app.projects.push(project);
+    }
+    let mut screen = harness(app);
+    screen.get_by_label("Switch project").click();
+    screen.run_steps(3);
+    assert!(screen.state().workspace_picker_open());
+    snapshot(&mut screen, "morrow_project_picker");
+}
+
+#[test]
 fn polished_screenshots() {
     let mut app = MorrowApp::empty(egui::Context::default());
-    app.recovery_session_path = std::env::temp_dir().join("morrow-visual-session.json");
+    app.recovery_session_path = recovery_directory().join("visual-session.json");
     let mut screen = harness(app);
     snapshot(&mut screen, "morrow_welcome");
 
@@ -498,7 +538,7 @@ fn tab_toolbar_pointer_actions_and_context_split_preserve_the_source() {
 
     // Exercise the actual pointer targets in the tab strip, rather than the
     // keyboard command route or AccessKit's direct click action.
-    screen.get_by_label("Preview").click();
+    screen.get_by_label("Toggle Markdown preview").click();
     screen.run_steps(3);
     assert_eq!(
         screen.state().tab().unwrap().agent_view,
@@ -511,7 +551,7 @@ fn tab_toolbar_pointer_actions_and_context_split_preserve_the_source() {
     assert_eq!(screen.state().tab().unwrap().text, MARKDOWN_DOCUMENT);
     assert!(!screen.state().tab().unwrap().dirty);
 
-    screen.get_by_label("Source").click();
+    screen.get_by_label("Toggle Markdown preview").click();
     screen.run_steps(3);
     assert_eq!(
         screen.state().tab().unwrap().agent_view,
@@ -564,7 +604,7 @@ fn tab_toolbar_pointer_actions_and_context_split_preserve_the_source() {
     // The right pane's controls must act on that pane independently, while
     // both panes continue to share the same clean document.
     screen
-        .query_all_by_label("Preview")
+        .query_all_by_label("Toggle Markdown preview")
         .max_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
         .expect("right-pane preview control")
         .click();
