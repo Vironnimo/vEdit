@@ -72,6 +72,7 @@ struct Settings {
     swap_jk: bool,
     autosave: bool,
     font_size: f32,
+    editor_font: crate::cli::EditorFont,
     tab_width: usize,
     word_wrap: bool,
     smooth_scroll: bool,
@@ -85,6 +86,7 @@ impl Default for Settings {
             swap_jk: false,
             autosave: true,
             font_size: 14.0,
+            editor_font: crate::cli::EditorFont::default(),
             tab_width: 4,
             word_wrap: false,
             smooth_scroll: false,
@@ -514,6 +516,7 @@ pub struct MorrowApp {
     context_file_jobs: context_actions::FileJobRegistry,
     native_dialog_builder: Option<rfd::FileDialog>,
     settings_open: bool,
+    applied_editor_font: crate::cli::EditorFont,
     save_as: Option<u64>,
     save_queue: std::collections::VecDeque<u64>,
     close_action: Option<CloseAction>,
@@ -572,6 +575,7 @@ impl MorrowApp {
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
+        app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
@@ -701,6 +705,7 @@ impl MorrowApp {
             sidebar: SidebarView::Explorer,
             sidebar_visible: true,
             settings: Settings::default(),
+            applied_editor_font: crate::cli::EditorFont::default(),
             bookmarks: crate::bookmarks::BookmarkStore::default(),
             bookmark_lines: HashMap::new(),
             pending_bookmark_jump: None,
@@ -5417,16 +5422,29 @@ impl MorrowApp {
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Bookmark at line {line}")));
                         if response.clicked() { bookmark_click = Some(id); }
                     }
-                    ui.painter().text(
-                        egui::pos2(output.galley_pos.x - 17.0, y),
-                        egui::Align2::RIGHT_TOP,
+                    let color = if mapped.line == current_line {
+                        ACCENT
+                    } else {
+                        MUTED.linear_multiply(0.7)
+                    };
+                    let number = ui.painter().layout_no_wrap(
                         mapped.line.to_string(),
                         FontId::monospace((font - 2.0).max(10.0)),
-                        if mapped.line == current_line {
-                            ACCENT
-                        } else {
-                            MUTED.linear_multiply(0.7)
-                        },
+                        color,
+                    );
+                    let source_baseline = row.glyphs.first().map(|glyph| glyph.pos.y)
+                        .unwrap_or_else(|| {
+                            // Use the same line box as source; natural font ascent
+                            // alone loses the pixel-rounded leading on empty rows.
+                            let mut job = egui::text::LayoutJob::simple("0".into(), FontId::monospace(font), color, f32::INFINITY);
+                            job.sections[0].format.line_height = Some(font * 1.35);
+                            let probe = ui.painter().layout_job(job);
+                            probe.rows[0].glyphs[0].pos.y
+                        });
+                    let number_baseline = number.rows[0].glyphs[0].pos.y;
+                    ui.painter().galley(
+                        egui::pos2(output.galley_pos.x - 17.0 - number.size().x, y + source_baseline - number_baseline),
+                        number, color,
                     );
                 }
             }
@@ -6376,6 +6394,17 @@ impl MorrowApp {
                     changed |= ui.checkbox(&mut self.settings.smooth_scroll, "Smooth scrolling")
                         .on_hover_text("Animate source and Markdown scrolling; turn off for immediate movement.").changed();
                     ui.add_space(10.0);
+                    let font_choice = egui::ComboBox::from_label("Editor font")
+                        .selected_text(self.settings.editor_font.label())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            for font in [crate::cli::EditorFont::JetBrainsMono, crate::cli::EditorFont::Consolas, crate::cli::EditorFont::CascadiaMono] {
+                                changed |= ui.selectable_value(&mut self.settings.editor_font, font, font.label()).changed();
+                            }
+                            changed
+                        });
+                    changed |= font_choice.inner.unwrap_or(false);
+                    font_choice.response.on_hover_text("Regular code fonts. JetBrains Mono is included; unavailable Windows fonts use it as a fallback. Changes apply immediately.");
                     changed |= ui.add(
                         egui::Slider::new(&mut self.settings.font_size, 10.0..=24.0)
                             .text("Editor font size"),
@@ -6415,6 +6444,7 @@ impl MorrowApp {
             });
             self.settings_open = !(done || modal.should_close());
             self.session_dirty |= changed;
+            self.apply_editor_font();
             if !self.settings_open {
                 ctx.memory_mut(|memory| {
                     if let Some(id) = memory.focused() {
@@ -6623,12 +6653,21 @@ impl MorrowApp {
         }
         self.ctx.request_repaint();
     }
+    fn apply_editor_font(&mut self) {
+        if self.applied_editor_font != self.settings.editor_font {
+            self.ctx
+                .set_fonts(crate::typography::fonts(self.settings.editor_font));
+            self.applied_editor_font = self.settings.editor_font;
+            self.ctx.request_repaint();
+        }
+    }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
-        self.syntax.begin_frame(ui);
         let restore_after_menu = egui::Popup::is_any_open(&self.ctx)
             && self.ctx.input(|input| input.key_pressed(Key::Escape));
         self.poll();
         self.poll_control();
+        self.apply_editor_font();
+        self.syntax.begin_frame(ui);
         self.apply_pending_bookmark_jump();
         self.apply_pending_agent_locations();
         self.poll_languages();
@@ -6817,63 +6856,7 @@ fn syntax_language(path: Option<&Path>) -> &str {
     }
 }
 fn set_style(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    for (name, file, family) in [
-        ("morrow-ui", "segoeui.ttf", egui::FontFamily::Proportional),
-        (
-            "morrow-code",
-            "CascadiaMono.ttf",
-            egui::FontFamily::Monospace,
-        ),
-        (
-            "morrow-symbols",
-            "seguisym.ttf",
-            egui::FontFamily::Proportional,
-        ),
-    ] {
-        if let Ok(bytes) = fs::read(
-            PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
-                .join("Fonts")
-                .join(file),
-        ) {
-            fonts
-                .font_data
-                .insert(name.into(), egui::FontData::from_owned(bytes).into());
-            if name == "morrow-symbols" {
-                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                    fonts.families.entry(family).or_default().push(name.into());
-                }
-            } else {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .insert(0, name.into());
-            }
-        }
-    }
-    if let Ok(bytes) = fs::read(
-        PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
-            .join("Fonts")
-            .join("seguisb.ttf"),
-    ) {
-        fonts.font_data.insert(
-            "morrow-semibold".into(),
-            egui::FontData::from_owned(bytes).into(),
-        );
-        let mut family = vec!["morrow-semibold".into()];
-        family.extend(
-            fonts
-                .families
-                .get(&egui::FontFamily::Proportional)
-                .cloned()
-                .unwrap_or_default(),
-        );
-        fonts
-            .families
-            .insert(egui::FontFamily::Name("morrow-semibold".into()), family);
-    }
-    ctx.set_fonts(fonts);
+    ctx.set_fonts(crate::typography::fonts(crate::cli::EditorFont::default()));
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = BG;
@@ -7052,6 +7035,10 @@ mod focus_feedback_tests;
 #[cfg(test)]
 #[path = "selection_scroll_tests.rs"]
 mod selection_scroll_tests;
+
+#[cfg(test)]
+#[path = "typography_ui_tests.rs"]
+mod typography_ui_tests;
 
 impl MorrowApp {
     fn sync_languages(&mut self, force: bool) {

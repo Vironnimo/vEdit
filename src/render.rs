@@ -577,7 +577,20 @@ impl SyntaxCache {
 }
 
 fn plain(text: &str, font: f32, color: Color32, wrap_width: f32) -> LayoutJob {
-    LayoutJob::simple(text.into(), FontId::monospace(font), color, wrap_width)
+    let mut job = LayoutJob::simple(text.into(), FontId::monospace(font), color, wrap_width);
+    source_format(&mut job, font);
+    job
+}
+
+/// Source uses a stable row grid, including before syntax colors arrive. Token
+/// emphasis must not change glyph geometry or make comments visually compete
+/// with code; egui_extras also maps syntect italics to an underline.
+fn source_format(job: &mut LayoutJob, font: f32) {
+    for section in &mut job.sections {
+        section.format.line_height = Some(font * 1.35);
+        section.format.italics = false;
+        section.format.underline = egui::Stroke::NONE;
+    }
 }
 
 /// Preserve stable token colors while a new parse is pending. Only unchanged
@@ -649,6 +662,7 @@ fn carry_colors(
             );
         }
     }
+    source_format(&mut job, font);
     job
 }
 
@@ -776,6 +790,7 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
                     f32::INFINITY,
                 );
             }
+            source_format(&mut job, request.font);
             // Own the persistent cache here; the library's one-frame cache must
             // not accumulate every historical document revision on this thread.
             parser_ctx.memory_mut(|memory| memory.caches = Default::default());
@@ -854,6 +869,132 @@ mod tests {
         });
         output.drop_without_applying_deltas();
         result.unwrap()
+    }
+
+    fn source_galley_pass(
+        ctx: &egui::Context,
+        cache: &SyntaxCache,
+        text: &str,
+        font: f32,
+        width: f32,
+    ) -> Arc<egui::Galley> {
+        let mut result = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            result = Some(cache.galley(ui, 1, 0, text, "rs", font, Color32::WHITE, width));
+        });
+        output.drop_without_applying_deltas();
+        result.unwrap()
+    }
+
+    fn assert_same_source_geometry(before: &egui::Galley, after: &egui::Galley) {
+        assert_eq!(before.job.text, after.job.text);
+        assert_eq!(before.size(), after.size());
+        assert_eq!(
+            visual_rows(before).collect::<Vec<_>>(),
+            visual_rows(after).collect::<Vec<_>>()
+        );
+        for (before, after) in before.rows.iter().zip(&after.rows) {
+            assert_eq!(before.pos, after.pos);
+            assert_eq!(before.size, after.size);
+        }
+        // Cursor and range overlays must stay on the same glyphs when the
+        // asynchronous result replaces the immediate source layout.
+        for position in 0..=before.job.text.chars().count() {
+            let cursor = egui::text::CCursor::new(position);
+            assert_eq!(
+                before.pos_from_cursor(cursor),
+                after.pos_from_cursor(cursor)
+            );
+        }
+        let mapped: Vec<_> = visual_rows(before).collect();
+        for (row, mapped) in mapped.into_iter().enumerate() {
+            assert_eq!(
+                range_on_visual_row(before, row, mapped, mapped.start, mapped.end),
+                range_on_visual_row(after, row, mapped, mapped.start, mapped.end)
+            );
+        }
+    }
+
+    #[test]
+    fn source_rows_and_cursor_geometry_stay_stable_when_syntax_arrives() {
+        let source = "// Grüße 🦀: comments stay calm\n\nfn main() {\n    let text = \"ä中🦀 and words that wrap\";\n}\n";
+        for width in [f32::INFINITY, 100.0] {
+            let ctx = egui::Context::default();
+            let cache = SyntaxCache::new();
+            let initial = source_galley_pass(&ctx, &cache, source, 14.0, width);
+            assert_eq!(initial.job.sections.len(), 1);
+            settle(&cache, 1, source, "rs", 14.0);
+            let ready = source_galley_pass(&ctx, &cache, source, 14.0, width);
+            assert!(ready.job.sections.len() > 1);
+            assert!(ready.job.sections.iter().all(|section| {
+                !section.format.italics && section.format.underline == egui::Stroke::NONE
+            }));
+            assert_same_source_geometry(&initial, &ready);
+            let numbered: Vec<_> = visual_rows(&ready)
+                .filter(|row| row.first_in_line)
+                .map(|row| row.line)
+                .collect();
+            assert_eq!(numbered, [1, 2, 3, 4, 5, 6]);
+            if width.is_finite() {
+                assert!(ready.rows.len() > numbered.len());
+            }
+        }
+    }
+
+    #[test]
+    fn inserted_rows_keep_the_same_grid_before_and_after_recoloring() {
+        let ctx = egui::Context::default();
+        let cache = SyntaxCache::new();
+        let source = "fn main() { let value = 1; }\n";
+        source_galley_pass(&ctx, &cache, source, 15.0, 130.0);
+        settle(&cache, 1, source, "rs", 15.0);
+        let edited = "// inserted Unicode ä中🦀 and more words\n\nfn main() { let value = 1; }\n";
+        let preview = source_galley_pass(&ctx, &cache, edited, 15.0, 130.0);
+        assert!(preview.job.sections.len() > 1);
+        assert_eq!(preview.job.sections[0].format.color, Color32::WHITE);
+        assert!(
+            preview
+                .job
+                .sections
+                .iter()
+                .any(|section| section.format.color != Color32::WHITE)
+        );
+        settle(&cache, 1, edited, "rs", 15.0);
+        let ready = source_galley_pass(&ctx, &cache, edited, 15.0, 130.0);
+        assert_same_source_geometry(&preview, &ready);
+        assert_eq!(
+            visual_rows(&ready)
+                .filter(|row| row.first_in_line)
+                .map(|row| row.line)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn resizing_source_font_updates_row_grid_without_reusing_old_glyphs() {
+        let ctx = egui::Context::default();
+        let cache = SyntaxCache::new();
+        let source = "// ä🦀\n\nfn main() {}\n";
+        source_galley_pass(&ctx, &cache, source, 13.0, f32::INFINITY);
+        settle(&cache, 1, source, "rs", 13.0);
+        let small = source_galley_pass(&ctx, &cache, source, 13.0, f32::INFINITY);
+        let resized_plain = source_galley_pass(&ctx, &cache, source, 22.0, f32::INFINITY);
+        assert!(!Arc::ptr_eq(&small, &resized_plain));
+        assert!(resized_plain.rows[0].size.y > small.rows[0].size.y);
+        assert_eq!(resized_plain.rows.len(), small.rows.len());
+        settle(&cache, 1, source, "rs", 22.0);
+        let resized = source_galley_pass(&ctx, &cache, source, 22.0, f32::INFINITY);
+        assert_same_source_geometry(&resized_plain, &resized);
+        assert!(
+            resized
+                .job
+                .sections
+                .iter()
+                .all(|section| section.format.font_id.size == 22.0)
+        );
+        let returned = source_galley_pass(&ctx, &cache, source, 22.0, f32::INFINITY);
+        assert!(Arc::ptr_eq(&resized, &returned));
     }
 
     #[test]

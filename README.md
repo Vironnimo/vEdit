@@ -1,4 +1,4 @@
-# Morrow 0.4.6
+# Morrow 0.4.7
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -28,6 +28,7 @@ Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öff
 ## Arbeiten im Editor
 
 - Syntaxfarben, Zeilennummern, aktuelle Zeile und Dateipfad helfen bei der Orientierung. Die Statusleiste zeigt aktuelle Zeile / Gesamtzeilen und die Cursorspalte; Zeilenumbruch verändert die Gesamtzahl nicht.
+- JetBrains Mono Regular wird mitgeliefert und ist die Standardschrift für Code: klare Zeichen, etwas mehr Zeilenabstand und Syntaxfarben ohne zusätzliche Kursivschrift oder Unterstreichungen. Unter **Settings → Editor font** stehen außerdem die Windows-Schriften Consolas und Cascadia Mono zur Wahl; fehlt eine Systemschrift, wird die mitgelieferte Schrift verwendet. Schriftgröße und Schriftwahl werden gespeichert.
 - Ein Klick setzt den Cursor. Ziehen und Doppelklick wählen Text aus, ein Dreifachklick ganze Zeilen. Beim Ziehen am sichtbaren Rand scrollt der Editor vertikal und horizontal mit, auch bei stillgehaltener Maus; bei Zeilenumbruch nur vertikal. Im Vim-Normalmodus wird daraus eine Visual-Auswahl; im Insert-Modus bleibt die Texteingabe aktiv.
 - Im Insert-Modus oder bei ausgeschaltetem Vim sucht **Ctrl+F** in der Datei; **Ctrl+H** öffnet Suchen und Ersetzen. Im Normalmodus startet `/` die Vim-Suche. Groß-/Kleinschreibung und ganze Wörter lassen sich in Find/Replace einstellen; dort wird nach wörtlichem Text gesucht.
 - **Ctrl+Shift+F** durchsucht das aktive Projekt. Ein Treffer öffnet die passende Datei, zeigt die Fundstelle mittig und hebt die Zielzeile kurz hervor.

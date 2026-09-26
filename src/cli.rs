@@ -27,6 +27,17 @@ pub enum DocumentView {
     Preview,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorFont {
+    #[default]
+    #[serde(rename = "jetbrains_mono", alias = "jetbrains-mono")]
+    JetBrainsMono,
+    Consolas,
+    #[serde(alias = "cascadia-mono")]
+    CascadiaMono,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Location {
@@ -136,6 +147,7 @@ pub struct SettingsPatch {
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,
     pub font_size: Option<f32>,
+    pub editor_font: Option<EditorFont>,
     pub tab_width: Option<usize>,
     pub word_wrap: Option<bool>,
     pub smooth_scroll: Option<bool>,
@@ -483,6 +495,7 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli settings [PATCH.json]
   morrow-cli settings leader-key space|comma|backslash|CHAR
   morrow-cli settings swap-jk true|false
+  morrow-cli settings font jetbrains-mono|consolas|cascadia-mono
   morrow-cli bookmarks [list] [--limit N] [--offset N]
   morrow-cli bookmarks toggle [--tab ID] [--label TEXT]
   morrow-cli bookmarks remove|jump ID
@@ -554,11 +567,13 @@ use settings.search_excludes. Repeated --exclude rules replace that list for one
 search; --no-excludes clears optional filters only. .gitignore and VCS-directory
 guards still apply; unsaved buffers are excluded. Results report actual excludes
 and excludes_source. JSON search accepts optional excludes:[] or ["folder/glob"].
-Settings patches accept search_excludes and swap_jk; omitted/null fields remain
-unchanged. Exclusion rules are gitignore-style, max 128 rules/1024 bytes each/
+Settings patches accept editor_font, search_excludes and swap_jk; omitted/null
+fields remain unchanged. Exclusion rules are gitignore-style, max 128 rules/1024 bytes each/
 16 KiB total, trimmed with Windows separators normalized; ! negation is refused.
 Invalid rules apply nothing. swap_jk defaults false and swaps j/k navigation;
 inserted text and literal find/replacement targets keep their original letters.
+editor_font defaults jetbrains_mono; consolas and cascadia_mono are alternatives.
+JetBrains Mono is bundled; unavailable Windows fonts fall back to it.
 "#;
 
 pub enum Parsed {
@@ -803,6 +818,12 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                     }),
                     ..Default::default()
                 }),
+                [setting, value] if setting == "font" => Some(SettingsPatch {
+                    editor_font: Some(serde_json::from_value(json!(value)).map_err(
+                        |_| "settings font requires jetbrains-mono, consolas, or cascadia-mono",
+                    )?),
+                    ..Default::default()
+                }),
                 [path] => Some(
                     transport::from_unique_json::<SettingsPatch>(json_bytes(&read_json_file(
                         &absolute(path.into()),
@@ -811,7 +832,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 ),
                 _ => {
                     return Err(
-                        "settings takes PATCH.json, swap-jk true|false, or leader-key space|comma|backslash|CHAR".into(),
+                        "settings takes PATCH.json, font jetbrains-mono|consolas|cascadia-mono, swap-jk true|false, or leader-key space|comma|backslash|CHAR".into(),
                     );
                 }
             },
@@ -2173,6 +2194,107 @@ mod tests {
                 })
             }
         ));
+    }
+    #[test]
+    fn editor_font_cli_accepts_equivalent_spellings_and_changes_only_the_font() {
+        for (input, expected, serialized) in [
+            (
+                "jetbrains-mono",
+                EditorFont::JetBrainsMono,
+                "jetbrains_mono",
+            ),
+            (
+                "jetbrains_mono",
+                EditorFont::JetBrainsMono,
+                "jetbrains_mono",
+            ),
+            ("consolas", EditorFont::Consolas, "consolas"),
+            ("cascadia-mono", EditorFont::CascadiaMono, "cascadia_mono"),
+            ("cascadia_mono", EditorFont::CascadiaMono, "cascadia_mono"),
+        ] {
+            let Parsed::Command {
+                request: Request::Settings { patch: Some(patch) },
+                start,
+            } = parse(&["settings", "font", input]).unwrap()
+            else {
+                panic!("expected a font settings patch")
+            };
+            assert_eq!(patch.editor_font, Some(expected));
+            let mut fields = serde_json::to_value(patch).unwrap();
+            assert_eq!(
+                fields.as_object_mut().unwrap().remove("editor_font"),
+                Some(json!(serialized))
+            );
+            assert!(fields.as_object().unwrap().values().all(Value::is_null));
+            assert!(!start, "font selection must not start another app");
+        }
+        for args in [
+            vec!["settings", "font", "JetBrainsMono"],
+            vec!["settings", "font", "jetbrains"],
+            vec!["settings", "font", "consolas-bold"],
+            vec!["settings", "font", "cascadia-code"],
+            vec!["settings", "font", ""],
+            vec!["settings", "font", "consolas", "cascadia-mono"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+    #[test]
+    fn editor_font_json_preserves_null_and_omission_and_refuses_unknown_choices() {
+        assert_eq!(EditorFont::default(), EditorFont::JetBrainsMono);
+        for patch in [
+            json!({}),
+            json!({"editor_font":null}),
+            json!({"word_wrap":true}),
+        ] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":patch})).unwrap();
+            validate(&request).unwrap();
+            assert!(matches!(
+                request,
+                Request::Settings {
+                    patch: Some(SettingsPatch {
+                        editor_font: None,
+                        ..
+                    })
+                }
+            ));
+        }
+        for (input, expected) in [
+            ("jetbrains_mono", EditorFont::JetBrainsMono),
+            ("jetbrains-mono", EditorFont::JetBrainsMono),
+            ("consolas", EditorFont::Consolas),
+            ("cascadia_mono", EditorFont::CascadiaMono),
+            ("cascadia-mono", EditorFont::CascadiaMono),
+        ] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":{"editor_font":input}}))
+                    .unwrap();
+            validate(&request).unwrap();
+            assert!(
+                matches!(request, Request::Settings { patch: Some(SettingsPatch { editor_font: Some(font), .. }) } if font == expected)
+            );
+        }
+        for patch in [
+            json!({"editor_font":"consola","autosave":false}),
+            json!({"editor_font":"Consolas"}),
+            json!({"editor_font":42}),
+            json!({"editor_font":"consolas","font_weight":"bold"}),
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(json!({"op":"settings","patch":patch})).is_err()
+            );
+        }
+        assert!(transport::from_unique_json::<Request>(br#"{"op":"settings","patch":{"editor_font":"consolas","editor_font":"cascadia_mono"}}"#).is_err());
+        let schema = schema();
+        assert_eq!(
+            schema["settings"]["editor_font"]["enum"],
+            json!(["jetbrains_mono", "consolas", "cascadia_mono"])
+        );
+        assert_eq!(
+            schema["settings"]["editor_font"]["default"],
+            "jetbrains_mono"
+        );
     }
     #[test]
     fn open_preserves_preview_and_exact_location() {

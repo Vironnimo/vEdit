@@ -26,6 +26,11 @@ try {
     $documentationDirectory = Join-Path $releaseDirectory 'docs'
     New-Item -ItemType Directory -Path $documentationDirectory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
+    $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
+    New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
+    foreach ($fontDocumentation in @('OFL.txt', 'README.md')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "assets/fonts/$fontDocumentation") -Destination $fontLicenseDirectory -Force
+    }
     if ($env:OS -eq 'Windows_NT') {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut((Join-Path $projectRoot 'Morrow.lnk'))

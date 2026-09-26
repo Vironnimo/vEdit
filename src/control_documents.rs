@@ -775,6 +775,9 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.font_size {
         settings.font_size = value;
     }
+    if let Some(value) = patch.editor_font {
+        settings.editor_font = value;
+    }
     if let Some(value) = patch.tab_width {
         settings.tab_width = value;
     }
@@ -1424,6 +1427,97 @@ mod tests {
         assert_eq!(saved.search_excludes, ["generated", "src/cache"]);
         drop(app);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn editor_font_shortcuts_apply_and_persist_without_changing_other_preferences_or_text() {
+        for (input, expected, serialized) in [
+            (
+                "jetbrains-mono",
+                cli::EditorFont::JetBrainsMono,
+                "jetbrains_mono",
+            ),
+            ("consolas", cli::EditorFont::Consolas, "consolas"),
+            (
+                "cascadia-mono",
+                cli::EditorFont::CascadiaMono,
+                "cascadia_mono",
+            ),
+        ] {
+            let root = temporary_directory(input);
+            let (mut app, _) = app_with_text("keep\nβ😀");
+            app.recovery_session_path = root.join("session.json");
+            app.settings.autosave = false;
+            app.settings.swap_jk = true;
+            app.settings.font_size = 17.0;
+            app.settings.editor_font = cli::EditorFont::Consolas;
+            let tab = app.tab_mut().unwrap();
+            tab.vim.handle_key(&mut tab.text, VimKey::Char('i'));
+            let mut expected_settings = serde_json::to_value(&app.settings).unwrap();
+            expected_settings["editor_font"] = json!(serialized);
+            let cli::Parsed::Command { request, start } = cli::parse_args(
+                ["settings", "font", input]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            )
+            .unwrap() else {
+                panic!("expected settings command")
+            };
+            assert!(!start);
+            let response = app.control_request(request);
+            assert!(response.ok, "{response:?}");
+            assert_eq!(response.result["applied"], true);
+            assert_eq!(response.result["settings"], expected_settings);
+            assert_eq!(
+                serde_json::to_value(&app.settings).unwrap(),
+                expected_settings
+            );
+            assert_eq!(app.settings.editor_font, expected);
+            assert_eq!(app.tab().unwrap().text, "keep\nβ😀");
+            assert_eq!(app.tab().unwrap().revision, 0);
+            assert_eq!(app.tab().unwrap().vim.mode, VimMode::Insert);
+            assert!(!app.tab().unwrap().dirty);
+            for patch in [json!({"editor_font":null}), json!({})] {
+                let request =
+                    serde_json::from_value(json!({"op":"settings","patch":patch})).unwrap();
+                assert!(app.control_request(request).ok);
+                assert_eq!(
+                    serde_json::to_value(&app.settings).unwrap(),
+                    expected_settings
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !app.recovery_session_path.is_file() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let saved: Session =
+                serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(saved.settings.unwrap()).unwrap(),
+                expected_settings
+            );
+            drop(app);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_font_size_patch_does_not_apply_a_valid_font_choice() {
+        let (mut app, _) = app_with_text("unchanged");
+        let before = serde_json::to_value(&app.settings).unwrap();
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                editor_font: Some(cli::EditorFont::Consolas),
+                font_size: Some(25.0),
+                autosave: Some(false),
+                ..Default::default()
+            }),
+        });
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_request");
+        assert_eq!(serde_json::to_value(&app.settings).unwrap(), before);
+        assert_eq!(app.tab().unwrap().text, "unchanged");
+        assert_eq!(app.tab().unwrap().revision, 0);
     }
 
     #[test]

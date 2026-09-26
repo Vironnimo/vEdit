@@ -19,6 +19,7 @@ mod search;
 mod selection_scroll;
 mod single_instance;
 mod tasks;
+mod typography;
 mod vim;
 mod workspace;
 

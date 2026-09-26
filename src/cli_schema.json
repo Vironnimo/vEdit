@@ -177,6 +177,7 @@
         "swap_jk": false,
         "autosave": true,
         "font_size": 14.0,
+        "editor_font": "jetbrains_mono",
         "tab_width": 4,
         "word_wrap": true,
         "smooth_scroll": false,
@@ -435,6 +436,11 @@
     "get": "omit patch",
     "patch": "only supplied fields change; null leaves a field unchanged. Applied settings are returned, persistence is queued.",
     "font_size": "10..24",
+    "editor_font": {
+      "enum": ["jetbrains_mono", "consolas", "cascadia_mono"],
+      "default": "jetbrains_mono",
+      "description": "Regular editor font. JetBrains Mono is bundled; unavailable Windows fonts fall back to it. CLI shortcut: settings font jetbrains-mono|consolas|cascadia-mono; equivalent hyphen spellings are accepted in JSON. Omitted/null preserves the current choice."
+    },
     "tab_width": "1..8",
     "smooth_scroll": "false by default; input key scrolling works with either setting",
     "swap_jk": "false by default. true exchanges physical j/k navigation in Normal/Visual Vim commands (including counts/operators), Explorer navigation and Markdown scrolling. Inserted text, literal f/t/r targets, arrows and page motions remain unchanged. CLI shortcut: settings swap-jk true|false.",
