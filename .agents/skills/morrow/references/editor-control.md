@@ -67,7 +67,9 @@ To close only one pane's tab, use the actual IDs from layout:
 
 `close_tab` removes that local tab, leaving the shared buffer in any other pane. If it is the final reference to a dirty or saving buffer, it refuses without effects. Closing the last tab automatically collapses an empty split pane; the sole remaining pane stays available. Ordinary `close TAB_ID...` closes each clean, non-saving document in every pane. Layout `close` closes a whole pane and transfers tabs that have no other pane to a survivor, preserving unsaved work; the last pane cannot be closed. Query layout after changes to verify local tab membership and the requested documents remain visible.
 
-`settings` without a patch returns the current preferences; `patch` changes supplied fields: `vim`, `autosave`, `font_size` (10–24), `tab_width` (1–8), `word_wrap`, `smooth_scroll`, and `leader_key`. Null leaves a field unchanged. Changes persist. Do not change unrelated preferences merely to carry out an editor action.
+`settings` without a patch returns the current preferences; `patch` changes supplied fields: `vim`, `swap_jk`, `autosave`, `font_size` (10–24), `tab_width` (1–8), `word_wrap`, `smooth_scroll`, `leader_key`, and `search_excludes`. Omitted/null leaves a field unchanged; an explicit empty exclusion list clears those optional filters. Changes persist. Do not change unrelated preferences merely to carry out an editor action.
+
+`settings swap-jk true` exchanges j/k navigation; `false` restores the default. Counts, Vim operators and Visual motions follow the exchanged directions, as do Explorer navigation and Markdown scrolling. Inserted text and literal `f`/`t`/`r` targets keep their letters; arrows and page motions retain their direction. The JSON form is `{"op":"settings","patch":{"swap_jk":true}}`.
 
 `settings leader-key space`, `comma`, `backslash`, or a single printable Unicode character changes the Vim leader key. The JSON equivalent for Space is `{"op":"settings","patch":{"leader_key":" "}}`. Named aliases are normalized to the actual character in the applied settings response; controls and multiple characters are refused.
 
@@ -85,7 +87,17 @@ Bookmarks preserve their IDs across app restarts and survive closing their files
 
 ## Inspect project work and run tasks
 
-`search` searches indexed project files on disk; its optional `workspace` selects a known project. The response contains completed, bounded search results. Use `find` on a tab to search an unsaved proposal. `git_status` lists cached changed paths and reports cache age, loading state, and errors. `task` starts the supported `check`, `test`, or `build` action in the active Cargo workspace, or stops a running task. Tasks read files on disk, so save relevant changes only if the user's task includes saving them. `output` reads bounded task output; task dispatch alone does not mean it finished. Inspect task state and output for completion and errors.
+`search` reads saved files during a bounded background workspace walk; it does not require a completed Explorer index. Its optional `workspace` queries a registered project without selecting it. Use `find` on a tab to search unsaved text. Search inherits the persistent `settings.search_excludes` list; optional JSON `excludes` replaces it for one request, while `[]` removes only these optional filters. The CLI equivalent is repeated `--exclude PATTERN`, or `--no-excludes`; those flags cannot be combined. `.gitignore`, VCS directories, symlink guards and search limits still apply, so clearing filters does not guarantee every disk file is searched. The response identifies the actual `excludes`, `excludes_source` (`settings` or `request`), truncation, warnings and files searched.
+
+For example, search generated code without changing the user's saved preferences:
+
+```json
+{"op":"search","query":"needle","workspace":"C:/project","excludes":[],"limit":100}
+```
+
+To persist exclusions, supply `{"op":"settings","patch":{"search_excludes":["node_modules","src/generated","**/*.min.js"]}}`. Rules use gitignore folder/glob syntax, match case-insensitively on Windows, and support literal names beginning with `#`. Whitespace is trimmed, blank entries dropped, duplicates collapsed and Windows separators normalized to `/`. Negation with `!`, controls and malformed globs are refused before any setting changes. Limits are 128 input rules, 1024 bytes per rule and 16 KiB total. If saved filters are invalid, correct them or supply a valid per-query override; `search_busy` means wait for running searches. Changing persistent filters cancels stale GUI results and reruns its current query.
+
+`git_status` lists cached changed paths and reports cache age, loading state, and errors. `task` starts the supported `check`, `test`, or `build` action in the active Cargo workspace, or stops a running task. Tasks read files on disk, so save relevant changes only if the user's task includes saving them. `output` reads bounded task output; task dispatch alone does not mean it finished. Inspect task state and output for completion and errors.
 
 ## Manage project files
 

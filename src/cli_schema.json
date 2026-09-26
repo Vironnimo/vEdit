@@ -18,6 +18,9 @@
     "replace_matches": 10000,
     "batch_actions": 100,
     "bookmark_label_bytes": 256,
+    "search_excludes": 128,
+    "search_exclude_bytes": 1024,
+    "search_excludes_total_bytes": 16384,
     "document_bytes": 8388608,
     "json_bytes": 1048576
   },
@@ -171,12 +174,14 @@
       "op": "settings",
       "patch": {
         "vim": true,
+        "swap_jk": false,
         "autosave": true,
         "font_size": 14.0,
         "tab_width": 4,
         "word_wrap": true,
         "smooth_scroll": false,
-        "leader_key": " "
+        "leader_key": " ",
+        "search_excludes": ["node_modules", "target", "dist", "build"]
       }
     },
     {
@@ -257,6 +262,7 @@
       "op": "search",
       "query": "cache",
       "workspace": "C:/project",
+      "excludes": ["generated", "**/*.min.js"],
       "case_sensitive": false,
       "whole_word": false,
       "limit": 100
@@ -431,6 +437,8 @@
     "font_size": "10..24",
     "tab_width": "1..8",
     "smooth_scroll": "false by default; input key scrolling works with either setting",
+    "swap_jk": "false by default. true exchanges physical j/k navigation in Normal/Visual Vim commands (including counts/operators), Explorer navigation and Markdown scrolling. Inserted text, literal f/t/r targets, arrows and page motions remain unchanged. CLI shortcut: settings swap-jk true|false.",
+    "search_excludes": "Persistent list of gitignore-style folder/glob rules, shared by GUI and CLI project search. Trimmed, blank entries removed, duplicates collapsed and Windows separators normalized to /. Literal leading # is supported; ! negation and malformed globs are refused before any patch field changes. Maximum 128 input rules, 1024 bytes per rule, 16 KiB total. [] removes optional filters; omitted/null preserves the current list. Changing filters cancels stale GUI search results and reruns its current query.",
     "leader_key": "One printable Unicode character, including a literal space. Aliases space/comma/backslash are accepted and normalized to that character. CLI shortcut: settings leader-key space|comma|backslash|CHAR. Applied settings return the actual character."
   },
   "bookmarks": {
@@ -444,7 +452,7 @@
   "queries": {
     "diff": "Bounded contiguous replacement hunk against saved buffer, not Git history; reports truncation.",
     "diagnostics": "Open document's current cached language-server diagnostics; one-based Unicode range, exclusive end, clamping explicitly reported when positions are stale.",
-    "search": "Completes on a background worker over indexed files on disk; unsaved buffers excluded. Active workspace default, limit/time/byte budgets reported. Never modifies GUI search state.",
+    "search": "Completes on a bounded background filesystem walk without requiring an Explorer index. Active workspace default; explicit workspace queries stay in the background. Reads saved files, excluding unsaved buffer changes. Omitted/null excludes inherits settings.search_excludes; [] removes optional exclusions; a supplied list replaces them for that request only. CLI repeated --exclude PATTERN replaces the list, --no-excludes sets []; the two flags conflict. Gitignore rules, structural VCS-directory guards, symlink guards and time/byte/result limits still apply. Results report scope:workspace_files_on_disk, actual excludes and excludes_source:settings|request. Never changes persisted settings, GUI query or active project. On invalid_search_excludes correct the saved filters or supply a valid override; on search_busy wait for running searches before retrying.",
     "git_status": "Cached branch and changed files with age/loading/error; does not trigger refresh.",
     "output": "Bounded task output text page with actual task status; long-line byte truncation is explicit.",
     "task": "check/test/build run Cargo against the active workspace's saved files. Require Cargo.toml; never auto-save or replace a running task. stop requests cancellation; inspect output/status for completion."

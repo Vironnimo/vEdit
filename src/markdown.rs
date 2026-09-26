@@ -17,6 +17,8 @@ const MUTED: Color32 = Color32::from_rgb(139, 150, 172);
 const INK: Color32 = Color32::from_rgb(224, 230, 240);
 const SURFACE: Color32 = Color32::from_rgb(22, 26, 34);
 const BORDER: Color32 = Color32::from_rgb(43, 50, 63);
+const INLINE_CODE: Color32 = Color32::from_rgb(30, 37, 47);
+const CODE_PADDING: f32 = 2.0;
 const MAX_DOCUMENTS: usize = 12;
 const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
@@ -182,6 +184,7 @@ impl MarkdownCache {
         font_size: f32,
         smooth_scroll: bool,
         keyboard_active: bool,
+        swap_jk: bool,
     ) -> PreviewResponse {
         let pane = ui.id();
         let existing = self
@@ -274,11 +277,13 @@ impl MarkdownCache {
         {
             ui.input_mut(|input| {
                 let mut requested = None;
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::J) {
+                let down = if swap_jk { egui::Key::K } else { egui::Key::J };
+                let up = if swap_jk { egui::Key::J } else { egui::Key::K };
+                if input.consume_key(egui::Modifiers::NONE, down) {
                     requested = Some(entry.scroll_y + font_size * 2.0);
                     entry.pending_g = None;
                 }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::K) {
+                if input.consume_key(egui::Modifiers::NONE, up) {
                     requested = Some((entry.scroll_y - font_size * 2.0).max(0.0));
                     entry.pending_g = None;
                 }
@@ -779,7 +784,140 @@ struct Renderer<'a> {
 
 struct InlineLayout {
     galley: Arc<egui::Galley>,
+    badges: Arc<Vec<egui::Rect>>,
     links: Vec<(Range<usize>, String)>,
+}
+
+#[derive(Clone)]
+struct InlineGeometry {
+    original: Arc<egui::Galley>,
+    galley: Arc<egui::Galley>,
+    badges: Arc<Vec<egui::Rect>>,
+}
+
+// Font layout already has a cache. Retain the small placement/decorations pass
+// too, keyed by that exact layout so font changes cannot reuse stale geometry.
+#[derive(Clone, Default)]
+struct InlineGeometryCache {
+    entries: VecDeque<InlineGeometry>,
+    bytes: usize,
+}
+
+fn inline_geometry_bytes(entry: &InlineGeometry) -> usize {
+    entry.original.num_vertices * std::mem::size_of::<egui::epaint::Vertex>()
+        + entry.original.num_indices * std::mem::size_of::<u32>()
+        + entry
+            .original
+            .rows
+            .iter()
+            .map(|row| row.glyphs.len() * std::mem::size_of::<egui::epaint::text::Glyph>())
+            .sum::<usize>()
+        + entry.original.rows.len() * std::mem::size_of::<egui::epaint::text::PlacedRow>() * 2
+        + entry.original.job.text.len()
+        + entry.badges.len() * std::mem::size_of::<egui::Rect>()
+}
+
+impl InlineGeometryCache {
+    fn get_or_insert(
+        &mut self,
+        original: Arc<egui::Galley>,
+        code: &[Range<usize>],
+        line_height: f32,
+    ) -> InlineGeometry {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| Arc::ptr_eq(&entry.original, &original))
+        {
+            return entry.clone();
+        }
+        let entry = inline_geometry(original, code, line_height);
+        let bytes = inline_geometry_bytes(&entry);
+        if bytes <= 2 * 1024 * 1024 {
+            self.bytes += bytes;
+            self.entries.push_front(entry.clone());
+            while self.entries.len() > 128 || self.bytes > 2 * 1024 * 1024 {
+                if let Some(removed) = self.entries.pop_back() {
+                    self.bytes -= inline_geometry_bytes(&removed);
+                }
+            }
+        }
+        entry
+    }
+}
+
+fn inline_geometry(
+    original: Arc<egui::Galley>,
+    code: &[Range<usize>],
+    line_height: f32,
+) -> InlineGeometry {
+    let mut galley = (*original).clone();
+    let inset = match galley.job.halign {
+        Align::LEFT => CODE_PADDING,
+        Align::Center => 0.0,
+        Align::RIGHT => -CODE_PADDING,
+    };
+    let mut badges = Vec::new();
+    let mut character = 0;
+    let mut range_index = 0;
+    let mut mesh_bounds = egui::Rect::NOTHING;
+    for (index, row) in galley.rows.iter_mut().enumerate() {
+        // Ascent-compensated native layout aligns glyphs AND decorations. A
+        // code-only wrapped row is shorter; move that row, never its mesh, so
+        // every line still has the same baseline and breathing room.
+        row.pos.y = 1.0 + index as f32 * line_height + (line_height - row.size.y).max(0.0);
+        row.pos.x += inset;
+        let mut badge: Option<egui::Rect> = None;
+        for glyph in &row.glyphs {
+            while code
+                .get(range_index)
+                .is_some_and(|range| character >= range.end)
+            {
+                if let Some(rect) = badge.take() {
+                    badges.push(rect.expand2(egui::vec2(CODE_PADDING, 1.0)));
+                }
+                range_index += 1;
+            }
+            if code
+                .get(range_index)
+                .is_some_and(|range| range.contains(&character))
+            {
+                let rect = egui::Rect::from_min_size(
+                    row.pos
+                        + egui::vec2(
+                            glyph.pos.x,
+                            glyph.pos.y
+                                - glyph.font_face_ascent
+                                - 0.5 * (glyph.font_height - glyph.font_face_height),
+                        ),
+                    egui::vec2(glyph.advance_width, glyph.font_height),
+                );
+                badge = Some(badge.map_or(rect, |previous| previous.union(rect)));
+            } else if let Some(rect) = badge.take() {
+                badges.push(rect.expand2(egui::vec2(CODE_PADDING, 1.0)));
+            }
+            character += 1;
+        }
+        if let Some(rect) = badge {
+            badges.push(rect.expand2(egui::vec2(CODE_PADDING, 1.0)));
+        }
+        if row.ends_with_newline {
+            character += 1;
+        }
+        mesh_bounds |= row.visuals.mesh_bounds.translate(row.pos.to_vec2());
+    }
+    let width = original.rect.width() + CODE_PADDING * 2.0;
+    let left = -galley.job.halign.to_factor() * width;
+    galley.rect = egui::Rect::from_min_size(
+        egui::pos2(left, 0.0),
+        egui::vec2(width, galley.rows.len() as f32 * line_height + 2.0),
+    );
+    galley.mesh_bounds = mesh_bounds;
+    InlineGeometry {
+        original,
+        galley: Arc::new(galley),
+        badges: Arc::new(badges),
+    }
 }
 
 struct TableRowLayout {
@@ -1158,13 +1296,17 @@ impl Renderer<'_> {
         align: Align,
     ) -> InlineLayout {
         let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = width.max(1.0);
+        let has_code = spans.iter().any(|span| span.code);
+        job.wrap.max_width = (width - if has_code { CODE_PADDING * 2.0 } else { 0.0 }).max(1.0);
         job.halign = align;
         let strong_family = FontFamily::Name("morrow-semibold".into());
         let has_strong = ui.fonts_mut(|fonts| fonts.families().contains(&strong_family));
         let mut links = Vec::new();
+        let mut code = Vec::new();
         let mut character = 0;
         let mut previous_code = false;
+        let mut formats = Vec::with_capacity(spans.len());
+        let mut metrics = Vec::<(FontId, f32, f32)>::new();
         for span in spans {
             let strong = bold || span.strong;
             let family = if span.code {
@@ -1188,23 +1330,52 @@ impl Renderer<'_> {
             } else {
                 size
             };
+            let font_id = FontId::new(text_size, family);
+            if !metrics.iter().any(|(font, _, _)| *font == font_id) {
+                let (ascent, height) = ui.fonts_mut(|fonts| {
+                    let measured = fonts.layout_no_wrap("M".into(), font_id.clone(), INK);
+                    let glyph = &measured.rows[0].glyphs[0];
+                    (glyph.font_ascent, glyph.font_height)
+                });
+                metrics.push((font_id.clone(), ascent, height));
+            }
             let format = TextFormat {
-                font_id: FontId::new(text_size, family),
+                font_id,
                 color,
                 italics: span.emphasis,
-                background: if span.code {
-                    Color32::from_rgb(31, 38, 48)
-                } else {
-                    Color32::TRANSPARENT
-                },
                 strikethrough: if span.strike {
                     Stroke::new(1.0, MUTED)
                 } else {
                     Stroke::NONE
                 },
-                line_height: Some(size * 1.55),
                 ..Default::default()
             };
+            formats.push(format);
+        }
+        let max_ascent = metrics
+            .iter()
+            .map(|(_, ascent, _)| *ascent)
+            .fold(0.0, f32::max);
+        let max_height = metrics
+            .iter()
+            .map(|(_, _, height)| *height)
+            .fold(0.0, f32::max);
+        let pixels = ui.ctx().pixels_per_point();
+        let line_height = ((size * 1.55).max(max_height + 2.0) * pixels).ceil() / pixels;
+        for (span, mut format) in spans.iter().zip(formats) {
+            let ascent = metrics
+                .iter()
+                .find(|(font, _, _)| *font == format.font_id)
+                .map_or(max_ascent, |(_, ascent, _)| *ascent);
+            // Equal line heights make egui's vertical alignment inert: each
+            // family then uses its own ascent, raising monospace above prose.
+            // Compensate the native line height instead, keeping glyphs,
+            // strikethrough and fallback fonts together on one baseline.
+            format.line_height = Some(if has_code {
+                line_height + ascent - max_ascent
+            } else {
+                line_height
+            });
             // A little breathing room keeps inline code badges separate from
             // prose without changing the copied text or link coordinates.
             let leading = if !job.text.is_empty() && (span.code || previous_code) {
@@ -1218,10 +1389,29 @@ impl Renderer<'_> {
             if let Some(link) = &span.link {
                 links.push((character..end, link.clone()));
             }
+            if span.code {
+                code.push(character..end);
+            }
             character = end;
         }
+        let original = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        let geometry = if has_code {
+            ui.ctx().data_mut(|data| {
+                data.get_temp_mut_or_default::<InlineGeometryCache>(egui::Id::new(
+                    "markdown_inline_geometry",
+                ))
+                .get_or_insert(original, &code, line_height)
+            })
+        } else {
+            InlineGeometry {
+                galley: original.clone(),
+                original,
+                badges: Arc::new(Vec::new()),
+            }
+        };
         InlineLayout {
-            galley: ui.fonts_mut(|fonts| fonts.layout_job(job)),
+            galley: geometry.galley,
+            badges: geometry.badges,
             links,
         }
     }
@@ -1232,19 +1422,37 @@ impl Renderer<'_> {
         inline: InlineLayout,
         source: usize,
     ) -> egui::Response {
-        let InlineLayout { galley, links } = inline;
+        let InlineLayout {
+            galley,
+            badges,
+            links,
+        } = inline;
+        // Reserve the background before Label paints its selection, then place
+        // rounded badges using the Label's actual alignment and position.
+        let badge_shape = ui.painter().add(egui::Shape::Noop);
         let mut response = ui.add(
             egui::Label::new(galley.clone())
                 .selectable(true)
                 .sense(Sense::click_and_drag() - Sense::FOCUSABLE),
         );
+        let origin = match galley.job.halign {
+            Align::LEFT => response.rect.left_top(),
+            Align::Center => response.rect.center_top(),
+            Align::RIGHT => response.rect.right_top(),
+        };
+        ui.painter().set(
+            badge_shape,
+            egui::Shape::Vec(
+                badges
+                    .iter()
+                    .map(|rect| {
+                        egui::Shape::rect_filled(rect.translate(origin.to_vec2()), 3.0, INLINE_CODE)
+                    })
+                    .collect(),
+            ),
+        );
         let mut hovered_link = None;
         if let Some(pointer) = response.hover_pos() {
-            let origin = match galley.job.halign {
-                Align::LEFT => response.rect.left_top(),
-                Align::Center => response.rect.center_top(),
-                Align::RIGHT => response.rect.right_top(),
-            };
             let character = galley.cursor_from_pos(pointer - origin).index.0;
             if let Some((_, link)) = links.iter().find(|(range, _)| range.contains(&character)) {
                 hovered_link = Some(link.clone());
@@ -1513,7 +1721,17 @@ mod tests {
         for text in ["# First", "# First", "# Changed"] {
             let output = context.run_ui(Default::default(), |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    cache.show(ui, 7, 3, text, Path::new("README.md"), 14.0, false, true);
+                    cache.show(
+                        ui,
+                        7,
+                        3,
+                        text,
+                        Path::new("README.md"),
+                        14.0,
+                        false,
+                        true,
+                        false,
+                    );
                 });
             });
             output.drop_without_applying_deltas();
@@ -1556,7 +1774,17 @@ mod tests {
             }
             let output = context.run_ui(input, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    cache.show(ui, 1, 0, &text, Path::new("README.md"), 14.0, false, true);
+                    cache.show(
+                        ui,
+                        1,
+                        0,
+                        &text,
+                        Path::new("README.md"),
+                        14.0,
+                        false,
+                        true,
+                        false,
+                    );
                 });
             });
             output.drop_without_applying_deltas();
@@ -1595,7 +1823,17 @@ mod tests {
         };
         let output = context.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                cache.show(ui, 1, 0, text, Path::new("README.md"), 14.0, false, true);
+                cache.show(
+                    ui,
+                    1,
+                    0,
+                    text,
+                    Path::new("README.md"),
+                    14.0,
+                    false,
+                    true,
+                    false,
+                );
             });
         });
         output.drop_without_applying_deltas();
@@ -1752,7 +1990,17 @@ mod tests {
                     },
                     |ui| {
                         egui::CentralPanel::default().show(ui, |ui| {
-                            cache.show(ui, 1, 0, &text, Path::new("README.md"), 14.0, false, true);
+                            cache.show(
+                                ui,
+                                1,
+                                0,
+                                &text,
+                                Path::new("README.md"),
+                                14.0,
+                                false,
+                                true,
+                                false,
+                            );
                         });
                     },
                 );
@@ -1861,6 +2109,7 @@ mod tests {
                                 14.0,
                                 false,
                                 active,
+                                false,
                             );
                         }
                     });
@@ -1951,7 +2200,17 @@ mod tests {
                 },
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
-                        cache.show(ui, 1, 0, text, Path::new("README.md"), 14.0, false, true);
+                        cache.show(
+                            ui,
+                            1,
+                            0,
+                            text,
+                            Path::new("README.md"),
+                            14.0,
+                            false,
+                            true,
+                            false,
+                        );
                     });
                 },
             );
@@ -1994,6 +2253,7 @@ mod tests {
                     14.0,
                     false,
                     true,
+                    false,
                 );
                 if let Some(line) = response.source_line {
                     result.set(Some(line));
@@ -2121,7 +2381,17 @@ mod tests {
                 },
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
-                        cache.show(ui, 1, 0, text, Path::new("README.md"), 14.0, false, true);
+                        cache.show(
+                            ui,
+                            1,
+                            0,
+                            text,
+                            Path::new("README.md"),
+                            14.0,
+                            false,
+                            true,
+                            false,
+                        );
                     });
                 },
             );
@@ -2158,6 +2428,404 @@ mod tests {
         assert!((start - forward - 13.0).abs() < 1.0);
         let idle = render(&mut cache, None);
         assert!((idle - forward).abs() < 1.0);
+    }
+
+    fn measured_inline(
+        context: &egui::Context,
+        text: &str,
+        width: f32,
+        size: f32,
+        align: Align,
+    ) -> InlineLayout {
+        let document = parse(text);
+        let BlockKind::Paragraph(spans) = &document.blocks[0].kind else {
+            panic!("paragraph required")
+        };
+        let mut result = PreviewResponse::default();
+        let mut next = None;
+        let mut tables = HashMap::new();
+        let mut restore = HashMap::new();
+        let mut measured = None;
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            let renderer = Renderer {
+                source_path: Path::new("README.md"),
+                font_size: size,
+                line_starts: &document.line_starts,
+                result: &mut result,
+                next_fragment: &mut next,
+                pending_fragment: None,
+                reveal_source: None,
+                markdown_source: text,
+                smooth_scroll: false,
+                table_scroll: &mut tables,
+                restore_tables: &mut restore,
+            };
+            measured = Some(renderer.shape_inline(ui, spans, size, false, width, align));
+        });
+        output.drop_without_applying_deltas();
+        measured.unwrap()
+    }
+
+    fn effective_baseline(
+        row: &egui::epaint::text::PlacedRow,
+        glyph: &egui::epaint::text::Glyph,
+    ) -> f32 {
+        row.pos.y + glyph.pos.y
+            - glyph.font_face_ascent
+            - 0.5 * (glyph.font_height - glyph.font_face_height)
+            + glyph.font_ascent
+    }
+
+    #[test]
+    fn inline_code_shares_the_prose_baseline_and_wraps_without_tall_backgrounds() {
+        let text = "Before **bold prose** and `é🙂漢字 very_long_inline_identifier_without_breaks` then ~~`old_value`~~ after.\n\n";
+        for size in [12.0, 18.0, 24.0] {
+            for width in [100.0, 240.0, 900.0] {
+                let context = egui::Context::default();
+                let inline = measured_inline(&context, text, width, size, Align::LEFT);
+                let row_height =
+                    (inline.galley.rect.height() - 2.0) / inline.galley.rows.len() as f32;
+                let first_row = &inline.galley.rows[0];
+                let baseline = effective_baseline(first_row, &first_row.glyphs[0]);
+                for (index, row) in inline.galley.rows.iter().enumerate() {
+                    for glyph in &row.glyphs {
+                        assert!(
+                            (effective_baseline(row, glyph) - baseline - index as f32 * row_height)
+                                .abs()
+                                <= 1.1,
+                            "mixed font baseline drift: size {size}, width {width}, row {index}, glyph {}",
+                            glyph.chr
+                        );
+                    }
+                }
+                assert!(!inline.badges.is_empty());
+                for badge in inline.badges.iter() {
+                    assert!(
+                        inline.galley.rect.expand(0.6).contains_rect(*badge),
+                        "badge clips outside the text allocation: {badge:?} vs {:?}",
+                        inline.galley.rect
+                    );
+                    assert!(
+                        badge.height() < row_height,
+                        "code background must fit its font instead of filling the whole line"
+                    );
+                }
+                assert_eq!(
+                    inline.galley.job.text,
+                    "Before bold prose and é🙂漢字 very_long_inline_identifier_without_breaks then old_value after."
+                );
+                assert!(
+                    inline
+                        .galley
+                        .job
+                        .sections
+                        .iter()
+                        .all(|section| section.format.background == Color32::TRANSPARENT)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_at_cell_edges_keeps_padding_in_left_center_and_right_aligned_cells() {
+        for align in [Align::LEFT, Align::Center, Align::RIGHT] {
+            let context = egui::Context::default();
+            let inline = measured_inline(
+                &context,
+                "`path/é🙂/漢字.rs` and **details** then `last_value`",
+                130.0,
+                15.0,
+                align,
+            );
+            assert!(inline.galley.rows.len() > 1);
+            assert!(inline.galley.size().x <= 130.5);
+            for badge in inline.badges.iter() {
+                assert!(
+                    inline.galley.rect.expand(0.6).contains_rect(*badge),
+                    "edge padding clipped with alignment {align:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inline_geometry_cache_reuses_placements_without_reusing_link_destinations() {
+        let context = egui::Context::default();
+        let first = measured_inline(
+            &context,
+            "See [`é🙂 target`](first.md) now.",
+            400.0,
+            14.0,
+            Align::LEFT,
+        );
+        let second = measured_inline(
+            &context,
+            "See [`é🙂 target`](second.md) now.",
+            400.0,
+            14.0,
+            Align::LEFT,
+        );
+        assert!(Arc::ptr_eq(&first.galley, &second.galley));
+        assert!(Arc::ptr_eq(&first.badges, &second.badges));
+        assert_eq!(first.links, vec![(4..13, "first.md".into())]);
+        assert_eq!(second.links, vec![(4..13, "second.md".into())]);
+        let row = &second.galley.rows[0];
+        let pointer = row.pos + row.glyphs[6].pos.to_vec2();
+        let character = second.galley.cursor_from_pos(pointer.to_vec2()).index.0;
+        assert!(second.links[0].0.contains(&character));
+        let retained = context
+            .data(|data| {
+                data.get_temp::<InlineGeometryCache>(egui::Id::new("markdown_inline_geometry"))
+            })
+            .unwrap();
+        assert_eq!(retained.entries.len(), 1);
+        assert!(retained.bytes > retained.entries[0].original.job.text.len());
+    }
+
+    #[test]
+    fn swapped_preview_jk_moves_in_the_users_configured_direction() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = "A reading paragraph with `inline code`.\n\n".repeat(80);
+        for (pass, key) in [None, Some(egui::Key::K), Some(egui::Key::J)]
+            .into_iter()
+            .enumerate()
+        {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Default::default(),
+                        Vec2::new(700.0, 300.0),
+                    )),
+                    time: Some(pass as f64 * 0.1),
+                    events: key
+                        .map(|key| {
+                            vec![egui::Event::Key {
+                                key,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: egui::Modifiers::NONE,
+                            }]
+                        })
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        cache.show(
+                            ui,
+                            1,
+                            0,
+                            &text,
+                            Path::new("README.md"),
+                            14.0,
+                            false,
+                            true,
+                            true,
+                        );
+                    });
+                },
+            );
+            output.drop_without_applying_deltas();
+            if pass == 1 {
+                assert!(cache.documents[0].scroll_y > 20.0);
+            }
+            if pass == 2 {
+                assert!(cache.documents[0].scroll_y < 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn selecting_across_wrapped_inline_code_copies_the_original_unicode_text() {
+        const SOURCE: &str = "Start **bold** and `é🙂漢字 a_long_identifier_without_breaks` then ~~`old_value`~~ end.";
+        const EXPECTED: &str =
+            "Start bold and é🙂漢字 a_long_identifier_without_breaks then old_value end.";
+        let mut screen = egui_kittest::Harness::builder()
+            .with_size([290.0, 600.0])
+            .build_ui_state(
+                |ui, cache: &mut MarkdownCache| {
+                    cache.show(
+                        ui,
+                        1,
+                        0,
+                        SOURCE,
+                        Path::new("README.md"),
+                        18.0,
+                        false,
+                        true,
+                        false,
+                    );
+                },
+                MarkdownCache::default(),
+            );
+        screen.run_steps(2);
+        let mut shapes = Vec::new();
+        fn collect<'a>(shape: &'a egui::Shape, output: &mut Vec<&'a egui::epaint::TextShape>) {
+            match shape {
+                egui::Shape::Text(text) => output.push(text),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, output);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for shape in &screen.output().shapes {
+            collect(&shape.shape, &mut shapes);
+        }
+        let shape = shapes
+            .into_iter()
+            .find(|shape| shape.galley.job.text == EXPECTED)
+            .unwrap();
+        assert!(shape.galley.rows.len() > 2);
+        let start = shape.pos
+            + shape
+                .galley
+                .pos_from_cursor(egui::text::CCursor::new(0))
+                .center()
+                .to_vec2();
+        let end = shape.pos
+            + shape
+                .galley
+                .pos_from_cursor(egui::text::CCursor::new(EXPECTED.chars().count()))
+                .center()
+                .to_vec2();
+        screen.input_mut().events.extend([
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        screen.step();
+        screen
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(end));
+        screen.step();
+        screen.input_mut().events.push(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        screen.step();
+        screen.input_mut().events.push(egui::Event::Copy);
+        screen.step();
+        let copied = screen
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            });
+        assert_eq!(copied, Some(EXPECTED));
+    }
+
+    const INLINE_PREVIEW: &str = "# Review notes\n\nRead **important references** beside `src/editor.rs`, follow [`docs/plan.md`](docs/plan.md), and keep `:w` close to the surrounding text.\n\n- `src/markdown.rs` — inline code now shares the prose baseline.\n- **Unicode stays readable:** `café/Ω/☀.md`, ~~`old_value`~~ and *ordinary emphasis*.\n\n## Wrapped references\n\nA longer paragraph keeps **bold text**, `very_long_inline_identifier_without_any_spaces_or_breaks_at_all`, and normal words together across several lines. Code with spaces such as `review this plan before continuing` wraps gently within the same paragraph.\n\n| Left aligned | Centered | Right aligned |\n| :--- | :---: | ---: |\n| `src/main.rs` and **notes** | `éΩ ☀` | `last_value` |\n| A longer explanation with `inline_code_value` in the middle and enough words to wrap. | `a_long_reference_with_no_breaks` | **Ready** |\n\nThe paragraph after the table remains separate and readable.\n";
+
+    fn inline_preview_harness(width: f32) -> egui_kittest::Harness<'static, MarkdownCache> {
+        let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
+        if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
+            options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
+        }
+        let screen = egui_kittest::Harness::builder()
+            .with_size([width, 1300.0])
+            .with_pixels_per_point(1.0)
+            .with_theme(egui::Theme::Dark)
+            .with_os(egui::os::OperatingSystem::Windows)
+            .wgpu_setup(setup)
+            .build_ui_state(
+                |ui, cache: &mut MarkdownCache| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::new()
+                                .fill(Color32::from_rgb(17, 20, 27))
+                                .inner_margin(12.0),
+                        )
+                        .show(ui, |ui| {
+                            cache.show(
+                                ui,
+                                1,
+                                0,
+                                INLINE_PREVIEW,
+                                Path::new("README.md"),
+                                18.0,
+                                false,
+                                true,
+                                false,
+                            );
+                        });
+                },
+                MarkdownCache::default(),
+            );
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, file, family) in [
+            ("preview-ui", "segoeui.ttf", FontFamily::Proportional),
+            ("preview-code", "CascadiaMono.ttf", FontFamily::Monospace),
+            (
+                "morrow-semibold",
+                "seguisb.ttf",
+                FontFamily::Name("morrow-semibold".into()),
+            ),
+        ] {
+            if let Ok(bytes) = std::fs::read(
+                PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:/Windows".into()))
+                    .join("Fonts")
+                    .join(file),
+            ) {
+                fonts
+                    .font_data
+                    .insert(name.into(), egui::FontData::from_owned(bytes).into());
+                let mut family_fonts = vec![name.into()];
+                family_fonts.extend(
+                    fonts
+                        .families
+                        .get(&family)
+                        .cloned()
+                        .unwrap_or_else(|| fonts.families[&FontFamily::Proportional].clone()),
+                );
+                fonts.families.insert(family, family_fonts);
+            }
+        }
+        screen.ctx.set_fonts(fonts);
+        screen
+    }
+
+    fn inline_snapshot(screen: &mut egui_kittest::Harness<'_, MarkdownCache>, name: &str) {
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(3);
+        if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+            screen.snapshot_options(
+                name,
+                &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+            );
+        } else {
+            screen.snapshot(name);
+        }
+    }
+
+    #[test]
+    fn markdown_inline_code_screenshot() {
+        inline_snapshot(
+            &mut inline_preview_harness(980.0),
+            "morrow_markdown_inline_code",
+        );
+    }
+
+    #[test]
+    fn narrow_markdown_inline_code_screenshot() {
+        inline_snapshot(
+            &mut inline_preview_harness(420.0),
+            "morrow_narrow_markdown_inline_code",
+        );
     }
 
     #[test]

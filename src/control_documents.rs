@@ -183,7 +183,16 @@ impl MorrowApp {
                             "A document is in Vim Insert mode. Finish the user's editing transaction before switching Vim settings; no preference changed",
                         );
                     }
+                    let previous_excludes = patch
+                        .search_excludes
+                        .as_ref()
+                        .map(|_| self.settings.search_excludes.clone());
                     apply_settings_patch(&mut self.settings, &patch);
+                    if previous_excludes
+                        .is_some_and(|previous| previous != self.settings.search_excludes)
+                    {
+                        self.invalidate_project_search();
+                    }
                     for tab in self.projects.iter_mut().flat_map(|p| &mut p.tabs) {
                         tab.vim.set_indent_width(self.settings.tab_width);
                     }
@@ -752,6 +761,14 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.vim {
         settings.vim = value;
     }
+    if let Some(value) = patch.swap_jk {
+        settings.swap_jk = value;
+    }
+    if let Some(value) = &patch.search_excludes {
+        // The entire patch was validated before any preference could change.
+        settings.search_excludes =
+            cli::normalize_search_excludes(value).expect("validated search exclusion patch");
+    }
     if let Some(value) = patch.autosave {
         settings.autosave = value;
     }
@@ -1311,6 +1328,7 @@ mod tests {
                 Request::Search {
                     query: "x".into(),
                     workspace: None,
+                    excludes: None,
                     case_sensitive: false,
                     whole_word: false,
                     limit: 100,
@@ -1382,6 +1400,8 @@ mod tests {
             patch: Some(SettingsPatch {
                 word_wrap: Some(true),
                 smooth_scroll: Some(true),
+                swap_jk: Some(true),
+                search_excludes: Some(vec![" generated ".into(), "src\\cache".into()]),
                 ..Default::default()
             }),
         });
@@ -1391,13 +1411,78 @@ mod tests {
         assert_eq!(app.settings.font_size, 14.0);
         assert!(app.settings.word_wrap);
         assert!(app.settings.smooth_scroll);
+        assert!(app.settings.swap_jk);
+        assert_eq!(app.settings.search_excludes, ["generated", "src/cache"]);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !app.recovery_session_path.is_file() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         let snapshot: Session =
             serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
-        assert!(snapshot.settings.unwrap().word_wrap);
+        let saved = snapshot.settings.unwrap();
+        assert!(saved.word_wrap && saved.swap_jk);
+        assert_eq!(saved.search_excludes, ["generated", "src/cache"]);
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_exclusion_patch_changes_no_preferences_or_search_and_valid_change_cancels_old_results()
+     {
+        let root = temporary_directory("search-settings");
+        let (mut app, _) = app_with_text("64");
+        app.recovery_session_path = root.join("session.json");
+        app.settings.swap_jk = false;
+        app.settings.search_excludes = vec!["generated".into()];
+        app.project_query = "needle".into();
+        app.project_search = Some(workspace::SearchResults::default());
+        app.search_running = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.search_cancel = cancel.clone();
+        let generation = app.search_generation;
+        let before = serde_json::to_value(&app.settings).unwrap();
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                swap_jk: Some(true),
+                autosave: Some(false),
+                search_excludes: Some(vec!["[unclosed".into()]),
+                ..Default::default()
+            }),
+        });
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_request");
+        assert_eq!(serde_json::to_value(&app.settings).unwrap(), before);
+        assert_eq!(app.search_generation, generation);
+        assert!(app.project_search.is_some() && app.search_running);
+        assert!(!cancel.load(Ordering::Relaxed));
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                search_excludes: Some(Vec::new()),
+                ..Default::default()
+            }),
+        });
+        assert!(response.ok);
+        assert!(app.settings.search_excludes.is_empty());
+        assert!(!app.settings.swap_jk && app.settings.autosave);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(app.search_generation, generation.wrapping_add(1));
+        assert!(app.project_search.is_none() && !app.search_running && app.search_dirty);
+        let generation = app.search_generation;
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                search_excludes: Some(Vec::new()),
+                ..Default::default()
+            }),
+        });
+        assert!(response.ok);
+        assert_eq!(
+            app.search_generation, generation,
+            "unchanged filters should not restart search"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.recovery_session_path.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         drop(app);
         fs::remove_dir_all(root).unwrap();
     }

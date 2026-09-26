@@ -7,6 +7,29 @@ use serde_json::{Value, json};
 
 const MAX_PANES: usize = 8;
 
+#[derive(Default)]
+pub(super) struct RegionFocusState {
+    pending: Option<RegionFocusAction>,
+    trailing: Vec<egui::Event>,
+    owner: Option<RegionInputOwner>,
+}
+
+#[derive(PartialEq)]
+struct RegionInputOwner {
+    project: Option<PathBuf>,
+    pane: u64,
+    document: Option<(u64, u64, usize, Range<usize>, VimMode)>,
+    widget: Option<egui::Id>,
+}
+
+#[derive(Clone, Copy)]
+enum RegionFocusAction {
+    Explorer,
+    Editor,
+    Cycle(bool),
+    Direction(&'static str),
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum PaneNode {
@@ -1153,6 +1176,7 @@ impl MorrowApp {
         {
             return Err("Pane no longer exists; inspect layout status".into());
         }
+        self.find.break_escape_sequence();
         if pane_id == self.editor_layout.focused {
             return Ok(());
         }
@@ -1198,6 +1222,9 @@ impl MorrowApp {
                 .iter()
                 .find_map(|(id, rect)| rect.contains(position).then_some(*id));
             if let Some(id) = pane {
+                if self.explorer_keyboard_focused() {
+                    self.focus_editor();
+                }
                 let _ = self.focus_editor_pane(id);
             }
         }
@@ -1520,7 +1547,13 @@ impl MorrowApp {
         } else if ctx.input_mut(|i| i.consume_key(ctrl, Key::Backslash)) {
             Some("right")
         } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowRight)) {
-            Some("next")
+            Some("focus_right")
+        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowLeft)) {
+            Some("focus_left")
+        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowUp)) {
+            Some("focus_up")
+        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowDown)) {
+            Some("focus_down")
         } else if ctx.input_mut(|i| i.consume_key(alt, Key::W)) {
             Some("close")
         } else {
@@ -1538,6 +1571,18 @@ impl MorrowApp {
             "right" => self.split_active(SplitOrientation::Vertical).map(|_| ()),
             "down" => self.split_active(SplitOrientation::Horizontal).map(|_| ()),
             "close" => self.close_editor_pane(self.editor_layout.focused),
+            "focus_left" => self.focus_directional_pane(Vec2::new(-1.0, 0.0)),
+            "focus_right" => self.focus_directional_pane(Vec2::new(1.0, 0.0)),
+            "focus_up" => self.focus_directional_pane(Vec2::new(0.0, -1.0)),
+            "focus_down" => self.focus_directional_pane(Vec2::new(0.0, 1.0)),
+            "region_next" => {
+                self.cycle_focus_region(false);
+                Ok(())
+            }
+            "region_previous" => {
+                self.cycle_focus_region(true);
+                Ok(())
+            }
             "next" => {
                 let mut ids = Vec::new();
                 self.editor_layout.root.ids(&mut ids);
@@ -1558,7 +1603,8 @@ impl MorrowApp {
         for (label, keys, action) in [
             ("Split right", "Ctrl+\\", "right"),
             ("Split down", "Ctrl+Shift+\\", "down"),
-            ("Focus next pane", "Ctrl+Alt+Right", "next"),
+            ("Next region", "F6", "region_next"),
+            ("Previous region", "Shift+F6", "region_previous"),
             ("Close pane", "Ctrl+Alt+W", "close"),
         ] {
             if design::menu_item(ui, label, keys, "Arrange editor panes; documents stay open")
@@ -1567,6 +1613,209 @@ impl MorrowApp {
                 self.split_command(action);
                 ui.close();
             }
+        }
+    }
+
+    /// Follow the visible pane geometry, rather than cycling in a fixed direction.
+    fn focus_directional_pane(&mut self, direction: Vec2) -> Result<(), String> {
+        if self.explorer_keyboard_focused() {
+            if direction.x > 0.0 {
+                self.focus_editor();
+            }
+            return Ok(());
+        }
+        let Some(origin) = self.editor_layout.rects.get(&self.editor_layout.focused) else {
+            return Ok(());
+        };
+        let horizontal = direction.x != 0.0;
+        let origin = *origin;
+        let candidate = self
+            .editor_layout
+            .rects
+            .iter()
+            .filter(|(id, _)| **id != self.editor_layout.focused)
+            .filter_map(|(id, rect)| {
+                let delta = rect.center() - origin.center();
+                let primary = if horizontal {
+                    delta.x * direction.x
+                } else {
+                    delta.y * direction.y
+                };
+                if primary <= 1.0 {
+                    return None;
+                }
+                let overlap = if horizontal {
+                    rect.top() < origin.bottom() && rect.bottom() > origin.top()
+                } else {
+                    rect.left() < origin.right() && rect.right() > origin.left()
+                };
+                if !overlap {
+                    return None;
+                }
+                let secondary = if horizontal {
+                    delta.y.abs()
+                } else {
+                    delta.x.abs()
+                };
+                Some((*id, !overlap, primary + secondary * 2.0))
+            })
+            .min_by(|a, b| {
+                a.1.cmp(&b.1)
+                    .then_with(|| a.2.total_cmp(&b.2))
+                    .then_with(|| a.0.cmp(&b.0))
+            })
+            .map(|candidate| candidate.0);
+        if let Some(id) = candidate {
+            self.focus_editor();
+            self.focus_editor_pane(id)?;
+        } else if direction.x < 0.0 && self.sidebar_visible && self.sidebar == SidebarView::Explorer
+        {
+            self.focus_explorer();
+        }
+        Ok(())
+    }
+
+    fn region_focus_blocked(&self) -> bool {
+        self.picker.is_some()
+            || self.settings_open
+            || self.save_as.is_some()
+            || self.close_action.is_some()
+            || self.diff.is_some()
+            || self.git_detail_open()
+            || self.navigation_modal_open()
+            || self.palette.is_some()
+            || self.workspace_picker_open()
+            || self.context_file_dialog.is_some()
+            || self.vim_command.is_some()
+            || self.tab_drag_active()
+            || egui::Popup::is_any_open(&self.ctx)
+    }
+
+    fn region_input_owner(&self) -> RegionInputOwner {
+        RegionInputOwner {
+            project: self.project().map(|project| project.root.clone()),
+            pane: self.current_pane_id(),
+            document: self.tab().map(|tab| {
+                (
+                    tab.id,
+                    tab.revision,
+                    tab.vim.cursor,
+                    tab.selection.clone(),
+                    tab.vim.mode,
+                )
+            }),
+            widget: self.ctx.memory(|memory| memory.focused()),
+        }
+    }
+
+    pub(super) fn resume_region_input(&mut self) {
+        if !self.region_focus.trailing.is_empty() {
+            let mut events = std::mem::take(&mut self.region_focus.trailing);
+            if self.region_focus.owner.take().as_ref() != Some(&self.region_input_owner()) {
+                return;
+            }
+            self.ctx.input_mut(|input| {
+                events.append(&mut input.events);
+                input.events = events;
+            });
+        }
+    }
+
+    /// Render prefix input in its original widget before changing ownership.
+    /// Events after the shortcut resume in the destination on the next frame.
+    pub(super) fn focus_region_shortcuts(&mut self, ctx: &egui::Context) -> bool {
+        if self.region_focus_blocked() {
+            return false;
+        }
+        let shortcut = ctx.input(|input| {
+            input.events.iter().enumerate().find_map(|(index, event)| {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                let action = if modifiers.command && !modifiers.alt {
+                    match (key, modifiers.shift) {
+                        (Key::E, true) => RegionFocusAction::Explorer,
+                        (Key::Num1, false) => RegionFocusAction::Editor,
+                        _ => return None,
+                    }
+                } else if modifiers.command && modifiers.alt && !modifiers.shift {
+                    RegionFocusAction::Direction(match key {
+                        Key::ArrowLeft => "focus_left",
+                        Key::ArrowRight => "focus_right",
+                        Key::ArrowUp => "focus_up",
+                        Key::ArrowDown => "focus_down",
+                        _ => return None,
+                    })
+                } else if *key == Key::F6 && !modifiers.ctrl && !modifiers.command && !modifiers.alt
+                {
+                    RegionFocusAction::Cycle(modifiers.shift)
+                } else {
+                    return None;
+                };
+                Some((index, action))
+            })
+        });
+        if let Some((index, action)) = shortcut {
+            self.region_focus.trailing = ctx.input_mut(|input| {
+                let trailing = input.events.split_off(index + 1);
+                input.events.pop();
+                trailing
+            });
+            self.region_focus.pending = Some(action);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn finish_region_focus(&mut self) {
+        if let Some(action) = self.region_focus.pending.take() {
+            self.find.break_escape_sequence();
+            if !self.region_focus_blocked() {
+                match action {
+                    RegionFocusAction::Explorer => self.focus_explorer(),
+                    RegionFocusAction::Editor => self.focus_editor(),
+                    RegionFocusAction::Cycle(backwards) => self.cycle_focus_region(backwards),
+                    RegionFocusAction::Direction(action) => self.split_command(action),
+                }
+            }
+            self.region_focus.owner = Some(self.region_input_owner());
+            self.ctx.request_repaint();
+        }
+    }
+
+    pub(super) fn cycle_focus_region(&mut self, backwards: bool) {
+        let mut ids = Vec::new();
+        self.editor_layout.root.ids(&mut ids);
+        if ids.is_empty() {
+            self.focus_explorer();
+            return;
+        }
+        // Slot zero is the Explorer; remaining slots follow the visible split tree.
+        let slot = if self.explorer_keyboard_focused() {
+            0
+        } else {
+            ids.iter()
+                .position(|id| *id == self.editor_layout.focused)
+                .unwrap_or(0)
+                + 1
+        };
+        let count = ids.len() + 1;
+        let destination = if backwards {
+            (slot + count - 1) % count
+        } else {
+            (slot + 1) % count
+        };
+        if destination == 0 {
+            self.focus_explorer();
+        } else {
+            self.focus_editor();
+            let _ = self.focus_editor_pane(ids[destination - 1]);
         }
     }
     pub(super) fn editor_session_layout(&self) -> SessionLayout {

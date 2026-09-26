@@ -772,14 +772,24 @@ fn opening_editor_context_menu_preserves_visual_selection() {
         copied,
         "Copy must emit its clipboard command during the actual click frames"
     );
-    assert_eq!(screen.state().register.as_ref().unwrap().text, "second");
+    assert!(screen.state().register.is_none());
+    let tab = screen.state().tab().unwrap();
+    assert!(tab.vim.register().is_none());
+    assert_eq!(tab.selection, 6..12);
+    assert_eq!(tab.vim.mode, VimMode::Visual);
 }
 
 #[test]
 fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
     let mut app = fixture();
     app.projects[0].active_tab = 1;
+    let preserved = Yank {
+        text: "Vim register 🦀\n".into(),
+        linewise: true,
+    };
+    app.register = Some(preserved.clone());
     let tab = app.tab_mut().unwrap();
+    tab.vim.set_register(preserved.clone());
     tab.text = "abcdefghij\n".into();
     tab.saved_text = tab.text.clone();
     tab.vim.set_selection(&tab.text, 0..3);
@@ -840,8 +850,11 @@ fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
 
     assert_eq!(choose(&mut screen, "Cut Ctrl+X"), ["abc"]);
     assert_eq!(screen.state().tab().unwrap().text, "defghij\n");
-    assert_eq!(screen.state().register.as_ref().unwrap().text, "abc");
-    assert!(!screen.state().register.as_ref().unwrap().linewise);
+    assert_eq!(screen.state().register.as_ref(), Some(&preserved));
+    assert_eq!(
+        screen.state().tab().unwrap().vim.register(),
+        Some(&preserved)
+    );
     assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
     assert!(
         screen
@@ -855,6 +868,16 @@ fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
     screen.event(egui::Event::Text(".".into()));
     screen.run_steps(1);
     assert_eq!(screen.state().tab().unwrap().text, "ghij\n");
+    assert_eq!(screen.state().register.as_ref().unwrap().text, "def");
+    assert!(!screen.state().register.as_ref().unwrap().linewise);
+    assert!(
+        screen
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .all(|command| { !matches!(command, egui::OutputCommand::CopyText(_)) })
+    );
     screen.event(egui::Event::Text("u".into()));
     screen.run_steps(1);
     assert_eq!(screen.state().tab().unwrap().text, "defghij\n");

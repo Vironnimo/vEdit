@@ -5,6 +5,7 @@
 //! restoring the original line-ending convention and UTF-8 BOM when they are saved.
 
 use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::RegexBuilder;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -12,7 +13,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -353,11 +354,150 @@ pub struct SearchResults {
     pub warnings: Vec<String>,
 }
 
+/// Optional project-search filters. The Explorer's cached index has independent
+/// pruning: a search with an empty list can inspect these folders when Git allows it.
+pub fn default_search_excludes() -> Vec<String> {
+    [
+        "node_modules",
+        "bower_components",
+        "vendor",
+        "target",
+        ".git",
+        "dist",
+        "build",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".next",
+        ".nuxt",
+        "coverage",
+        ".cache",
+        ".vs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+pub fn normalize_search_excludes(excludes: &[String]) -> Result<Vec<String>, String> {
+    crate::cli::normalize_search_excludes(excludes)
+}
+
+fn search_exclusion_matcher(root: &Path, excludes: &[String]) -> Result<Gitignore, String> {
+    let excludes = normalize_search_excludes(excludes)?;
+    let mut builder = GitignoreBuilder::new(root);
+    builder.allow_unclosed_class(false);
+    builder
+        .case_insensitive(cfg!(windows))
+        .map_err(|error| error.to_string())?;
+    for pattern in excludes {
+        // A list of patterns has no comment lines: a folder named #cache should
+        // be excluded just like every other literal folder name.
+        let literal_hash;
+        let pattern = if pattern.starts_with('#') {
+            literal_hash = format!("\\{pattern}");
+            &literal_hash
+        } else {
+            &pattern
+        };
+        builder.add_line(None, pattern).map_err(|error| {
+            format!("Invalid search exclusion {pattern:?}: {error}. Use a folder or glob such as **/*.min.js.")
+        })?;
+    }
+    builder
+        .build()
+        .map_err(|error| format!("Invalid search exclusions: {error}"))
+}
+
+#[cfg(test)]
+fn validate_search_excludes(excludes: &[String]) -> Result<(), String> {
+    search_exclusion_matcher(Path::new("."), excludes).map(|_| ())
+}
+
+/// Search a fresh, bounded filesystem walk on a background worker. Folder and
+/// glob exclusions are applied before reading files or descending directories.
+/// Git ignore files remain respected even when the optional list is empty.
+pub fn search_with_excludes(
+    root: &Path,
+    query: &str,
+    options: SearchOptions,
+    excludes: &[String],
+) -> Result<SearchResults, String> {
+    let started = Instant::now();
+    let root = fs::canonicalize(root)
+        .map_err(|error| format!("Could not open search project: {error}"))?;
+    if !root.is_dir() {
+        return Err("The search project must be a folder.".into());
+    }
+    let matcher = search_exclusion_matcher(&root, excludes)?;
+    let cancel = options.cancel.clone();
+    let duration = options.max_duration;
+    let count = Arc::new(AtomicUsize::new(0));
+    let bounded = Arc::new(AtomicBool::new(false));
+    let bounded_walk = bounded.clone();
+    let mut walker = WalkBuilder::new(&root);
+    walker
+        .hidden(false)
+        .follow_links(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(false)
+        .require_git(false)
+        .max_depth(Some(64))
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            if cancelled(&cancel)
+                || started.elapsed() >= duration
+                || count.fetch_add(1, Ordering::Relaxed) >= 100_000
+            {
+                bounded_walk.store(true, Ordering::Relaxed);
+                return false;
+            }
+            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if is_dir && matches!(entry.file_name().to_str(), Some(".git" | ".hg" | ".svn")) {
+                return false;
+            }
+            if is_dir && entry.depth() == 64 {
+                bounded_walk.store(true, Ordering::Relaxed);
+            }
+            !matcher.matched(entry.path(), is_dir).is_ignore()
+        });
+    let paths = walker.build().filter_map(|entry| match entry {
+        Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_file()) => {
+            Some(Ok(entry.path().to_path_buf()))
+        }
+        Ok(_) => None,
+        Err(error) => Some(Err(error.to_string())),
+    });
+    let mut result = search_paths(paths, query, options, started)?;
+    result.truncated |= bounded.load(Ordering::Relaxed);
+    Ok(result)
+}
+
 /// Literal project search; punctuation in a query is never interpreted as a regex.
+#[cfg(test)]
 pub fn search_project(
     index: &WorkspaceIndex,
     query: &str,
     options: SearchOptions,
+) -> Result<SearchResults, String> {
+    let mut results = search_paths(
+        index.files.iter().cloned().map(Ok),
+        query,
+        options,
+        Instant::now(),
+    )?;
+    results.truncated |= index.truncated;
+    Ok(results)
+}
+
+fn search_paths(
+    paths: impl Iterator<Item = Result<PathBuf, String>>,
+    query: &str,
+    options: SearchOptions,
+    started: Instant,
 ) -> Result<SearchResults, String> {
     let mut results = SearchResults::default();
     if query.is_empty() {
@@ -370,9 +510,8 @@ pub fn search_project(
         .case_insensitive(!options.case_sensitive)
         .build()
         .map_err(|error| format!("Could not prepare search: {error}"))?;
-    let started = Instant::now();
     let mut bytes_searched = 0u64;
-    'files: for path in &index.files {
+    'files: for path in paths {
         if cancelled(&options.cancel)
             || started.elapsed() >= options.max_duration
             || results.matches.len() >= options.max_matches
@@ -381,9 +520,18 @@ pub fn search_project(
             results.truncated = true;
             break;
         }
+        let path = match path {
+            Ok(path) => path,
+            Err(error) => {
+                if results.warnings.len() < MAX_WARNINGS {
+                    results.warnings.push(error);
+                }
+                continue;
+            }
+        };
         let remaining = options.max_total_bytes.saturating_sub(bytes_searched);
         let limit = remaining.min(options.max_file_bytes);
-        let document = match read_document(path, limit) {
+        let document = match read_document(&path, limit) {
             Ok(document) => document,
             Err(error) => {
                 results.files_skipped += 1;
@@ -452,7 +600,6 @@ pub fn search_project(
             }
         }
     }
-    results.truncated |= index.truncated;
     Ok(results)
 }
 
@@ -932,6 +1079,10 @@ fn publish_new_file(temporary: &Path, destination: &Path) -> io::Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "project_search_backend_tests.rs"]
+mod project_search_backend_tests;
 
 #[cfg(test)]
 mod tests {

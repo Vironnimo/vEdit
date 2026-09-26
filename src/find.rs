@@ -91,6 +91,7 @@ pub(super) struct FindState {
     last: Option<Pattern>,
     backwards: bool,
     pub(super) highlighted: bool,
+    last_escape: Option<f64>,
     cache: crate::search::MatchCache<Pattern>,
     pub(super) view_scroll: HashMap<(u64, u64), (egui::Id, Vec2)>,
     pub(super) restore_scroll: HashMap<(u64, u64), Vec2>,
@@ -108,6 +109,44 @@ pub(super) struct FindState {
 }
 
 impl FindState {
+    /// A repeated held key is not a second Escape. Only consecutive key presses
+    /// suppress highlights; the last pattern and logical match remain intact.
+    pub(super) fn observe_escape(&mut self, event: &egui::Event, time: f64) {
+        match event {
+            egui::Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                repeat: false,
+                ..
+            } => {
+                if self
+                    .last_escape
+                    .is_some_and(|previous| (0.0..=0.75).contains(&(time - previous)))
+                {
+                    self.highlighted = false;
+                    self.last_escape = None;
+                } else {
+                    self.last_escape = Some(time);
+                }
+            }
+            egui::Event::Key {
+                key: Key::Escape, ..
+            } => {}
+            egui::Event::Key { pressed: true, .. }
+            | egui::Event::Text(_)
+            | egui::Event::Paste(_)
+            | egui::Event::Copy
+            | egui::Event::Cut
+            | egui::Event::Ime(egui::ImeEvent::Commit(_))
+            | egui::Event::PointerButton { pressed: true, .. } => self.last_escape = None,
+            _ => {}
+        }
+    }
+
+    pub(super) fn break_escape_sequence(&mut self) {
+        self.last_escape = None;
+    }
+
     fn matches(
         &mut self,
         tab: &EditorTab,
@@ -664,6 +703,13 @@ impl FindState {
                 tab.changed();
             }
             if action.yanked.is_some() {
+                if !action.text_changed {
+                    if action.yanked.as_ref().is_some_and(|yank| yank.linewise) {
+                        tab.flash_line_yank(action.yanked_ranges.clone());
+                    } else {
+                        tab.flash_yank(action.yanked_ranges.clone());
+                    }
+                }
                 self.pending_yank = action.yanked;
             }
             tab.selection = tab
@@ -805,6 +851,7 @@ impl MorrowApp {
     }
 
     pub(super) fn validate_vim_search(&mut self) {
+        let was_modal_waiting = self.find.waiting();
         let pane = self.current_pane_id();
         let tab_id = self.tab().map(|tab| tab.id);
         if self.find.current_pane != pane
@@ -867,7 +914,8 @@ impl MorrowApp {
             return;
         }
         let modal_waiting = self.find.waiting();
-        let has_pending = modal_waiting || self.find.pending_navigation.is_some();
+        let has_pending =
+            was_modal_waiting || modal_waiting || self.find.pending_navigation.is_some();
         let escape = has_pending
             && self.ctx.input(|input| {
                 input.events.iter().any(|event| {
@@ -890,24 +938,52 @@ impl MorrowApp {
             });
         if has_pending && (escape || self.ctx.input(|input| input.pointer.any_pressed())) {
             self.cancel_vim_search(false);
-            if escape && modal_waiting {
-                self.ctx.input_mut(|input| {
-                    input.events.retain(|event| {
-                        !matches!(
+            if was_modal_waiting || modal_waiting {
+                // The first cancellation belongs to this search. Preserve any
+                // following Escape so the ordinary dispatcher can recognize a
+                // second press, including two presses in the same input batch.
+                let consumed = self.ctx.input_mut(|input| {
+                    let index = input.events.iter().position(|event| {
+                        matches!(
                             event,
                             egui::Event::Copy
+                                | egui::Event::PointerButton { pressed: true, .. }
                                 | egui::Event::Key {
                                     key: Key::Escape,
+                                    pressed: true,
                                     ..
                                 }
                                 | egui::Event::Key {
                                     key: Key::C,
+                                    pressed: true,
                                     modifiers: egui::Modifiers { ctrl: true, .. },
                                     ..
                                 }
                         )
-                    })
+                    })?;
+                    // Input before cancellation belonged to the waiting query,
+                    // and must never become source commands after it closes.
+                    let prefix: Vec<_> = input.events.drain(..=index).collect();
+                    let (consumed, retained): (Vec<_>, Vec<_>) =
+                        prefix.into_iter().partition(|event| {
+                            matches!(
+                                event,
+                                egui::Event::Text(_)
+                                    | egui::Event::Paste(_)
+                                    | egui::Event::Ime(_)
+                                    | egui::Event::Key { .. }
+                                    | egui::Event::Copy
+                                    | egui::Event::Cut
+                            )
+                        });
+                    drop(input.events.splice(0..0, retained));
+                    Some((consumed, input.time))
                 });
+                if let Some((events, time)) = consumed {
+                    for event in events {
+                        self.find.observe_escape(&event, time);
+                    }
+                }
             }
             return;
         }
@@ -923,7 +999,6 @@ impl MorrowApp {
             state.poll_deferred(tab);
         }
         if let Some(yank) = state.take_yank() {
-            self.ctx.copy_text(yank.text.clone());
             self.register = Some(yank);
         }
         if !state.waiting() && !state.deferred_events.is_empty() {
@@ -1261,6 +1336,159 @@ fn visible_match_columns(
 #[cfg(test)]
 #[path = "find_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    fn escape(repeat: bool) -> egui::Event {
+        egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn only_two_consecutive_escape_presses_hide_the_retained_pattern() {
+        let mut state = FindState {
+            highlighted: true,
+            last: Some(Pattern::vim("🦀".into())),
+            ..Default::default()
+        };
+        state.observe_escape(&escape(false), 1.0);
+        state.observe_escape(&escape(true), 1.1);
+        assert!(state.highlighted);
+        state.observe_escape(&egui::Event::Text("j".into()), 1.2);
+        state.observe_escape(&escape(false), 1.3);
+        assert!(state.highlighted);
+        state.observe_escape(&escape(false), 2.2);
+        assert!(
+            state.highlighted,
+            "widely separated Escape presses are independent"
+        );
+        state.observe_escape(&escape(false), 2.3);
+        assert!(!state.highlighted);
+        assert_eq!(state.pattern(), Some(Pattern::vim("🦀".into())));
+        assert!(state.prompt.is_none());
+    }
+
+    #[test]
+    fn async_query_cancellation_discards_query_input_and_preserves_second_escape() {
+        let ctx = egui::Context::default();
+        let mut app = MorrowApp::empty(ctx.clone());
+        let mut project = Project::new(std::env::temp_dir().join("morrow-async-escape-unit"));
+        project.last_git_refresh = Instant::now();
+        let mut tab = EditorTab::new(None, "search.txt".into());
+        tab.text = format!("start foo {}", "a".repeat(ASYNC_DOCUMENT_BYTES));
+        tab.saved_text = tab.text.clone();
+        project.tabs.push(tab);
+        app.projects.push(project);
+        app.bind_current_pane();
+        let pane = app.current_pane_id();
+        let original = app.tab().unwrap().text.clone();
+        let mut state = std::mem::take(&mut app.find);
+        state.worker = Some(worker::Worker::manual());
+        state.context = Some(ctx.clone());
+        state.last = Some(Pattern::vim("start".into()));
+        state.highlighted = true;
+        let tab = app.tab_mut().unwrap();
+        state.start(tab, pane, false);
+        state.text(tab, "foo");
+        state.key(tab, Key::Enter, egui::Modifiers::NONE);
+        assert!(state.waiting());
+        app.find = state;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(1.0),
+                events: vec![
+                    egui::Event::Text("dd".into()),
+                    egui::Event::Paste("must not edit".into()),
+                    escape(false),
+                    egui::Event::Key {
+                        key: Key::Escape,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    escape(false),
+                ],
+                ..Default::default()
+            },
+            |_| {
+                app.validate_vim_search();
+                assert!(!app.vim_search_active());
+                assert!(app.find.highlighted);
+                let remaining = ctx.input(|input| input.events.clone());
+                assert_eq!(remaining.len(), 2);
+                assert!(matches!(
+                    remaining[0],
+                    egui::Event::Key {
+                        key: Key::Escape,
+                        ..
+                    }
+                ));
+                for event in remaining {
+                    app.find.observe_escape(&event, 1.0);
+                }
+                assert!(!app.find.highlighted);
+                assert_eq!(app.find.pattern(), Some(Pattern::vim("start".into())));
+                assert_eq!(app.tab().unwrap().text, original);
+                assert!(!app.tab().unwrap().vim.can_undo());
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn async_query_pointer_cancel_discards_preceding_query_commands() {
+        let ctx = egui::Context::default();
+        let mut app = MorrowApp::empty(ctx.clone());
+        let mut project =
+            Project::new(std::env::temp_dir().join("morrow-async-pointer-cancel-unit"));
+        project.last_git_refresh = Instant::now();
+        let mut tab = EditorTab::new(None, "search.txt".into());
+        tab.text = format!("start foo {}", "a".repeat(ASYNC_DOCUMENT_BYTES));
+        tab.saved_text = tab.text.clone();
+        project.tabs.push(tab);
+        app.projects.push(project);
+        app.bind_current_pane();
+        let pane = app.current_pane_id();
+        let original = app.tab().unwrap().text.clone();
+        let mut state = std::mem::take(&mut app.find);
+        state.worker = Some(worker::Worker::manual());
+        state.context = Some(ctx.clone());
+        let tab = app.tab_mut().unwrap();
+        state.start(tab, pane, false);
+        state.text(tab, "foo");
+        state.key(tab, Key::Enter, egui::Modifiers::NONE);
+        assert!(state.waiting());
+        app.find = state;
+        let pointer = egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Text("dd".into()), pointer.clone()],
+                ..Default::default()
+            },
+            |_| {
+                app.validate_vim_search();
+                assert!(!app.vim_search_active());
+                ctx.input(|input| assert_eq!(input.events, vec![pointer.clone()]));
+                assert_eq!(app.tab().unwrap().text, original);
+                assert!(!app.tab().unwrap().vim.can_undo());
+            },
+        );
+        output.textures_delta.clear();
+    }
+}
 
 #[cfg(test)]
 #[path = "find_async_tests.rs"]

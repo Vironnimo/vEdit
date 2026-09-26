@@ -92,6 +92,15 @@ impl LineIndex {
         (position <= end).then_some(position)
     }
 
+    /// Source lines, including the final empty line after a trailing newline.
+    pub fn line_count(&self, text: &str, revision: u64) -> usize {
+        self.line_col(text, revision, 0);
+        self.cached
+            .borrow()
+            .as_ref()
+            .map_or(1, |index| index.starts.len())
+    }
+
     /// End character offset of a one-based line, excluding LF or CRLF.
     pub fn line_end(&self, text: &str, revision: u64, line: usize) -> Option<usize> {
         let row = line.checked_sub(1)?;

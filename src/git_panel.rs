@@ -240,7 +240,7 @@ impl MorrowApp {
 
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal(|ui| {
-            let toolbar_width = if repo { 45.0 } else { 0.0 } + if loading { 25.0 } else { 0.0 };
+            let toolbar_width = if repo { 45.0 } else { 0.0 };
             let width = (ui.available_width() - toolbar_width).max(35.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(width, 28.0),
@@ -265,9 +265,6 @@ impl MorrowApp {
             )
             .inner
             .on_hover_text(crate::paths::display(&root));
-            if loading {
-                ui.spinner();
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if repo {
                     design::menu(ui, "···", "Repository actions", |ui| {
@@ -377,6 +374,7 @@ impl MorrowApp {
             ui.add_space(7.0);
             let changed_count = project.git_changes.len();
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(1.0);
                 if section_button(
                     ui,
@@ -620,7 +618,7 @@ impl MorrowApp {
                     if project.git_history_loading || (project.recent_commits.is_empty() && loading)
                     {
                         ui.horizontal(|ui| {
-                            ui.spinner();
+                            ui.add(egui::Spinner::new().size(14.0).color(MUTED));
                             ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                         });
                     } else if project.git_history_error.is_none()
@@ -648,7 +646,7 @@ impl MorrowApp {
             }
             if busy {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    ui.add(egui::Spinner::new().size(14.0).color(MUTED));
                     ui.label(
                         RichText::new("Updating repository…")
                             .size(11.0)
@@ -852,6 +850,28 @@ fn error_note(ui: &mut egui::Ui, error: &str) {
     ui.label(RichText::new(error).size(11.0).color(ORANGE));
 }
 
+pub(super) fn refresh_indicator(ui: &mut egui::Ui, running: bool) -> egui::Response {
+    // Keep this slot even while idle: periodic refresh must not move the title
+    // or repository controls, nor increase the header's height.
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
+    if running {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::ProgressIndicator,
+                ui.is_enabled(),
+                "Refreshing repository",
+            )
+        });
+        egui::Spinner::new()
+            .size(14.0)
+            .color(MUTED)
+            .paint_at(ui, rect);
+        response.on_hover_text("Refreshing repository")
+    } else {
+        response
+    }
+}
+
 fn section_button(
     ui: &mut egui::Ui,
     label: &str,
@@ -859,14 +879,41 @@ fn section_button(
     width: f32,
     tooltip: &str,
 ) -> egui::Response {
-    ui.add_sized(
+    let response = ui.add_sized(
         [width, 29.0],
-        egui::Button::new(RichText::new(label).size(12.0))
-            .selected(selected)
-            .frame_when_inactive(false),
-    )
-    .on_hover_text(tooltip)
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
+        egui::Button::new(RichText::new(label).size(12.0).color(if selected {
+            ACCENT
+        } else {
+            TEXT
+        }))
+        .selected(selected)
+        .fill(if selected {
+            ACCENT.gamma_multiply(0.16)
+        } else {
+            SURFACE
+        })
+        .stroke(Stroke::new(
+            1.0,
+            if selected {
+                ACCENT.gamma_multiply(0.45)
+            } else {
+                BORDER
+            },
+        ))
+        .corner_radius(5.0),
+    );
+    if selected {
+        ui.painter().line_segment(
+            [
+                egui::pos2(response.rect.left() + 8.0, response.rect.bottom() - 2.0),
+                egui::pos2(response.rect.right() - 8.0, response.rect.bottom() - 2.0),
+            ],
+            Stroke::new(1.5, ACCENT),
+        );
+    }
+    response
+        .on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[derive(Clone, Copy)]
@@ -1527,7 +1574,7 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-const HISTORY_ROW_HEIGHT: f32 = 70.0;
+const HISTORY_ROW_HEIGHT: f32 = 46.0;
 
 fn history_near_end(visible_end: usize, loaded: usize) -> bool {
     loaded > 0 && visible_end.saturating_add(4) >= loaded
@@ -1627,54 +1674,52 @@ fn history_row(
             TEXT,
             rect.right() - left - 6.0,
         );
-        painter.galley(egui::pos2(left, rect.top() + 9.0), subject, TEXT);
-        let detail = truncated_text(
+        painter.galley(egui::pos2(left, rect.top() + 6.0), subject, TEXT);
+        let hash = truncated_text(
             ui,
-            &format!(
-                "{} · {} · {}",
-                short_hash(&commit.hash),
-                commit.author,
-                commit.date
-            ),
-            FontId::proportional(10.5),
+            short_hash(&commit.hash),
+            FontId::monospace(9.5),
             MUTED,
-            rect.right() - left - 8.0,
+            50.0,
         );
-        painter.galley(egui::pos2(left, rect.top() + 29.0), detail, MUTED);
-        let mut badge_x = left;
+        let mut badge_x = left + hash.size().x + 7.0;
+        painter.galley(egui::pos2(left, rect.top() + 26.0), hash, MUTED);
+        let metadata_space = rect.right() - 6.0 - badge_x;
+        let metadata_reserve = if metadata_space >= 150.0 { 48.0 } else { 0.0 };
+        let badges_right = rect.right() - 6.0 - metadata_reserve;
+        let mut shown = 0;
         for (index, reference) in commit.refs.iter().take(2).enumerate() {
             let color = match reference.kind {
                 git::RefKind::Local | git::RefKind::Head => ACCENT,
                 git::RefKind::Remote => BLUE,
                 git::RefKind::Tag => ORANGE,
             };
-            let label = if reference.current && reference.kind == git::RefKind::Local {
-                format!("HEAD · {}", reference.name)
-            } else {
-                reference.name.clone()
-            };
+            let label = reference_label(reference);
             let hidden = commit.refs.len() - index - 1;
-            let reserve = if hidden > 0 { 29.0 } else { 0.0 };
-            let available = rect.right() - 6.0 - badge_x - reserve;
-            if available < 25.0 {
+            let reserve = if hidden > 0 { 23.0 } else { 0.0 };
+            let available = badges_right - badge_x - reserve;
+            if available < 32.0 {
                 break;
             }
             let width = (ui
                 .painter()
-                .layout_no_wrap(label.clone(), FontId::proportional(9.5), color)
+                .layout_no_wrap(label.clone(), FontId::proportional(9.0), color)
                 .size()
                 .x
-                + 12.0)
+                + 10.0)
                 .min(available)
                 .min(135.0);
             let badge = egui::Rect::from_min_size(
-                egui::pos2(badge_x, rect.top() + 48.0),
-                Vec2::new(width, 17.0),
+                egui::pos2(badge_x, rect.top() + 25.0),
+                Vec2::new(width, 16.0),
             );
             painter.rect_filled(badge, 4.0, color.gamma_multiply(0.13));
             ui.put(
                 badge.shrink2(Vec2::new(4.0, 0.0)),
-                egui::Label::new(RichText::new(label).size(9.5).color(color)).truncate(),
+                egui::Label::new(RichText::new(label).size(9.0).color(color))
+                    .truncate()
+                    .selectable(false)
+                    .sense(egui::Sense::hover()),
             )
             .on_hover_text(format!(
                 "{}{}",
@@ -1686,16 +1731,52 @@ fn history_row(
                 reference.name
             ));
             badge_x = badge.right() + 4.0;
-            if hidden > 0 && (index == 1 || rect.right() - badge_x < 55.0) {
-                painter.text(
-                    egui::pos2(badge_x, rect.top() + 49.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("+{hidden}"),
-                    FontId::proportional(10.0),
-                    MUTED,
+            shown += 1;
+        }
+        if shown < commit.refs.len() {
+            let hidden = format!("+{}", commit.refs.len() - shown);
+            let width = ui
+                .painter()
+                .layout_no_wrap(hidden.clone(), FontId::proportional(9.0), MUTED)
+                .size()
+                .x
+                + 5.0;
+            if rect.right() - 6.0 - badge_x >= width {
+                ui.put(
+                    egui::Rect::from_min_size(
+                        egui::pos2(badge_x, rect.top() + 25.0),
+                        Vec2::new(width, 16.0),
+                    ),
+                    egui::Label::new(RichText::new(hidden).size(9.0).color(MUTED))
+                        .selectable(false)
+                        .sense(egui::Sense::hover()),
+                )
+                .on_hover_text(
+                    commit
+                        .refs
+                        .iter()
+                        .map(reference_label)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 );
-                break;
+                badge_x += width + 5.0;
             }
+        }
+        let metadata_width = rect.right() - 6.0 - badge_x;
+        if metadata_width >= 35.0 {
+            let metadata = if commit.refs.is_empty() || metadata_width >= 130.0 {
+                format!("{} · {}", commit.author, commit.date)
+            } else {
+                commit.author.clone()
+            };
+            let detail = truncated_text(
+                ui,
+                &metadata,
+                FontId::proportional(10.0),
+                MUTED,
+                metadata_width,
+            );
+            painter.galley(egui::pos2(badge_x, rect.top() + 26.0), detail, MUTED);
         }
     }
     response
@@ -1728,6 +1809,14 @@ fn history_row(
         ))
 }
 
+fn reference_label(reference: &git::CommitRef) -> String {
+    if reference.current && reference.kind == git::RefKind::Local {
+        format!("HEAD · {}", reference.name)
+    } else {
+        reference.name.clone()
+    }
+}
+
 fn short_hash(hash: &str) -> &str {
     hash.get(..7).unwrap_or(hash)
 }
@@ -1754,6 +1843,10 @@ fn change_marker(
         git::FileChange::None | git::FileChange::Other(_) => ("·", MUTED, "Changed"),
     }
 }
+
+#[cfg(test)]
+#[path = "git_ux_tests.rs"]
+mod ux_tests;
 
 #[cfg(test)]
 mod tests {

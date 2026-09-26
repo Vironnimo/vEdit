@@ -40,8 +40,35 @@ pub struct Action {
     pub text_changed: bool,
     pub cursor_changed: bool,
     pub mode_changed: bool,
-    /// Includes copies and cuts, for sharing the unnamed register across tabs.
+    /// Vim yanks and deletions, for sharing the unnamed register across tabs.
     pub yanked: Option<Yank>,
+    /// Actual source spans in character indices, before any destructive edit.
+    /// A linewise register's synthetic final newline has no source span.
+    pub yanked_ranges: Vec<Range<usize>>,
+}
+
+/// Remap physical Vim navigation keys. Callers leave literal targets and
+/// inserted text untouched; arrows and scrolling already express a direction.
+pub fn map_jk(character: char, swap_jk: bool) -> char {
+    match (character, swap_jk) {
+        ('j', true) => 'k',
+        ('k', true) => 'j',
+        _ => character,
+    }
+}
+
+/// Native Copy/Cut use the selection, or the current line when it is empty.
+/// The final newline is included only when it exists in the source document.
+pub fn clipboard_range(text: &str, selection: Range<usize>, cursor: usize) -> Range<usize> {
+    let chars: Vec<_> = text.chars().collect();
+    let start = selection.start.min(chars.len());
+    let end = selection.end.min(chars.len()).max(start);
+    if start != end {
+        return start..end;
+    }
+    let rows = lines(&chars);
+    let line = rows[row_for_cursor(&rows, cursor.min(chars.len()))];
+    line.start..line.newline.map_or(line.end, |index| index + 1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +202,7 @@ pub struct VimState {
     /// Insert mode: insertion boundary. Other modes: current character.
     pub cursor: usize,
     register: Option<Yank>,
+    yanked_ranges: Vec<Range<usize>>,
     pending: Option<Pending>,
     count: usize,
     preferred_column: Option<usize>,
@@ -199,6 +227,7 @@ impl Default for VimState {
             mode: VimMode::Normal,
             cursor: 0,
             register: None,
+            yanked_ranges: Vec::new(),
             pending: None,
             count: 0,
             preferred_column: None,
@@ -395,6 +424,7 @@ impl VimState {
     /// Geometry makes dot reliable for keyboard, mouse and external selections,
     /// even when a pending r/i/g/count or the bounded key history is incomplete.
     pub fn cut_visual(&mut self, text: &mut String) -> Action {
+        self.yanked_ranges.clear();
         if !matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
             return Action::default();
         }
@@ -447,9 +477,21 @@ impl VimState {
             consumed,
             text_changed,
             yanked,
+            yanked_ranges: std::mem::take(&mut self.yanked_ranges),
             cursor_changed: self.cursor != old_cursor,
             mode_changed: self.mode != old_mode,
         }
+    }
+
+    /// System Cut shares Visual undo/repeat behavior without replacing the Vim
+    /// unnamed register. The returned clipboard text is deliberately separate.
+    pub fn cut_visual_to_clipboard(&mut self, text: &mut String) -> (Action, Option<String>) {
+        let register = self.register.clone();
+        let mut action = self.cut_visual(text);
+        self.register = register;
+        let copied = action.yanked.take().map(|yank| yank.text);
+        action.yanked_ranges.clear();
+        (action, copied)
     }
 
     fn repeat_visual_cut(
@@ -533,6 +575,7 @@ impl VimState {
         target: usize,
         motion: SearchMotion,
     ) -> Action {
+        self.yanked_ranges.clear();
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let operator = match self.pending {
@@ -608,6 +651,7 @@ impl VimState {
             cursor_changed: self.cursor != old_cursor,
             mode_changed: self.mode != old_mode,
             yanked,
+            yanked_ranges: std::mem::take(&mut self.yanked_ranges),
         }
     }
 
@@ -715,6 +759,7 @@ impl VimState {
     }
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        self.yanked_ranges.clear();
         if matches!(self.mode, VimMode::Visual | VimMode::VisualLine)
             && self.pending.is_none()
             && matches!(key, VimKey::Char('d' | 'x'))
@@ -821,6 +866,7 @@ impl VimState {
             cursor_changed: self.cursor != old_cursor,
             mode_changed: self.mode != old_mode,
             yanked,
+            yanked_ranges: std::mem::take(&mut self.yanked_ranges),
         }
     }
 
@@ -1516,6 +1562,9 @@ impl VimState {
             linewise: true,
         };
         self.register = Some(yank.clone());
+        self.yanked_ranges.clear();
+        self.yanked_ranges
+            .push(first_line.start..last_line.newline.map_or(last_line.end, |index| index + 1));
         if op == Operator::Yank {
             return (true, false, Some(yank));
         }
@@ -1582,6 +1631,8 @@ impl VimState {
                 linewise: false,
             };
             self.register = Some(yank.clone());
+            self.yanked_ranges.clear();
+            self.yanked_ranges.push(start..end);
             Some(yank)
         } else {
             None
@@ -1698,6 +1749,8 @@ impl VimState {
         };
         self.leave_visual();
         self.register = Some(deleted.clone());
+        self.yanked_ranges.clear();
+        self.yanked_ranges.push(range);
         if changed {
             self.record(before);
         }
@@ -2511,6 +2564,73 @@ fn paragraph(chars: &[char], cursor: usize, count: usize, forward: bool) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yank_feedback_reports_unicode_source_ranges_and_real_newlines() {
+        let mut text = "α🦀 one\nlast".to_owned();
+        let mut state = VimState::new();
+        keys(&mut state, &mut text, "vl");
+        let action = state.handle_key(&mut text, VimKey::Char('y'));
+        assert_eq!(action.yanked.as_ref().unwrap().text, "α🦀");
+        assert_eq!(action.yanked_ranges.len(), 1);
+        assert_eq!(action.yanked_ranges[0], 0..2);
+        assert!(!action.text_changed);
+        assert!(
+            state
+                .handle_key(&mut text, VimKey::Char('j'))
+                .yanked_ranges
+                .is_empty()
+        );
+
+        keys(&mut state, &mut text, "y");
+        let action = state.handle_key(&mut text, VimKey::Char('y'));
+        assert_eq!(action.yanked.as_ref().unwrap().text, "last\n");
+        assert_eq!(action.yanked_ranges.len(), 1);
+        assert_eq!(action.yanked_ranges[0], 7..11);
+        keys(&mut state, &mut text, "ggV");
+        let action = state.handle_key(&mut text, VimKey::Char('y'));
+        assert_eq!(action.yanked_ranges.len(), 1);
+        assert_eq!(action.yanked_ranges[0], 0..7);
+    }
+
+    #[test]
+    fn clipboard_visual_cut_preserves_register_and_geometry_for_undo_and_dot() {
+        for register in [
+            None,
+            Some(Yank {
+                text: "KEEP🦀".into(),
+                linewise: false,
+            }),
+        ] {
+            let mut text = "α🦀βabcdef".to_owned();
+            let mut state = VimState::new();
+            state.register = register.clone();
+            state.set_selection(&text, 0..3);
+            keys(&mut state, &mut text, "2r");
+            let (action, copied) = state.cut_visual_to_clipboard(&mut text);
+            assert_eq!(copied.as_deref(), Some("α🦀β"));
+            assert!(action.text_changed && action.yanked.is_none());
+            assert!(action.yanked_ranges.is_empty());
+            assert_eq!(state.register, register);
+            assert_eq!(text, "abcdef");
+            keys(&mut state, &mut text, ".");
+            assert_eq!(text, "def");
+            assert_eq!(state.register.as_ref().unwrap().text, "abc");
+            keys(&mut state, &mut text, "uu");
+            assert_eq!(text, "α🦀βabcdef");
+        }
+    }
+
+    #[test]
+    fn native_clipboard_ranges_use_unicode_selection_or_the_complete_source_line() {
+        let text = "α🦀\nβγ";
+        assert_eq!(clipboard_range(text, 1..2, 0), 1..2);
+        assert_eq!(clipboard_range(text, 1..1, 1), 0..3);
+        assert_eq!(clipboard_range(text, 4..4, 4), 3..5);
+        assert_eq!(clipboard_range(text, 99..99, 99), 3..5);
+        assert_eq!(clipboard_range("", 0..0, 0), 0..0);
+        assert_eq!(clipboard_range("α\n", 2..2, 2), 2..2);
+    }
 
     #[test]
     fn native_visual_cut_discards_unfinished_prefixes_and_repeats_completed_area() {

@@ -133,12 +133,14 @@ pub struct TextEdit {
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
     pub vim: Option<bool>,
+    pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,
     pub font_size: Option<f32>,
     pub tab_width: Option<usize>,
     pub word_wrap: Option<bool>,
     pub smooth_scroll: Option<bool>,
     pub leader_key: Option<String>,
+    pub search_excludes: Option<Vec<String>>,
 }
 
 /// Session bookmarks use persistent IDs returned by the bookmark list.
@@ -384,6 +386,8 @@ pub enum Request {
         #[serde(default)]
         workspace: Option<PathBuf>,
         #[serde(default)]
+        excludes: Option<Vec<String>>,
+        #[serde(default)]
         case_sensitive: bool,
         #[serde(default)]
         whole_word: bool,
@@ -478,6 +482,7 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli selection TAB_ID
   morrow-cli settings [PATCH.json]
   morrow-cli settings leader-key space|comma|backslash|CHAR
+  morrow-cli settings swap-jk true|false
   morrow-cli bookmarks [list] [--limit N] [--offset N]
   morrow-cli bookmarks toggle [--tab ID] [--label TEXT]
   morrow-cli bookmarks remove|jump ID
@@ -488,6 +493,7 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli diff TAB_ID [--count N]
   morrow-cli diagnostics TAB_ID [--limit N] [--offset N]
   morrow-cli search QUERY [WORKSPACE] [--case-sensitive] [--whole-word] [--limit N]
+                    [--exclude PATTERN ...|--no-excludes]
   morrow-cli output [--line N] [--count N]
   morrow-cli git-status [WORKSPACE] [--limit N] [--offset N]
   morrow-cli new [TITLE]
@@ -542,6 +548,17 @@ Select the project first, then inspect layout and use its current IDs. Use schem
 for complete request shapes and task/disk-search limits. Batch stops at the first
 failed/partial step by default and reports completed steps; it never rolls back
 or replays them.
+
+Search reads saved workspace files on a bounded background walk. Omitted filters
+use settings.search_excludes. Repeated --exclude rules replace that list for one
+search; --no-excludes clears optional filters only. .gitignore and VCS-directory
+guards still apply; unsaved buffers are excluded. Results report actual excludes
+and excludes_source. JSON search accepts optional excludes:[] or ["folder/glob"].
+Settings patches accept search_excludes and swap_jk; omitted/null fields remain
+unchanged. Exclusion rules are gitignore-style, max 128 rules/1024 bytes each/
+16 KiB total, trimmed with Windows separators normalized; ! negation is refused.
+Invalid rules apply nothing. swap_jk defaults false and swaps j/k navigation;
+inserted text and literal find/replacement targets keep their original letters.
 "#;
 
 pub enum Parsed {
@@ -648,6 +665,21 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 iter.next().ok_or("--label needs text")?,
                 "--label",
             )?,
+            "--exclude" => {
+                if options.no_excludes {
+                    return Err("--exclude and --no-excludes are contradictory".into());
+                }
+                options.excludes.get_or_insert_with(Vec::new).push(
+                    iter.next()
+                        .ok_or("--exclude needs a folder or glob pattern")?,
+                );
+            }
+            "--no-excludes" => {
+                if options.excludes.is_some() {
+                    return Err("--exclude and --no-excludes are contradictory".into());
+                }
+                set_flag(&mut options.no_excludes, "--no-excludes")?;
+            }
             "--case-sensitive" => set_flag(&mut options.case_sensitive, "--case-sensitive")?,
             "--whole-word" => set_flag(&mut options.whole_word, "--whole-word")?,
             "--first" => set_flag(&mut options.first, "--first")?,
@@ -763,6 +795,14 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                     leader_key: Some(normalize_leader_key(value)?),
                     ..Default::default()
                 }),
+                [setting, value] if setting == "swap-jk" => Some(SettingsPatch {
+                    swap_jk: Some(match value.as_str() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err("settings swap-jk requires true or false".into()),
+                    }),
+                    ..Default::default()
+                }),
                 [path] => Some(
                     transport::from_unique_json::<SettingsPatch>(json_bytes(&read_json_file(
                         &absolute(path.into()),
@@ -771,7 +811,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 ),
                 _ => {
                     return Err(
-                        "settings takes PATCH.json or leader-key space|comma|backslash|CHAR".into(),
+                        "settings takes PATCH.json, swap-jk true|false, or leader-key space|comma|backslash|CHAR".into(),
                     );
                 }
             },
@@ -833,6 +873,11 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
             Request::Search {
                 query: positional[0].clone(),
                 workspace: positional.get(1).map(|p| absolute(p.into())),
+                excludes: if options.no_excludes {
+                    Some(Vec::new())
+                } else {
+                    options.excludes.clone()
+                },
                 case_sensitive: options.case_sensitive,
                 whole_word: options.whole_word,
                 limit: options.limit.unwrap_or(100),
@@ -938,6 +983,8 @@ struct Options {
     revision: Option<u64>,
     tab: Option<u64>,
     label: Option<String>,
+    excludes: Option<Vec<String>>,
+    no_excludes: bool,
     case_sensitive: bool,
     whole_word: bool,
     first: bool,
@@ -989,6 +1036,8 @@ impl Options {
             ),
             (self.tab.is_some(), command == "bookmarks", "--tab"),
             (self.label.is_some(), command == "bookmarks", "--label"),
+            (self.excludes.is_some(), command == "search", "--exclude"),
+            (self.no_excludes, command == "search", "--no-excludes"),
             (
                 self.case_sensitive,
                 matches!(command, "find" | "search" | "replace"),
@@ -1087,6 +1136,53 @@ pub fn normalize_leader_key(value: &str) -> Result<String, String> {
         (Some(key), None) if !key.is_control() => Ok(normalized.to_owned()),
         _ => Err("leader_key needs one printable character or space|comma|backslash".into()),
     }
+}
+/// Compile bounded gitignore-style rules before a request can change settings.
+/// This pure helper is also used by the workspace search worker.
+pub fn normalize_search_excludes(values: &[String]) -> Result<Vec<String>, String> {
+    if values.len() > 128 {
+        return Err("search_excludes/excludes accepts at most 128 folder or glob rules".into());
+    }
+    if values.iter().map(String::len).sum::<usize>() > 16 * 1024 {
+        return Err("search_excludes/excludes rules exceed 16 KiB in total".into());
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
+    builder.allow_unclosed_class(false);
+    builder
+        .case_insensitive(cfg!(windows))
+        .map_err(|error| error.to_string())?;
+    let mut normalized = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        if value.len() > 1024 {
+            return Err(format!("Exclude rule {} exceeds 1024 bytes", index + 1));
+        }
+        let rule = value.trim().replace('\\', "/");
+        if rule.is_empty() {
+            continue;
+        }
+        if rule.starts_with('!') {
+            return Err(format!(
+                "Exclude rule {} uses unsupported ! negation; remove it or use excludes:[] for this search",
+                index + 1
+            ));
+        }
+        if rule.chars().any(char::is_control) {
+            return Err(format!(
+                "Exclude rule {} must be a single printable folder or glob pattern",
+                index + 1
+            ));
+        }
+        let literal_hash = rule.starts_with('#').then(|| format!("\\{rule}"));
+        builder.add_line(None, literal_hash.as_deref().unwrap_or(&rule))
+            .map_err(|error| format!("Invalid exclude rule {}: {error}; correct the folder/glob pattern before retrying", index + 1))?;
+        if !normalized.contains(&rule) {
+            normalized.push(rule);
+        }
+    }
+    builder
+        .build()
+        .map_err(|error| format!("Invalid exclude rules: {error}"))?;
+    Ok(normalized)
 }
 fn set_option<T>(field: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
     if field.is_some() {
@@ -1330,6 +1426,9 @@ pub fn validate(request: &Request) -> Result<(), String> {
             }
         }
         Request::Settings { patch: Some(patch) } => {
+            if let Some(excludes) = &patch.search_excludes {
+                normalize_search_excludes(excludes)?;
+            }
             if let Some(leader_key) = &patch.leader_key {
                 normalize_leader_key(leader_key)?;
             }
@@ -1384,6 +1483,7 @@ pub fn validate(request: &Request) -> Result<(), String> {
         Request::Search {
             query,
             workspace,
+            excludes,
             limit,
             ..
         } => {
@@ -1391,6 +1491,9 @@ pub fn validate(request: &Request) -> Result<(), String> {
             validate_page(*limit, 0)?;
             if let Some(path) = workspace {
                 validate_path(path)?;
+            }
+            if let Some(excludes) = excludes {
+                normalize_search_excludes(excludes)?;
             }
         }
         Request::Output {
@@ -1938,6 +2041,140 @@ mod tests {
         );
     }
     #[test]
+    fn search_exclusion_options_preserve_inheritance_and_explicit_empty_override() {
+        let search = |args: &[&str]| {
+            let Parsed::Command {
+                request: Request::Search { excludes, .. },
+                ..
+            } = parse(args).unwrap()
+            else {
+                panic!("expected Search")
+            };
+            excludes
+        };
+        assert_eq!(search(&["search", "needle"]), None);
+        assert_eq!(
+            search(&["search", "needle", "--no-excludes"]),
+            Some(Vec::new())
+        );
+        let rules = search(&[
+            "search",
+            "needle",
+            "--exclude",
+            "src\\generated",
+            "--exclude",
+            "**/*.min.js",
+        ])
+        .unwrap();
+        assert_eq!(
+            normalize_search_excludes(&rules).unwrap(),
+            ["src/generated", "**/*.min.js"]
+        );
+        for args in [
+            vec![
+                "search",
+                "needle",
+                "--exclude",
+                "generated",
+                "--no-excludes",
+            ],
+            vec![
+                "search",
+                "needle",
+                "--no-excludes",
+                "--exclude",
+                "generated",
+            ],
+            vec!["search", "needle", "--no-excludes", "--no-excludes"],
+            vec!["search", "needle", "--exclude"],
+            vec!["read", "1", "--exclude", "generated"],
+            vec!["settings", "--no-excludes"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+        for json in [
+            json!({"op":"search","query":"needle"}),
+            json!({"op":"search","query":"needle","excludes":null}),
+        ] {
+            let request: Request = serde_json::from_value(json).unwrap();
+            validate(&request).unwrap();
+            assert!(matches!(request, Request::Search { excludes: None, .. }));
+        }
+    }
+    #[test]
+    fn exclusion_rules_validate_globs_and_actual_payload_bounds_before_effects() {
+        let normalized = normalize_search_excludes(&[
+            "  src\\generated  ".into(),
+            "".into(),
+            " ".into(),
+            "src/generated".into(),
+            "#cache".into(),
+            "**/*.min.js".into(),
+        ])
+        .unwrap();
+        assert_eq!(normalized, ["src/generated", "#cache", "**/*.min.js"]);
+        for rules in [
+            vec!["!keep.rs".into()],
+            vec!["[abc".into()],
+            vec!["folder\nfile".into()],
+            vec!["folder\tfile".into()],
+            vec!["x".repeat(1025)],
+            vec!["x".into(); 129],
+            vec!["x".repeat(1024); 17],
+        ] {
+            assert!(normalize_search_excludes(&rules).is_err(), "{rules:?}");
+            for json in [
+                json!({"op":"search","query":"needle","excludes":rules}),
+                json!({"op":"settings","patch":{"swap_jk":true,"search_excludes":rules}}),
+            ] {
+                let request: Request = serde_json::from_value(json).unwrap();
+                assert!(validate(&request).is_err());
+            }
+        }
+        assert!(normalize_search_excludes(&vec!["x".repeat(1024); 16]).is_ok());
+        for json in [
+            json!({"op":"settings","patch":{"swap_jk":"true"}}),
+            json!({"op":"search","query":"needle","excludes":[42]}),
+            json!({"op":"search","query":"needle","exclude":["target"]}),
+        ] {
+            assert!(serde_json::from_value::<Request>(json).is_err());
+        }
+    }
+    #[test]
+    fn swap_jk_cli_is_explicit_boolean_and_leaves_unrelated_settings_omitted() {
+        for (input, expected) in [("true", true), ("false", false)] {
+            let Parsed::Command {
+                request: Request::Settings { patch: Some(patch) },
+                start,
+            } = parse(&["settings", "swap-jk", input]).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(patch.swap_jk, Some(expected));
+            assert!(
+                patch.vim.is_none()
+                    && patch.leader_key.is_none()
+                    && patch.search_excludes.is_none()
+            );
+            assert!(!start);
+        }
+        for input in ["", "on", "1", "TRUE", "false "] {
+            assert!(parse(&["settings", "swap-jk", input]).is_err());
+        }
+        let request: Request =
+            serde_json::from_value(json!({"op":"settings","patch":{"word_wrap":true}})).unwrap();
+        assert!(matches!(
+            request,
+            Request::Settings {
+                patch: Some(SettingsPatch {
+                    swap_jk: None,
+                    search_excludes: None,
+                    ..
+                })
+            }
+        ));
+    }
+    #[test]
     fn open_preserves_preview_and_exact_location() {
         let Parsed::Command {
             request: Request::Open { files },
@@ -2258,6 +2495,7 @@ mod tests {
             Request::Search {
                 query: "x".into(),
                 workspace: None,
+                excludes: None,
                 case_sensitive: false,
                 whole_word: false,
                 limit: 100,

@@ -46,6 +46,7 @@ impl MorrowApp {
         let Request::Search {
             query,
             workspace,
+            excludes,
             case_sensitive,
             whole_word,
             limit,
@@ -64,12 +65,21 @@ impl MorrowApp {
                 return true;
             }
         };
-        let Some(index) = project.index.clone() else {
-            let _ = reply.send(Response::failure(
-                "index_not_ready",
-                "This workspace has no completed file index. Inspect status and retry after indexing finishes.",
-            ));
-            return true;
+        let excludes_source = if excludes.is_some() {
+            "request"
+        } else {
+            "settings"
+        };
+        let excludes = match cli::normalize_search_excludes(
+            excludes
+                .as_deref()
+                .unwrap_or(&self.settings.search_excludes),
+        ) {
+            Ok(excludes) => excludes,
+            Err(error) => {
+                let _ = reply.send(Response::failure("invalid_search_excludes", error));
+                return true;
+            }
         };
         let permit = match SearchPermit::acquire() {
             Some(permit) => permit,
@@ -82,6 +92,7 @@ impl MorrowApp {
             }
         };
         let root = crate::paths::display(&project.root);
+        let root_path = project.root.clone();
         let query = query.clone();
         let options = workspace::SearchOptions {
             case_sensitive: *case_sensitive,
@@ -96,10 +107,13 @@ impl MorrowApp {
             .name("morrow-cli-search".into())
             .spawn(move || {
                 let _permit = permit;
-                let response = match workspace::search_project(&index, &query, options) {
-                    Ok(results) => search_response(root, query, results),
-                    Err(error) => Response::failure("search_failed", error),
-                };
+                let response =
+                    match workspace::search_with_excludes(&root_path, &query, options, &excludes) {
+                        Ok(results) => {
+                            search_response(root, query, results, excludes, excludes_source)
+                        }
+                        Err(error) => Response::failure("search_failed", error),
+                    };
                 let _ = worker_reply.send(response);
             });
         if let Err(error) = spawn {
@@ -459,7 +473,13 @@ fn git_change(change: git::FileChange) -> &'static str {
     }
 }
 
-fn search_response(root: String, query: String, results: workspace::SearchResults) -> Response {
+fn search_response(
+    root: String,
+    query: String,
+    results: workspace::SearchResults,
+    excludes: Vec<String>,
+    excludes_source: &str,
+) -> Response {
     let mut items = Vec::new();
     let mut bytes = 0;
     for found in &results.matches {
@@ -489,7 +509,8 @@ fn search_response(root: String, query: String, results: workspace::SearchResult
         })
         .collect();
     Response::success(json!({
-        "workspace":root,"query":query,"scope":"indexed_files_on_disk",
+        "workspace":root,"query":query,"scope":"workspace_files_on_disk",
+        "excludes":excludes,"excludes_source":excludes_source,
         "includes_unsaved_buffers":false,"items":items,"truncated":results.truncated||omitted>0,
         "omitted_matches":omitted,"files_searched":results.files_searched,
         "files_skipped":results.files_skipped,"warnings":warnings,
@@ -772,6 +793,7 @@ mod tests {
         let request = Request::Search {
             query: "needle".into(),
             workspace: Some(std::env::temp_dir().join("unknown-query-workspace")),
+            excludes: None,
             case_sensitive: false,
             whole_word: false,
             limit: 10,
@@ -783,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn asynchronous_search_reads_indexed_disk_files_and_preserves_gui_search() {
+    fn asynchronous_search_reads_disk_files_without_an_index_and_preserves_gui_search() {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "morrow-query-test-{}-{}",
@@ -794,14 +816,13 @@ mod tests {
         fs::write(directory.join("code.rs"), "😀 needle\nNeedle\n").unwrap();
         let (mut app, _) = app_with_tab("unsaved replacement", "old");
         app.projects[0].root = directory.clone();
-        let mut index = workspace::WorkspaceIndex::empty(directory.clone());
-        index.files.push(directory.join("code.rs"));
-        app.projects[0].index = Some(Arc::new(index));
+        app.projects[0].index = None;
         app.project_query = "user query".into();
         let (reply, receiver) = mpsc::channel();
         let request = Request::Search {
             query: "needle".into(),
             workspace: Some(directory.join(".")),
+            excludes: None,
             case_sensitive: true,
             whole_word: true,
             limit: 10,
@@ -817,6 +838,92 @@ mod tests {
         assert_eq!(response.result["includes_unsaved_buffers"], false);
         assert_eq!(app.project_query, "user query");
         assert_eq!(app.tab().unwrap().text, "unsaved replacement");
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn asynchronous_search_reports_effective_filters_and_override_keeps_inactive_workspace_background()
+     {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "morrow-query-excludes-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        for folder in ["generated", "ignored", ".git", "other"] {
+            fs::create_dir_all(directory.join(folder)).unwrap();
+        }
+        fs::write(directory.join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(directory.join("source.rs"), "needle source\n").unwrap();
+        for folder in ["generated", "ignored", ".git"] {
+            fs::write(directory.join(folder).join("file.rs"), "needle hidden\n").unwrap();
+        }
+        let (mut app, id) = app_with_tab("unsaved user document", "saved");
+        app.projects[0].root = directory.clone();
+        app.bind_current_pane();
+        app.projects.push(Project::new(directory.join("other")));
+        app.switch_project(1);
+        let active_layout = app.layout_status();
+        app.settings.search_excludes = vec!["generated".into()];
+        app.project_query = "keep user query".into();
+        for (override_rules, expected_rules, expected_count, source) in [
+            (None, vec!["generated"], 1, "settings"),
+            (Some(Vec::new()), Vec::new(), 2, "request"),
+            (
+                Some(vec!["generated".into(), "source.rs".into()]),
+                vec!["generated", "source.rs"],
+                0,
+                "request",
+            ),
+        ] {
+            let (reply, receiver) = mpsc::channel();
+            let request = Request::Search {
+                query: "needle".into(),
+                workspace: Some(directory.clone()),
+                excludes: override_rules,
+                case_sensitive: true,
+                whole_word: true,
+                limit: 10,
+            };
+            assert!(app.control_query_async(&request, reply));
+            let response = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(
+                response.result["items"].as_array().unwrap().len(),
+                expected_count
+            );
+            assert_eq!(response.result["excludes"], json!(expected_rules));
+            assert_eq!(response.result["excludes_source"], source);
+            assert_eq!(response.result["scope"], "workspace_files_on_disk");
+            assert_eq!(app.settings.search_excludes, ["generated"]);
+            assert_eq!(app.active_project, 1);
+            assert_eq!(app.layout_status(), active_layout);
+            assert_eq!(app.project_query, "keep user query");
+            assert_eq!(app.projects[0].tabs[0].id, id);
+            assert_eq!(app.projects[0].tabs[0].text, "unsaved user document");
+        }
+        let (reply, receiver) = mpsc::channel();
+        app.settings.search_excludes = vec!["[broken".into()];
+        let request = Request::Search {
+            query: "needle".into(),
+            workspace: Some(directory.clone()),
+            excludes: None,
+            case_sensitive: false,
+            whole_word: false,
+            limit: 10,
+        };
+        assert!(app.control_query_async(&request, reply));
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "invalid_search_excludes"
+        );
+        assert_eq!(app.layout_status(), active_layout);
         drop(app);
         fs::remove_dir_all(directory).unwrap();
     }

@@ -3,6 +3,8 @@
 use super::*;
 use egui_kittest::Harness;
 
+const PRESERVED_REGISTER: &str = "KEEP🦀";
+
 fn fixture(document: &str, vim: bool) -> MorrowApp {
     let mut app = MorrowApp::empty(egui::Context::default());
     app.settings.autosave = false;
@@ -14,6 +16,12 @@ fn fixture(document: &str, vim: bool) -> MorrowApp {
     let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
     tab.text = document.into();
     tab.saved_text = document.into();
+    let register = Yank {
+        text: PRESERVED_REGISTER.into(),
+        linewise: false,
+    };
+    tab.vim.set_register(register.clone());
+    app.register = Some(register);
     project.tabs.push(tab);
     app.projects.push(project);
     app.bind_current_pane();
@@ -73,7 +81,12 @@ fn assert_copied(screen: &Harness<'_, MorrowApp>, expected: &str) {
                 matches!(command, egui::OutputCommand::CopyText(text) if text == expected)
             })
     );
-    assert_eq!(screen.state().register.as_ref().unwrap().text, expected);
+    let register = screen.state().register.as_ref().unwrap();
+    assert_eq!(register.text, PRESERVED_REGISTER);
+    assert!(!register.linewise);
+    let local_register = screen.state().tab().unwrap().vim.register().unwrap();
+    assert_eq!(local_register.text, PRESERVED_REGISTER);
+    assert!(!local_register.linewise);
 }
 
 #[test]
@@ -197,13 +210,13 @@ fn native_copy_cancels_pending_operator_and_preserves_visual_payload() {
         [egui::Event::Text("vll".into()), egui::Event::Copy],
     );
     assert_copied(&screen, "a🦀é");
-    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
-    assert!(screen.state().tab().unwrap().selection.is_empty());
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Visual);
+    assert_eq!(screen.state().tab().unwrap().selection, 0..3);
     assert_unedited(&screen, original, revision);
 }
 
 #[test]
-fn native_copy_finishes_insert_and_keeps_the_group_undoable() {
+fn native_copy_keeps_insert_active_and_the_group_undoable() {
     let original = "tail\n";
     let mut screen = harness(fixture(original, true));
     events(
@@ -215,13 +228,14 @@ fn native_copy_finishes_insert_and_keeps_the_group_undoable() {
         ],
     );
     assert_eq!(screen.state().tab().unwrap().text, "🦀tail\n");
-    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Insert);
+    events(&mut screen, [key(Key::Escape)]);
     events(&mut screen, [egui::Event::Text("u".into())]);
     assert_eq!(screen.state().tab().unwrap().text, original);
 }
 
 #[test]
-fn native_cut_visual_unicode_is_yanked_and_undoable() {
+fn native_cut_visual_unicode_preserves_vim_register_and_is_undoable() {
     let original = "a🦀édef\n";
     let mut screen = harness(fixture(original, true));
     events(
@@ -235,7 +249,7 @@ fn native_cut_visual_unicode_is_yanked_and_undoable() {
     assert_eq!(screen.state().tab().unwrap().text, original);
     assert!(!screen.state().tab().unwrap().dirty);
     events(&mut screen, [egui::Event::Text("0p".into())]);
-    assert_eq!(screen.state().tab().unwrap().text, "aa🦀é🦀édef\n");
+    assert_eq!(screen.state().tab().unwrap().text, "aKEEP🦀🦀édef\n");
 }
 
 #[test]
@@ -248,7 +262,7 @@ fn native_cut_visual_line_keeps_linewise_register_and_undo() {
     );
     assert_eq!(screen.state().tab().unwrap().text, "second\n");
     assert_copied(&screen, "a🦀é\n");
-    assert!(screen.state().register.as_ref().unwrap().linewise);
+    assert!(!screen.state().register.as_ref().unwrap().linewise);
     events(&mut screen, [egui::Event::Text("u".into())]);
     assert_eq!(screen.state().tab().unwrap().text, original);
 }

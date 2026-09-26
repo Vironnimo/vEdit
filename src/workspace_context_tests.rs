@@ -64,6 +64,8 @@ fn stale_result(app: &mut MorrowApp, root: PathBuf, generation: u64) {
         .send(WorkerResult::Search {
             root,
             generation,
+            query: app.project_query.clone(),
+            excludes: app.settings.search_excludes.clone(),
             result: Ok(workspace::SearchResults {
                 files_searched: 99,
                 ..Default::default()

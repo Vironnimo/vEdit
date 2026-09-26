@@ -245,6 +245,18 @@ enum FileOperation {
     NewFolder,
 }
 
+fn rename_name_selection(name: &str, is_dir: bool) -> Range<usize> {
+    let selected = if is_dir {
+        name
+    } else {
+        Path::new(name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name)
+    };
+    0..selected.chars().count()
+}
+
 pub(super) struct FileActionDialog {
     operation: FileOperation,
     path: PathBuf,
@@ -252,6 +264,8 @@ pub(super) struct FileActionDialog {
     error: Option<String>,
     focus: bool,
     busy: bool,
+    name_selection: Option<Range<usize>>,
+    return_to_explorer: bool,
 }
 
 pub(super) struct FileActionResult {
@@ -705,6 +719,7 @@ impl MorrowApp {
             EditorAction::CommandPalette => self.open_palette(Palette::Commands),
             EditorAction::Paste => {
                 let widget = self.document_widget_id(id);
+                let vim = self.settings.vim;
                 let Some(tab) = self.tab_by_id_mut(id) else {
                     return;
                 };
@@ -715,7 +730,13 @@ impl MorrowApp {
                 let pending = PendingPaste {
                     id,
                     revision: tab.revision,
-                    selection: tab.selection.clone(),
+                    selection: if vim {
+                        tab.vim
+                            .selection(&tab.text)
+                            .unwrap_or_else(|| tab.selection.clone())
+                    } else {
+                        tab.selection.clone()
+                    },
                     requested: Instant::now(),
                 };
                 self.context_paste = Some(pending);
@@ -724,7 +745,8 @@ impl MorrowApp {
                     .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
             EditorAction::Copy | EditorAction::Cut => {
-                if action == EditorAction::Cut && self.settings.vim {
+                let vim = self.settings.vim;
+                if action == EditorAction::Cut && vim {
                     let Some(tab) = self.tab_by_id_mut(id) else {
                         return;
                     };
@@ -732,7 +754,7 @@ impl MorrowApp {
                         return;
                     }
                     if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
-                        let result = tab.vim.cut_visual(&mut tab.text);
+                        let (result, copied) = tab.vim.cut_visual_to_clipboard(&mut tab.text);
                         if result.text_changed {
                             tab.changed();
                         }
@@ -743,9 +765,8 @@ impl MorrowApp {
                         tab.pending_selection = Some(tab.selection.clone());
                         tab.focus = true;
                         tab.scroll_to_cursor = true;
-                        if let Some(yank) = result.yanked {
-                            self.ctx.copy_text(yank.text.clone());
-                            self.register = Some(yank);
+                        if let Some(copied) = copied {
+                            self.ctx.copy_text(copied);
                         }
                         return;
                     }
@@ -756,27 +777,46 @@ impl MorrowApp {
                 let Some(tab) = self.tab_by_id_mut(id) else {
                     return;
                 };
-                if tab.selection.is_empty() {
+                if action == EditorAction::Cut && tab.loading {
+                    return;
+                }
+                let selection = if vim {
+                    tab.vim
+                        .selection(&tab.text)
+                        .unwrap_or_else(|| tab.selection.clone())
+                } else {
+                    tab.selection.clone()
+                };
+                let cursor = if vim {
+                    tab.vim.cursor
+                } else {
+                    tab.selection.start
+                };
+                let linewise = selection.is_empty() || vim && tab.vim.mode == VimMode::VisualLine;
+                let selection = crate::vim::clipboard_range(&tab.text, selection, cursor);
+                if selection.is_empty() {
                     return;
                 }
                 let copied: String = tab
                     .text
                     .chars()
-                    .skip(tab.selection.start)
-                    .take(tab.selection.len())
+                    .skip(selection.start)
+                    .take(selection.len())
                     .collect();
-                let yank = Yank {
-                    text: copied.clone(),
-                    linewise: tab.vim.mode == VimMode::VisualLine,
-                };
-                tab.vim.set_register(yank.clone());
-                if action == EditorAction::Cut && !tab.loading {
-                    let edit = editor::replace_selection(&tab.text, tab.selection.clone(), "");
+                if action == EditorAction::Cut {
+                    let edit = editor::replace_selection(&tab.text, selection, "");
                     let cursor = edit.selection.start;
                     tab.apply(edit);
                     tab.set_cursor(cursor..cursor);
+                    tab.vim.notify_external_text_change();
+                } else {
+                    if linewise {
+                        tab.flash_line_yank(vec![selection]);
+                    } else {
+                        tab.flash_yank(vec![selection]);
+                    }
+                    tab.vim.cancel_pending_command();
                 }
-                self.register = Some(yank);
                 self.ctx.copy_text(copied);
             }
             EditorAction::SelectAll => {
@@ -933,7 +973,11 @@ impl MorrowApp {
         let edit = editor::replace_selection(&tab.text, pending.selection, &text);
         let cursor = edit.selection.start;
         tab.apply(edit);
+        if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
+            tab.vim.set_selection(&tab.text, cursor..cursor);
+        }
         tab.set_cursor(cursor..cursor);
+        tab.vim.notify_external_text_change();
     }
 
     pub(super) fn apply_tab_context_action(&mut self, id: u64, action: TabAction) {
@@ -1027,7 +1071,11 @@ impl MorrowApp {
                         && (tab.loading || tab.saving)
                 });
         let mut action = None;
-        response.context_menu(|ui| {
+        let mut popup = egui::Popup::context_menu(response).id(self.explorer_menu_id(path));
+        if let Some(position) = self.explorer_menu_position(response, path) {
+            popup = popup.at_position(position);
+        }
+        popup.show(|ui| {
             if !is_dir {
                 if design::menu_item(ui, "Open", "", "Open this file in the current pane").clicked()
                 {
@@ -1058,12 +1106,23 @@ impl MorrowApp {
             }
             if ui
                 .add_enabled_ui(can_rename, |ui| {
-                    design::menu_item(
+                    let response = design::menu_item(
                         ui,
                         "Rename…",
-                        "",
+                        "F2",
                         "Rename without replacing another file; unsaved buffers stay open",
-                    )
+                    );
+                    // egui concatenates the shortcut into a Button's default
+                    // accessible name. Keep the command name stable while its
+                    // visible F2 hint remains available alongside it.
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            "Rename…",
+                        )
+                    });
+                    response
                 })
                 .inner
                 .clicked()
@@ -1109,7 +1168,7 @@ impl MorrowApp {
                 );
             }
             Some(4) => {
-                self.context_begin_file_action(FileOperation::Rename, path);
+                self.context_begin_rename(path, is_dir);
             }
             Some(5) => self.ctx.copy_text(crate::paths::display(path)),
             Some(6) => self.ctx.copy_text(crate::paths::display(
@@ -1196,6 +1255,7 @@ impl MorrowApp {
     }
 
     fn context_begin_file_action(&mut self, operation: FileOperation, path: &Path) {
+        let return_to_explorer = self.explorer_keyboard_focused();
         self.context_file_dialog = Some(FileActionDialog {
             operation,
             path: path.into(),
@@ -1210,7 +1270,44 @@ impl MorrowApp {
             error: None,
             focus: true,
             busy: false,
+            name_selection: None,
+            return_to_explorer,
         });
+    }
+
+    pub(super) fn context_begin_rename(&mut self, path: &Path, is_dir: bool) {
+        if self.context_path_busy(path)
+            || self
+                .projects
+                .iter()
+                .any(|project| project.root.starts_with(path))
+            || self
+                .projects
+                .iter()
+                .flat_map(|project| &project.tabs)
+                .any(|tab| {
+                    tab.path.as_ref().is_some_and(|open| open.starts_with(path))
+                        && (tab.loading || tab.saving)
+                })
+        {
+            self.status(
+                "Wait for pending file operations before renaming this item",
+                true,
+            );
+            return;
+        }
+        self.context_begin_file_action(FileOperation::Rename, path);
+        if let Some(dialog) = self.context_file_dialog.as_mut() {
+            dialog.name_selection = Some(rename_name_selection(&dialog.name, is_dir));
+            // Rename is invoked from Explorer, even if a menu item temporarily
+            // acquired keyboard focus before this action was dispatched.
+            dialog.return_to_explorer = true;
+        }
+        // The name field owns the next frame's keyboard input. Explorer has
+        // already consumed this frame's F2 and trailing text before opening it.
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = false;
+        }
     }
 
     pub(super) fn context_path_busy(&self, path: &Path) -> bool {
@@ -1251,12 +1348,28 @@ impl MorrowApp {
             );
             ui.add_space(8.0);
             ui.add_enabled_ui(!dialog.busy, |ui| {
+                let name_id = egui::Id::new("file_action_name");
+                if dialog.focus && !ui.is_sizing_pass() {
+                    let mut state =
+                        egui::TextEdit::load_state(ui.ctx(), name_id).unwrap_or_default();
+                    if let Some(selection) = dialog.name_selection.take() {
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(selection.start),
+                                egui::text::CCursor::new(selection.end),
+                            )));
+                        state.store(ui.ctx(), name_id);
+                    }
+                    ui.memory_mut(|memory| memory.request_focus(name_id));
+                }
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut dialog.name)
+                        .id(name_id)
                         .hint_text("Name")
                         .desired_width(f32::INFINITY),
                 );
-                if dialog.focus {
+                if dialog.focus && !ui.is_sizing_pass() {
                     response.request_focus();
                     dialog.focus = false;
                 }
@@ -1298,8 +1411,9 @@ impl MorrowApp {
             }
         });
         if (modal.should_close() || cancel) && !dialog.busy {
+            let return_to_explorer = dialog.return_to_explorer;
             self.context_file_dialog = None;
-            self.context_restore_editor_focus();
+            self.context_restore_file_action_focus(return_to_explorer);
             return;
         }
         if !submit || dialog.busy {
@@ -1312,8 +1426,9 @@ impl MorrowApp {
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy() == dialog.name)
         {
+            let return_to_explorer = dialog.return_to_explorer;
             self.context_file_dialog = None;
-            self.context_restore_editor_focus();
+            self.context_restore_file_action_focus(return_to_explorer);
             return;
         }
         let parent = if operation == FileOperation::Rename {
@@ -1395,11 +1510,16 @@ impl MorrowApp {
             return;
         }
         if result.job_id.is_none() {
+            let return_to_explorer = self
+                .context_file_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.return_to_explorer);
             self.context_file_dialog = None;
-            self.context_restore_editor_focus();
+            self.context_restore_file_action_focus(return_to_explorer);
         }
         let mut updated_tabs = Vec::new();
         if result.operation == FileOperation::Rename {
+            self.explorer_renamed(&result.old_path, &result.new_path);
             self.bookmarks
                 .rename_prefix(&result.old_path, &result.new_path);
             self.bookmark_lines.clear();
@@ -1483,6 +1603,14 @@ impl MorrowApp {
         }
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
+        }
+    }
+
+    fn context_restore_file_action_focus(&mut self, explorer: bool) {
+        if explorer {
+            self.focus_explorer();
+        } else {
+            self.context_restore_editor_focus();
         }
     }
 
@@ -1885,11 +2013,18 @@ mod tests {
     #[test]
     fn cut_preserves_unicode_and_can_be_undone_in_vim() {
         let mut app = fixture();
+        let preserved = Yank {
+            text: "Vim register".into(),
+            linewise: false,
+        };
+        app.register = Some(preserved.clone());
+        app.tab_mut().unwrap().vim.set_register(preserved.clone());
         let id = app.tab().unwrap().id;
         app.tab_mut().unwrap().selection = 1..3;
         app.apply_editor_context_action(id, EditorAction::Cut);
         assert_eq!(app.tab().unwrap().text, "α\nsecond\n");
-        assert_eq!(app.register.as_ref().unwrap().text, "βγ");
+        assert_eq!(app.register.as_ref(), Some(&preserved));
+        assert_eq!(app.tab().unwrap().vim.register(), Some(&preserved));
         app.apply_editor_context_action(id, EditorAction::Undo);
         assert_eq!(app.tab().unwrap().text, "αβγ\nsecond\n");
         assert!(!app.tab().unwrap().dirty);
@@ -1972,7 +2107,10 @@ mod tests {
             Some(0..tab.text.chars().count())
         );
         app.apply_editor_context_action(id, EditorAction::Copy);
-        assert_eq!(app.register.as_ref().unwrap().text, original);
+        assert!(app.register.is_none());
+        assert!(app.tab().unwrap().vim.register().is_none());
+        assert_eq!(app.tab().unwrap().vim.mode, VimMode::Visual);
+        assert_eq!(app.tab().unwrap().selection, 0..original.chars().count());
         assert_eq!(app.tab().unwrap().text, original);
         assert!(!app.tab().unwrap().dirty);
     }
