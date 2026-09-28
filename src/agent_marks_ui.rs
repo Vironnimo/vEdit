@@ -239,7 +239,7 @@ impl MorrowApp {
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
-                "For agent · {count} marked block{} across all projects\nSelect text, then Ctrl+Shift+A or Leader a to add it.\nOpen this collection to add notes, remove marks, or restore the last batch.",
+                "For agent · {count} marked block{} across all projects\nSelect text, then Ctrl+Shift+A or Leader a to add it.\nOpen this collection to add notes, remove marks, or restore the most recently removed or agent-collected blocks.",
                 block_suffix(count),
             ));
     }
@@ -251,11 +251,9 @@ impl MorrowApp {
                 id: mark.id,
                 range: mark.range.start..mark.range.end,
                 tooltip: format!(
-                    "For agent · {}:{}–{}:{}{}\n{}",
-                    mark.start.line,
-                    mark.start.column,
-                    mark.end.line,
-                    mark.end.column,
+                    "For agent · {}\n{}{}\n{}",
+                    mark_location(mark),
+                    mark_exact_range(mark),
                     if mark.note.is_empty() {
                         String::new()
                     } else {
@@ -289,10 +287,7 @@ impl MorrowApp {
                     .map(crate::paths::display)
                     .unwrap_or_else(|| format!("{} · unsaved document", mark.target.title));
                 let workspace = file_title(&mark.target.workspace);
-                let location = format!(
-                    "{}:{}–{}:{}",
-                    mark.start.line, mark.start.column, mark.end.line, mark.end.column
-                );
+                let location = mark_location(mark);
                 MarkRow {
                     id: mark.id,
                     file,
@@ -303,7 +298,8 @@ impl MorrowApp {
                     excerpt: short_first_line(&mark.snippet, 180),
                     note: short_text(&mark.note, 150),
                     tooltip: format!(
-                        "{full_path}\n{location}\n{}{}",
+                        "{full_path}\n{location}\n{}\n{}{}",
+                        mark_exact_range(mark),
                         short_text(&mark.snippet, 700),
                         if mark.note.is_empty() {
                             String::new()
@@ -377,8 +373,15 @@ impl MorrowApp {
         let mut edit_note = None;
         let mut save_note = None;
         let mut query_changed = false;
-        let can_restore = self.agent_marks.can_restore();
         let restore_count = self.agent_marks.restore_count();
+        let can_restore = self.agent_marks.can_restore();
+        let restore_origin = self.agent_marks.restore_origin();
+        let restore_detail = restore_summary(restore_count, restore_origin);
+        let restore_tooltip = if can_restore {
+            format!("Restore {restore_detail}, keeping new marks and notes")
+        } else {
+            "No removed or agent-collected blocks are missing from the current collection".into()
+        };
         let mut next_row_focus_ids = Vec::new();
         let pending_batch = self
             .agent_marks
@@ -523,16 +526,24 @@ impl MorrowApp {
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_add, "Add selection"));
                         add = response.clicked();
                         restore = ui.add_enabled_ui(can_restore, |ui|
-                            design::ghost_button(ui, "Restore last", &format!("Restore the last {restore_count} removed or collected block{}, keeping new marks and notes", block_suffix(restore_count)))).inner.clicked();
+                            design::ghost_button(ui, "Restore last", &restore_tooltip)).inner.clicked();
+                        ui.label(RichText::new(&restore_detail).size(10.5).color(MUTED));
                         clear = ui.add_enabled_ui(!rows.is_empty(), |ui|
-                            design::ghost_button(ui, "Clear all", "Remove all current agent marks. Restore last can bring them back.")).inner.clicked();
+                            design::ghost_button(ui, "Clear all", "Remove all current marks and make them the Restore last target. Source text stays unchanged.")).inner.clicked();
                     });
-                    ui.label(RichText::new("↑ ↓ choose · Enter opens · Esc closes. Agents collect these blocks; Restore last brings them back.")
+                    ui.label(RichText::new("↑ ↓ choose · Enter opens · Esc closes. Restoration keeps new marks and notes.")
                         .size(10.5).color(MUTED));
                     if let Some((batch, count)) = pending_batch {
-                        ui.label(RichText::new(format!("Agent collected {count} block{} · delivery pending", block_suffix(count)))
+                        ui.label(RichText::new(format!("Agent collected {count} block{} · awaiting acknowledgment", block_suffix(count)))
                             .size(10.5).color(AGENT_MARK_COLOR))
-                            .on_hover_text(format!("Batch #{batch} is retained until the agent acknowledges delivery. Restore last can return these blocks to your collection."));
+                            .on_hover_text(format!(
+                                "The agent has not confirmed receiving every block and complete excerpt. This collection remains retained until a later agent collection replaces it.\n{}",
+                                if restore_origin == crate::agent_marks::RestoreSource::Taken(batch) {
+                                    "Restore last returns blocks from this collection that are not already marked."
+                                } else {
+                                    "Restore last currently targets the most recently removed blocks."
+                                },
+                            ));
                     }
                 }
             });
@@ -775,6 +786,43 @@ fn mark_row(ui: &mut egui::Ui, row: &MarkRow, selected: bool, enabled: bool) -> 
 
 fn block_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+fn restore_summary(count: usize, origin: crate::agent_marks::RestoreSource) -> String {
+    if count == 0 {
+        return "Nothing to restore".into();
+    }
+    let origin = match origin {
+        crate::agent_marks::RestoreSource::Removed => "removed",
+        crate::agent_marks::RestoreSource::Taken(_) => "agent-collected",
+    };
+    format!("{count} {origin} block{}", block_suffix(count))
+}
+
+fn mark_location(mark: &crate::agent_marks::UserMark) -> String {
+    // A next-line boundary includes the previous line's ending, not that next line.
+    let last_line = if mark.end.column == 1 && mark.end.line > mark.start.line {
+        mark.end.line - 1
+    } else {
+        mark.end.line
+    };
+    let lines = if last_line == mark.start.line {
+        format!("Line {}", mark.start.line)
+    } else {
+        format!("Lines {}–{last_line}", mark.start.line)
+    };
+    let count = mark.snippet_chars();
+    format!(
+        "{lines} · {count} character{}",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+fn mark_exact_range(mark: &crate::agent_marks::UserMark) -> String {
+    format!(
+        "Exact range: {}:{} → {}:{} (end excluded)",
+        mark.start.line, mark.start.column, mark.end.line, mark.end.column,
+    )
 }
 
 fn short_text(text: &str, limit: usize) -> String {

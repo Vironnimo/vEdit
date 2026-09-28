@@ -460,13 +460,140 @@ fn collection_groups_files_and_opens_the_chosen_mark_with_real_clicks() {
     screen.get_by_label("For agent").click();
     screen.run_steps(4);
     screen
-        .get_by_label_contains("Marked block 1:9–1:15: target ·")
+        .get_by_label_contains("Marked block Line 1 · 6 characters: target ·")
         .click();
     screen.run_steps(4);
     assert!(!screen.state().agent_marks_modal_open());
     assert_eq!(screen.state().tab().unwrap().id, original_id);
     assert_eq!(screen.state().agent_marks.items.len(), 2);
     assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
+}
+
+#[test]
+fn restore_detail_follows_the_latest_take_or_removal_and_keeps_new_marks() {
+    let mut screen = harness(fixture(true), [1200.0, 900.0]);
+    select(&mut screen, 8, 14);
+    add_selection(&mut screen);
+    let collected = screen.state().agent_marks.items[0].id;
+    screen
+        .state_mut()
+        .agent_marks
+        .take("ui-restore-origin")
+        .unwrap();
+    screen.run_steps(4);
+    select(&mut screen, 21, 37);
+    add_selection(&mut screen);
+    let removed = screen.state().agent_marks.items[0].id;
+    screen
+        .state_mut()
+        .agent_marks_set_note(removed, "Restore this newer note");
+    select(&mut screen, 39, 44);
+    add_selection(&mut screen);
+    let kept = screen.state().agent_marks.items[1].id;
+    screen
+        .state_mut()
+        .agent_marks_set_note(kept, "Keep this current note");
+    screen.get_by_label("For agent").click();
+    screen.hover_at(egui::pos2(-20.0, -20.0));
+    screen.run_steps(4);
+    assert!(screen.query_by_label("1 agent-collected block").is_some());
+    assert!(
+        screen
+            .query_by_label("Agent collected 1 block · awaiting acknowledgment")
+            .is_some()
+    );
+    screen
+        .get_by_label_contains(&format!("Remove mark {removed} ·"))
+        .click();
+    screen.run_steps(4);
+    assert!(screen.query_by_label("1 removed block").is_some());
+    assert!(screen.query_by_label("1 agent-collected block").is_none());
+    assert!(
+        screen
+            .query_by_label("Agent collected 1 block · awaiting acknowledgment")
+            .is_some()
+    );
+    screen.get_by_label("Restore last").click();
+    screen.run_steps(4);
+    let marks = &screen.state().agent_marks;
+    assert_eq!(marks.items.len(), 2);
+    assert!(
+        marks.get(collected, None).is_none(),
+        "a newer removal must remain the restore target"
+    );
+    assert_eq!(
+        marks.get(removed, None).unwrap().note,
+        "Restore this newer note"
+    );
+    assert_eq!(
+        marks.get(kept, None).unwrap().note,
+        "Keep this current note"
+    );
+    assert!(screen.query_by_label("Nothing to restore").is_some());
+    screen.get_by_label("Clear all").click();
+    screen.run_steps(4);
+    assert!(screen.query_by_label("2 removed blocks").is_some());
+    screen.get_by_label("Restore last").click();
+    screen.run_steps(4);
+    assert_eq!(screen.state().agent_marks.items.len(), 2);
+    assert!(screen.state().agent_marks.get(collected, None).is_none());
+}
+
+#[test]
+fn human_ranges_name_included_lines_and_unicode_character_counts() {
+    use crate::agent_marks::{AgentMarks, MarkDocument};
+    let text = "a🦊\r\nbé\r\nc";
+    let mut marks = AgentMarks::default();
+    let document = MarkDocument {
+        id: 1,
+        workspace: Path::new("C:/project"),
+        path: Some(Path::new("C:/project/plan.md")),
+        title: "plan.md",
+    };
+    for (range, label, exact) in [
+        (
+            0..1,
+            "Line 1 · 1 character",
+            "Exact range: 1:1 → 1:2 (end excluded)",
+        ),
+        (
+            1..2,
+            "Line 1 · 1 character",
+            "Exact range: 1:2 → 1:3 (end excluded)",
+        ),
+        (
+            0..4,
+            "Line 1 · 4 characters",
+            "Exact range: 1:1 → 2:1 (end excluded)",
+        ),
+        (
+            1..6,
+            "Lines 1–2 · 5 characters",
+            "Exact range: 1:2 → 2:3 (end excluded)",
+        ),
+        (
+            0..8,
+            "Lines 1–2 · 8 characters",
+            "Exact range: 1:1 → 3:1 (end excluded)",
+        ),
+        (
+            4..8,
+            "Line 2 · 4 characters",
+            "Exact range: 2:1 → 3:1 (end excluded)",
+        ),
+        (
+            8..9,
+            "Line 3 · 1 character",
+            "Exact range: 3:1 → 3:2 (end excluded)",
+        ),
+    ] {
+        let id = marks.add(document, text, 1, range.clone(), "").unwrap();
+        let mark = marks.get(id, None).unwrap();
+        assert_eq!(mark_location(mark), label);
+        assert_eq!(mark_exact_range(mark), exact);
+        assert_eq!(mark.range.start, range.start);
+        assert_eq!(mark.range.end, range.end);
+    }
 }
 
 #[test]

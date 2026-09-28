@@ -219,9 +219,9 @@ impl fmt::Display for MarkError {
 
 impl std::error::Error for MarkError {}
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RestoreSource {
+pub(crate) enum RestoreSource {
     #[default]
     Removed,
     Taken(u64),
@@ -682,6 +682,10 @@ impl AgentMarks {
         self.restore_count() > 0
     }
 
+    pub(crate) fn restore_origin(&self) -> RestoreSource {
+        self.restore_source
+    }
+
     pub fn snippet_chunk(
         &self,
         id: u64,
@@ -1037,6 +1041,36 @@ mod tests {
         );
         store.synchronize_document(document(1), "abcDEFghi", 1);
         assert_eq!(store.visible_marks(1).count(), 2);
+    }
+
+    #[test]
+    fn restore_origin_tracks_the_latest_removal_or_take_across_restart() {
+        let mut store = AgentMarks::default();
+        let collected = mark(&mut store, "abcDEFghi", 3..6);
+        let batch = store.take("restore-origin").unwrap().batch_id.unwrap();
+        assert_eq!(store.restore_origin(), RestoreSource::Taken(batch));
+        let mut store: AgentMarks =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert_eq!(store.restore_origin(), RestoreSource::Taken(batch));
+        let removed = mark(&mut store, "abcDEFghi", 0..3);
+        let kept = mark(&mut store, "abcDEFghi", 6..9);
+        store.set_note(kept, "Keep this newer note").unwrap();
+        assert!(store.remove(removed));
+        assert_eq!(store.restore_origin(), RestoreSource::Removed);
+        store.ack(batch).unwrap();
+        assert_eq!(store.restore_origin(), RestoreSource::Removed);
+        assert_eq!(store.restore(None).unwrap(), 1);
+        assert!(store.get(collected, None).is_none());
+        assert_eq!(store.get(kept, None).unwrap().note, "Keep this newer note");
+        assert_eq!(store.restore(None).unwrap(), 0);
+        store.clear();
+        assert_eq!(store.restore_origin(), RestoreSource::Removed);
+        let next = mark(&mut store, "abcDEFghi", 3..6);
+        let next_batch = store.take("restore-origin-next").unwrap().batch_id.unwrap();
+        assert_eq!(store.restore_origin(), RestoreSource::Taken(next_batch));
+        assert_eq!(store.restore(None).unwrap(), 1);
+        assert!(store.get(next, None).is_some());
+        assert!(store.get(removed, None).is_none());
     }
 
     #[test]

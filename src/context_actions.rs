@@ -866,18 +866,9 @@ impl MorrowApp {
                 if tab.loading {
                     return;
                 }
-                let insert = tab.vim.finish_insert(&mut tab.text);
-                if insert.text_changed {
-                    tab.changed();
-                }
-                let result = tab.vim.handle_key(
-                    &mut tab.text,
-                    if action == EditorAction::Undo {
-                        VimKey::Char('u')
-                    } else {
-                        VimKey::Redo
-                    },
-                );
+                let result = tab
+                    .vim
+                    .history_edit(&mut tab.text, action == EditorAction::Redo);
                 if result.text_changed {
                     tab.changed();
                 }

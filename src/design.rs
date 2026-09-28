@@ -178,7 +178,7 @@ fn enabled_color(ui: &Ui, color: Color32) -> Color32 {
     }
 }
 
-fn truncated_galley(
+pub(crate) fn truncated_galley(
     ui: &Ui,
     text: &str,
     font: FontId,

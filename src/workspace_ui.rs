@@ -207,7 +207,18 @@ impl MorrowApp {
             }
             return;
         };
-        let name = file_title(&project.root);
+        let names: Vec<_> = self
+            .projects
+            .iter()
+            .map(|project| file_title(&project.root))
+            .collect();
+        let identities: Vec<_> = names
+            .iter()
+            .zip(&self.projects)
+            .map(|(name, project)| (name.as_str(), Some(project.root.as_path())))
+            .collect();
+        let name =
+            crate::file_identity::disambiguate_labels(&identities)[self.active_project].clone();
         let path = crate::paths::display(&project.root);
         let dirty = project.tabs.iter().filter(|tab| tab.dirty).count();
         let tooltip = format!(

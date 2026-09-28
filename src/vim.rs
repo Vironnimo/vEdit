@@ -746,6 +746,67 @@ impl VimState {
         }
     }
 
+    /// Windows undo/redo uses the same history as Vim, while keeping an Insert
+    /// caret at its insertion boundary. Committing with Escape here would move
+    /// the caret left and turn later text in the same input batch into motions.
+    pub fn history_edit(&mut self, text: &mut String, redo: bool) -> Action {
+        let old_cursor = self.cursor;
+        let old_mode = self.mode;
+        let inserting = old_mode == VimMode::Insert;
+        let mut insert_expanded = false;
+        if inserting {
+            let inserted_delta = self
+                .insert_replay
+                .as_ref()
+                .map(|replay| insert_delta(&replay.baseline, text, replay.cursor));
+            insert_expanded = self.finish_insert_repetitions(text);
+            let changed = self
+                .insert_origin
+                .as_ref()
+                .is_some_and(|origin| origin.text != *text);
+            if let Some(origin) = self.insert_origin.take()
+                && changed
+            {
+                self.record(origin);
+            }
+            if let Some(replay) = self.insert_replay.take()
+                && changed
+            {
+                self.last_change = Some(RepeatChange {
+                    keys: replay.keys,
+                    insert: inserted_delta,
+                    search: replay.search,
+                    visual: None,
+                });
+            }
+            self.insert_count = 1;
+        }
+        self.leave_visual();
+        self.clear_command();
+        let text_changed = self.restore(text, redo) || insert_expanded;
+        self.preferred_column = None;
+        if inserting {
+            self.start_insert(text, self.cursor);
+            self.insert_replay = Some(InsertReplay {
+                keys: vec![VimKey::Char('i')],
+                baseline: text.clone(),
+                cursor: self.cursor,
+                search: None,
+            });
+        }
+        self.clamp_cursor(text);
+        if text_changed || self.cursor != old_cursor {
+            self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        }
+        Action {
+            consumed: true,
+            text_changed,
+            cursor_changed: self.cursor != old_cursor,
+            mode_changed: self.mode != old_mode,
+            ..Action::default()
+        }
+    }
+
     /// Move by visible-page rows supplied by the UI, preserving visual mode.
     pub fn scroll_lines(&mut self, text: &mut String, delta: isize) -> Action {
         let prefix = self.take_count();
@@ -899,23 +960,7 @@ impl VimState {
     fn handle_insert_key(&mut self, text: &mut String, key: VimKey) -> (bool, bool, Option<Yank>) {
         match key {
             VimKey::Escape => {
-                let mut changed = false;
-                if self.insert_count > 1
-                    && let Some(replay) = &self.insert_replay
-                {
-                    let delta = insert_delta(&replay.baseline, text, replay.cursor);
-                    if delta.removed == 0
-                        && !delta.inserted.is_empty()
-                        && let Some(repeated) =
-                            repeated_text(&delta.inserted, self.insert_count - 1)
-                        && text.len().saturating_add(repeated.len()) <= MAX_PASTE_BYTES
-                    {
-                        text.insert_str(char_to_byte(text, self.cursor), &repeated);
-                        self.cursor += repeated.chars().count();
-                        changed = true;
-                    }
-                }
-                self.insert_count = 1;
+                let changed = self.finish_insert_repetitions(text);
                 let chars: Vec<char> = text.chars().collect();
                 let rows = lines(&chars);
                 if self.cursor > rows[row_for_cursor(&rows, self.cursor)].start {
@@ -948,6 +993,28 @@ impl VimState {
             }
             VimKey::Redo => (false, false, None),
         }
+    }
+
+    /// Finalize a counted insertion once for Escape and Windows history alike.
+    /// The repeat delta is captured by callers before this expands the text.
+    fn finish_insert_repetitions(&mut self, text: &mut String) -> bool {
+        let mut changed = false;
+        if self.insert_count > 1
+            && let Some(replay) = &self.insert_replay
+        {
+            let delta = insert_delta(&replay.baseline, text, replay.cursor);
+            if delta.removed == 0
+                && !delta.inserted.is_empty()
+                && let Some(repeated) = repeated_text(&delta.inserted, self.insert_count - 1)
+                && text.len().saturating_add(repeated.len()) <= MAX_PASTE_BYTES
+            {
+                text.insert_str(char_to_byte(text, self.cursor), &repeated);
+                self.cursor += repeated.chars().count();
+                changed = true;
+            }
+        }
+        self.insert_count = 1;
+        changed
     }
 
     fn handle_normal_key(&mut self, text: &mut String, key: VimKey) -> (bool, bool, Option<Yank>) {

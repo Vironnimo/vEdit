@@ -36,6 +36,8 @@ mod find;
 mod git_panel;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "save_state.rs"]
+mod save_state;
 #[path = "split.rs"]
 mod split;
 #[path = "tab_drag.rs"]
@@ -3166,6 +3168,19 @@ impl MorrowApp {
                     continue;
                 }
                 match &event {
+                    egui::Event::Key {
+                        key: Key::Z | Key::Y,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
+                        flush_insert(tab, &mut native_insert, width);
+                        let redo = matches!(&event, egui::Event::Key { key: Key::Y, .. })
+                            || modifiers.shift;
+                        let action = tab.vim.history_edit(&mut tab.text, redo);
+                        apply_action(tab, action, &mut vim_register);
+                        continue;
+                    }
                     egui::Event::Copy => {
                         copy_to_clipboard(tab, &mut native_insert, width, &mut system_clipboard);
                         continue;
@@ -3935,6 +3950,7 @@ impl MorrowApp {
         rows: &[explorer_navigation::VisibleRow<'_>],
         active: &Option<PathBuf>,
     ) {
+        let explorer_focused = self.explorer_keyboard_focused();
         for row in rows {
             let entry = row.entry;
             ui.push_id(&entry.path, |ui| {
@@ -3963,8 +3979,15 @@ impl MorrowApp {
                     } else {
                         (file_badge(&entry.path), file_color(Some(&entry.path)))
                     };
+                    // The Explorer keeps its own keyboard selection. Once focus
+                    // leaves it, emphasize the file the editor is displaying.
+                    let emphasized = if explorer_focused {
+                        selected
+                    } else {
+                        active_file
+                    };
                     let response =
-                        design::left_row(ui, &entry.name, Some(badge), selected, &tooltip);
+                        design::left_row(ui, &entry.name, Some(badge), emphasized, &tooltip);
                     if active_file {
                         ui.painter().rect_filled(
                             egui::Rect::from_min_size(
@@ -4193,7 +4216,7 @@ impl MorrowApp {
                             .on_hover_text("Type up to three characters to find visible matches. Digits choose a jump label. For numeric search text, press Enter before selecting a label. Backspace refines the query; Esc cancels.");
                     } else if let Some((message, error, time)) = &self.status
                         && (*error || time.elapsed() < Duration::from_secs(6)) {
-                        let width = (ui.available_width() - 350.0).clamp(40.0, 440.0);
+                        let width = (ui.available_width() - 530.0).clamp(40.0, 440.0);
                         ui.add_sized([width, 20.0], egui::Label::new(RichText::new(message).size(10.5).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4206,6 +4229,7 @@ impl MorrowApp {
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
                             ui.label(RichText::new(language_name(t.path.as_deref())).size(10.5).color(MUTED)).on_hover_text(details);
                         }
+                        self.save_status_ui(ui);
                         if let Some(project) = self.project() {
                             let problem_count = project.diagnostics.values().map(Vec::len).sum::<usize>();
                             if problem_count > 0 && design::ghost_button(ui, &format!("{problem_count} problems"), "Show errors and warnings - Ctrl+Shift+M").clicked() { self.problems_visible = true; self.output_visible = true; }
@@ -4605,11 +4629,17 @@ impl MorrowApp {
                         ui.label(RichText::new(error).size(10.5).color(ORANGE));
                     }
                     for annotation in &tab.annotations {
-                        let detail = annotation
+                        let location = annotation
                             .end
                             .as_ref()
                             .map(|end| format!("Lines {}-{}", annotation.start.line, end.line))
                             .unwrap_or_else(|| format!("Line {}", annotation.start.line));
+                        let severity = match annotation.severity {
+                            crate::cli::AnnotationSeverity::Info => "Info",
+                            crate::cli::AnnotationSeverity::Warning => "Warning",
+                            crate::cli::AnnotationSeverity::Critical => "Critical",
+                        };
+                        let detail = format!("{severity} · {location}");
                         let label = if annotation.note.is_empty() {
                             "Marked location"
                         } else {
@@ -4681,6 +4711,12 @@ impl MorrowApp {
                 )
             })
             .collect();
+        let tab_labels = crate::file_identity::disambiguate_labels(
+            &tabs
+                .iter()
+                .map(|tab| (tab.1.as_str(), tab.4.as_deref()))
+                .collect::<Vec<_>>(),
+        );
         let active_id = self.tab().map(|tab| tab.id);
         let mut tab_drop_rects = Vec::new();
         let reveal_active = self.tab_strip_active != active_id;
@@ -4704,7 +4740,7 @@ impl MorrowApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
-                    for (id, title, dirty, loading, path, marks, saving, project_index, tab_index) in &tabs {
+                    for ((id, original_title, dirty, loading, path, marks, saving, project_index, tab_index), title) in tabs.iter().zip(&tab_labels) {
                         let selected = Some(*id) == active_id;
                         let font = FontId::proportional(12.0);
                         let title_galley = ui.painter().layout_no_wrap(
@@ -4712,7 +4748,7 @@ impl MorrowApp {
                             font.clone(),
                             if selected { TEXT } else { MUTED },
                         );
-                        let width = (title_galley.size().x + 65.0).clamp(125.0, 230.0);
+                        let width = (title_galley.size().x + 65.0).clamp(125.0, if title == original_title { 230.0 } else { 300.0 });
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::new(width, 37.0), egui::Sense::click_and_drag());
                         tab_drop_rects.push((*id, rect));
@@ -4748,14 +4784,25 @@ impl MorrowApp {
                             rect.min + Vec2::new(36.0, 0.0),
                             rect.max - Vec2::new(29.0, 0.0),
                         );
-                        ui.painter().with_clip_rect(clip).galley(
-                            egui::pos2(
-                                rect.left() + 36.0,
-                                rect.center().y - title_galley.size().y * 0.5,
-                            ),
-                            title_galley,
-                            TEXT,
-                        );
+                        let painter = ui.painter().with_clip_rect(clip);
+                        if title != original_title && title_galley.size().x > clip.width() {
+                            // Keep the distinguishing folder visible even when
+                            // a long shared filename must be shortened.
+                            let suffix = title.strip_prefix(original_title).unwrap_or_default();
+                            let suffix = design::truncated_galley(ui, suffix, FontId::proportional(10.5), MUTED, clip.width() * 0.7);
+                            let filename = design::truncated_galley(ui, original_title, font, if selected { TEXT } else { MUTED }, (clip.width() - suffix.size().x - 4.0).max(1.0));
+                            painter.galley(egui::pos2(clip.left(), rect.center().y - filename.size().y * 0.5), filename, TEXT);
+                            painter.galley(egui::pos2(clip.right() - suffix.size().x, rect.center().y - suffix.size().y * 0.5), suffix, MUTED);
+                        } else {
+                            painter.galley(
+                                egui::pos2(
+                                    rect.left() + 36.0,
+                                    rect.center().y - title_galley.size().y * 0.5,
+                                ),
+                                title_galley,
+                                TEXT,
+                            );
+                        }
                         let close_rect = egui::Rect::from_center_size(
                             egui::pos2(rect.right() - 16.0, rect.center().y),
                             Vec2::splat(20.0),
@@ -5930,7 +5977,7 @@ impl MorrowApp {
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(if compact {
-                        18.0
+                        14.0
                     } else {
                         (available_height * 0.15).max(35.0)
                     });
@@ -5948,7 +5995,7 @@ impl MorrowApp {
                             .size(15.0)
                             .color(MUTED),
                     );
-                    ui.add_space(35.0 * space);
+                    ui.add_space(if compact { 17.0 } else { 35.0 });
                     if accent_button(ui, "Open a project folder").clicked() {
                         self.pick_project();
                     }
@@ -5959,12 +6006,12 @@ impl MorrowApp {
                             .size(11.0)
                             .color(MUTED),
                     );
-                    ui.add_space(46.0 * space);
+                    ui.add_space(if compact { 19.0 } else { 46.0 });
                     egui::Frame::new()
                         .fill(PANEL)
                         .stroke(Stroke::new(1.0, BORDER))
                         .corner_radius(10.0)
-                        .inner_margin(if compact { 16 } else { 24 })
+                        .inner_margin(if compact { 12 } else { 24 })
                         .show(ui, |ui| {
                             ui.set_max_width(460.0);
                             ui.label(
@@ -5973,13 +6020,21 @@ impl MorrowApp {
                                     .strong()
                                     .color(ACCENT),
                             );
-                            ui.add_space(12.0);
-                            for (label, keys) in [
+                            ui.add_space(if compact { 8.0 } else { 12.0 });
+                            for (index, (label, keys)) in [
+                                ("Start typing · return to motions", "i / Esc"),
                                 ("Vim motions & visual selections", "v / V"),
                                 ("Find a file", "Ctrl P"),
                                 ("Search the whole project", "Ctrl Shift F"),
                                 ("Commands at your fingertips", "Ctrl Shift P"),
-                            ] {
+                                ("Editor & Vim settings", "Ctrl ,"),
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                if index < 2 && !self.settings.vim {
+                                    continue;
+                                }
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(label).size(12.0).color(TEXT));
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -5988,10 +6043,10 @@ impl MorrowApp {
                                         );
                                     });
                                 });
-                                ui.add_space(6.0);
+                                ui.add_space(if compact { 4.0 } else { 6.0 });
                             }
                         });
-                    ui.add_space(25.0 * space);
+                    ui.add_space(if compact { 8.0 } else { 25.0 });
                     ui.label(
                         RichText::new(format!("MORROW  /  {}", env!("CARGO_PKG_VERSION")))
                             .size(10.0)
@@ -6722,6 +6777,27 @@ impl MorrowApp {
         self.poll_languages();
         self.resume_region_input();
         self.focus_pane_from_pointer();
+        // Editing buffers use LF; Windows clipboard text commonly uses CRLF.
+        // Normalize only source input, before either Vim, TextEdit, or a pending
+        // context-menu paste consumes it. The file's saved encoding stays intact.
+        if self.context_paste.is_some()
+            || self.tab().is_some_and(|tab| {
+                tab.agent_view == crate::cli::DocumentView::Source
+                    && self
+                        .ctx
+                        .memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
+            })
+        {
+            self.ctx.input_mut(|input| {
+                for event in &mut input.events {
+                    if let egui::Event::Paste(text) = event
+                        && text.contains('\r')
+                    {
+                        *text = text.replace("\r\n", "\n").replace('\r', "\n");
+                    }
+                }
+            });
+        }
         self.context_paste_poll();
         self.validate_vim_search();
         let dragging_tab = self.tab_drag_keys();
@@ -7080,6 +7156,14 @@ mod native_input_tests;
 #[cfg(test)]
 #[path = "vim_clipboard_tests.rs"]
 mod vim_clipboard_tests;
+
+#[cfg(test)]
+#[path = "windows_undo_tests.rs"]
+mod windows_undo_tests;
+
+#[cfg(test)]
+#[path = "user_review_tests.rs"]
+mod user_review_tests;
 
 #[cfg(test)]
 #[path = "focus_feedback_tests.rs"]

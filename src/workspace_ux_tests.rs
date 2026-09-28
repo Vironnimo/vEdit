@@ -231,7 +231,11 @@ fn welcome_actions_shortcuts_and_version_fit_the_minimum_window() {
         );
     }
     let version = format!("MORROW  /  {}", env!("CARGO_PKG_VERSION"));
-    assert!(screen.get_by_label(&version).rect().bottom() < 613.0);
+    let version_rect = screen.get_by_label(&version).rect();
+    assert!(
+        version_rect.bottom() < 613.0,
+        "version footer: {version_rect:?}"
+    );
 }
 
 #[test]

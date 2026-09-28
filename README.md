@@ -1,4 +1,4 @@
-# Morrow 0.4.8
+# Morrow 0.4.9
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -27,6 +27,8 @@ Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öff
 
 ## Arbeiten im Editor
 
+- Gleichnamige Tabs erhalten einen kurzen Ordnerzusatz, etwa `lib.rs — client\src`; eindeutig benannte Dateien bleiben kompakt. Auch gleichnamige offene Projekte lassen sich im Projektwechsel links oben anhand ihres Ordners unterscheiden.
+- Der Speicherzustand bleibt in der Statusleiste sichtbar: **Saved**, **Unsaved**, **Saving…**, **Agent draft** oder ein Dateifehler. **Auto save on/off** schaltet das automatische Speichern für alle Projekte um. Neue Dateien und Agent-Entwürfe warten weiter auf **Ctrl+S**; der Tooltip erklärt die jeweilige Situation.
 - Syntaxfarben, Zeilennummern, aktuelle Zeile und Dateipfad helfen bei der Orientierung. Die Statusleiste zeigt aktuelle Zeile / Gesamtzeilen und die Cursorspalte; Zeilenumbruch verändert die Gesamtzahl nicht.
 - JetBrains Mono Regular wird mitgeliefert und ist die Standardschrift für Code: klare Zeichen, etwas mehr Zeilenabstand und Syntaxfarben ohne zusätzliche Kursivschrift oder Unterstreichungen. Unter **Settings → Editor font** stehen außerdem die Windows-Schriften Consolas und Cascadia Mono zur Wahl; fehlt eine Systemschrift, wird die mitgelieferte Schrift verwendet. Schriftgröße und Schriftwahl werden gespeichert.
 - Ein Klick setzt den Cursor. Ziehen und Doppelklick wählen Text aus, ein Dreifachklick ganze Zeilen. Beim Ziehen am sichtbaren Rand scrollt der Editor vertikal und horizontal mit, auch bei stillgehaltener Maus; bei Zeilenumbruch nur vertikal. Im Vim-Normalmodus wird daraus eine Visual-Auswahl; im Insert-Modus bleibt die Texteingabe aktiv.
@@ -34,6 +36,7 @@ Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öff
 - **Ctrl+Shift+F** durchsucht das aktive Projekt. Ein Treffer öffnet die passende Datei, zeigt die Fundstelle mittig und hebt die Zielzeile kurz hervor.
 - **Settings** (**Ctrl+,**) bietet Vim an/aus, die Leader-Taste, automatisches Speichern, Schriftgröße, Einrückungsbreite, Zeilenumbruch und **Smooth scrolling**. Vim und automatisches Speichern sind standardmäßig eingeschaltet; weiches Scrollen ist standardmäßig ausgeschaltet und lässt sich für Editor und Markdown-Vorschau aktivieren.
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
+- **Ctrl+Z** sowie **Ctrl+Y** / **Ctrl+Shift+Z** verwenden mit eingeschaltetem Vim dieselbe Undo-Historie wie `u` / **Ctrl+R**, auch im Insert- und Visual-Modus. Im Insert-Modus bleibt die Texteingabe aktiv; Vim-Register und System-Zwischenablage bleiben getrennt.
 - Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** rückt ein, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um und **Alt+Shift+↓** dupliziert Zeilen. Neue Zeilen übernehmen die Einrückung.
 
 Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergrund. Auch die Suche in großen offenen Dateien berechnet ihre Treffer im Hintergrund; währenddessen zeigt sie **Searching…** und verwirft überholte Ergebnisse bei weiterer Eingabe oder einem Dateiwechsel. Der Explorer berücksichtigt `.gitignore` und überspringt unter anderem `.git`, `target`, `node_modules` und generierte Build-Ordner. Die Projektsuche bietet unter **Exclusions** eine gespeicherte Liste von Ordnern und Dateimustern, etwa `src/generated` oder `**/*.min.js`. Sie liest unabhängig vom Explorer-Index den Datenträger; eine leere Filterliste erlaubt auch generierte Ordner, während `.gitignore` und VCS-Verzeichnisse weiter berücksichtigt werden. Symbolische Links werden nicht verfolgt. Bei erreichten Such- oder Indexgrenzen erscheint ein Hinweis; dann hilft ein kleinerer Projektordner oder eine genauere Suche.
@@ -47,6 +50,8 @@ Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffne
 Text mit der Maus oder Vim `v` / `V` auswählen und **Leader a** oder **Ctrl+Shift+A** drücken. Der Ausschnitt bleibt als zusätzliche lila Markierung erhalten; weitere Bereiche können in beliebigen Dateien und Projekten hinzukommen. Die gewöhnliche Auswahl und das Vim-Register bleiben erhalten. Das **×** am Rand entfernt einen Bereich. Das Symbol **For agent** in der Tab-Leiste zeigt die Gesamtzahl; **Leader A** oder **Ctrl+Alt+Shift+A** öffnet die gemeinsame Übersicht mit Dateigruppen, Suche, optionalen Notizen, **Clear all** und **Restore last**.
 
 Die Markierung enthält den Text zum Zeitpunkt der Auswahl, einschließlich ungespeicherter Änderungen. Bei Änderungen vor dem Bereich wandert sie mit; Änderungen innerhalb des Bereichs kennzeichnen den gespeicherten Ausschnitt als veraltet, statt einen anderen Text als ursprünglich ausgewählt auszugeben. Geschlossene Dateien und Projektwechsel löschen die Sammlung nicht.
+
+Die Übersicht zeigt die tatsächlich enthaltenen Zeilen und die Zeichenanzahl. Bei **Restore last** steht sichtbar, wie viele entfernte oder von einem Agenten abgeholte Bereiche zurückkommen. Die letzte Entfernung, **Clear all** oder Abholung bestimmt das Ziel; neue Markierungen und Notizen bleiben beim Wiederherstellen erhalten.
 
 Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](.agents/skills/morrow/SKILL.md), der auch im portablen Paket enthalten ist.
 
@@ -145,6 +150,8 @@ Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, benannte Regi
 
 Markdown-Dateien bieten rechts in der Tab-Leiste ein Vorschau-Symbol. Es leuchtet, wenn die Vorschau aktiv ist; ein Klick oder **Ctrl+Shift+V** wechselt zwischen Quelltext und Vorschau. Der Quelltext bleibt ein normaler Vim-Editor; **Shift+V** wählt weiterhin ganze Zeilen aus.
 
+Bei langen Vorschauen bleibt die vertikale Scrollleiste sichtbar. Breite Tabellen zeigen auch ohne Mausbewegung eine horizontale Scrollleiste; kurze Dokumente und passende Tabellen benötigen keine zusätzliche Leiste.
+
 Die Vorschau zeigt Überschriften, Listen, Aufgaben, Tabellen, Zitate, Codeblöcke und Links. Text ist auswählbar; Codeblöcke lassen sich kopieren. Ein Doppelklick auf einen Block öffnet die passende Quelltextzeile. In der Vorschau scrollen `j` / `k`, **Ctrl+D** / **Ctrl+U**, `gg` und **Shift+G**. Bilder werden als Links angezeigt, HTML bleibt Text. Die Ansicht wird pro Datei beim Neustart wiederhergestellt.
 
 ## Geteilte Ansicht
@@ -214,7 +221,7 @@ Ein Review-Manifest kann mehrere Dateien und mehrere Hinweise je Datei enthalten
 }
 ```
 
-Die Seitenleiste **Review** zeigt die Dateien und Hinweise. Ein Klick springt zur betreffenden Stelle; Markierungen stören die Vim-Auswahl nicht. Nach eigenen Änderungen werden veraltete Markierungen ausgeblendet und ein Hinweis angezeigt. **Clear** entfernt die Hinweise und lässt die Tabs offen.
+Die Seitenleiste **Review** zeigt die Dateien und Hinweise mit ausgeschriebener Dringlichkeit (**Info**, **Warning**, **Critical**). Ein Klick springt zur betreffenden Stelle; Markierungen stören die Vim-Auswahl nicht. Nach eigenen Änderungen werden veraltete Markierungen ausgeblendet und ein Hinweis angezeigt. **Clear** entfernt die Hinweise und lässt die Tabs offen.
 
 `open` und `review` erhalten ungespeicherten Text. Unveränderte offene Dateien werden dabei im Hintergrund vom Datenträger aktualisiert. `close` lehnt geänderte oder noch speichernde Tabs ab. Öffnen, Laden und Speichern sind getrennte Zustände; eine erfolgreiche Anfrage allein bedeutet nicht, dass eine Datei bereits geladen oder geschrieben wurde. Die Verbindung bleibt lokal und ist pro Sitzung authentifiziert.
 

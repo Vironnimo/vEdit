@@ -26,6 +26,7 @@ try {
     $documentationDirectory = Join-Path $releaseDirectory 'docs'
     New-Item -ItemType Directory -Path $documentationDirectory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/user-review-0.4.9.md') -Destination $documentationDirectory -Force
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
     New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
     foreach ($fontDocumentation in @('OFL.txt', 'README.md')) {

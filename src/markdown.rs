@@ -23,6 +23,21 @@ const MAX_DOCUMENTS: usize = 12;
 const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 
+// Keep the same UI IDs so persisted scroll and text-selection state stays attached.
+fn with_reading_scrollbars<R>(ui: &mut egui::Ui, show: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let previous_scroll = ui.spacing().scroll;
+    let previous_track = ui.visuals().extreme_bg_color;
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        foreground_color: true,
+        ..egui::style::ScrollStyle::solid()
+    };
+    ui.visuals_mut().extreme_bg_color = BORDER;
+    let result = show(ui);
+    ui.spacing_mut().scroll = previous_scroll;
+    ui.visuals_mut().extreme_bg_color = previous_track;
+    result
+}
+
 #[derive(Default)]
 pub(crate) struct PreviewResponse {
     pub open_file: Option<PathBuf>,
@@ -314,6 +329,7 @@ impl MarkdownCache {
         let scroll_salt = ("markdown_preview", pane, id);
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt(scroll_salt)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .animated(smooth_scroll)
             .scroll_source(egui::scroll_area::ScrollSource {
                 mouse_wheel: smooth_scroll,
@@ -335,7 +351,8 @@ impl MarkdownCache {
         if let Some(offset) = requested_scroll {
             scroll = scroll.vertical_scroll_offset(offset);
         }
-        let output = scroll.show(ui, |ui| {
+        let output = with_reading_scrollbars(ui, |ui| {
+            scroll.show(ui, |ui| {
                 ui.add_space(26.0);
                 ui.horizontal_top(|ui| {
                     ui.add_space(((available - width) * 0.5).max(0.0));
@@ -381,7 +398,8 @@ impl MarkdownCache {
                         ui.add_space(44.0);
                     });
                 });
-            });
+            })
+        });
         crate::render::remember_scroll_limits(ui.ctx(), &output);
         entry.scroll_y = output.state.offset.y;
         entry.content_height = output.content_size.y;
@@ -1029,6 +1047,7 @@ impl Renderer<'_> {
         let scroll_id = ui.make_persistent_id(egui::IdSalt::new(salt));
         let mut scroll = egui::ScrollArea::horizontal()
             .id_salt(salt)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .auto_shrink([false, true])
             .animated(self.smooth_scroll)
             .scroll_source(egui::scroll_area::ScrollSource {
@@ -1063,72 +1082,76 @@ impl Renderer<'_> {
                 scroll = scroll.scroll_offset(offset);
             }
         }
-        let output = scroll.show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let table_start = ui.cursor().min;
-            for (row_index, TableRowLayout { cells, height }) in prepared.into_iter().enumerate() {
-                let (row_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(table_width, height), Sense::hover());
-                if !ui.is_rect_visible(row_rect) {
-                    continue;
+        let output = with_reading_scrollbars(ui, |ui| {
+            scroll.show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let table_start = ui.cursor().min;
+                for (row_index, TableRowLayout { cells, height }) in
+                    prepared.into_iter().enumerate()
+                {
+                    let (row_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(table_width, height), Sense::hover());
+                    if !ui.is_rect_visible(row_rect) {
+                        continue;
+                    }
+                    let fill = if row_index == 0 {
+                        Color32::from_rgb(29, 34, 44)
+                    } else if row_index % 2 == 1 {
+                        SURFACE
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    if fill != Color32::TRANSPARENT {
+                        ui.painter().rect_filled(
+                            row_rect,
+                            if row_index == 0 {
+                                egui::CornerRadius {
+                                    nw: 5,
+                                    ne: 5,
+                                    sw: 0,
+                                    se: 0,
+                                }
+                            } else {
+                                egui::CornerRadius::ZERO
+                            },
+                            fill,
+                        );
+                    }
+                    if row_index > 0 {
+                        ui.painter().line_segment(
+                            [row_rect.left_top(), row_rect.right_top()],
+                            Stroke::new(1.0, BORDER.gamma_multiply(0.75)),
+                        );
+                    }
+                    let mut left = row_rect.left() + 13.0;
+                    for (column, (width, cell)) in widths.iter().zip(cells).enumerate() {
+                        let cell_rect = egui::Rect::from_min_size(
+                            egui::pos2(left, row_rect.top() + 12.0),
+                            Vec2::new(*width, height - 24.0),
+                        );
+                        let align = cell.galley.job.halign;
+                        let mut cell_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .id_salt(("table_cell", source, row_index, column))
+                                .max_rect(cell_rect)
+                                .layout(Layout::top_down(align)),
+                        );
+                        cell_ui.set_clip_rect(cell_rect.intersect(ui.clip_rect()));
+                        self.paint_inline(&mut cell_ui, cell, source);
+                        left += width + 24.0;
+                    }
                 }
-                let fill = if row_index == 0 {
-                    Color32::from_rgb(29, 34, 44)
-                } else if row_index % 2 == 1 {
-                    SURFACE
-                } else {
-                    Color32::TRANSPARENT
-                };
-                if fill != Color32::TRANSPARENT {
-                    ui.painter().rect_filled(
-                        row_rect,
-                        if row_index == 0 {
-                            egui::CornerRadius {
-                                nw: 5,
-                                ne: 5,
-                                sw: 0,
-                                se: 0,
-                            }
-                        } else {
-                            egui::CornerRadius::ZERO
-                        },
-                        fill,
-                    );
-                }
-                if row_index > 0 {
-                    ui.painter().line_segment(
-                        [row_rect.left_top(), row_rect.right_top()],
-                        Stroke::new(1.0, BORDER.gamma_multiply(0.75)),
-                    );
-                }
-                let mut left = row_rect.left() + 13.0;
-                for (column, (width, cell)) in widths.iter().zip(cells).enumerate() {
-                    let cell_rect = egui::Rect::from_min_size(
-                        egui::pos2(left, row_rect.top() + 12.0),
-                        Vec2::new(*width, height - 24.0),
-                    );
-                    let align = cell.galley.job.halign;
-                    let mut cell_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .id_salt(("table_cell", source, row_index, column))
-                            .max_rect(cell_rect)
-                            .layout(Layout::top_down(align)),
-                    );
-                    cell_ui.set_clip_rect(cell_rect.intersect(ui.clip_rect()));
-                    self.paint_inline(&mut cell_ui, cell, source);
-                    left += width + 24.0;
-                }
-            }
-            let table_rect = egui::Rect::from_min_max(
-                table_start,
-                egui::pos2(table_start.x + table_width, ui.cursor().top()),
-            );
-            ui.painter().rect_stroke(
-                table_rect,
-                6.0,
-                Stroke::new(1.0, BORDER),
-                egui::StrokeKind::Inside,
-            );
+                let table_rect = egui::Rect::from_min_max(
+                    table_start,
+                    egui::pos2(table_start.x + table_width, ui.cursor().top()),
+                );
+                ui.painter().rect_stroke(
+                    table_rect,
+                    6.0,
+                    Stroke::new(1.0, BORDER),
+                    egui::StrokeKind::Inside,
+                );
+            })
         });
         crate::render::remember_scroll_limits(ui.ctx(), &output);
         self.table_scroll.insert(source, output.state.offset.x);
@@ -1960,6 +1983,138 @@ mod tests {
             collect(&shape.shape, &mut output);
         }
         output
+    }
+
+    fn reading_harness(
+        size: [f32; 2],
+        text: &str,
+    ) -> egui_kittest::Harness<'static, MarkdownCache> {
+        let text = text.to_owned();
+        let screen = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_ui_state(
+                move |ui, cache: &mut MarkdownCache| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        cache.show(
+                            ui,
+                            1,
+                            0,
+                            &text,
+                            Path::new("README.md"),
+                            14.0,
+                            false,
+                            true,
+                            false,
+                        );
+                    });
+                },
+                MarkdownCache::default(),
+            );
+        screen.ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        screen
+    }
+
+    fn reading_scroll_tracks(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
+        fn collect(shape: &egui::Shape, clip: egui::Rect, tracks: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.fill == BORDER => {
+                    assert!(
+                        clip.expand(0.1).contains_rect(rect.rect),
+                        "the track must be painted within its viewport"
+                    );
+                    tracks.push(rect.rect);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, clip, tracks);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut tracks = Vec::new();
+        for shape in shapes {
+            collect(&shape.shape, shape.clip_rect, &mut tracks);
+        }
+        tracks
+    }
+
+    #[test]
+    fn overflowing_preview_paints_a_compact_vertical_track_without_hover_and_keeps_scroll() {
+        let text = "# Section\n\nA paragraph with enough words to read.\n\n".repeat(40);
+        let mut screen = reading_harness([640.0, 340.0], &text);
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(4);
+        let tracks = reading_scroll_tracks(&screen.output().shapes);
+        assert_eq!(tracks.len(), 1);
+        let track = tracks[0];
+        assert!((5.0..=7.0).contains(&track.width()));
+        assert!(track.height() > 250.0);
+        assert!(
+            track.right() > 620.0,
+            "the track should stay beside the reading viewport"
+        );
+        let pane = screen.state().documents[0].pane;
+        let document = screen.state().documents[0].document.clone();
+        screen.state_mut().restore_view_scroll(1, pane, 92.0);
+        screen.run_steps(3);
+        assert_eq!(screen.state().view_scroll(1, pane), Some(92.0));
+        assert!(Arc::ptr_eq(
+            &document,
+            &screen.state().documents[0].document
+        ));
+        assert_eq!(reading_scroll_tracks(&screen.output().shapes), tracks);
+    }
+
+    #[test]
+    fn overflowing_table_paints_a_horizontal_track_without_hover_and_leaves_prose_below() {
+        let text = "| Risk | Countermeasure | DoD |\n| --- | --- | --- |\n| A long risk description that needs room to wrap in a narrow pane. | A long countermeasure description that needs enough space too. | H1 |\n\nAfter the table.\n";
+        let mut screen = reading_harness([320.0, 900.0], text);
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(4);
+        let tracks = reading_scroll_tracks(&screen.output().shapes);
+        assert_eq!(tracks.len(), 1);
+        let track = tracks[0];
+        assert!((5.0..=7.0).contains(&track.height()));
+        assert!(track.width() > 200.0 && track.width() < 320.0);
+        let after = text_bounds(&screen.output().shapes)
+            .into_iter()
+            .find(|(text, _)| text == "After the table.")
+            .unwrap()
+            .1;
+        assert!(
+            after.top() > track.bottom() + 10.0,
+            "prose must follow the track, without an oversized gutter"
+        );
+        assert!(after.top() < track.bottom() + 45.0);
+        assert_eq!(screen.state().documents[0].scroll_y, 0.0);
+        screen.state_mut().documents[0]
+            .restore_tables
+            .insert(0, 60.0);
+        screen.run_steps(3);
+        assert_eq!(
+            screen.state().documents[0].table_scroll.get(&0),
+            Some(&60.0)
+        );
+        assert_eq!(screen.state().documents[0].scroll_y, 0.0);
+        assert_eq!(reading_scroll_tracks(&screen.output().shapes), tracks);
+    }
+
+    #[test]
+    fn fitting_preview_and_table_do_not_paint_scroll_tracks() {
+        for text in [
+            "# Brief plan\n\nRead this short plan.\n",
+            "| File | Status |\n| --- | --- |\n| plan.md | Ready |\n\nAfter the table.\n",
+        ] {
+            let mut screen = reading_harness([960.0, 900.0], text);
+            screen.hover_at(egui::pos2(-20.0, -20.0));
+            screen.run_steps(4);
+            assert!(reading_scroll_tracks(&screen.output().shapes).is_empty());
+            assert_eq!(screen.state().documents[0].scroll_y, 0.0);
+        }
     }
 
     #[test]
