@@ -155,6 +155,21 @@ impl MarkdownCache {
             self.restore_scroll.insert((pane, document), offset);
         }
     }
+    pub(crate) fn forget_document(&mut self, document: u64) {
+        self.documents.retain(|entry| entry.id != document);
+        self.restore_scroll.retain(|(_, id), _| *id != document);
+        if self.reveal.is_some_and(|(id, _)| id == document) {
+            self.reveal = None;
+        }
+    }
+    pub(crate) fn forget_view_restore(&mut self, document: u64, pane: egui::Id) {
+        self.restore_scroll.remove(&(pane, document));
+    }
+    pub(crate) fn forget_pane_restores(&mut self, pane: egui::Id) {
+        self.restore_scroll.retain(|(id, _), _| *id != pane);
+        // Cached layouts stay bounded by the LRU and can still supply a queued
+        // tab transfer whose destination pane has not rendered yet.
+    }
     #[cfg(test)]
     pub(crate) fn table_scroll(&self, document: u64, pane: egui::Id, source: usize) -> Option<f32> {
         self.documents
@@ -174,11 +189,8 @@ impl MarkdownCache {
         {
             self.documents.pop_back();
         }
-        self.restore_scroll.retain(|(pane, id), _| {
-            self.documents
-                .iter()
-                .any(|entry| entry.pane == *pane && entry.id == *id)
-        });
+        // A restored inactive tab need not have a cached layout yet. Its
+        // pending position belongs to the view lifecycle, not the LRU.
     }
     /// Reveal a one-based source line in the corresponding preview document.
     /// The request is consumed only when that document is rendered.
@@ -1768,6 +1780,26 @@ mod tests {
             }
         }
         assert_eq!(cache.documents[0].text.as_ref(), "# Changed");
+    }
+
+    #[test]
+    fn closing_a_preview_view_clears_only_its_pending_restore() {
+        let mut cache = MarkdownCache::default();
+        let left = egui::Id::new("left");
+        let right = egui::Id::new("right");
+        cache.restore_view_scroll(1, left, 120.0);
+        cache.restore_view_scroll(1, right, 240.0);
+        cache.restore_view_scroll(2, left, 360.0);
+        cache.restore_view_scroll(2, right, 480.0);
+        cache.forget_view_restore(1, left);
+        assert!(!cache.restore_scroll.contains_key(&(left, 1)));
+        assert_eq!(cache.restore_scroll.get(&(right, 1)), Some(&240.0));
+        cache.forget_pane_restores(left);
+        assert!(!cache.restore_scroll.contains_key(&(left, 2)));
+        assert_eq!(cache.restore_scroll.get(&(right, 2)), Some(&480.0));
+        cache.forget_document(1);
+        assert!(!cache.restore_scroll.contains_key(&(right, 1)));
+        assert_eq!(cache.restore_scroll.get(&(right, 2)), Some(&480.0));
     }
 
     #[test]

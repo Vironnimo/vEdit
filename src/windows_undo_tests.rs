@@ -56,6 +56,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
 fn events(screen: &mut Harness<'_, MorrowApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
+    super::editor_input_tests::settle(screen);
 }
 
 fn text(screen: &mut Harness<'_, MorrowApp>, value: &str) {

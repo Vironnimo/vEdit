@@ -1,20 +1,105 @@
 //! Serialized, atomic recovery writes with per-file revision ordering.
 //!
 //! Clone one writer for all workers that can write or remove recovery files.
-//! Revisions are supplied by each document; [`RecoveryWriter::stamp`] provides
-//! a shared sequence for snapshots that do not already have a revision.
+//! [`RecoveryWriter::stamp`] orders document snapshots, removals and session
+//! writes across all clones. The editor tracks source revisions separately:
+//! a completed save can change a recovery baseline without changing the text.
 
 use std::{
     collections::HashMap,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
+
+// The NUL distinguishes a recovery record from any supported legacy text file.
+// Metadata and unescaped buffer bytes are committed in one atomic write, so a
+// newer session cannot accidentally pair an older buffer with a new baseline.
+const DOCUMENT_HEADER: &[u8] = b"Morrow recovery v1\0";
+const MAX_METADATA_BYTES: usize = 4096;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DocumentMetadata {
+    baseline: Option<crate::workspace::FileFingerprint>,
+    line_ending: crate::workspace::LineEnding,
+    bom: bool,
+}
+
+pub struct RecoveredDocument {
+    pub text: String,
+    pub baseline: Option<crate::workspace::FileFingerprint>,
+    pub line_ending: Option<crate::workspace::LineEnding>,
+    pub bom: Option<bool>,
+}
+
+/// Encode one self-contained recovery snapshot, including its disk baseline.
+pub fn encode_document(
+    text: &str,
+    baseline: Option<&crate::workspace::FileFingerprint>,
+    line_ending: crate::workspace::LineEnding,
+    bom: bool,
+) -> Result<Vec<u8>, String> {
+    let metadata = serde_json::to_vec(&DocumentMetadata {
+        baseline: baseline.cloned(),
+        line_ending,
+        bom,
+    })
+    .map_err(|error| format!("Could not encode recovery metadata: {error}"))?;
+    let mut bytes = Vec::with_capacity(DOCUMENT_HEADER.len() + metadata.len() + 1 + text.len());
+    bytes.extend_from_slice(DOCUMENT_HEADER);
+    bytes.extend_from_slice(&metadata);
+    bytes.push(b'\n');
+    bytes.extend_from_slice(text.as_bytes());
+    Ok(bytes)
+}
+
+/// Read a current record or an older raw-text recovery. Legacy text has no
+/// provable baseline and must never authorize replacement of a named file.
+pub fn read_document(path: &Path, max_bytes: u64) -> Result<RecoveredDocument, String> {
+    let maximum = max_bytes.saturating_add((DOCUMENT_HEADER.len() + MAX_METADATA_BYTES + 1) as u64);
+    let file = fs::File::open(path).map_err(|error| format!("Could not open recovery: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read recovery: {error}"))?;
+    if bytes.len() as u64 > maximum {
+        return Err("Recovery document exceeds the supported size".into());
+    }
+    let Some(record) = bytes.strip_prefix(DOCUMENT_HEADER) else {
+        let legacy = crate::workspace::read_document(path, max_bytes)?;
+        return Ok(RecoveredDocument {
+            text: legacy.text,
+            baseline: None,
+            line_ending: None,
+            bom: None,
+        });
+    };
+    let separator = record
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .filter(|position| *position <= MAX_METADATA_BYTES)
+        .ok_or_else(|| "Recovery metadata is incomplete".to_owned())?;
+    let metadata: DocumentMetadata = serde_json::from_slice(&record[..separator])
+        .map_err(|error| format!("Recovery metadata is invalid: {error}"))?;
+    let text = &record[separator + 1..];
+    if text.len() as u64 > max_bytes {
+        return Err("Recovery document exceeds the supported size".into());
+    }
+    let text = std::str::from_utf8(text)
+        .map_err(|error| format!("Recovery text is not valid UTF-8: {error}"))?
+        .to_owned();
+    Ok(RecoveredDocument {
+        text,
+        baseline: metadata.baseline,
+        line_ending: Some(metadata.line_ending),
+        bom: Some(metadata.bom),
+    })
+}
 
 #[derive(Clone, Copy)]
 struct Commit {
@@ -299,5 +384,86 @@ mod tests {
         stamps.sort_unstable();
         assert_eq!(stamps, (1..=800).collect::<Vec<_>>());
         assert_eq!(writer.stamp(), 801);
+    }
+
+    #[test]
+    fn document_record_keeps_buffer_baseline_and_encoding_in_one_write() {
+        let directory = Directory::new();
+        let path = directory.file("draft.recovery");
+        let baseline = crate::workspace::FileFingerprint {
+            len: 123,
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::new(42, 17)),
+            hash: u64::MAX - 9,
+        };
+        let text = "# Entwurf 🦀\n\"quoted\"\\path\nzweite Zeile\n";
+        let bytes = encode_document(
+            text,
+            Some(&baseline),
+            crate::workspace::LineEnding::CrLf,
+            true,
+        )
+        .unwrap();
+        assert!(bytes.starts_with(DOCUMENT_HEADER));
+        assert!(
+            bytes.ends_with(text.as_bytes()),
+            "buffer bytes are not JSON-escaped"
+        );
+        RecoveryWriter::default().write(&path, 1, &bytes).unwrap();
+        let recovered = read_document(&path, 1024).unwrap();
+        assert_eq!(recovered.text, text);
+        assert_eq!(recovered.baseline, Some(baseline));
+        assert_eq!(
+            recovered.line_ending,
+            Some(crate::workspace::LineEnding::CrLf)
+        );
+        assert_eq!(recovered.bom, Some(true));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_recovery_is_readable_without_claiming_a_verified_baseline() {
+        let directory = Directory::new();
+        let path = directory.file("legacy.txt");
+        let source = "\u{feff}Legacy ü\r\n{\"text\":\"not metadata\"}\r\n";
+        fs::write(&path, source).unwrap();
+        let recovered = read_document(&path, 1024).unwrap();
+        assert_eq!(recovered.text, "Legacy ü\n{\"text\":\"not metadata\"}\n");
+        assert!(recovered.baseline.is_none());
+        assert!(recovered.line_ending.is_none());
+        assert!(recovered.bom.is_none());
+        assert_eq!(fs::read(&path).unwrap(), source.as_bytes());
+    }
+
+    #[test]
+    fn invalid_or_future_records_are_not_mistaken_for_legacy_text() {
+        let directory = Directory::new();
+        let path = directory.file("invalid.recovery");
+        for suffix in [
+            b"{".as_slice(),
+            b"{}\ntext".as_slice(),
+            b"invalid\ntext".as_slice(),
+        ] {
+            let mut bytes = DOCUMENT_HEADER.to_vec();
+            bytes.extend_from_slice(suffix);
+            fs::write(&path, &bytes).unwrap();
+            assert!(read_document(&path, 1024).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        let bytes = b"Morrow recovery v2\0future format";
+        fs::write(&path, bytes).unwrap();
+        assert!(read_document(&path, 1024).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn record_size_limit_applies_to_the_buffer_not_its_small_metadata() {
+        let directory = Directory::new();
+        let path = directory.file("bounded.recovery");
+        let text = "é🦀\n";
+        let bytes = encode_document(text, None, crate::workspace::LineEnding::Lf, false).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_document(&path, text.len() as u64).unwrap().text, text);
+        assert!(read_document(&path, text.len() as u64 - 1).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }

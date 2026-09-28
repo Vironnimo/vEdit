@@ -715,7 +715,9 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 return false;
             }
             "--line" | "--column" | "--limit" | "--offset" | "--count" | "--revision" | "--tab"
-            | "--label" | "--note" | "--batch" | "--request-id" => expects_value = true,
+            | "--label" | "--note" | "--batch" | "--request-id" | "--exclude" => {
+                expects_value = true
+            }
             _ => {}
         }
         true
@@ -2650,6 +2652,12 @@ mod tests {
             excludes
         };
         assert_eq!(search(&["search", "needle"]), None);
+        for pattern in ["--help", "-h", "--no-start", "--"] {
+            assert_eq!(
+                search(&["search", "needle", "--exclude", pattern]),
+                Some(vec![pattern.into()])
+            );
+        }
         assert_eq!(
             search(&["search", "needle", "--no-excludes"]),
             Some(Vec::new())

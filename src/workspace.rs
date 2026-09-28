@@ -562,11 +562,11 @@ fn search_paths(
                 && (text[..found.start()]
                     .chars()
                     .next_back()
-                    .is_some_and(word_character)
+                    .is_some_and(crate::search::word_char)
                     || text[found.end()..]
                         .chars()
                         .next()
-                        .is_some_and(word_character))
+                        .is_some_and(crate::search::word_char))
             {
                 continue;
             }
@@ -603,10 +603,6 @@ fn search_paths(
     Ok(results)
 }
 
-fn word_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
-}
-
 fn line_preview(line: &str, match_byte: usize) -> String {
     const PREVIEW_CHARS: usize = 240;
     let match_char = line[..match_byte].chars().count();
@@ -623,7 +619,7 @@ fn line_preview(line: &str, match_byte: usize) -> String {
     result
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LineEnding {
     #[default]
     Lf,
@@ -643,7 +639,7 @@ impl fmt::Display for LineEnding {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileFingerprint {
     pub len: u64,
     pub modified: Option<SystemTime>,
@@ -651,7 +647,7 @@ pub struct FileFingerprint {
 }
 
 impl FileFingerprint {
-    fn same_content(&self, other: &Self) -> bool {
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
         self.len == other.len && self.hash == other.hash
     }
 }
@@ -1301,6 +1297,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sensitive.matches.len(), 1);
+    }
+
+    #[test]
+    fn disk_whole_word_search_keeps_unicode_identifiers_intact() {
+        let fixture = Fixture::new("unicode-word-search");
+        let path = fixture.write("words.txt", "git\u{301} git\u{200d} git‿ git");
+        let results = search_with_excludes(
+            &fixture.0,
+            "git",
+            SearchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(results.matches.len(), 1);
+        let found = &results.matches[0];
+        assert_eq!(found.path, fs::canonicalize(path).unwrap());
+        assert_eq!(
+            (found.line, found.column, found.start_char, found.end_char),
+            (1, 16, 15, 18)
+        );
     }
 
     #[test]

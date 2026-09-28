@@ -1,4 +1,4 @@
-# Morrow 0.4.9
+# Morrow 0.4.10
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -231,7 +231,7 @@ Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/morrow/
 
 **Ctrl+S** speichert die aktive Datei, **Ctrl+Shift+S** alle geänderten Dateien. Neue Dateien und **File → Save as…** öffnen den Windows-Speicherdialog, auch außerhalb des Projekts. Eine vorhandene Zieldatei wird erst nach der Windows-Bestätigung ersetzt; spätere Änderungen auf dem Datenträger bleiben durch die Konfliktprüfung geschützt. Eine Datei, die bereits in einem anderen Tab offen ist, lässt sich nicht als Ziel überschreiben. Abbrechen erhält den ungespeicherten Text.
 
-Automatisches Speichern schreibt benannte Dateien nach etwa **850 ms Schreibpause**. Es lässt sich in den Einstellungen ausschalten. Wiederherstellungskopien werden nach dieser Pause unabhängig davon für geänderte Dateien und neue Tabs geschrieben. Sie liegen unter `%APPDATA%\Morrow\recovery` und werden beim nächsten Start eingelesen. Beim regulären Schließen fragt Morrow nach ungespeicherten Änderungen.
+Automatisches Speichern schreibt benannte Dateien nach etwa **850 ms Schreibpause**. Es lässt sich in den Einstellungen ausschalten. Wiederherstellungskopien werden nach dieser Pause unabhängig davon für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\Morrow\recovery` und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt Morrow nach ungespeicherten Änderungen.
 
 Dateien werden über eine temporäre Datei im selben Ordner atomar gespeichert. Änderungen auf dem Datenträger werden vor dem Ersetzen geprüft; ein Konflikt überschreibt die externe Version nicht. Unveränderte offene Dateien werden bei externen Änderungen aktualisiert. Bei eigenen Änderungen den Inhalt mit **Save as…** sichern, bevor die externe Fassung erneut geöffnet wird. **Reload file from disk** in der Befehlspalette lädt eine unveränderte Datei neu.
 

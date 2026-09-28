@@ -419,6 +419,34 @@ impl MorrowApp {
             }
         }
     }
+    pub(super) fn has_saved_document_scroll(&self, document: u64) -> bool {
+        let Some((project, _)) = self.tab_location(document) else {
+            return false;
+        };
+        let layout = if project == self.active_project {
+            Some(&self.editor_layout)
+        } else {
+            self.projects[project].layout.as_ref()
+        };
+        let Some(layout) = layout else {
+            return false;
+        };
+        let pane = layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == layout.focused && pane.documents.contains(&document))
+            .or_else(|| {
+                layout
+                    .panes
+                    .iter()
+                    .find(|pane| pane.documents.contains(&document))
+            });
+        pane.and_then(|pane| pane.states.get(&document))
+            .is_some_and(|state| match state.view {
+                DocumentView::Source => state.source_scroll.is_some(),
+                DocumentView::Preview => state.preview_scroll.is_some(),
+            })
+    }
     pub(super) fn pane_has_empty_workspace(&self) -> bool {
         self.editor_layout.panes.iter().any(|pane| {
             pane.id == self.pane_context()
@@ -874,6 +902,9 @@ impl MorrowApp {
             pane.documents.remove(old);
             if source != destination {
                 pane.states.remove(&tab_id);
+                if let Some(ui_id) = pane.preview_ui_id {
+                    self.markdown.forget_view_restore(tab_id, ui_id);
+                }
                 if pane.document == Some(tab_id) {
                     pane.document = pane
                         .documents
@@ -949,6 +980,9 @@ impl MorrowApp {
         {
             pane.documents.remove(index);
             pane.states.remove(&id);
+            if let Some(ui_id) = pane.preview_ui_id {
+                self.markdown.forget_view_restore(id, ui_id);
+            }
             if pane.document == Some(id) {
                 pane.document = pane
                     .documents
@@ -1090,6 +1124,15 @@ impl MorrowApp {
         for id in empty {
             if self.editor_layout.panes.len() == 1 {
                 break;
+            }
+            if let Some(ui_id) = self
+                .editor_layout
+                .panes
+                .iter()
+                .find(|pane| pane.id == id)
+                .and_then(|pane| pane.preview_ui_id)
+            {
+                self.markdown.forget_pane_restores(ui_id);
             }
             let next = self.editor_layout.root.neighbor(id);
             self.editor_layout.root.remove(id);
@@ -1384,6 +1427,15 @@ impl MorrowApp {
             .find(|pane| pane.id == id)
             .map(|pane| pane.states.clone())
             .unwrap_or_default();
+        if let Some(ui_id) = self
+            .editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .and_then(|pane| pane.preview_ui_id)
+        {
+            self.markdown.forget_pane_restores(ui_id);
+        }
         self.editor_layout.root.remove(id);
         self.editor_layout.panes.retain(|pane| pane.id != id);
         self.editor_layout.rects.remove(&id);
@@ -2360,6 +2412,9 @@ impl MorrowApp {
                     .find(|pane| pane.id == pane_id)
                     && pane.preview_ui_id != Some(ui.id())
                 {
+                    if let Some(previous) = pane.preview_ui_id {
+                        self.markdown.forget_pane_restores(previous);
+                    }
                     pane.preview_ui_id = Some(ui.id());
                     for (document, state) in &pane.states {
                         if let Some(offset) = state.preview_scroll {

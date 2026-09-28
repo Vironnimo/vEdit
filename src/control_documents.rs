@@ -343,6 +343,9 @@ impl MorrowApp {
                     .unwrap_or_else(|| "Untitled".into());
                 let mut tab = EditorTab::new(path, title);
                 tab.text = text;
+                if !tab.text.is_empty() || tab.path.is_some() {
+                    tab.changed();
+                }
                 // A named new document must be saved even when its text is empty.
                 tab.dirty = tab.path.is_some() || !tab.text.is_empty();
                 tab.agent_unsaved = tab.dirty;
@@ -904,10 +907,15 @@ fn literal_matches(
     let mut previous_char = 0;
     let mut result = Vec::new();
     for found in pattern.find_iter(text) {
-        let word = |c: char| c.is_alphanumeric() || c == '_';
         if whole_word
-            && (text[..found.start()].chars().next_back().is_some_and(word)
-                || text[found.end()..].chars().next().is_some_and(word))
+            && (text[..found.start()]
+                .chars()
+                .next_back()
+                .is_some_and(crate::search::word_char)
+                || text[found.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(crate::search::word_char))
         {
             continue;
         }
@@ -1296,6 +1304,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_whole_word_find_and_replace_preserve_unicode_identifiers() {
+        let (mut app, id) = app_with_text("git\u{301} git\u{200d} git‿ git");
+        let response = app.control_request(Request::Find {
+            tab_id: id,
+            query: "git".into(),
+            case_sensitive: true,
+            whole_word: true,
+            limit: 100,
+            offset: 0,
+        });
+        assert!(response.ok, "{response:?}");
+        let items = response.result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["range"]["start"]["column"], 16);
+        let response = app.control_request(Request::Replace {
+            tab_id: id,
+            expected_revision: 0,
+            query: "git".into(),
+            replacement: "hg".into(),
+            case_sensitive: true,
+            whole_word: true,
+            all: true,
+        });
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result["replaced"], 1);
+        assert_eq!(app.tab().unwrap().text, "git\u{301} git\u{200d} git‿ hg");
+    }
+
+    #[test]
     fn ordered_batch_reports_applied_edit_and_stops_at_conflict_without_replay() {
         let (mut app, id) = app_with_text("64");
         let response = app.control_request(Request::Batch {
@@ -1608,6 +1645,44 @@ mod tests {
         assert!(!app.projects[0].tabs[0].saving);
         drop(app);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_agent_drafts_write_recovery_without_a_followup_edit() {
+        for (named, text) in [(false, "Unsaved 🦀 draft"), (true, "# Draft"), (true, "")] {
+            let root = temporary_directory("new-recovery");
+            let (mut app, _) = app_with_text("");
+            app.projects[0].root = root.clone();
+            app.recovery_session_path = root.join("session.json");
+            let destination = root.join("draft.md");
+            let response = app.control_request(Request::New {
+                title: None,
+                text: text.into(),
+                path: named.then(|| destination.clone()),
+            });
+            assert!(response.ok, "{response:?}");
+            let recovery_path = root.join("draft-recovery.txt");
+            let tab = app.tab_mut().unwrap();
+            tab.recovery_path = recovery_path.clone();
+            tab.last_edit = Instant::now() - Duration::from_secs(2);
+            app.autosave();
+            assert!(app.tab().unwrap().recovery_pending);
+            assert!(!app.tab().unwrap().saving);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while app.tab().unwrap().recovery_pending && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+                app.poll();
+            }
+            let tab = app.tab().unwrap();
+            assert!(!tab.recovery_pending);
+            assert_eq!(tab.recovery_revision, tab.revision);
+            assert!(tab.dirty && tab.agent_unsaved);
+            let recovered = crate::recovery::read_document(&recovery_path, MAX_DOCUMENT).unwrap();
+            assert_eq!(recovered.text, text);
+            assert!(!destination.exists());
+            drop(app);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

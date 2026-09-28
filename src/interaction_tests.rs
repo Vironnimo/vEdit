@@ -1035,6 +1035,11 @@ fn native_disk_reload_starts_fresh_undo_history() {
     let app = screen.state_mut();
     let tab = app.tab_mut().unwrap();
     let id = tab.id;
+    // Reload is available only after the current edits have been saved.
+    // Keep their native undo history so the test verifies that the disk
+    // replacement, rather than saving alone, starts a fresh history.
+    tab.saved_text.clone_from(&tab.text);
+    tab.dirty = false;
     tab.loading = true;
     let replacement = "# Reloaded disk plan\n";
     app.sender

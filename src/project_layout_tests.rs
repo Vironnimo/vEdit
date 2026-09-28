@@ -999,6 +999,52 @@ fn actual_source_and_markdown_wheels_keep_separate_positions_across_project_swit
     assert!((preview_offset(restarted.state(), preview) - preview_scroll).abs() < 0.5);
 }
 
+#[test]
+fn restart_restores_inactive_preview_tabs_after_another_preview_renders() {
+    let files = WorkspaceFiles::new();
+    let mut app = fixture(&files);
+    let pane = app.current_pane_id();
+    app.set_document_view(DocumentView::Preview);
+    let mut screen = harness(app);
+    wheel(&mut screen, 600.0, 230.0);
+    let first_id = screen.state().projects[0].tabs[0].id;
+    let first_scroll = screen.state().tab_preview_scroll(pane, first_id).unwrap();
+    screen.state_mut().activate_tab(0, 1);
+    screen.state_mut().set_document_view(DocumentView::Preview);
+    screen.run_steps(3);
+    wheel(&mut screen, 600.0, 420.0);
+    let second_id = screen.state().projects[0].tabs[1].id;
+    let second_scroll = screen.state().tab_preview_scroll(pane, second_id).unwrap();
+    assert!(first_scroll > 100.0 && second_scroll > 300.0);
+    screen.state_mut().activate_tab(0, 0);
+    screen.run_steps(3);
+    let saved =
+        serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
+    let mut restarted = harness(restore(saved));
+    let first_id = restarted.state().projects[0].tabs[0].id;
+    assert!(
+        (restarted
+            .state()
+            .tab_preview_scroll(pane, first_id)
+            .unwrap()
+            - first_scroll)
+            .abs()
+            < 0.5
+    );
+    restarted.state_mut().activate_tab(0, 1);
+    restarted.run_steps(3);
+    let second_id = restarted.state().projects[0].tabs[1].id;
+    assert!(
+        (restarted
+            .state()
+            .tab_preview_scroll(pane, second_id)
+            .unwrap()
+            - second_scroll)
+            .abs()
+            < 0.5
+    );
+}
+
 fn document_text(files: &WorkspaceFiles) -> String {
     fs::read_to_string(files.project("A").join("first.md")).unwrap()
 }

@@ -478,6 +478,9 @@ fn text_enter_and_more_text_in_one_frame_keep_their_chronological_order() {
         egui::Event::Text("bar".into()),
     ]);
     harness.step();
+    // TextEdit renders the native prefix before the queued Enter and suffix.
+    assert!(harness.state().editor_input_pending());
+    super::editor_input_tests::settle(&mut harness);
     assert_eq!(harness.state().tab().unwrap().text, "foo\nbar");
 }
 
@@ -491,6 +494,9 @@ fn native_text_before_escape_in_one_frame_is_committed_and_undoable() {
         .events
         .extend([egui::Event::Text("foo".into()), key(Key::Escape)]);
     harness.step();
+    // Escape commits only after TextEdit has applied the preceding text.
+    assert!(harness.state().editor_input_pending());
+    super::editor_input_tests::settle(&mut harness);
     assert_eq!(harness.state().tab().unwrap().text, "footail");
     assert_eq!(harness.state().tab().unwrap().vim.mode, VimMode::Normal);
     harness.event(egui::Event::Text("u".into()));

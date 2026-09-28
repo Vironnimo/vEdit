@@ -101,7 +101,7 @@ struct Find {
 
 #[derive(Clone, Copy, Debug)]
 enum Pending {
-    Operator(Operator, usize),
+    Operator(Operator, usize, bool),
     Go {
         operator: Option<Operator>,
         count: usize,
@@ -159,6 +159,7 @@ struct InsertReplay {
     baseline: String,
     cursor: usize,
     search: Option<SearchMotion>,
+    visual: Option<VisualRepeat>,
 }
 
 /// An application-level search motion. Keeping the pattern with a change lets
@@ -291,6 +292,7 @@ impl VimState {
                 baseline: text.to_owned(),
                 cursor: self.cursor,
                 search: None,
+                visual: None,
             });
         }
     }
@@ -439,28 +441,7 @@ impl VimState {
         };
         let old_cursor = self.cursor;
         let old_mode = self.mode;
-        let chars: Vec<_> = text.chars().collect();
-        let rows = lines(&chars);
-        let first = row_for_cursor(&rows, range.start);
-        let last = if old_mode == VimMode::VisualLine {
-            row_for_cursor(
-                &rows,
-                self.cursor.max(self.visual_anchor.unwrap_or(self.cursor)),
-            )
-        } else {
-            row_for_cursor(&rows, range.end - 1)
-        };
-        let visual = VisualRepeat {
-            linewise: old_mode == VimMode::VisualLine,
-            rows: last.saturating_sub(first) + 1,
-            columns: if first == last {
-                range.len()
-            } else {
-                range.end - rows[last].start
-            },
-            includes_newline: chars.get(range.end - 1) == Some(&'\n'),
-            to_line_end: self.visual_to_line_end,
-        };
+        let visual = self.visual_repeat(text, &range);
         self.cancel_pending_command();
         let (consumed, text_changed, yanked) = self.apply_visual(text, 'd', 1);
         self.clamp_cursor(text);
@@ -494,18 +475,41 @@ impl VimState {
         (action, copied)
     }
 
-    fn repeat_visual_cut(
-        &mut self,
-        text: &mut String,
-        visual: &VisualRepeat,
-    ) -> (bool, bool, Option<Yank>) {
-        let before = self.snapshot(text);
+    fn visual_repeat(&self, text: &str, range: &Range<usize>) -> VisualRepeat {
+        let chars: Vec<_> = text.chars().collect();
+        let rows = lines(&chars);
+        let first = row_for_cursor(&rows, range.start);
+        let last = if self.mode == VimMode::VisualLine {
+            row_for_cursor(
+                &rows,
+                self.cursor
+                    .max(self.visual_anchor.unwrap_or(self.cursor))
+                    .min(chars.len()),
+            )
+        } else {
+            row_for_cursor(&rows, range.end.saturating_sub(1).max(range.start))
+        };
+        VisualRepeat {
+            linewise: self.mode == VimMode::VisualLine,
+            rows: last.saturating_sub(first) + 1,
+            columns: if first == last {
+                range.len()
+            } else {
+                range.end - rows[last].start
+            },
+            includes_newline: range.end > range.start && chars.get(range.end - 1) == Some(&'\n'),
+            to_line_end: self.visual_to_line_end,
+        }
+    }
+
+    fn select_repeat_visual(&mut self, text: &str, visual: &VisualRepeat) {
         let chars: Vec<_> = text.chars().collect();
         let rows = lines(&chars);
         let first = row_for_cursor(&rows, self.cursor);
         let last = first.saturating_add(visual.rows - 1).min(rows.len() - 1);
         let line = rows[last];
         self.cancel_pending_command();
+        self.visual_to_line_end = visual.to_line_end;
         self.visual_anchor = Some(self.cursor);
         self.mode = if visual.linewise {
             VimMode::VisualLine
@@ -533,15 +537,6 @@ impl VimState {
                     .min(limit)
             }
         };
-        self.replaying = true;
-        let result = self.apply_visual(text, 'd', 1);
-        self.replaying = false;
-        self.clamp_cursor(text);
-        if result.1 {
-            self.record(before);
-        }
-        self.cancel_pending_command();
-        result
     }
 
     /// Consume a search count while retaining a waiting d/c/y operator. Search
@@ -549,7 +544,7 @@ impl VimState {
     pub fn take_search_count(&mut self) -> usize {
         let count = self.take_count().clamp(1, MAX_COUNT);
         match self.pending {
-            Some(Pending::Operator(_, prefix)) => count.saturating_mul(prefix).min(MAX_COUNT),
+            Some(Pending::Operator(_, prefix, _)) => count.saturating_mul(prefix).min(MAX_COUNT),
             None => count,
             _ => {
                 self.cancel_pending_command();
@@ -563,7 +558,7 @@ impl VimState {
     }
 
     pub fn search_operator_pending(&self) -> bool {
-        matches!(self.pending, Some(Pending::Operator(_, _)))
+        matches!(self.pending, Some(Pending::Operator(_, _, _)))
     }
 
     /// Apply an exclusive logical search target before Normal mode clamps its
@@ -579,7 +574,7 @@ impl VimState {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let operator = match self.pending {
-            Some(Pending::Operator(op, _)) => Some(op),
+            Some(Pending::Operator(op, _, _)) => Some(op),
             _ => None,
         };
         self.cancel_pending_command();
@@ -628,6 +623,7 @@ impl VimState {
                         baseline: text.clone(),
                         cursor: self.cursor,
                         search: Some(motion),
+                        visual: None,
                     });
                 } else if result.1 {
                     self.last_change = Some(RepeatChange {
@@ -685,7 +681,15 @@ impl VimState {
             }
         };
         let mut command = match self.pending {
-            Some(Pending::Operator(op, count)) => format!("{}{}", prefix(count), op.key()),
+            Some(Pending::Operator(op, count, explicit)) => format!(
+                "{}{}",
+                if explicit {
+                    count.to_string()
+                } else {
+                    String::new()
+                },
+                op.key(),
+            ),
             Some(Pending::Go {
                 operator,
                 count,
@@ -776,13 +780,13 @@ impl VimState {
                     keys: replay.keys,
                     insert: inserted_delta,
                     search: replay.search,
-                    visual: None,
+                    visual: replay.visual,
                 });
             }
             self.insert_count = 1;
         }
         self.leave_visual();
-        self.clear_command();
+        self.cancel_pending_command();
         let text_changed = self.restore(text, redo) || insert_expanded;
         self.preferred_column = None;
         if inserting {
@@ -792,6 +796,7 @@ impl VimState {
                 baseline: text.clone(),
                 cursor: self.cursor,
                 search: None,
+                visual: None,
             });
         }
         self.clamp_cursor(text);
@@ -830,6 +835,23 @@ impl VimState {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let old_count = self.count;
+        let visual_change = self.selection(text).and_then(|range| {
+            let keys = match (self.pending, key) {
+                (Some(Pending::Replace(_)), VimKey::Char(_) | VimKey::Enter | VimKey::Tab) => {
+                    vec![VimKey::Char('r'), key]
+                }
+                (None, VimKey::Char('c' | 's' | '>' | '<' | 'p' | 'P' | 'J')) => {
+                    let mut keys = Vec::new();
+                    if old_count > 0 {
+                        keys.extend(old_count.to_string().chars().map(VimKey::Char));
+                    }
+                    keys.push(key);
+                    keys
+                }
+                _ => return None,
+            };
+            Some((self.visual_repeat(text, &range), keys))
+        });
         let insert_changed = old_mode == VimMode::Insert
             && self
                 .insert_origin
@@ -862,11 +884,18 @@ impl VimState {
         self.clamp_cursor(text);
         if !self.replaying {
             if old_mode != VimMode::Insert && self.mode == VimMode::Insert {
+                let (visual, keys) = if let Some((visual, keys)) = visual_change {
+                    self.command_keys.clear();
+                    (Some(visual), keys)
+                } else {
+                    (None, std::mem::take(&mut self.command_keys))
+                };
                 self.insert_replay = Some(InsertReplay {
-                    keys: std::mem::take(&mut self.command_keys),
+                    keys,
                     baseline: text.clone(),
                     cursor: self.cursor,
                     search: None,
+                    visual,
                 });
             } else if old_mode == VimMode::Insert && self.mode != VimMode::Insert {
                 if let Some(replay) = self.insert_replay.take()
@@ -877,15 +906,21 @@ impl VimState {
                         insert: inserted_delta
                             .or_else(|| Some(insert_delta(&replay.baseline, text, replay.cursor))),
                         search: replay.search,
-                        visual: None,
+                        visual: replay.visual,
                     });
                 }
             } else if text_changed && !history_command && !dot_command {
+                let (visual, keys) = if let Some((visual, keys)) = visual_change {
+                    self.command_keys.clear();
+                    (Some(visual), keys)
+                } else {
+                    (None, std::mem::take(&mut self.command_keys))
+                };
                 self.last_change = Some(RepeatChange {
-                    keys: std::mem::take(&mut self.command_keys),
+                    keys,
                     insert: None,
                     search: None,
-                    visual: None,
+                    visual,
                 });
             }
             if self.mode == VimMode::Normal && self.pending.is_none() && self.count == 0 {
@@ -1149,7 +1184,7 @@ impl VimState {
                     self.preferred_column = None;
                     return (true, false, None);
                 }
-                Pending::Operator(op, prefix) => {
+                Pending::Operator(op, prefix, explicit_prefix) => {
                     let count = prefix.saturating_mul(count).min(MAX_COUNT);
                     if ch == op.key() {
                         let rows = lines(&chars);
@@ -1165,7 +1200,7 @@ impl VimState {
                         self.pending = Some(Pending::Go {
                             operator: Some(op),
                             count,
-                            explicit: explicit || prefix > 1,
+                            explicit: explicit || explicit_prefix,
                         });
                         return (true, false, None);
                     }
@@ -1195,7 +1230,13 @@ impl VimState {
                         }
                         return (true, false, None);
                     }
-                    return self.apply_operator_motion(text, op, ch, count, explicit || prefix > 1);
+                    return self.apply_operator_motion(
+                        text,
+                        op,
+                        ch,
+                        count,
+                        explicit || explicit_prefix,
+                    );
                 }
                 Pending::Replace(_) | Pending::Find { .. } | Pending::TextObject { .. } => {
                     unreachable!()
@@ -1310,7 +1351,7 @@ impl VimState {
             }
             'd' | 'c' | 'y' | '>' | '<' if self.mode == VimMode::Normal => {
                 let op = operator_for(ch);
-                self.pending = Some(Pending::Operator(op, count));
+                self.pending = Some(Pending::Operator(op, count, explicit));
                 (true, false, None)
             }
             'D' | 'C' if self.mode == VimMode::Normal => self.apply_operator_motion(
@@ -1497,7 +1538,7 @@ impl VimState {
             '{' | '}' => paragraph(chars, self.cursor, count, key == '}'),
             _ => self.cursor,
         };
-        self.preferred_column = None;
+        self.preferred_column = if key == '$' { Some(usize::MAX) } else { None };
     }
 
     fn apply_operator_motion(
@@ -2096,14 +2137,9 @@ impl VimState {
         if change.keys.is_empty() {
             return (true, false, None);
         }
-        if let Some(visual) = &change.visual {
-            // Vim repeats the saved Visual area size from the current cursor;
-            // a count supplied to dot is ignored for Visual operators.
-            return self.repeat_visual_cut(text, visual);
-        }
         if let Some(search) = change.search.as_mut().filter(|_| explicit) {
             search.count = count;
-        } else if explicit {
+        } else if explicit && change.visual.is_none() {
             // A count on dot replaces the original command count, as in Vim.
             let digits = change
                 .keys
@@ -2138,6 +2174,11 @@ impl VimState {
         }
         let before = self.snapshot(text);
         self.command_keys.clear();
+        if let Some(visual) = &change.visual {
+            // Visual changes repeat their completed area, independent of mouse
+            // selection and selection-building keys. A dot count is ignored.
+            self.select_repeat_visual(text, visual);
+        }
         self.replaying = true;
         // The insert replay supplies a baseline even during command replay, so
         // counted i/a commands can repeat the inserted text on Escape.
@@ -2182,6 +2223,7 @@ impl VimState {
                 baseline: text.clone(),
                 cursor: self.cursor,
                 search: change.search.clone(),
+                visual: change.visual.clone(),
             });
             let len = text.chars().count();
             let start = self
@@ -3419,6 +3461,92 @@ mod tests {
         state = VimState::new();
         keys(&mut state, &mut text, "d2w3.");
         assert_eq!(text, "six seven eight nine ten");
+    }
+
+    #[test]
+    fn windows_history_discards_visual_operator_and_count_prefixes_before_dot() {
+        for prefix in ["vll", "V", "d", "3"] {
+            for redo in [false, true] {
+                let mut state = VimState::new();
+                let mut text = "abcdefghi".to_owned();
+                keys(&mut state, &mut text, "x");
+                if redo {
+                    keys(&mut state, &mut text, "u");
+                }
+                keys(&mut state, &mut text, prefix);
+                state.history_edit(&mut text, redo);
+                assert!(
+                    state.command_keys.is_empty(),
+                    "prefix={prefix}, redo={redo}"
+                );
+                keys(&mut state, &mut text, "x.");
+                assert_eq!(text, if redo { "defghi" } else { "cdefghi" });
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_visual_changes_repeat_completed_geometry_and_one_undo_step() {
+        for (operation, first, repeated) in [("rX", "XXX def", "XXX XXX"), ("cZ", "Z def", "Z Z")] {
+            let mut state = VimState::new();
+            let mut text = "abc def".to_owned();
+            state.set_mouse_selection(&text, 3, 0, false);
+            keys(&mut state, &mut text, operation);
+            state.finish_insert(&mut text);
+            assert_eq!(text, first);
+            keys(&mut state, &mut text, "w.");
+            assert_eq!(text, repeated, "operation={operation}");
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, first);
+            state.handle_key(&mut text, VimKey::Redo);
+            assert_eq!(text, repeated);
+        }
+
+        let mut state = VimState::new();
+        let mut text = "a\nb\nc\nd".to_owned();
+        state.set_mouse_selection(&text, 4, 0, true);
+        keys(&mut state, &mut text, ">jj.");
+        assert_eq!(text, "    a\n    b\n    c\n    d");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "    a\n    b\nc\nd");
+    }
+
+    #[test]
+    fn explicit_one_before_operator_is_retained_for_absolute_line_motion() {
+        for command in ["1dG", "d1G"] {
+            let mut state = VimState::new();
+            let mut text = "one\ntwo\nthree\nfour".to_owned();
+            keys(&mut state, &mut text, "3G");
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, "four", "command={command}");
+        }
+        let mut state = VimState::new();
+        let mut text = "one\ntwo\nthree\nfour".to_owned();
+        keys(&mut state, &mut text, "3G1yG");
+        assert_eq!(state.register().unwrap().text, "one\ntwo\nthree\n");
+        keys(&mut state, &mut text, "3G1>G");
+        assert_eq!(text, "    one\n    two\n    three\nfour");
+    }
+
+    #[test]
+    fn dollar_keeps_end_of_line_intent_across_vertical_motion_and_empty_lines() {
+        let mut state = VimState::new();
+        let mut text = "a\nlong\n\nlast".to_owned();
+        keys(&mut state, &mut text, "$j");
+        assert_eq!(state.cursor, 5);
+        keys(&mut state, &mut text, "jj");
+        assert_eq!(state.cursor, 11);
+        keys(&mut state, &mut text, "kk");
+        assert_eq!(state.cursor, 5);
+        keys(&mut state, &mut text, "0j");
+        assert_eq!(state.cursor, 7);
+
+        state = VimState::new();
+        text = "a\nlong".into();
+        keys(&mut state, &mut text, "v$jd");
+        assert_eq!(text, "");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "a\nlong");
     }
     #[test]
     fn dot_replays_external_widget_change_as_one_transaction() {

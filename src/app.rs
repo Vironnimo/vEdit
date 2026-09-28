@@ -28,6 +28,8 @@ mod context_actions;
 mod control;
 #[path = "editor_feedback.rs"]
 mod editor_feedback;
+#[path = "editor_input.rs"]
+mod editor_input;
 #[path = "explorer_navigation.rs"]
 mod explorer_navigation;
 #[path = "find.rs"]
@@ -224,6 +226,9 @@ struct EditorTab {
     recovery_path: PathBuf,
     recovery_revision: u64,
     recovery_pending: bool,
+    recovery_cleanup_pending: Option<u64>,
+    recovery_cleanup_retry_at: Option<Instant>,
+    recovery_generation: u64,
     revision: u64,
     fingerprint: Option<workspace::FileFingerprint>,
     line_ending: workspace::LineEnding,
@@ -263,6 +268,9 @@ impl EditorTab {
             recovery_path,
             recovery_revision: 0,
             recovery_pending: false,
+            recovery_cleanup_pending: None,
+            recovery_cleanup_retry_at: None,
+            recovery_generation: 0,
             revision: 0,
             fingerprint: None,
             line_ending: workspace::LineEnding::Lf,
@@ -343,7 +351,7 @@ enum WorkerResult {
     Loaded {
         id: u64,
         result: Result<workspace::LoadedDocument, String>,
-        recovery: Option<Result<workspace::LoadedDocument, String>>,
+        recovery: Option<Result<crate::recovery::RecoveredDocument, String>>,
     },
     Saved {
         id: u64,
@@ -354,6 +362,13 @@ enum WorkerResult {
     Recovered {
         id: u64,
         revision: u64,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    RecoveryRemoved {
+        id: u64,
+        revision: u64,
+        generation: u64,
         result: Result<(), String>,
     },
     GitStatus {
@@ -639,7 +654,13 @@ impl MorrowApp {
         let mut mapping = vec![None; entries.len()];
         for (original, entry) in entries.into_iter().enumerate() {
             let root = entry.root;
-            if !root.is_dir() {
+            if !root.is_dir()
+                && !entry.tabs.iter().any(|tab| {
+                    tab.recovery_path
+                        .as_ref()
+                        .is_some_and(|path| path.is_file())
+                })
+            {
                 continue;
             }
             let mut project = Project::new(root.clone());
@@ -881,7 +902,7 @@ impl MorrowApp {
                 .unwrap_or_else(|| Err("Untitled".into()));
             let recovered = recovery
                 .filter(|p| p.is_file())
-                .map(|p| workspace::read_document(&p, MAX_DOCUMENT));
+                .map(|p| crate::recovery::read_document(&p, MAX_DOCUMENT));
             WorkerResult::Loaded {
                 id,
                 result,
@@ -1174,7 +1195,10 @@ impl MorrowApp {
                     p.index_cancel.store(true, Ordering::Relaxed);
                     for t in p.tabs {
                         self.agent_marks.detach_document(t.id);
-                        let _ = self.recovery_writer.remove(&t.recovery_path, t.revision);
+                        self.markdown.forget_document(t.id);
+                        let _ = self
+                            .recovery_writer
+                            .remove(&t.recovery_path, self.recovery_writer.stamp());
                     }
                     if self.active_project > index {
                         self.active_project -= 1;
@@ -1191,7 +1215,9 @@ impl MorrowApp {
                     for t in &mut p.tabs {
                         t.text.clone_from(&t.saved_text);
                         t.dirty = false;
-                        let _ = self.recovery_writer.remove(&t.recovery_path, t.revision);
+                        let _ = self
+                            .recovery_writer
+                            .remove(&t.recovery_path, self.recovery_writer.stamp());
                     }
                 }
                 self.flush_recovery();
@@ -1212,9 +1238,10 @@ impl MorrowApp {
             if let Some(index) = project.tabs.iter().position(|tab| tab.id == id) {
                 let tab = project.tabs.remove(index);
                 self.agent_marks.detach_document(id);
+                self.markdown.forget_document(id);
                 let _ = self
                     .recovery_writer
-                    .remove(&tab.recovery_path, tab.revision);
+                    .remove(&tab.recovery_path, self.recovery_writer.stamp());
                 if project.active_tab > index {
                     project.active_tab -= 1;
                 }
@@ -1268,7 +1295,26 @@ impl MorrowApp {
                 } => {
                     self.find.invalidate(id);
                     let ctx = self.ctx.clone();
+                    let preserve_scroll = self.has_saved_document_scroll(id);
+                    let next_recovery_name = format!(
+                        "{}-{id}-after-unreadable-{}.txt",
+                        std::process::id(),
+                        self.recovery_writer.stamp()
+                    );
                     if let Some(tab) = self.tab_by_id_mut(id) {
+                        // Only the active load may publish. All load entry
+                        // points serialize requests; a late duplicate must not
+                        // overwrite a document that has become editable.
+                        if !tab.loading || tab.saving {
+                            continue;
+                        }
+                        if tab.dirty {
+                            tab.loading = false;
+                            tab.error = Some(
+                                "The reload was skipped because the buffer has new edits".into(),
+                            );
+                            continue;
+                        }
                         tab.loading = false;
                         tab.lines.invalidate();
                         match result {
@@ -1305,13 +1351,51 @@ impl MorrowApp {
                                 }
                             }
                         }
-                        if let Some(Ok(doc)) = recovery {
-                            if tab.text != doc.text {
-                                tab.revision = tab.revision.saturating_add(1);
+                        if let Some(recovery) = recovery {
+                            match recovery {
+                                Ok(doc) => {
+                                    let disk_matches =
+                                        doc.baseline.as_ref().is_some_and(|baseline| {
+                                            tab.fingerprint
+                                                .as_ref()
+                                                .is_some_and(|disk| disk.same_content(baseline))
+                                        });
+                                    if tab.text != doc.text {
+                                        tab.revision = tab.revision.saturating_add(1);
+                                    }
+                                    tab.text = doc.text;
+                                    tab.dirty = tab.text != tab.saved_text
+                                        || (tab.path.is_some() && tab.fingerprint.is_none());
+                                    if tab.dirty {
+                                        // A fresh disk read is an observation,
+                                        // not permission to overwrite changes
+                                        // made since this recovery was recorded.
+                                        tab.fingerprint = doc.baseline;
+                                        if !disk_matches && tab.path.is_some() {
+                                            tab.error = Some(if tab.fingerprint.is_some() {
+                                                "The file changed since these edits were recovered. Save As preserves your recovered changes without replacing the disk version.".into()
+                                            } else {
+                                                "Recovered edits have no verified disk baseline. Use Save As to preserve them; the original file is protected.".into()
+                                            });
+                                        }
+                                        if let Some(ending) = doc.line_ending {
+                                            tab.line_ending = ending;
+                                        }
+                                        if let Some(bom) = doc.bom {
+                                            tab.bom = bom;
+                                        }
+                                    }
+                                    tab.recovery_revision = tab.revision;
+                                }
+                                Err(error) => {
+                                    let retained = crate::paths::display(&tab.recovery_path);
+                                    tab.recovery_path =
+                                        tab.recovery_path.with_file_name(next_recovery_name);
+                                    tab.error = Some(format!(
+                                        "Recovery could not be read: {error}. The unreadable file is retained at {retained}; new edits use a separate recovery file."
+                                    ));
+                                }
                             }
-                            tab.text = doc.text;
-                            tab.dirty = tab.text != tab.saved_text;
-                            tab.recovery_revision = tab.revision;
                         }
                         let range = tab
                             .pending_selection
@@ -1320,6 +1404,12 @@ impl MorrowApp {
                             .unwrap_or(tab.vim.cursor..tab.vim.cursor);
                         let length = tab.text.chars().count();
                         tab.set_cursor(range.start.min(length)..range.end.min(length));
+                        // Loading a restored document must not turn its saved
+                        // reading position into a cursor-reveal request. Pending
+                        // explicit navigation is applied after the load.
+                        if preserve_scroll {
+                            tab.scroll_to_cursor = false;
+                        }
                     }
                 }
                 WorkerResult::Saved {
@@ -1341,13 +1431,22 @@ impl MorrowApp {
                                 tab.saved_text = text;
                                 tab.fingerprint = Some(fingerprint);
                                 tab.dirty = tab.text != tab.saved_text;
+                                if tab.dirty {
+                                    // A completed save changes the baseline of
+                                    // newer edits without changing their text.
+                                    // Older recovery completions may no longer
+                                    // claim that this new snapshot is secured.
+                                    tab.recovery_generation =
+                                        tab.recovery_generation.wrapping_add(1);
+                                    tab.recovery_revision = 0;
+                                }
                                 if !tab.dirty {
                                     tab.agent_unsaved = false;
                                 }
                                 tab.error = None;
                                 if !tab.dirty {
-                                    let _ =
-                                        recovery_writer.remove(&tab.recovery_path, tab.revision);
+                                    let _ = recovery_writer
+                                        .remove(&tab.recovery_path, recovery_writer.stamp());
                                 }
                                 message = Some((format!("Saved {}", tab.title), false));
                             }
@@ -1399,18 +1498,42 @@ impl MorrowApp {
                 WorkerResult::Recovered {
                     id,
                     revision,
+                    generation,
                     result,
                 } => {
                     if let Some(tab) = self.tab_by_id_mut(id) {
                         tab.recovery_pending = false;
-                        if result.is_ok() {
+                        if result.is_ok() && generation == tab.recovery_generation {
                             tab.recovery_revision = tab.recovery_revision.max(revision);
-                        } else {
+                        } else if result.is_err() {
                             tab.last_edit = Instant::now();
                         }
                     }
                     if let Err(e) = result {
                         self.status(e, true);
+                    }
+                    self.session_dirty = true;
+                }
+                WorkerResult::RecoveryRemoved {
+                    id,
+                    revision,
+                    generation,
+                    result,
+                } => {
+                    if let Some(tab) = self.tab_by_id_mut(id) {
+                        if tab.recovery_cleanup_pending == Some(revision) {
+                            tab.recovery_cleanup_pending = None;
+                        }
+                        if result.is_ok() && generation == tab.recovery_generation {
+                            tab.recovery_revision = tab.recovery_revision.max(revision);
+                            tab.recovery_cleanup_retry_at = None;
+                        } else {
+                            tab.recovery_cleanup_retry_at =
+                                Some(Instant::now() + Duration::from_millis(850));
+                        }
+                    }
+                    if let Err(error) = result {
+                        self.status(error, true);
                     }
                     self.session_dirty = true;
                 }
@@ -1582,6 +1705,7 @@ impl MorrowApp {
                 }
                 WorkerResult::DiskChanges(changes) => {
                     self.disk_check_running = false;
+                    let ctx = self.ctx.clone();
                     for (id, baseline, result) in changes {
                         if let Some(t) = self.tab_by_id_mut(id) {
                             if t.fingerprint.as_ref() != Some(&baseline) || t.saving || t.loading {
@@ -1592,6 +1716,7 @@ impl MorrowApp {
                                     if t.dirty {
                                         t.error=Some("This file changed outside Morrow. Save your edits as another file, or close and reopen it.".into());
                                     } else {
+                                        context_actions::reset_native_history(&ctx, id);
                                         let cursor = t
                                             .vim
                                             .cursor
@@ -2241,11 +2366,39 @@ impl MorrowApp {
     }
     fn autosave(&mut self) {
         let mut recoveries = Vec::new();
+        let mut removals = Vec::new();
         let mut saves = Vec::new();
         let mut delay: Option<Duration> = None;
         for p in &mut self.projects {
             for t in &mut p.tabs {
-                if !t.dirty || t.loading {
+                if t.loading {
+                    continue;
+                }
+                if !t.dirty {
+                    let retry_delay = t
+                        .recovery_cleanup_retry_at
+                        .map(|retry| retry.saturating_duration_since(Instant::now()));
+                    if !t.saving
+                        && t.error.is_none()
+                        && t.recovery_revision != t.revision
+                        && t.recovery_cleanup_pending != Some(t.revision)
+                    {
+                        if let Some(remaining) =
+                            retry_delay.filter(|remaining| !remaining.is_zero())
+                        {
+                            delay =
+                                Some(delay.map_or(remaining, |existing| existing.min(remaining)));
+                        } else {
+                            t.recovery_cleanup_pending = Some(t.revision);
+                            t.recovery_cleanup_retry_at = None;
+                            removals.push((
+                                t.id,
+                                t.revision,
+                                t.recovery_generation,
+                                t.recovery_path.clone(),
+                            ));
+                        }
+                    }
                     continue;
                 }
                 let remaining = Duration::from_millis(850).saturating_sub(t.last_edit.elapsed());
@@ -2255,7 +2408,16 @@ impl MorrowApp {
                 }
                 if t.recovery_revision != t.revision && !t.recovery_pending {
                     t.recovery_pending = true;
-                    recoveries.push((t.id, t.revision, t.recovery_path.clone(), t.text.clone()));
+                    recoveries.push((
+                        t.id,
+                        t.revision,
+                        t.recovery_generation,
+                        t.recovery_path.clone(),
+                        t.text.clone(),
+                        t.fingerprint.clone(),
+                        t.line_ending,
+                        t.bom,
+                    ));
                 }
                 if self.settings.autosave
                     && !t.agent_unsaved
@@ -2268,15 +2430,29 @@ impl MorrowApp {
                 }
             }
         }
-        for (id, revision, path, text) in recoveries {
+        for (id, revision, generation, path, text, baseline, ending, bom) in recoveries {
             let writer = self.recovery_writer.clone();
+            let stamp = writer.stamp();
             self.worker(move || {
-                let result = writer.write(&path, revision, text.as_bytes());
+                let result =
+                    crate::recovery::encode_document(&text, baseline.as_ref(), ending, bom)
+                        .and_then(|bytes| writer.write(&path, stamp, &bytes));
                 WorkerResult::Recovered {
                     id,
                     revision,
+                    generation,
                     result,
                 }
+            });
+        }
+        for (id, revision, generation, path) in removals {
+            let writer = self.recovery_writer.clone();
+            let stamp = writer.stamp();
+            self.worker(move || WorkerResult::RecoveryRemoved {
+                id,
+                revision,
+                generation,
+                result: writer.remove(&path, stamp),
             });
         }
         for id in saves {
@@ -2348,11 +2524,22 @@ impl MorrowApp {
         for p in &self.projects {
             for tab in &p.tabs {
                 if tab.dirty {
-                    let _ = self.recovery_writer.write(
-                        &tab.recovery_path,
-                        tab.revision,
-                        tab.text.as_bytes(),
-                    );
+                    if let Ok(bytes) = crate::recovery::encode_document(
+                        &tab.text,
+                        tab.fingerprint.as_ref(),
+                        tab.line_ending,
+                        tab.bom,
+                    ) {
+                        let _ = self.recovery_writer.write(
+                            &tab.recovery_path,
+                            self.recovery_writer.stamp(),
+                            &bytes,
+                        );
+                    }
+                } else if !tab.loading && !tab.saving && tab.error.is_none() {
+                    let _ = self
+                        .recovery_writer
+                        .remove(&tab.recovery_path, self.recovery_writer.stamp());
                 }
             }
         }
@@ -2754,6 +2941,7 @@ impl MorrowApp {
         }
     }
     fn handle_vim(&mut self) {
+        self.resume_editor_input();
         self.validate_vim_search();
         if !self.settings.vim
             || egui::Popup::is_any_open(&self.ctx)
@@ -2796,166 +2984,6 @@ impl MorrowApp {
             return;
         }
 
-        // Native insert events normally reach TextEdit once. If Escape occurs in
-        // the same frame, apply the queued edits before ending the transaction.
-        fn flush_insert(tab: &mut EditorTab, events: &mut Vec<egui::Event>, width: usize) {
-            for event in events.drain(..) {
-                let len = tab.text.chars().count();
-                let caret = tab.vim.cursor.min(len);
-                let mut selection = tab.selection.start.min(len)..tab.selection.end.min(len);
-                let indent = " ".repeat(width);
-                let edit = match event {
-                    egui::Event::Key {
-                        key: Key::A,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } if modifiers.command || modifiers.ctrl => {
-                        tab.selection = 0..len;
-                        tab.vim.set_cursor(&tab.text, len);
-                        tab.pending_selection = Some(tab.selection.clone());
-                        None
-                    }
-                    egui::Event::Text(text) | egui::Event::Paste(text) => Some(
-                        editor::replace_selection(&tab.text, selection.clone(), &text),
-                    ),
-                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => Some(
-                        editor::replace_selection(&tab.text, selection.clone(), &text),
-                    ),
-                    egui::Event::Key {
-                        key: Key::Enter,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => {
-                        Some(editor::smart_newline(&tab.text, selection.clone(), &indent))
-                    }
-                    egui::Event::Key {
-                        key: Key::Tab,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => {
-                        Some(if modifiers.shift {
-                            editor::indent_lines(&tab.text, selection.clone(), &indent, true)
-                        } else if selection.is_empty() {
-                            editor::replace_selection(&tab.text, selection.clone(), &indent)
-                        } else {
-                            editor::indent_lines(&tab.text, selection.clone(), &indent, false)
-                        })
-                    }
-                    egui::Event::Key {
-                        key: Key::Backspace | Key::Delete,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => {
-                        if selection.is_empty() {
-                            selection = if matches!(
-                                event,
-                                egui::Event::Key {
-                                    key: Key::Backspace,
-                                    ..
-                                }
-                            ) {
-                                caret.saturating_sub(1)..caret
-                            } else {
-                                caret..caret.saturating_add(1).min(len)
-                            };
-                        }
-                        Some(editor::replace_selection(&tab.text, selection, ""))
-                    }
-                    egui::Event::Key {
-                        key:
-                            Key::ArrowLeft
-                            | Key::ArrowRight
-                            | Key::ArrowUp
-                            | Key::ArrowDown
-                            | Key::Home
-                            | Key::End,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => {
-                        let egui::Event::Key { key, .. } = event else {
-                            unreachable!()
-                        };
-                        let chars: Vec<char> = tab.text.chars().collect();
-                        let mut starts = vec![0];
-                        for (index, ch) in chars.iter().enumerate() {
-                            if *ch == '\n' {
-                                starts.push(index + 1);
-                            }
-                        }
-                        let row = starts
-                            .partition_point(|start| *start <= caret)
-                            .saturating_sub(1);
-                        let line_end =
-                            |row: usize| starts.get(row + 1).map_or(chars.len(), |next| next - 1);
-                        let column = caret - starts[row];
-                        let next = match key {
-                            Key::ArrowLeft => {
-                                if !modifiers.shift && !selection.is_empty() {
-                                    selection.start
-                                } else {
-                                    caret.saturating_sub(1)
-                                }
-                            }
-                            Key::ArrowRight => {
-                                if !modifiers.shift && !selection.is_empty() {
-                                    selection.end
-                                } else {
-                                    caret.saturating_add(1).min(len)
-                                }
-                            }
-                            Key::ArrowUp => {
-                                let target = row.saturating_sub(1);
-                                starts[target] + column.min(line_end(target) - starts[target])
-                            }
-                            Key::ArrowDown => {
-                                let target = (row + 1).min(starts.len() - 1);
-                                starts[target] + column.min(line_end(target) - starts[target])
-                            }
-                            Key::Home => {
-                                if modifiers.ctrl || modifiers.command {
-                                    0
-                                } else {
-                                    starts[row]
-                                }
-                            }
-                            Key::End => {
-                                if modifiers.ctrl || modifiers.command {
-                                    len
-                                } else {
-                                    line_end(row)
-                                }
-                            }
-                            _ => caret,
-                        };
-                        let anchor = if caret == selection.start {
-                            selection.end
-                        } else {
-                            selection.start
-                        };
-                        tab.selection = if modifiers.shift {
-                            anchor.min(next)..anchor.max(next)
-                        } else {
-                            next..next
-                        };
-                        tab.vim.set_cursor(&tab.text, next);
-                        tab.pending_selection = Some(tab.selection.clone());
-                        None
-                    }
-                    _ => None,
-                };
-                if let Some(edit) = edit {
-                    tab.apply(edit);
-                    tab.vim.set_cursor(&tab.text, tab.selection.end);
-                    tab.vim.notify_external_text_change();
-                    tab.scroll_to_cursor = true;
-                }
-            }
-        }
         fn apply_action(
             tab: &mut EditorTab,
             action: crate::vim::Action,
@@ -2982,13 +3010,7 @@ impl MorrowApp {
             tab.pending_selection = Some(selection);
             tab.scroll_to_cursor = true;
         }
-        fn copy_to_clipboard(
-            tab: &mut EditorTab,
-            native_insert: &mut Vec<egui::Event>,
-            width: usize,
-            system_clipboard: &mut Option<String>,
-        ) {
-            flush_insert(tab, native_insert, width);
+        fn copy_to_clipboard(tab: &mut EditorTab, system_clipboard: &mut Option<String>) {
             let selection = tab
                 .vim
                 .selection(&tab.text)
@@ -3015,12 +3037,9 @@ impl MorrowApp {
         }
         fn cut_selection(
             tab: &mut EditorTab,
-            native_insert: &mut Vec<egui::Event>,
-            width: usize,
             system_clipboard: &mut Option<String>,
             vim_register: &mut Option<Yank>,
         ) {
-            flush_insert(tab, native_insert, width);
             if tab.loading {
                 return;
             }
@@ -3048,13 +3067,7 @@ impl MorrowApp {
             tab.set_cursor(tab.selection.start..tab.selection.start);
             tab.vim.notify_external_text_change();
         }
-        fn paste_system_text(
-            tab: &mut EditorTab,
-            native_insert: &mut Vec<egui::Event>,
-            width: usize,
-            text: &str,
-        ) {
-            flush_insert(tab, native_insert, width);
+        fn paste_system_text(tab: &mut EditorTab, text: &str) {
             if tab.loading || text.is_empty() {
                 return;
             }
@@ -3114,7 +3127,19 @@ impl MorrowApp {
             if let Some(register) = register {
                 tab.vim.set_register(register);
             }
-            for event in events {
+            let mut events = events.into_iter();
+            while let Some(event) = events.next() {
+                if tab.vim.mode == VimMode::Insert
+                    && editor_input::vim_barrier(&event)
+                    && native_insert.iter().any(editor_input::native_input)
+                {
+                    editor_input::defer(
+                        &ctx,
+                        tab.id,
+                        std::iter::once(event).chain(events).collect(),
+                    );
+                    break;
+                }
                 find.observe_escape(&event, event_time);
                 if find.prompt.is_some() || find.waiting() {
                     match event {
@@ -3144,12 +3169,7 @@ impl MorrowApp {
                         egui::Event::Copy => {
                             prompt = None;
                             prompt_text.clear();
-                            copy_to_clipboard(
-                                tab,
-                                &mut native_insert,
-                                width,
-                                &mut system_clipboard,
-                            );
+                            copy_to_clipboard(tab, &mut system_clipboard);
                         }
                         egui::Event::Cut | egui::Event::Ime(_) => {}
                         egui::Event::Key {
@@ -3174,7 +3194,6 @@ impl MorrowApp {
                         modifiers,
                         ..
                     } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
-                        flush_insert(tab, &mut native_insert, width);
                         let redo = matches!(&event, egui::Event::Key { key: Key::Y, .. })
                             || modifiers.shift;
                         let action = tab.vim.history_edit(&mut tab.text, redo);
@@ -3182,28 +3201,23 @@ impl MorrowApp {
                         continue;
                     }
                     egui::Event::Copy => {
-                        copy_to_clipboard(tab, &mut native_insert, width, &mut system_clipboard);
+                        copy_to_clipboard(tab, &mut system_clipboard);
                         continue;
                     }
                     egui::Event::Cut => {
-                        cut_selection(
-                            tab,
-                            &mut native_insert,
-                            width,
-                            &mut system_clipboard,
-                            &mut vim_register,
-                        );
+                        cut_selection(tab, &mut system_clipboard, &mut vim_register);
                         continue;
                     }
                     egui::Event::Paste(text) => {
-                        paste_system_text(tab, &mut native_insert, width, text);
+                        paste_system_text(tab, text);
                         continue;
                     }
-                    egui::Event::Ime(egui::ImeEvent::Commit(_))
+                    egui::Event::Ime(egui::ImeEvent::Commit(text))
                         if tab.vim.mode == VimMode::Insert =>
                     {
-                        native_insert.push(event);
-                        flush_insert(tab, &mut native_insert, width);
+                        // Composition previews remain separate from source;
+                        // committed text uses the same native event chronology.
+                        native_insert.push(egui::Event::Text(text.clone()));
                         continue;
                     }
                     egui::Event::Ime(_) => continue,
@@ -3214,12 +3228,7 @@ impl MorrowApp {
                         ..
                     } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
                         if !native_copy {
-                            copy_to_clipboard(
-                                tab,
-                                &mut native_insert,
-                                width,
-                                &mut system_clipboard,
-                            );
+                            copy_to_clipboard(tab, &mut system_clipboard);
                         }
                         continue;
                     }
@@ -3230,13 +3239,7 @@ impl MorrowApp {
                         ..
                     } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
                         if !native_cut {
-                            cut_selection(
-                                tab,
-                                &mut native_insert,
-                                width,
-                                &mut system_clipboard,
-                                &mut vim_register,
-                            );
+                            cut_selection(tab, &mut system_clipboard, &mut vim_register);
                         }
                         continue;
                     }
@@ -3262,16 +3265,8 @@ impl MorrowApp {
                             ..
                         }
                     ) {
-                        flush_insert(tab, &mut native_insert, width);
                         let action = tab.vim.handle_key(&mut tab.text, VimKey::Escape);
                         apply_action(tab, action, &mut vim_register);
-                    } else if matches!(&event, egui::Event::Key { key: Key::Enter | Key::Tab, pressed: true, modifiers, .. }
-                        if !modifiers.command && !modifiers.ctrl && !modifiers.alt)
-                    {
-                        // Preserve text-before-newline order; these two keys
-                        // otherwise run as editor shortcuts before TextEdit.
-                        native_insert.push(event);
-                        flush_insert(tab, &mut native_insert, width);
                     } else {
                         native_insert.push(event);
                     }
@@ -4919,6 +4914,9 @@ impl MorrowApp {
         }
     }
     fn text_editor(&mut self, ui: &mut egui::Ui) {
+        if self.render_pane_is_focused() {
+            self.resume_editor_input();
+        }
         self.sync_agent_marks();
         let explorer_focused = self.explorer_keyboard_focused();
         let search_matches = self.editor_search_matches();
@@ -5013,22 +5011,25 @@ impl MorrowApp {
             .unwrap_or_default();
         let mut bookmark_click = None;
         let mut agent_mark_remove = None;
-        if !settings.vim
-            && pane_focused
+        let editor_command = if pane_focused
             && source_interaction
+            && !source_command_pending
             && ctx.memory(|memory| memory.has_focus(id))
-        {
-            let redo = ctx.input_mut(|input| {
-                input.consume_key(
-                    egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
-                    Key::Z,
-                ) || input.consume_key(egui::Modifiers::COMMAND, Key::Y)
-            });
-            let undo =
-                !redo && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, Key::Z));
-            if undo || redo {
-                self.context_native_undo(document_id, redo);
-            }
+            && self.tab().is_some_and(|tab| {
+                !tab.loading && (!settings.vim || tab.vim.mode == VimMode::Insert)
+            }) {
+            editor_input::take_command(&ctx, document_id, !settings.vim)
+        } else {
+            None
+        };
+        if matches!(
+            editor_command,
+            Some(editor_input::Command::Undo | editor_input::Command::Redo)
+        ) {
+            self.context_native_undo(
+                document_id,
+                editor_command == Some(editor_input::Command::Redo),
+            );
         }
         let Some(tab) = self.tab_mut() else { return };
         let mode = tab.vim.mode;
@@ -5058,44 +5059,35 @@ impl MorrowApp {
             })
             .flatten();
         // Editing shortcuts use the widget's current character selection.
+        let mut native_custom_edit = false;
         if pane_focused && source_editable && ctx.memory(|m| m.has_focus(id)) {
-            let mut edit = None;
-            let indent = " ".repeat(settings.tab_width);
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Slash)) {
-                edit = Some(editor::toggle_line_comment(
+            let indent = " ".repeat(settings.tab_width.clamp(1, 16));
+            let edit = match editor_command {
+                Some(editor_input::Command::Comment) => Some(editor::toggle_line_comment(
                     &tab.text,
                     tab.selection.clone(),
                     language_name(tab.path.as_deref()),
-                ));
-            } else if ctx.input_mut(|i| {
-                i.consume_key(
-                    egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
-                    Key::ArrowDown,
-                )
-            }) {
-                edit = Some(editor::duplicate_lines(&tab.text, tab.selection.clone()));
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::Tab)) {
-                edit = Some(editor::indent_lines(
+                )),
+                Some(editor_input::Command::Duplicate) => {
+                    Some(editor::duplicate_lines(&tab.text, tab.selection.clone()))
+                }
+                Some(editor_input::Command::Indent(outdent)) => {
+                    Some(if !outdent && tab.selection.is_empty() {
+                        editor::replace_selection(&tab.text, tab.selection.clone(), &indent)
+                    } else {
+                        editor::indent_lines(&tab.text, tab.selection.clone(), &indent, outdent)
+                    })
+                }
+                Some(editor_input::Command::Newline) => Some(editor::smart_newline(
                     &tab.text,
                     tab.selection.clone(),
                     &indent,
-                    true,
-                ));
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
-                edit = Some(if tab.selection.is_empty() {
-                    editor::replace_selection(&tab.text, tab.selection.clone(), &indent)
-                } else {
-                    editor::indent_lines(&tab.text, tab.selection.clone(), &indent, false)
-                });
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
-                edit = Some(editor::smart_newline(
-                    &tab.text,
-                    tab.selection.clone(),
-                    &indent,
-                ));
-            }
+                )),
+                _ => None,
+            };
             if let Some(edit) = edit {
-                if !settings.vim && edit.text != tab.text {
+                native_custom_edit = !settings.vim && edit.text != tab.text;
+                if native_custom_edit {
                     context_actions::native_history_checkpoint(
                         &ctx,
                         document_id,
@@ -5569,7 +5561,7 @@ impl MorrowApp {
                     &ctx,
                     document_id,
                     &output.state,
-                    output.response.changed(),
+                    output.response.changed() || native_custom_edit,
                 );
             }
             if pane_focused && let Some(jump) = &jump && jump.tab_id == tab.id {
@@ -5598,6 +5590,7 @@ impl MorrowApp {
         if let Some(action) = context_action {
             self.apply_editor_context_action(document_id, action);
         }
+        self.finish_editor_input(document_id);
     }
     fn find_ui(&mut self, ui: &mut egui::Ui) {
         let find_id = ui.make_persistent_id("find_query");
@@ -5875,6 +5868,13 @@ impl MorrowApp {
     }
     fn reload_current(&mut self) {
         if let Some(t) = self.tab_mut() {
+            if t.loading || t.saving {
+                self.status(
+                    "Wait for the current file operation to finish before reloading",
+                    true,
+                );
+                return;
+            }
             if t.dirty {
                 self.status("Save your changes to another file before reloading", true);
                 return;
@@ -7160,6 +7160,14 @@ mod vim_clipboard_tests;
 #[cfg(test)]
 #[path = "windows_undo_tests.rs"]
 mod windows_undo_tests;
+
+#[cfg(test)]
+#[path = "recovery_audit_tests.rs"]
+mod recovery_audit_tests;
+
+#[cfg(test)]
+#[path = "editor_input_tests.rs"]
+mod editor_input_tests;
 
 #[cfg(test)]
 #[path = "user_review_tests.rs"]

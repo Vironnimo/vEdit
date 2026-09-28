@@ -479,7 +479,9 @@ fn recovery_runs_for_named_files_when_autosave_is_disabled() {
     let tab = app.tab().unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "on disk");
     assert_eq!(
-        fs::read_to_string(&tab.recovery_path).unwrap(),
+        crate::recovery::read_document(&tab.recovery_path, MAX_DOCUMENT)
+            .unwrap()
+            .text,
         "private unsaved draft"
     );
     assert!(tab.dirty);
@@ -505,11 +507,21 @@ fn shutdown_recovery_keeps_latest_named_and_untitled_edits_before_debounce() {
     assert_eq!(saved.projects[0].tabs.len(), 2);
     assert_eq!(saved.autosave, Some(false));
     assert_eq!(
-        fs::read_to_string(saved.projects[0].tabs[0].recovery_path.as_ref().unwrap()).unwrap(),
+        crate::recovery::read_document(
+            saved.projects[0].tabs[0].recovery_path.as_ref().unwrap(),
+            MAX_DOCUMENT
+        )
+        .unwrap()
+        .text,
         "latest named edit"
     );
     assert_eq!(
-        fs::read_to_string(saved.projects[0].tabs[1].recovery_path.as_ref().unwrap()).unwrap(),
+        crate::recovery::read_document(
+            saved.projects[0].tabs[1].recovery_path.as_ref().unwrap(),
+            MAX_DOCUMENT
+        )
+        .unwrap()
+        .text,
         "latest untitled edit"
     );
 }
@@ -518,7 +530,15 @@ fn shutdown_recovery_keeps_latest_named_and_untitled_edits_before_debounce() {
 fn asynchronous_restore_keeps_disk_baseline_and_recovers_a_dirty_named_buffer() {
     let fixture = Fixture::new("restore");
     let path = fixture.write("notes.txt", "saved baseline");
-    let recovery = fixture.write("recovery/notes.txt", "recovered unsaved edits");
+    let baseline = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
+    let record = crate::recovery::encode_document(
+        "recovered unsaved edits",
+        Some(&baseline.fingerprint),
+        baseline.line_ending,
+        baseline.bom,
+    )
+    .unwrap();
+    let recovery = fixture.write("recovery/notes.txt", record);
     let mut app = fixture.app();
     let mut tab = EditorTab::new(Some(path.clone()), "notes.txt".into());
     tab.recovery_path = recovery.clone();
