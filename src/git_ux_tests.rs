@@ -158,42 +158,51 @@ fn git_unsaved_count_includes_other_open_folders_of_the_repository() {
 }
 
 #[test]
-fn compact_history_keeps_all_ref_variants_in_two_fixed_lines() {
+fn compact_history_uses_one_subject_author_line_without_inline_metadata() {
     for width in [220.0, 360.0] {
         let mut screen = harness(fixture(), width, false);
         screen.run_steps(3);
         let rows = row_rects(&screen);
-        for row in &rows {
-            assert_eq!(row.height(), 46.0, "refs must not reserve a third line");
-            for shape in &screen.output().shapes {
-                if let egui::Shape::Text(text) = &shape.shape {
-                    // Inline Labels use centered galleys: their position is an
-                    // anchor, not the painted rectangle's left edge.
-                    let text_rect = text.visual_bounding_rect();
-                    if row.contains(text_rect.center()) {
-                        assert!(text_rect.left() >= row.left() + 24.0);
-                        assert!(
-                            text_rect.right() <= row.right() + 0.5,
-                            "width={width}, text={:?}, text_rect={text_rect:?}, row={row:?}, clip={:?}",
-                            text.galley.text(),
-                            shape.clip_rect
-                        );
-                        assert!(text_rect.top() >= row.top());
-                        assert!(text_rect.bottom() <= row.bottom());
-                    }
-                }
-            }
+        for (row, commit) in rows.iter().zip(&screen.state().projects[0].recent_commits) {
+            assert_eq!(row.height(), 28.0);
+            let texts: Vec<_> = screen
+                .output()
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    let egui::Shape::Text(text) = &shape.shape else {
+                        return None;
+                    };
+                    let center_y = text.pos.y + text.galley.size().y * 0.5;
+                    (center_y >= row.top() && center_y < row.bottom())
+                        .then_some((text, shape.clip_rect))
+                })
+                .collect();
+            assert_eq!(texts.len(), 1, "only subject and author belong in the row");
+            let (text, clip) = texts[0];
+            assert_eq!(
+                text.galley.text(),
+                format!("{}  {}", commit.subject, commit.author)
+            );
+            assert_eq!(text.galley.rows.len(), 1);
+            assert_eq!(text.galley.job.sections[0].format.color, TEXT);
+            assert_eq!(text.galley.job.sections[1].format.color, MUTED);
+            assert!(text.pos.x >= row.left() + 24.0);
+            assert!(text.pos.y >= row.top());
+            assert!(text.pos.y + text.galley.size().y <= row.bottom());
+            assert!(clip.right() <= row.right() + 0.5);
+            let author_glyph = &text.galley.rows[0].glyphs[commit.subject.chars().count() + 2];
+            assert!(
+                text.pos.x + author_glyph.pos.x > clip.right(),
+                "long subjects must use the row width and push the author outside its clip"
+            );
         }
         for pair in rows.windows(2) {
             assert!((pair[1].top() - pair[0].bottom()).abs() < 0.5);
         }
-        let branch = screen.get_by_label("HEAD · main").rect();
-        assert!(rows[1].contains_rect(branch));
-        assert!(branch.top() >= rows[1].top() + 24.0);
-        assert!(
-            screen.query_all_by_label_contains("+").next().is_some(),
-            "omitted refs need a visible count"
-        );
+        assert!(screen.query_by_label("HEAD · main").is_none());
+        assert!(screen.query_by_label("origin/topic").is_none());
+        assert!(screen.query_by_label("v0.4.5").is_none());
     }
 }
 
@@ -233,20 +242,40 @@ fn compact_graph_edges_meet_at_each_row_boundary() {
 }
 
 #[test]
-fn graph_subject_metadata_and_inline_ref_all_select_the_same_commit() {
-    let mut screen = harness(fixture(), 360.0, false);
+fn graph_subject_author_and_row_background_select_the_same_commit() {
+    let mut app = fixture();
+    app.projects[0].recent_commits[1].subject = "Short subject".into();
+    let mut screen = harness(app, 360.0, false);
     screen.run_steps(3);
     let subject = screen.state().projects[0].recent_commits[1].subject.clone();
     let hash = screen.state().projects[0].recent_commits[1].hash.clone();
     let row = screen.get_by_label(&subject).rect();
-    let chip = screen.get_by_label("HEAD · main").rect().center();
+    let author_x = screen
+        .output()
+        .shapes
+        .iter()
+        .find_map(|shape| {
+            let egui::Shape::Text(text) = &shape.shape else {
+                return None;
+            };
+            text.galley.text().starts_with(&subject).then(|| {
+                text.pos.x
+                    + text.galley.rows[0].glyphs[subject.chars().count() + 2]
+                        .pos
+                        .x
+                    + 2.0
+            })
+        })
+        .expect("the short subject leaves space for its author");
+    assert!(author_x < row.right());
     for point in [
         egui::pos2(row.left() + 9.0, row.center().y),
-        egui::pos2(row.left() + 45.0, row.top() + 11.0),
-        egui::pos2(row.left() + 45.0, row.top() + 33.0),
-        chip,
+        egui::pos2(row.left() + 70.0, row.center().y),
+        egui::pos2(author_x, row.center().y),
+        egui::pos2(row.right() - 8.0, row.center().y),
     ] {
         screen.state_mut().projects[0].git_view.selected_commit = None;
+        screen.state_mut().projects[0].git_view.detail_open = false;
         screen
             .input_mut()
             .events
@@ -263,7 +292,7 @@ fn graph_subject_metadata_and_inline_ref_all_select_the_same_commit() {
         assert_eq!(
             screen.state().projects[0].git_view.selected_commit.as_ref(),
             Some(&hash),
-            "point={point:?}, row={row:?}, chip={chip:?}"
+            "point={point:?}, row={row:?}"
         );
         assert!(!screen.state().projects[0].git_view.detail_loading);
     }

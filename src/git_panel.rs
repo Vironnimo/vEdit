@@ -5,7 +5,7 @@
 //! file contents. Tree state stays local to the project and survives refreshes.
 
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum GitSection {
@@ -24,6 +24,9 @@ pub(super) struct GitViewState {
     pub(super) detail_error: Option<String>,
     pub(super) detail_open: bool,
     pub(super) detail_cache: HashMap<String, git::CommitDetails>,
+    pub(super) hover_stats: HashMap<(PathBuf, String), Result<git::CommitStats, String>>,
+    pub(super) hover_stats_pending: HashMap<(PathBuf, String), u64>,
+    pub(super) hover_stats_order: VecDeque<(PathBuf, String)>,
     pub(super) expanded: HashMap<String, bool>,
     pub(super) selected_file: Option<String>,
     working_cache: Option<WorkingTreeCache>,
@@ -569,6 +572,7 @@ enum GitUiAction {
     UnstageAll,
     Commit(String),
     SelectCommit(String),
+    LoadCommitStats(String),
     LoadMore,
     RetryHistory,
     RefreshHistory,
@@ -1165,6 +1169,14 @@ impl MorrowApp {
                                             &state.graph.rows[index],
                                             state.graph.lane_count,
                                         );
+                                        history_hover(
+                                            &response,
+                                            commit,
+                                            state
+                                                .hover_stats
+                                                .get(&(root.clone(), commit.hash.clone())),
+                                            &mut actions,
+                                        );
                                         if response.clicked() {
                                             actions.push(GitUiAction::SelectCommit(
                                                 commit.hash.clone(),
@@ -1491,6 +1503,9 @@ impl MorrowApp {
                     self.git_action(root.to_path_buf(), GitAction::Commit(message))
                 }
                 GitUiAction::SelectCommit(hash) => self.request_git_commit(project_index, hash),
+                GitUiAction::LoadCommitStats(hash) => {
+                    self.request_git_hover_stats(project_index, hash)
+                }
                 GitUiAction::LoadMore => self.load_more_git_history(),
                 GitUiAction::RetryHistory => {
                     let project = &mut self.projects[project_index];
@@ -2266,7 +2281,7 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-const HISTORY_ROW_HEIGHT: f32 = 46.0;
+const HISTORY_ROW_HEIGHT: f32 = 28.0;
 
 fn history_near_end(visible_end: usize, loaded: usize) -> bool {
     loaded > 0 && visible_end.saturating_add(4) >= loaded
@@ -2361,155 +2376,106 @@ fn history_row(
             painter.circle_filled(node, 3.5, color);
         }
         let left = rect.left() + graph_width + 5.0;
-        let subject = truncated_text(
-            ui,
+        let mut line = egui::text::LayoutJob::default();
+        line.wrap.max_rows = 1;
+        line.append(
             &commit.subject,
-            FontId::proportional(12.0),
-            TEXT,
-            rect.right() - left - 6.0,
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::proportional(12.0),
+                color: TEXT,
+                ..Default::default()
+            },
         );
-        painter.galley(egui::pos2(left, rect.top() + 6.0), subject, TEXT);
-        let hash = truncated_text(
-            ui,
-            short_hash(&commit.hash),
-            FontId::monospace(9.5),
-            MUTED,
-            50.0,
+        line.append(
+            &format!("  {}", commit.author),
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::proportional(11.0),
+                color: MUTED,
+                ..Default::default()
+            },
         );
-        let mut badge_x = left + hash.size().x + 7.0;
-        painter.galley(egui::pos2(left, rect.top() + 26.0), hash, MUTED);
-        let metadata_space = rect.right() - 6.0 - badge_x;
-        let metadata_reserve = if metadata_space >= 150.0 { 48.0 } else { 0.0 };
-        let badges_right = rect.right() - 6.0 - metadata_reserve;
-        let mut shown = 0;
-        for (index, reference) in commit.refs.iter().take(2).enumerate() {
-            let color = match reference.kind {
-                git::RefKind::Local | git::RefKind::Head => ACCENT,
-                git::RefKind::Remote => BLUE,
-                git::RefKind::Tag => ORANGE,
-            };
-            let label = reference_label(reference);
-            let hidden = commit.refs.len() - index - 1;
-            let reserve = if hidden > 0 { 23.0 } else { 0.0 };
-            let available = badges_right - badge_x - reserve;
-            if available < 32.0 {
-                break;
-            }
-            let width = (ui
-                .painter()
-                .layout_no_wrap(label.clone(), FontId::proportional(9.0), color)
-                .size()
-                .x
-                + 10.0)
-                .min(available)
-                .min(135.0);
-            let badge = egui::Rect::from_min_size(
-                egui::pos2(badge_x, rect.top() + 25.0),
-                Vec2::new(width, 16.0),
-            );
-            painter.rect_filled(badge, 4.0, color.gamma_multiply(0.13));
-            ui.put(
-                badge.shrink2(Vec2::new(4.0, 0.0)),
-                egui::Label::new(RichText::new(label).size(9.0).color(color))
-                    .truncate()
-                    .selectable(false)
-                    .sense(egui::Sense::hover()),
-            )
-            .on_hover_text(format!(
-                "{}{}",
-                if reference.current {
-                    "Current HEAD: "
-                } else {
-                    ""
-                },
-                reference.name
-            ));
-            badge_x = badge.right() + 4.0;
-            shown += 1;
-        }
-        if shown < commit.refs.len() {
-            let hidden = format!("+{}", commit.refs.len() - shown);
-            let width = ui
-                .painter()
-                .layout_no_wrap(hidden.clone(), FontId::proportional(9.0), MUTED)
-                .size()
-                .x
-                + 5.0;
-            if rect.right() - 6.0 - badge_x >= width {
-                ui.put(
-                    egui::Rect::from_min_size(
-                        egui::pos2(badge_x, rect.top() + 25.0),
-                        Vec2::new(width, 16.0),
-                    ),
-                    egui::Label::new(RichText::new(hidden).size(9.0).color(MUTED))
-                        .selectable(false)
-                        .sense(egui::Sense::hover()),
-                )
-                .on_hover_text(
-                    commit
-                        .refs
-                        .iter()
-                        .map(reference_label)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                badge_x += width + 5.0;
-            }
-        }
-        let metadata_width = rect.right() - 6.0 - badge_x;
-        if metadata_width >= 35.0 {
-            let metadata = if commit.refs.is_empty() || metadata_width >= 130.0 {
-                format!("{} · {}", commit.author, commit.date)
-            } else {
-                commit.author.clone()
-            };
-            let detail = truncated_text(
-                ui,
-                &metadata,
-                FontId::proportional(10.0),
-                MUTED,
-                metadata_width,
-            );
-            painter.galley(egui::pos2(badge_x, rect.top() + 26.0), detail, MUTED);
-        }
+        // Lay out the whole line without an author reservation. Long subjects
+        // keep their space and naturally push the author beyond the row clip.
+        let line = ui.fonts_mut(|fonts| fonts.layout_job(line));
+        let top = rect.center().y - line.size().y * 0.5;
+        painter.galley(egui::pos2(left, top), line, TEXT);
     }
     git_row_keyboard(ui, &response);
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!(
-            "{}\n{} · {}\n{}{}\nOpen commit details",
-            commit.subject,
-            commit.author,
-            commit.date,
-            commit.hash,
-            if commit.refs.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n{}",
-                    commit
-                        .refs
-                        .iter()
-                        .map(|reference| {
-                            if reference.current {
-                                format!("HEAD → {}", reference.name)
-                            } else {
-                                reference.name.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                )
-            }
-        ))
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn reference_label(reference: &git::CommitRef) -> String {
-    if reference.current && reference.kind == git::RefKind::Local {
-        format!("HEAD · {}", reference.name)
-    } else {
-        reference.name.clone()
-    }
+fn history_hover(
+    response: &egui::Response,
+    commit: &git::CommitSummary,
+    stats: Option<&Result<git::CommitStats, String>>,
+    actions: &mut Vec<GitUiAction>,
+) {
+    response.clone().on_hover_ui(|ui| {
+        ui.set_max_width(460.0);
+        ui.label(RichText::new(&commit.subject).strong());
+        ui.label(RichText::new(format!("{} · {}", commit.author, commit.date)).color(MUTED));
+        ui.label(
+            RichText::new(&commit.hash)
+                .monospace()
+                .size(10.5)
+                .color(MUTED),
+        );
+        if !commit.refs.is_empty() {
+            ui.label(
+                commit
+                    .refs
+                    .iter()
+                    .map(|reference| {
+                        if reference.current {
+                            format!("HEAD → {}", reference.name)
+                        } else {
+                            reference.name.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+        }
+        ui.separator();
+        match stats {
+            Some(Ok(stats)) => {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} {} changed",
+                        stats.files_changed,
+                        if stats.files_changed == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        }
+                    ));
+                    ui.label(RichText::new(format!("+{}", stats.lines.added)).color(ACCENT));
+                    ui.label(RichText::new(format!("−{}", stats.lines.removed)).color(RED));
+                });
+                if stats.lines.binary {
+                    ui.label(
+                        RichText::new("Includes binary changes")
+                            .size(10.5)
+                            .color(MUTED),
+                    );
+                }
+            }
+            Some(Err(error)) => {
+                ui.label(RichText::new("Change statistics unavailable").color(MUTED));
+                ui.label(RichText::new(error).size(10.5).color(MUTED));
+            }
+            None => {
+                actions.push(GitUiAction::LoadCommitStats(commit.hash.clone()));
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(12.0).color(MUTED));
+                    ui.label(RichText::new("Loading changes…").color(MUTED));
+                });
+            }
+        }
+        ui.label(RichText::new("Open commit details").size(10.5).color(MUTED));
+    });
 }
 
 fn short_hash(hash: &str) -> &str {

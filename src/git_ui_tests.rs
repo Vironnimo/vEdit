@@ -219,7 +219,28 @@ fn git_workspace() -> MorrowApp {
 
 #[test]
 fn git_changes_history_commit_and_diff_snapshots() {
-    let mut screen = visual_tests::harness(git_workspace());
+    let mut app = git_workspace();
+    let project = &mut app.projects[0];
+    let key = (
+        project
+            .git_root
+            .clone()
+            .unwrap_or_else(|| project.root.clone()),
+        project.recent_commits[0].hash.clone(),
+    );
+    project.git_view.hover_stats.insert(
+        key.clone(),
+        Ok(git::CommitStats {
+            files_changed: 4,
+            lines: git::LineStats {
+                added: 152,
+                removed: 48,
+                binary: true,
+            },
+        }),
+    );
+    project.git_view.hover_stats_order.push_back(key);
+    let mut screen = visual_tests::harness(app);
     visual_tests::snapshot(&mut screen, "morrow_git_changes");
     screen.get_by_label("History").click();
     screen.run_steps(3);
@@ -228,6 +249,41 @@ fn git_changes_history_commit_and_diff_snapshots() {
         git_panel::GitSection::History
     );
     visual_tests::snapshot(&mut screen, "morrow_git_history");
+    screen.ctx.all_styles_mut(|style| {
+        style.interaction.tooltip_delay = 0.0;
+        style.interaction.tooltip_grace_time = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    screen.hover_at(
+        screen
+            .get_by_label("Improve repository navigation")
+            .rect()
+            .center(),
+    );
+    screen.run_steps(4);
+    for label in ["4 files changed", "+152", "−48", "Includes binary changes"] {
+        assert!(
+            screen.query_by_label(label).is_some(),
+            "missing hover statistic: {label}"
+        );
+    }
+    assert!(
+        screen.state().projects[0]
+            .git_view
+            .hover_stats_pending
+            .is_empty()
+    );
+    // The shared helper moves the pointer away. Keep this tooltip open in its reference.
+    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+        screen.snapshot_options(
+            "morrow_git_history_hover",
+            &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+        );
+    } else {
+        screen.snapshot("morrow_git_history_hover");
+    }
+    screen.hover_at(egui::pos2(-20.0, -20.0));
+    screen.run_steps(3);
     screen.get_by_label("Improve repository navigation").click();
     screen.run_steps(3);
     let state = &screen.state().projects[0].git_view;

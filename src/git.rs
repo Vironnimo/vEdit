@@ -157,6 +157,14 @@ pub struct LineStats {
     pub binary: bool,
 }
 
+/// Compact commit totals for history previews. Binary and rename changes each
+/// count as one changed file; `lines.binary` means at least one is binary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitStats {
+    pub files_changed: usize,
+    pub lines: LineStats,
+}
+
 /// Separate comparisons of HEAD to index and index to working tree. Untracked
 /// text files are counted in `unstaged`, within a bounded file and byte budget.
 /// A missing entry means its statistics could not be computed, not zero changes.
@@ -450,6 +458,41 @@ pub fn working_tree_stats(root: &Path, files: &[FileStatus]) -> GitResult<Workin
         }
     }
     Ok(statistics)
+}
+
+/// Read compact statistics without loading commit metadata, changed-file
+/// statuses, or patches. Merge commits compare with their first parent, and
+/// root commits compare with the empty tree, just like `commit_details`.
+pub fn commit_stats(root: &Path, full_hash: &str) -> GitResult<CommitStats> {
+    validate_commit_hash(full_hash)?;
+    let mut args = string_args(&[
+        "diff-tree",
+        "--no-commit-id",
+        "-r",
+        "--root",
+        "--diff-merges=first-parent",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--find-renames",
+        "--numstat",
+        "-z",
+    ]);
+    // Reject tree/blob IDs as well as mutable revision expressions. The input
+    // is already hexadecimal, so this suffix cannot introduce Git options.
+    args.push(OsString::from(format!("{full_hash}^{{commit}}")));
+    args.push(OsString::from("--"));
+    let output = checked_git(root, &args, "read commit statistics")?;
+    let statistics = parse_numstat(&output.stdout)?;
+    let mut totals = CommitStats {
+        files_changed: statistics.len(),
+        ..CommitStats::default()
+    };
+    for (_, stats) in statistics {
+        totals.lines.added = totals.lines.added.saturating_add(stats.added);
+        totals.lines.removed = totals.lines.removed.saturating_add(stats.removed);
+        totals.lines.binary |= stats.binary;
+    }
+    Ok(totals)
 }
 
 /// Inspect an immutable full commit ID. Ref expressions and option-like strings
@@ -2033,6 +2076,18 @@ mod tests {
         );
         let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
+        assert_eq!(
+            commit_stats(&repository.0, &hash).unwrap(),
+            CommitStats {
+                // The fixture's two-line .gitignore is part of the root commit.
+                files_changed: 3,
+                lines: LineStats {
+                    added: 4,
+                    removed: 0,
+                    binary: true,
+                },
+            }
+        );
         assert_eq!(details.hash, hash);
         assert!(details.parents.is_empty());
         assert_eq!(details.author, "Morrow Göß Test");
@@ -2078,8 +2133,47 @@ mod tests {
             "fffffffffffffffffffffffffffffffffffffffz",
         ] {
             assert!(commit_details(&repository.0, invalid).is_err());
+            assert!(commit_stats(&repository.0, invalid).is_err());
             assert!(commit_diff(&repository.0, invalid, Path::new("root ü.txt")).is_err());
         }
+    }
+
+    #[test]
+    fn commit_statistics_count_text_binary_deletions_and_empty_commits() {
+        let repository = TestRepository::new();
+        repository.write("modified ü.txt", "one\ntwo\nthree\n");
+        repository.write("deleted.txt", "old\ncontents\n");
+        fs::write(repository.0.join("asset.bin"), b"original\0asset").unwrap();
+        repository.commit_all("Initial");
+        repository.write("modified ü.txt", "one\nchanged\nthree\n");
+        fs::remove_file(repository.0.join("deleted.txt")).unwrap();
+        repository.write("added.txt", "new\ncontents without a trailing newline");
+        fs::write(repository.0.join("asset.bin"), b"modified\0asset").unwrap();
+        repository.commit_all("Text additions, removals, and a binary change");
+        let hash = repository.head_hash();
+        // Working-tree edits must not alter immutable commit hover totals.
+        repository.write("modified ü.txt", "uncommitted\n");
+        assert_eq!(
+            commit_stats(&repository.0, &hash).unwrap(),
+            CommitStats {
+                files_changed: 4,
+                lines: LineStats {
+                    added: 3,
+                    removed: 3,
+                    binary: true,
+                },
+            }
+        );
+        let tree = String::from_utf8(repository.git(&["rev-parse", "HEAD^{tree}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(commit_stats(&repository.0, &tree).is_err());
+        repository.git(&["commit", "--allow-empty", "-m", "Empty commit"]);
+        assert_eq!(
+            commit_stats(&repository.0, &repository.head_hash()).unwrap(),
+            CommitStats::default()
+        );
     }
 
     #[test]
@@ -2116,6 +2210,17 @@ mod tests {
         let hash = repository.head_hash();
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.parents, vec![parent]);
+        assert_eq!(
+            commit_stats(&repository.0, &hash).unwrap(),
+            CommitStats {
+                files_changed: 1,
+                lines: LineStats {
+                    added: 1,
+                    removed: 0,
+                    binary: false,
+                },
+            }
+        );
         assert_eq!(details.files.len(), 1);
         let file = &details.files[0];
         assert_eq!(file.path, "new ü name.txt");
@@ -2195,6 +2300,17 @@ mod tests {
         assert_eq!(details.files.len(), 1);
         assert_eq!(details.files[0].path, "feature.txt");
         assert_eq!(details.files[0].stats.added, 1);
+        assert_eq!(
+            commit_stats(&repository.0, &hash).unwrap(),
+            CommitStats {
+                files_changed: 1,
+                lines: LineStats {
+                    added: 1,
+                    removed: 0,
+                    binary: false,
+                },
+            }
+        );
         assert!(
             commit_diff(&repository.0, &hash, Path::new("feature.txt"))
                 .unwrap()

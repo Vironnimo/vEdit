@@ -455,6 +455,13 @@ enum WorkerResult {
         hash: String,
         result: Result<git::CommitDetails, String>,
     },
+    GitCommitStats {
+        root: PathBuf,
+        repository: PathBuf,
+        hash: String,
+        request_id: u64,
+        result: Result<git::CommitStats, String>,
+    },
     GitHistory {
         root: PathBuf,
         generation: u64,
@@ -1101,8 +1108,14 @@ impl MorrowApp {
         self.bind_current_pane();
     }
     fn set_active_project_context(&mut self, index: usize) {
+        let previous_index = self.active_project;
         let previous_root = self.project().map(|project| project.root.clone());
         self.activate_project_layout(index);
+        if previous_root.as_deref() != self.project().map(|project| project.root.as_path())
+            && let Some(previous) = self.projects.get_mut(previous_index)
+        {
+            previous.git_view.hover_stats_pending.clear();
+        }
         self.clear_project_search_for_root_change(previous_root);
     }
     fn clear_project_search_for_root_change(&mut self, previous_root: Option<PathBuf>) {
@@ -1659,6 +1672,14 @@ impl MorrowApp {
                         p.last_git_refresh = Instant::now();
                         match result {
                             Ok(s) => {
+                                let repository = s.root.as_ref().unwrap_or(&p.root);
+                                p.git_view
+                                    .hover_stats_pending
+                                    .retain(|(root, _), _| root == repository);
+                                p.git_view.hover_stats.retain(|_, result| result.is_ok());
+                                p.git_view
+                                    .hover_stats_order
+                                    .retain(|key| p.git_view.hover_stats.contains_key(key));
                                 p.git_root = s.root;
                                 p.git_branch = s.branch;
                                 p.git_tracking = s.tracking;
@@ -1721,6 +1742,40 @@ impl MorrowApp {
                                 }
                             }
                         }
+                    }
+                }
+                WorkerResult::GitCommitStats {
+                    root,
+                    repository,
+                    hash,
+                    request_id,
+                    result,
+                } => {
+                    let active_root = self.project().map(|project| project.root.clone());
+                    if let Some(project) = self
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.root == root)
+                    {
+                        let key = (repository.clone(), hash);
+                        if project.git_view.hover_stats_pending.get(&key) != Some(&request_id) {
+                            continue;
+                        }
+                        project.git_view.hover_stats_pending.remove(&key);
+                        let current_repository = project.git_root.as_ref().unwrap_or(&project.root);
+                        if current_repository != &repository || active_root.as_ref() != Some(&root)
+                        {
+                            continue;
+                        }
+                        while project.git_view.hover_stats.len() >= 128 {
+                            if let Some(oldest) = project.git_view.hover_stats_order.pop_front() {
+                                project.git_view.hover_stats.remove(&oldest);
+                            } else {
+                                project.git_view.hover_stats.clear();
+                            }
+                        }
+                        project.git_view.hover_stats_order.push_back(key.clone());
+                        project.git_view.hover_stats.insert(key, result);
                     }
                 }
                 WorkerResult::GitHistory {
@@ -2044,6 +2099,37 @@ impl MorrowApp {
             root,
             result: git::commit_details(&repository, &hash).map_err(|e| e.to_string()),
             hash,
+        });
+    }
+    fn request_git_hover_stats(&mut self, index: usize, hash: String) {
+        if index != self.active_project {
+            return;
+        }
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        let repository = project
+            .git_root
+            .clone()
+            .unwrap_or_else(|| project.root.clone());
+        let key = (repository.clone(), hash.clone());
+        let view = &mut project.git_view;
+        if view.hover_stats.contains_key(&key)
+            || view.hover_stats_pending.contains_key(&key)
+            || view.hover_stats_pending.len() >= 4
+        {
+            return;
+        }
+        static NEXT_HOVER_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let request_id = NEXT_HOVER_REQUEST.fetch_add(1, Ordering::Relaxed);
+        view.hover_stats_pending.insert(key, request_id);
+        let root = project.root.clone();
+        self.worker(move || WorkerResult::GitCommitStats {
+            result: git::commit_stats(&repository, &hash).map_err(|error| error.to_string()),
+            root,
+            repository,
+            hash,
+            request_id,
         });
     }
     fn load_more_git_history(&mut self) {
