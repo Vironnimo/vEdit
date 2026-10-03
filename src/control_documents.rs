@@ -192,11 +192,7 @@ impl MorrowApp {
                         .search_excludes
                         .as_ref()
                         .map(|_| self.settings.search_excludes.clone());
-                    let previous_visibility = self.settings.show_ignored_files;
                     apply_settings_patch(&mut self.settings, &patch);
-                    if previous_visibility != self.settings.show_ignored_files {
-                        self.reindex_explorer_visibility();
-                    }
                     if previous_excludes
                         .is_some_and(|previous| previous != self.settings.search_excludes)
                     {
@@ -802,9 +798,8 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.highlight_current_line {
         settings.highlight_current_line = value;
     }
-    if let Some(value) = patch.show_ignored_files {
-        settings.show_ignored_files = value;
-    }
+    // Retained for older CLI clients; Explorer now always lists ignored files.
+    settings.show_ignored_files = true;
     if let Some(value) = patch.font_size {
         settings.font_size = value;
     }

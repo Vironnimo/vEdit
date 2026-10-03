@@ -32,9 +32,11 @@ pub(super) struct GitViewState {
     keyboard_last_focus: Option<egui::Id>,
     keyboard_header: Option<egui::Id>,
     keyboard_focus_pending: bool,
+    keyboard_page_rows: usize,
     keyboard_controls: Vec<egui::Id>,
     detail_keyboard_focus: Option<egui::Id>,
     detail_keyboard_focus_pending: bool,
+    detail_page_rows: usize,
 }
 
 fn git_row_id(root: &Path, key: &str) -> egui::Id {
@@ -82,6 +84,122 @@ fn git_keyboard_target(rows: &[egui::Id], focused: egui::Id, key: Key) -> Option
     rows.get(index).copied()
 }
 
+#[derive(Clone, Copy)]
+enum GitMovement {
+    Up(usize),
+    Down(usize),
+    First,
+    Last,
+}
+
+fn git_movement(
+    key: Key,
+    modifiers: egui::Modifiers,
+    page: usize,
+    swap_jk: bool,
+) -> Option<GitMovement> {
+    let page = page.max(1);
+    if modifiers == egui::Modifiers::CTRL {
+        return match key {
+            Key::U => Some(GitMovement::Up((page / 2).max(1))),
+            Key::D => Some(GitMovement::Down((page / 2).max(1))),
+            _ => None,
+        };
+    }
+    if modifiers != egui::Modifiers::NONE {
+        return None;
+    }
+    match key {
+        Key::ArrowUp => Some(GitMovement::Up(1)),
+        Key::ArrowDown => Some(GitMovement::Down(1)),
+        Key::J if swap_jk => Some(GitMovement::Up(1)),
+        Key::K if swap_jk => Some(GitMovement::Down(1)),
+        Key::K => Some(GitMovement::Up(1)),
+        Key::J => Some(GitMovement::Down(1)),
+        Key::PageUp => Some(GitMovement::Up(page)),
+        Key::PageDown => Some(GitMovement::Down(page)),
+        Key::Home => Some(GitMovement::First),
+        Key::End => Some(GitMovement::Last),
+        _ => None,
+    }
+}
+
+/// Consume navigation in event order, including repeated keys within one frame.
+/// Only rows own these motions; composer and popup text input stays untouched.
+fn take_git_navigation(
+    ctx: &egui::Context,
+    rows: &[egui::Id],
+    focused: egui::Id,
+    page: usize,
+    swap_jk: bool,
+) -> Option<egui::Id> {
+    let mut index = rows
+        .iter()
+        .position(|id| *id == focused || id.with("action") == focused)?;
+    let mut moved = false;
+    ctx.input_mut(|input| {
+        let keyed_letters: Vec<_> = input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if matches!(key, Key::J | Key::K) && *modifiers == egui::Modifiers::NONE => {
+                    Some(*key)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut apply = |movement| {
+            index = match movement {
+                GitMovement::Up(count) => index.saturating_sub(count),
+                GitMovement::Down(count) => index.saturating_add(count).min(rows.len() - 1),
+                GitMovement::First => 0,
+                GitMovement::Last => rows.len() - 1,
+            };
+            moved = true;
+        };
+        input.events.retain(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                if let Some(movement) = git_movement(*key, *modifiers, page, swap_jk) {
+                    if *pressed {
+                        apply(movement);
+                    }
+                    false
+                } else {
+                    true
+                }
+            }
+            egui::Event::Text(text)
+                if text.chars().all(|character| matches!(character, 'j' | 'k')) =>
+            {
+                for character in text.chars() {
+                    let key = if character == 'j' { Key::J } else { Key::K };
+                    if !keyed_letters.contains(&key) {
+                        apply(git_movement(key, egui::Modifiers::NONE, page, swap_jk).unwrap());
+                    }
+                }
+                false
+            }
+            _ => true,
+        });
+    });
+    if moved {
+        ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        Some(rows[index])
+    } else {
+        None
+    }
+}
+
 fn request_git_row_focus(ctx: &egui::Context, id: egui::Id) {
     ctx.memory_mut(|memory| memory.request_focus(id));
     ctx.data_mut(|data| data.insert_temp(id.with("reveal"), true));
@@ -116,14 +234,32 @@ fn git_row_keyboard(ui: &egui::Ui, response: &egui::Response) {
 }
 
 fn git_folder_key(ui: &egui::Ui, row: &egui::Response, open: &mut bool) {
-    if row.has_focus() {
+    if row.has_focus() && !egui::Popup::is_any_open(ui.ctx()) {
         ui.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft) {
-                *open = false;
-            }
-            if input.consume_key(egui::Modifiers::NONE, Key::ArrowRight) {
-                *open = true;
-            }
+            input.events.retain(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed,
+                    modifiers,
+                    ..
+                } if *modifiers == egui::Modifiers::NONE
+                    && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::H | Key::L) =>
+                {
+                    if *pressed {
+                        *open = matches!(key, Key::ArrowRight | Key::L);
+                    }
+                    false
+                }
+                egui::Event::Text(text)
+                    if text.chars().all(|character| matches!(character, 'h' | 'l')) =>
+                {
+                    for character in text.chars() {
+                        *open = character == 'l';
+                    }
+                    false
+                }
+                _ => true,
+            });
         });
     }
 }
@@ -631,15 +767,17 @@ impl MorrowApp {
                 .keyboard_rows
                 .get(index.min(state.keyboard_rows.len().saturating_sub(1)))
                 .copied();
-        } else if let Some(focused) = focused {
-            for key in [Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End] {
-                if let Some(target) = git_keyboard_target(&state.keyboard_rows, focused, key)
-                    && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
-                {
-                    keyboard_target = Some(target);
-                    break;
-                }
-            }
+        } else if let Some(focused) = focused
+            && ui.is_enabled()
+            && !egui::Popup::is_any_open(ui.ctx())
+        {
+            keyboard_target = take_git_navigation(
+                ui.ctx(),
+                &state.keyboard_rows,
+                focused,
+                state.keyboard_page_rows,
+                self.settings.swap_jk,
+            );
         }
         if let Some(id) = keyboard_target {
             request_git_row_focus(ui.ctx(), id);
@@ -846,7 +984,7 @@ impl MorrowApp {
                     if let Some(error) = &project.git_stats_error {
                         error_note(ui, &format!("Line counts unavailable: {error}"));
                     }
-                    egui::ScrollArea::vertical()
+                    let tree_scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-working-tree", project_index))
                         .auto_shrink([false, false])
                         .max_height((ui.available_height() - composer_height).max(65.0))
@@ -889,6 +1027,10 @@ impl MorrowApp {
                                 }
                             }
                         });
+                    state.keyboard_page_rows =
+                        (tree_scroll.inner_rect.intersect(ui.clip_rect()).height() / 31.0)
+                            .floor()
+                            .max(1.0) as usize;
                     ui.add_space(5.0);
                     ui.separator();
                     ui.add_space(5.0);
@@ -1005,7 +1147,7 @@ impl MorrowApp {
                             scroll =
                                 scroll.vertical_scroll_offset(index as f32 * HISTORY_ROW_HEIGHT);
                         }
-                        scroll.show_rows(
+                        let history_scroll = scroll.show_rows(
                             ui,
                             HISTORY_ROW_HEIGHT,
                             project.recent_commits.len(),
@@ -1060,6 +1202,11 @@ impl MorrowApp {
                                 }
                             },
                         );
+                        state.keyboard_page_rows =
+                            (history_scroll.inner_rect.intersect(ui.clip_rect()).height()
+                                / HISTORY_ROW_HEIGHT)
+                                .floor()
+                                .max(1.0) as usize;
                     });
                     ui.add_space(7.0);
                     if project.git_history_loading || (project.recent_commits.is_empty() && loading)
@@ -1175,15 +1322,16 @@ impl MorrowApp {
                 &state.expanded,
                 &mut rows,
             );
-            for key in [Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End] {
-                if let Some(target) = git_keyboard_target(&rows, focused, key)
-                    && self
-                        .ctx
-                        .input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
-                {
-                    request_git_row_focus(&self.ctx, target);
-                    break;
-                }
+            if !egui::Popup::is_any_open(&self.ctx)
+                && let Some(target) = take_git_navigation(
+                    &self.ctx,
+                    &rows,
+                    focused,
+                    state.detail_page_rows,
+                    self.settings.swap_jk,
+                )
+            {
+                request_git_row_focus(&self.ctx, target);
             }
         }
         let modal = crate::git_diff_view::dialog(
@@ -1219,7 +1367,7 @@ impl MorrowApp {
                         .unwrap_or((&detail.message, ""));
                     // The close header stays fixed; even unusually long commit
                     // metadata and octopus-merge parents must fit below it.
-                    egui::ScrollArea::vertical()
+                    let detail_scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-commit-content", &hash))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -1265,6 +1413,8 @@ impl MorrowApp {
                             ui.add_space(7.0);
                             draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &mut actions);
                         });
+                    state.detail_page_rows =
+                        (detail_scroll.inner_rect.height() / 31.0).floor().max(1.0) as usize;
                 }
             },
         );

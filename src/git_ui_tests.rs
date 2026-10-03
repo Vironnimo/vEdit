@@ -38,15 +38,36 @@ fn independently_arranged_sidebar_screenshots() {
     visual_tests::snapshot(&mut screen, "morrow_sidebar_panels");
     assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
     assert!(
-        screen
+        !screen
             .state()
             .sidebar_view_visible(SidebarView::SourceControl)
+    );
+    assert!(
+        screen
+            .state()
+            .sidebar_panel_open(SidebarView::SourceControl)
     );
     assert!(screen.state().sidebar_view_visible(SidebarView::Search));
     let left = screen
         .state()
         .sidebar_region_rect(sidebar_layout::Side::Left)
         .unwrap();
+    assert!(
+        screen
+            .get_by_label("Source control panel tab")
+            .rect()
+            .right()
+            <= left.right() - 9.0
+    );
+    screen.state_mut().show_sidebar(SidebarView::SourceControl);
+    screen.run_steps(3);
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(
+        screen
+            .state()
+            .sidebar_view_visible(SidebarView::SourceControl)
+    );
+    assert!(screen.state().sidebar_view_visible(SidebarView::Search));
     assert!(screen.get_by_label("History").rect().right() <= left.right() - 9.0);
     screen
         .state_mut()

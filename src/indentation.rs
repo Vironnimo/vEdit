@@ -78,6 +78,7 @@ pub(super) fn default_widths() -> HashMap<String, usize> {
         ("html", 2),
         ("css", 2),
         ("go", 4),
+        ("makefile", 4),
     ]
     .into_iter()
     .map(|(language, width)| (language.into(), width))
@@ -88,7 +89,7 @@ pub(super) fn default_tab_styles() -> HashMap<String, bool> {
     default_widths()
         .into_keys()
         .map(|language| {
-            let tabs = language == "go";
+            let tabs = matches!(language.as_str(), "go" | "makefile");
             (language, tabs)
         })
         .collect()
@@ -340,6 +341,7 @@ mod tests {
         assert_eq!(tab("a.py", "").indentation(&settings).unit(), "    ");
         assert_eq!(tab("a.dart", "").indentation(&settings).unit(), "  ");
         assert_eq!(tab("a.go", "").indentation(&settings).unit(), "\t");
+        assert_eq!(tab("Makefile", "").indentation(&settings).unit(), "\t");
         settings.language_indent_widths.insert("python".into(), 3);
         assert_eq!(tab("a.py", "").indentation(&settings).unit(), "   ");
         settings.language_indent_widths.remove("python");

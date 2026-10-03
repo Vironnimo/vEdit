@@ -306,6 +306,265 @@ pub(crate) fn detail_row(
         .on_hover_text(tooltip)
 }
 
+/// Explorer geometry is shared by painting, virtualization and keyboard paging.
+pub(crate) const EXPLORER_ROW_HEIGHT: f32 = 26.0;
+const EXPLORER_INDENT: f32 = 16.0;
+
+/// Tree metadata belongs to the visible row so guides remain correct when the
+/// ScrollArea paints only a slice of the tree.
+pub(crate) struct ExplorerRow<'a> {
+    pub label: &'a str,
+    pub depth: usize,
+    /// Whether each ancestor has a following sibling. The root-level ancestor
+    /// needs no trunk; subsequent ancestors continue the preceding guide column.
+    pub ancestor_continuations: &'a [bool],
+    pub last_sibling: bool,
+    /// `None` is a file; `Some` is a closed or expanded directory.
+    pub expanded: Option<bool>,
+    pub file_color: Color32,
+    pub selected: bool,
+    pub active_file: bool,
+    pub tooltip: &'a str,
+}
+
+/// A calm, full-width tree row. Disclosure, icon and filename each have their
+/// own fixed column; selection never shifts with a folder's indentation.
+pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width().max(1.0), EXPLORER_ROW_HEIGHT),
+        Sense::click(),
+    );
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            row.selected,
+            row.label,
+        )
+    });
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let highlighted = row.selected || response.has_focus();
+        let fill = if highlighted {
+            Some(
+                visuals
+                    .selection
+                    .bg_fill
+                    .lerp_to_gamma(visuals.panel_fill, 0.24),
+            )
+        } else if response.hovered() {
+            Some(
+                visuals
+                    .widgets
+                    .hovered
+                    .weak_bg_fill
+                    .lerp_to_gamma(visuals.panel_fill, 0.42),
+            )
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            painter.rect_filled(rect.shrink2(Vec2::new(2.0, 0.0)), 3.0, fill);
+        }
+        if highlighted || row.active_file {
+            let color = if highlighted {
+                visuals.selection.stroke.color
+            } else {
+                visuals
+                    .selection
+                    .stroke
+                    .color
+                    .lerp_to_gamma(visuals.weak_text_color(), 0.5)
+            };
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    rect.left_top() + Vec2::new(3.0, 6.0),
+                    rect.left_bottom() + Vec2::new(5.0, -6.0),
+                ),
+                1.0,
+                enabled_color(ui, color),
+            );
+        }
+
+        let tree_left = rect.left() + 9.0;
+        // Keep names usable in narrow sidebars and unusually deep paths. The
+        // tooltip always exposes the complete path; ordinary levels stay exact.
+        let indent = (row.depth as f32 * EXPLORER_INDENT).min((rect.width() - 112.0).max(0.0));
+        let disclosure_x = tree_left + indent + 6.0;
+        let guide = enabled_color(
+            ui,
+            visuals
+                .weak_text_color()
+                .lerp_to_gamma(visuals.panel_fill, 0.78),
+        );
+        let guide_stroke = Stroke::new(1.0, guide);
+        for (level, continues) in row.ancestor_continuations.iter().enumerate().skip(1) {
+            let x = tree_left + (level - 1) as f32 * EXPLORER_INDENT + 6.0;
+            if *continues && x < disclosure_x - 1.0 {
+                painter.line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    guide_stroke,
+                );
+            }
+        }
+        if row.depth > 0 && indent > 0.0 {
+            let parent_x = disclosure_x - EXPLORER_INDENT.min(indent);
+            painter.line_segment(
+                [
+                    egui::pos2(parent_x, rect.top()),
+                    egui::pos2(
+                        parent_x,
+                        if row.last_sibling {
+                            rect.center().y
+                        } else {
+                            rect.bottom()
+                        },
+                    ),
+                ],
+                guide_stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(parent_x, rect.center().y),
+                    egui::pos2(disclosure_x - 3.0, rect.center().y),
+                ],
+                guide_stroke,
+            );
+        }
+
+        let muted = enabled_color(ui, visuals.weak_text_color());
+        if let Some(expanded) = row.expanded {
+            let center = egui::pos2(disclosure_x, rect.center().y);
+            let points = if expanded {
+                [
+                    center + Vec2::new(-3.0, -1.5),
+                    center + Vec2::new(0.0, 1.5),
+                    center + Vec2::new(3.0, -1.5),
+                ]
+            } else {
+                [
+                    center + Vec2::new(-1.5, -3.0),
+                    center + Vec2::new(1.5, 0.0),
+                    center + Vec2::new(-1.5, 3.0),
+                ]
+            };
+            painter.add(egui::Shape::line(points.into(), Stroke::new(1.15, muted)));
+        }
+        let icon_center = egui::pos2(disclosure_x + 18.0, rect.center().y);
+        let icon_color = enabled_color(
+            ui,
+            if row.expanded.is_some() {
+                visuals
+                    .weak_text_color()
+                    .lerp_to_gamma(visuals.text_color(), 0.2)
+            } else {
+                row.file_color
+                    .lerp_to_gamma(visuals.weak_text_color(), 0.62)
+            },
+        );
+        paint_explorer_icon(&painter, icon_center, row.expanded, icon_color);
+
+        let left = icon_center.x + 13.0;
+        let color = if highlighted || response.hovered() || row.expanded.is_some() {
+            enabled_color(ui, visuals.text_color())
+        } else {
+            enabled_color(
+                ui,
+                visuals
+                    .text_color()
+                    .lerp_to_gamma(visuals.weak_text_color(), 0.12),
+            )
+        };
+        let galley = truncated_galley(
+            ui,
+            row.label,
+            FontId::proportional(12.0),
+            color,
+            (rect.right() - left - 8.0).max(1.0),
+        );
+        painter.galley(
+            egui::pos2(left, rect.center().y - galley.size().y * 0.5),
+            galley,
+            color,
+        );
+    }
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(row.tooltip)
+}
+
+fn paint_explorer_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    expanded: Option<bool>,
+    color: Color32,
+) {
+    let stroke = Stroke::new(1.0, color);
+    let points: &[Vec2] = match expanded {
+        Some(false) => &[
+            Vec2::new(-7.0, -5.0),
+            Vec2::new(-2.0, -5.0),
+            Vec2::new(0.0, -3.0),
+            Vec2::new(7.0, -3.0),
+            Vec2::new(7.0, 5.0),
+            Vec2::new(-7.0, 5.0),
+            Vec2::new(-7.0, -5.0),
+        ],
+        Some(true) => &[
+            Vec2::new(-7.0, 5.0),
+            Vec2::new(-7.0, -5.0),
+            Vec2::new(-2.0, -5.0),
+            Vec2::new(0.0, -3.0),
+            Vec2::new(6.0, -3.0),
+            Vec2::new(6.0, -1.0),
+        ],
+        None => &[
+            Vec2::new(-5.0, -6.0),
+            Vec2::new(2.0, -6.0),
+            Vec2::new(5.0, -3.0),
+            Vec2::new(5.0, 6.0),
+            Vec2::new(-5.0, 6.0),
+            Vec2::new(-5.0, -6.0),
+        ],
+    };
+    painter.add(egui::Shape::line(
+        points.iter().map(|offset| center + *offset).collect(),
+        stroke,
+    ));
+    if expanded == Some(true) {
+        painter.add(egui::Shape::line(
+            [
+                Vec2::new(-7.0, 5.0),
+                Vec2::new(-4.0, -1.0),
+                Vec2::new(8.0, -1.0),
+                Vec2::new(5.0, 5.0),
+                Vec2::new(-7.0, 5.0),
+            ]
+            .into_iter()
+            .map(|offset| center + offset)
+            .collect(),
+            stroke,
+        ));
+    } else if expanded.is_none() {
+        painter.add(egui::Shape::line(
+            [
+                Vec2::new(2.0, -6.0),
+                Vec2::new(2.0, -3.0),
+                Vec2::new(5.0, -3.0),
+            ]
+            .into_iter()
+            .map(|offset| center + offset)
+            .collect(),
+            stroke,
+        ));
+        painter.line_segment(
+            [center + Vec2::new(-2.0, 2.0), center + Vec2::new(2.0, 2.0)],
+            stroke,
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "menu_tests.rs"]
 mod menu_tests;

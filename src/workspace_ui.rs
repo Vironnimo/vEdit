@@ -338,6 +338,7 @@ impl MorrowApp {
                         "Find project",
                     )
                 });
+                let opening = state.focus;
                 if state.focus && !ui.is_sizing_pass() {
                     query.request_focus();
                     state.focus = false;
@@ -391,10 +392,20 @@ impl MorrowApp {
                         .id_salt("workspace_projects")
                         .max_height(max_height)
                         .auto_shrink([false, true]);
-                    if moved {
-                        scroll = scroll.vertical_scroll_offset(
-                            (selected as f32 * PROJECT_ROW_HEIGHT - max_height * 0.5).max(0.0),
-                        );
+                    // Reveal the current project when opening, including when
+                    // its row is below the viewport. Filtering must also reveal
+                    // the selection after a previously scrolled list shrinks.
+                    if moved || opening || query.changed() {
+                        // Clamp before painting, rather than relying on the
+                        // ScrollArea's end-of-frame correction. An overshoot
+                        // near the last rows otherwise moves their hit targets
+                        // between the first pointer press and release.
+                        let content_height = visible.len() as f32 * PROJECT_ROW_HEIGHT;
+                        let offset = (selected as f32 * PROJECT_ROW_HEIGHT
+                            + PROJECT_ROW_HEIGHT * 0.5
+                            - max_height * 0.5)
+                            .clamp(0.0, (content_height - max_height).max(0.0));
+                        scroll = scroll.vertical_scroll_offset(offset);
                     }
                     scroll.show_rows(ui, PROJECT_ROW_HEIGHT, visible.len(), |ui, range| {
                         ui.spacing_mut().item_spacing.y = 0.0;
@@ -519,7 +530,7 @@ fn shortened_project_path(path: &str) -> String {
 }
 
 fn project_match_score(query: &str, name: &str, path: &str) -> Option<usize> {
-    let query = query.trim().to_lowercase();
+    let query = query.trim().replace('\\', "/").to_lowercase();
     if query.is_empty() {
         return Some(0);
     }
@@ -527,7 +538,7 @@ fn project_match_score(query: &str, name: &str, path: &str) -> Option<usize> {
     if let Some(position) = name.find(&query) {
         return Some(position);
     }
-    let path = path.to_lowercase();
+    let path = path.replace('\\', "/").to_lowercase();
     if let Some(position) = path.find(&query) {
         return Some(100 + position);
     }

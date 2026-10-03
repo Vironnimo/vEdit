@@ -101,7 +101,10 @@ impl ScreenJump {
     }
 
     pub(crate) fn enter(&mut self) -> JumpAction {
-        if !self.query.is_empty() {
+        if self.targets.len() == 1 {
+            return JumpAction::Jump(self.targets[0].char_index);
+        }
+        if !self.query.is_empty() && !self.targets.is_empty() {
             self.phase = JumpPhase::Select;
             self.label_input.clear();
             self.explicit_selection = true;
@@ -566,6 +569,18 @@ mod tests {
         assert_eq!(jump.enter(), JumpAction::None);
         assert_eq!(jump.phase, JumpPhase::Select);
         assert_eq!(jump.input_char('2'), JumpAction::Jump(3));
+    }
+
+    #[test]
+    fn enter_jumps_directly_to_the_only_visible_match() {
+        for (query, document, position) in [("gi", "one git two", 4), ("12", "a 12 b", 2)] {
+            let mut jump = with_query(query, document);
+            assert_eq!(jump.enter(), JumpAction::Jump(position));
+        }
+        let mut missing = with_query("gi", "no match");
+        assert_eq!(missing.enter(), JumpAction::None);
+        assert_eq!(missing.phase, JumpPhase::Query);
+        assert_eq!(missing.query, "gi");
     }
 
     #[test]

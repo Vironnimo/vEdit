@@ -84,6 +84,8 @@ actions! {
     ToggleVim, "toggle_vim", "Toggle Vim motions", "Editing", [];
     ToggleComment, "toggle_comment", "Toggle line comment", "Editing", ["Ctrl+Slash", "Ctrl+Shift+Slash"];
     DuplicateLine, "duplicate_line", "Duplicate line / selection", "Editing", ["Alt+Shift+ArrowDown"];
+    MoveLineUp, "move_line_up", "Move line / selection up", "Editing", ["Alt+ArrowUp"];
+    MoveLineDown, "move_line_down", "Move line / selection down", "Editing", ["Alt+ArrowDown"];
     Undo, "undo", "Undo", "Editing", ["Ctrl+Z"];
     Redo, "redo", "Redo", "Editing", ["Ctrl+Y", "Ctrl+Shift+Z"];
     ToggleBookmark, "toggle_bookmark", "Toggle bookmark", "Navigation", [];
@@ -118,7 +120,12 @@ impl Action {
             Self::ToggleLeftSidebar => {
                 "Ctrl+Alt+E works in every editor mode. The default Ctrl+B alias remains page-back in Vim Normal mode."
             }
-            Self::Undo | Self::Redo | Self::ToggleComment | Self::DuplicateLine => {
+            Self::Undo
+            | Self::Redo
+            | Self::ToggleComment
+            | Self::DuplicateLine
+            | Self::MoveLineUp
+            | Self::MoveLineDown => {
                 "Applies to the focused source editor. Plain text fields keep their native editing controls."
             }
             Self::ZoomIn | Self::ZoomOut | Self::ZoomReset => {
@@ -137,7 +144,7 @@ struct Stroke {
     shift: bool,
 }
 
-fn modifier_key(key: Key) -> bool {
+pub(super) fn modifier_key(key: Key) -> bool {
     matches!(
         key,
         Key::ControlLeft
@@ -160,6 +167,16 @@ impl Stroke {
             shift: false,
         };
         let mut key = None;
+        // A literal '+' is itself a key: Ctrl++ and Ctrl+Shift++ are familiar
+        // spellings of the same chords that the recorder labels with Plus.
+        let value = value.trim();
+        let value = if value == "+" {
+            "Plus".to_owned()
+        } else if let Some(prefix) = value.strip_suffix("++") {
+            format!("{prefix}+Plus")
+        } else {
+            value.to_owned()
+        };
         for part in value.split('+').map(str::trim) {
             match part.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "cmd" | "command" => {
@@ -189,7 +206,13 @@ impl Stroke {
                     } else {
                         part.to_owned()
                     };
-                    key = Key::from_name(&normalized);
+                    key = Key::from_name(&normalized).or_else(|| {
+                        Key::ALL.iter().copied().find(|key| {
+                            key.name().eq_ignore_ascii_case(part)
+                                || key.symbol_or_name().eq_ignore_ascii_case(part)
+                                || format!("{key:?}").eq_ignore_ascii_case(part)
+                        })
+                    });
                     if key.is_none() {
                         return Err(format!(
                             "Unknown key '{part}'. Record the shortcut using its button."
@@ -273,6 +296,17 @@ impl Stroke {
                     | Key::F22
                     | Key::F23
                     | Key::F24
+                    | Key::F25
+                    | Key::F26
+                    | Key::F27
+                    | Key::F28
+                    | Key::F29
+                    | Key::F30
+                    | Key::F31
+                    | Key::F32
+                    | Key::F33
+                    | Key::F34
+                    | Key::F35
             )
         {
             return Err(
@@ -345,6 +379,53 @@ pub(super) fn shortcut_text_event(event: &egui::Event, key_event: &egui::Event) 
         if modifiers.alt && !modifiers.ctrl && !modifiers.command
             && (key.symbol_or_name().chars().count() == 1 && text.eq_ignore_ascii_case(key.symbol_or_name())
                 || *key == Key::Space && text == " "))
+}
+
+/// Some input integrations report AltGr as Ctrl+Alt even while emitting a
+/// printable character. That emitted text must win over application shortcuts.
+/// Native Windows winit already clears those modifiers; this also protects
+/// alternate integrations without changing ordinary Ctrl+Alt commands.
+pub(super) fn preserve_altgr_text(ctx: &egui::Context) {
+    ctx.input_mut(|input| {
+        // key_down reflects the end of this input batch. Recover its initial
+        // state when Right Alt is pressed/released in the same batch as text.
+        let mut right_alt = input
+            .events
+            .iter()
+            .find_map(|event| match event {
+                egui::Event::Key {
+                    key: Key::AltRight,
+                    pressed,
+                    ..
+                } => Some(!pressed),
+                _ => None,
+            })
+            .unwrap_or_else(|| input.key_down(Key::AltRight));
+        let mut index = 0;
+        while index + 1 < input.events.len() {
+            if let egui::Event::Key {
+                key: Key::AltRight,
+                pressed,
+                ..
+            } = &input.events[index]
+            {
+                right_alt = *pressed;
+            }
+            if right_alt && altgr_text_event(&input.events[index], &input.events[index + 1]) {
+                input.events.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    });
+}
+
+fn altgr_text_event(key_event: &egui::Event, text_event: &egui::Event) -> bool {
+    matches!((key_event, text_event), (
+        egui::Event::Key { key, pressed: true, modifiers, .. }, egui::Event::Text(text))
+        if modifiers.ctrl && modifiers.alt && !modifiers.mac_cmd
+            && (key.symbol_or_name().chars().count() == 1 || *key == Key::Space)
+            && text.chars().count() == 1 && !text.chars().any(char::is_control))
 }
 
 pub(super) fn validate(bindings: &Bindings) -> Result<(), String> {
@@ -445,7 +526,13 @@ impl MorrowApp {
             || self.diff.is_some()
             || self.git_detail_open()
             || self.navigation_modal_open()
+            || self.navigation_pending()
             || self.agent_marks_modal_open()
+            || self.context_file_dialog.is_some()
+            || self.vim_command.is_some()
+            || self.screen_jump.is_some()
+            || self.vim_search_active()
+            || egui::Popup::is_any_open(&self.ctx)
         {
             return;
         }
@@ -532,7 +619,10 @@ impl MorrowApp {
                     );
                 }
             }
-            Action::ToggleComment | Action::DuplicateLine => {
+            Action::ToggleComment
+            | Action::DuplicateLine
+            | Action::MoveLineUp
+            | Action::MoveLineDown => {
                 let Some(id) = self.tab().map(|tab| tab.id) else {
                     return;
                 };
@@ -548,18 +638,30 @@ impl MorrowApp {
                 } else {
                     tab.selection.clone()
                 };
-                let edit = if action == Action::ToggleComment {
-                    editor::toggle_line_comment(
+                let edit = match action {
+                    Action::ToggleComment => editor::toggle_line_comment(
                         &tab.text,
                         selection,
                         crate::file_kind::comment_language(tab.path.as_deref()),
-                    )
-                } else {
-                    editor::duplicate_lines(&tab.text, selection)
+                    ),
+                    Action::MoveLineUp | Action::MoveLineDown => {
+                        editor::move_lines(&tab.text, selection, action == Action::MoveLineDown)
+                    }
+                    _ => editor::duplicate_lines(&tab.text, selection),
                 };
-                tab.vim.begin_external_edit(&tab.text);
-                tab.apply(edit);
-                tab.vim.notify_external_text_change();
+                if edit.text == tab.text {
+                    return;
+                }
+                if matches!(
+                    action,
+                    Action::MoveLineUp | Action::MoveLineDown | Action::DuplicateLine
+                ) {
+                    tab.apply_line_move(edit);
+                } else {
+                    tab.vim.begin_external_edit(&tab.text);
+                    tab.apply(edit);
+                    tab.vim.notify_external_text_change();
+                }
             }
             Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
                 self.settings.ui_scale = match action {
@@ -601,7 +703,12 @@ impl MorrowApp {
         }
         if matches!(
             action,
-            Action::Undo | Action::Redo | Action::ToggleComment | Action::DuplicateLine
+            Action::Undo
+                | Action::Redo
+                | Action::ToggleComment
+                | Action::DuplicateLine
+                | Action::MoveLineUp
+                | Action::MoveLineDown
         ) && !source
         {
             return false;
@@ -691,6 +798,7 @@ impl MorrowApp {
     }
     /// Before zoom, global commands or modal close logic sees keyboard events.
     pub(super) fn capture_shortcut_input(&mut self) {
+        preserve_altgr_text(&self.ctx);
         let Some(action) = self.keybinding_ui.capture else {
             return;
         };
@@ -745,7 +853,10 @@ impl MorrowApp {
                 self.keybinding_ui.feedback =
                     Some((format!("{} → {}", action.label(), stroke.label()), false));
             }
-            Err(error) => self.keybinding_ui.feedback = Some((error, true)),
+            Err(error) => {
+                self.keybinding_ui.capture = Some(action);
+                self.keybinding_ui.feedback = Some((error, true));
+            }
         }
     }
     pub(super) fn keyboard_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
@@ -870,6 +981,7 @@ impl MorrowApp {
                         match validate(&candidate) {
                             Ok(()) => {
                                 self.settings.keybindings = candidate;
+                                self.keybinding_ui.capture = None;
                                 self.keybinding_ui.feedback = Some((
                                     format!("{} restored to default.", action.label()),
                                     false,

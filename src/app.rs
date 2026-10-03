@@ -32,8 +32,15 @@ mod editor_feedback;
 mod editor_input;
 #[path = "editor_preferences.rs"]
 mod editor_preferences;
+#[path = "ex_commands.rs"]
+mod ex_commands;
 #[path = "explorer_navigation.rs"]
 mod explorer_navigation;
+#[path = "explorer_tree_ui.rs"]
+mod explorer_tree_ui;
+#[cfg(test)]
+#[path = "explorer_visual_tests.rs"]
+mod explorer_visual_tests;
 #[path = "find.rs"]
 mod find;
 #[path = "git_panel.rs"]
@@ -128,7 +135,7 @@ impl Default for Settings {
             line_height: 1.35,
             line_numbers: crate::cli::LineNumbers::default(),
             highlight_current_line: true,
-            show_ignored_files: false,
+            show_ignored_files: true,
             editor_font: crate::cli::EditorFont::default(),
             tab_width: 4,
             detect_indentation: true,
@@ -186,6 +193,7 @@ struct Project {
     /// Parked while another project is active; buffers always stay in this project.
     layout: Option<split::EditorLayout>,
     index: Option<Arc<workspace::WorkspaceIndex>>,
+    explorer: Option<workspace::ExplorerTree>,
     indexing: bool,
     index_cancel: Arc<AtomicBool>,
     index_generation: u64,
@@ -223,6 +231,7 @@ impl Project {
             active_tab: 0,
             layout: None,
             index: None,
+            explorer: None,
             indexing: false,
             index_cancel: Arc::new(AtomicBool::new(false)),
             index_generation: 0,
@@ -362,6 +371,23 @@ impl EditorTab {
         self.focus = true;
         self.scroll_to_cursor = true;
     }
+    fn apply_line_move(&mut self, edit: editor::EditResult) {
+        if edit.text == self.text {
+            return;
+        }
+        let navigation = self.vim.navigation();
+        let start = self
+            .vim
+            .selection(&self.text)
+            .unwrap_or_else(|| self.selection.clone())
+            .start;
+        let delta = edit.selection.start as isize - start as isize;
+        self.apply(edit);
+        self.vim.notify_external_text_change();
+        self.vim
+            .restore_navigation(&self.text, &navigation.shifted(delta));
+        self.scroll_to_cursor = true;
+    }
 }
 struct GitSnapshot {
     root: Option<PathBuf>,
@@ -386,6 +412,12 @@ struct ActiveScreenJump {
 type BookmarkMarks = Vec<(usize, u64, String)>;
 type BookmarkLineCache = HashMap<u64, (u64, BookmarkMarks)>;
 enum WorkerResult {
+    ExplorerDirectory {
+        root: PathBuf,
+        path: PathBuf,
+        generation: u64,
+        result: Result<workspace::ExplorerDirectory, String>,
+    },
     Index {
         root: PathBuf,
         generation: u64,
@@ -649,6 +681,7 @@ impl MorrowApp {
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
+        app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
         app.ctx.set_zoom_factor(app.settings.ui_scale);
         app.apply_editor_font();
@@ -937,15 +970,19 @@ impl MorrowApp {
         p.index_generation += 1;
         p.indexing = true;
         p.index_error = None;
+        if let Some(explorer) = &mut p.explorer {
+            explorer.invalidate();
+        } else {
+            p.explorer = Some(workspace::ExplorerTree::new(p.root.clone()));
+        }
         let root = p.root.clone();
+        let explorer_root = root.clone();
         let generation = p.index_generation;
         let cancel = p.index_cancel.clone();
-        let show_ignored_files = self.settings.show_ignored_files;
         self.worker(move || WorkerResult::Index {
             result: workspace::build_index(
                 &root,
                 workspace::IndexOptions {
-                    show_ignored_files,
                     cancel: Some(cancel),
                     ..Default::default()
                 },
@@ -953,6 +990,7 @@ impl MorrowApp {
             root,
             generation,
         });
+        self.request_explorer_directory(index, explorer_root);
     }
     fn load_tab(&self, id: u64, path: Option<PathBuf>, recovery: Option<PathBuf>) {
         self.worker(move || {
@@ -1326,6 +1364,21 @@ impl MorrowApp {
             match result {
                 WorkerResult::ContextFile(result) => self.context_file_result(result),
                 WorkerResult::ContextFilePrepared(result) => self.context_file_prepared(result),
+                WorkerResult::ExplorerDirectory {
+                    root,
+                    path,
+                    generation,
+                    result,
+                } => {
+                    if let Some(explorer) = self
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.root == root)
+                        .and_then(|project| project.explorer.as_mut())
+                    {
+                        explorer.complete(&path, generation, result);
+                    }
+                }
                 WorkerResult::Index {
                     root,
                     generation,
@@ -2875,6 +2928,7 @@ impl MorrowApp {
         use keybindings::Action;
         self.resume_editor_input();
         self.resume_shortcut_input();
+        keybindings::preserve_altgr_text(&self.ctx);
         let ctx = self.ctx.clone();
         if self.picker.is_some()
             || self.palette.is_some()
@@ -2937,6 +2991,8 @@ impl MorrowApp {
                     | Action::AgentMarks
                     | Action::ToggleComment
                     | Action::DuplicateLine
+                    | Action::MoveLineUp
+                    | Action::MoveLineDown
                     | Action::Undo
                     | Action::Redo
                     | Action::ZoomIn
@@ -3275,6 +3331,20 @@ impl MorrowApp {
                 }
                 if prompt.is_some() {
                     match event {
+                        boundary @ egui::Event::Key {
+                            key: Key::Enter | Key::Escape,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if !modifiers.ctrl
+                            && !modifiers.command
+                            && !modifiers.alt
+                            && !modifiers.shift =>
+                        {
+                            retained.push(boundary);
+                            retained.extend(events);
+                            break;
+                        }
                         egui::Event::Text(text) => prompt_text.push_str(&text),
                         egui::Event::Paste(text) => prompt_text.push_str(&text),
                         egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
@@ -3312,7 +3382,14 @@ impl MorrowApp {
                         keybindings::Action::DuplicateLine,
                         &event,
                     );
-                    if comment || duplicate {
+                    let move_up =
+                        keybindings::matches(&keybindings, keybindings::Action::MoveLineUp, &event);
+                    let move_down = keybindings::matches(
+                        &keybindings,
+                        keybindings::Action::MoveLineDown,
+                        &event,
+                    );
+                    if comment || duplicate || move_up || move_down {
                         if events
                             .peek()
                             .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
@@ -3329,12 +3406,17 @@ impl MorrowApp {
                                 selection,
                                 crate::file_kind::comment_language(tab.path.as_deref()),
                             )
-                        } else {
+                        } else if duplicate {
                             editor::duplicate_lines(&tab.text, selection)
+                        } else {
+                            editor::move_lines(&tab.text, selection, move_down)
                         };
-                        tab.vim.begin_external_edit(&tab.text);
-                        tab.apply(edit);
-                        tab.vim.notify_external_text_change();
+                        if move_up || move_down || duplicate {
+                            tab.apply_line_move(edit);
+                        } else if edit.text != tab.text {
+                            tab.apply(edit);
+                            tab.vim.notify_external_text_change();
+                        }
                         editor_input::defer(&ctx, tab.id, events.collect());
                         break;
                     }
@@ -3521,9 +3603,7 @@ impl MorrowApp {
                         } else if !modifiers.command && !modifiers.ctrl && !modifiers.alt {
                             match key {
                                 Key::Escape => Some(VimKey::Escape),
-                                Key::Enter if tab.vim.expects_literal_character() => {
-                                    Some(VimKey::Enter)
-                                }
+                                Key::Enter => Some(VimKey::Enter),
                                 Key::Tab if tab.vim.expects_literal_character() => {
                                     Some(VimKey::Tab)
                                 }
@@ -3531,7 +3611,7 @@ impl MorrowApp {
                                     Some(VimKey::Backspace)
                                 }
                                 Key::ArrowLeft | Key::Backspace => Some(VimKey::Char('h')),
-                                Key::ArrowDown | Key::Enter => Some(VimKey::Char('j')),
+                                Key::ArrowDown => Some(VimKey::Char('j')),
                                 Key::ArrowUp => Some(VimKey::Char('k')),
                                 Key::ArrowRight => Some(VimKey::Char('l')),
                                 Key::Home => Some(VimKey::Char('0')),
@@ -3574,7 +3654,7 @@ impl MorrowApp {
             ctx.copy_text(text);
         }
         if let Some(':') = prompt {
-            self.vim_command = Some(prompt_text);
+            self.begin_ex_command(prompt_text);
         }
         if definition {
             self.request_definition();
@@ -3979,207 +4059,6 @@ impl MorrowApp {
                     }
                 });
             });
-    }
-    pub(super) fn reindex_explorer_visibility(&mut self) {
-        self.session_dirty = true;
-        for project in 0..self.projects.len() {
-            self.index_project(project);
-        }
-        self.ctx.request_repaint();
-    }
-    fn explorer_filter_ui(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .checkbox(&mut self.settings.show_ignored_files, "Show ignored files")
-            .on_hover_text(format!("Include ignored files and generated folders in Explorer and Quick Open. Git metadata and symbolic links stay hidden. Project text search keeps its own filters. Open file ({}) opens directly, regardless of these filters.", self.shortcut_label(keybindings::Action::OpenFile)))
-            .changed()
-        {
-            self.reindex_explorer_visibility();
-        }
-        if ui.available_height() < 180.0 {
-            ui.label(
-                RichText::new(format!(
-                    "Open any file: {}",
-                    self.shortcut_label(keybindings::Action::OpenFile)
-                ))
-                .size(10.5)
-                .color(MUTED),
-            );
-            return;
-        }
-        if !self.settings.show_ignored_files {
-            ui.label(
-                RichText::new("Ignore rules and generated folders are hidden.")
-                    .size(10.5)
-                    .color(MUTED),
-            );
-        }
-        ui.label(
-            RichText::new(format!(
-                "Open a file directly: {}",
-                self.shortcut_label(keybindings::Action::OpenFile)
-            ))
-            .size(10.5)
-            .color(MUTED),
-        );
-        ui.add_space(5.0);
-    }
-    fn explorer(&mut self, ui: &mut egui::Ui) {
-        let Some(p) = self.project() else { return };
-        let root = p.root.clone();
-        let index = p.index.clone();
-        let loading = p.indexing;
-        let error = p.index_error.clone();
-        self.explorer_register_focus(ui, &root);
-        self.explorer_project_heading(ui, &root);
-        self.explorer_filter_ui(ui);
-        if loading {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new("Indexing files…").size(11.0).color(MUTED));
-            });
-        }
-        if let Some(error) = error {
-            ui.colored_label(ORANGE, error);
-        }
-        let Some(index) = index else {
-            self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
-            return;
-        };
-        if index.truncated {
-            ui.label(
-                RichText::new("Index limit reached. Some files may be missing.")
-                    .size(11.0)
-                    .color(ORANGE),
-            );
-        }
-        if !index.warnings.is_empty() {
-            ui.label(
-                RichText::new(format!(
-                    "{} folders could not be read",
-                    index.warnings.len()
-                ))
-                .size(10.5)
-                .color(ORANGE),
-            )
-            .on_hover_text(index.warnings.join("\n"));
-        }
-        let active = self.tab().and_then(|t| t.path.clone());
-        self.explorer_initialize(&index);
-        let rows = self.explorer_rows(&index);
-        let scroll_row = self.explorer_take_scroll_row(&root, &rows);
-        egui::ScrollArea::vertical()
-            .id_salt(("tree", &root))
-            .auto_shrink([false, false])
-            .show_viewport(ui, |ui, viewport| {
-                let row_height = 28.0;
-                let content_top = ui.max_rect().top();
-                let content_height = row_height * rows.len() as f32;
-                ui.set_height(content_height.max(viewport.height()));
-                ui.spacing_mut().item_spacing.y = 0.0;
-                if let Some(row) = scroll_row {
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(ui.max_rect().left(), content_top + row as f32 * row_height),
-                        Vec2::new(ui.available_width(), row_height),
-                    );
-                    ui.scroll_to_rect_animation(
-                        rect,
-                        None,
-                        if self.settings.smooth_scroll {
-                            ui.style().scroll_animation
-                        } else {
-                            egui::style::ScrollAnimation::none()
-                        },
-                    );
-                }
-                if index.entries.is_empty() {
-                    ui.label(RichText::new("No visible files.").color(MUTED));
-                }
-                let first = (viewport.min.y / row_height).floor().max(0.0) as usize;
-                let last = ((viewport.max.y / row_height).ceil() as usize + 1).min(rows.len());
-                if first < last {
-                    let rect = egui::Rect::from_x_y_ranges(
-                        ui.max_rect().x_range(),
-                        content_top + first as f32 * row_height
-                            ..=content_top + last as f32 * row_height,
-                    );
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                        self.tree(ui, &rows[first..last], &active);
-                    });
-                }
-                // This rectangle starts below the last row, leaving file and
-                // folder menus (and the ScrollArea's scrollbar) in control.
-                let blank_top =
-                    content_top + content_height.max(if rows.is_empty() { 28.0 } else { 0.0 });
-                let blank = egui::Rect::from_min_max(
-                    egui::pos2(ui.max_rect().left(), blank_top),
-                    ui.max_rect().right_bottom(),
-                );
-                self.explorer_background_menu(ui, &root, blank);
-            });
-    }
-    fn tree(
-        &mut self,
-        ui: &mut egui::Ui,
-        rows: &[explorer_navigation::VisibleRow<'_>],
-        active: &Option<PathBuf>,
-    ) {
-        let explorer_focused = self.explorer_keyboard_focused();
-        for row in rows {
-            let entry = row.entry;
-            ui.push_id(&entry.path, |ui| {
-                let rect = egui::Rect::from_min_size(
-                    ui.next_widget_position(),
-                    Vec2::new(ui.available_width(), 28.0),
-                );
-                let row_rect = egui::Rect::from_min_max(
-                    rect.left_top() + Vec2::new(row.depth as f32 * 14.0, 0.0),
-                    rect.right_bottom(),
-                );
-                ui.allocate_rect(rect, egui::Sense::hover());
-                let tooltip = crate::paths::display(&entry.path);
-                ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
-                    let selected = self.explorer_selected(&entry.path);
-                    let active_file = !entry.is_dir && active.as_ref() == Some(&entry.path);
-                    let badge = if entry.is_dir {
-                        (
-                            if self.explorer_expanded(&entry.path) {
-                                "v"
-                            } else {
-                                ">"
-                            },
-                            MUTED,
-                        )
-                    } else {
-                        (file_badge(&entry.path), file_color(Some(&entry.path)))
-                    };
-                    // The Explorer keeps its own keyboard selection. Once focus
-                    // leaves it, emphasize the file the editor is displaying.
-                    let emphasized = if explorer_focused {
-                        selected
-                    } else {
-                        active_file
-                    };
-                    let response =
-                        design::left_row(ui, &entry.name, Some(badge), emphasized, &tooltip);
-                    if active_file {
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                response.rect.left_top() + Vec2::new(1.0, 6.0),
-                                Vec2::new(2.0, 16.0),
-                            ),
-                            1.0,
-                            ACCENT,
-                        );
-                    }
-                    self.explorer_row_interaction(&response, &entry.path, entry.is_dir);
-                    self.file_context_menu(&response, &entry.path, entry.is_dir);
-                    if response.clicked() && !entry.is_dir {
-                        self.open_file(entry.path.clone());
-                        self.focus_explorer();
-                    }
-                });
-            });
-        }
     }
     fn open_project_search(&mut self) {
         self.show_sidebar(SidebarView::Search);
@@ -5292,9 +5171,17 @@ impl MorrowApp {
                 Some(editor_input::Command::Duplicate) => {
                     Some(editor::duplicate_lines(&tab.text, tab.selection.clone()))
                 }
+                Some(editor_input::Command::MoveLine(down)) => {
+                    Some(editor::move_lines(&tab.text, tab.selection.clone(), down))
+                }
                 Some(editor_input::Command::Indent(outdent)) => {
                     Some(if !outdent && tab.selection.is_empty() {
-                        editor::replace_selection(&tab.text, tab.selection.clone(), &indent)
+                        editor::insert_tab(
+                            &tab.text,
+                            tab.selection.clone(),
+                            indentation.width,
+                            indentation.tabs,
+                        )
                     } else {
                         editor::indent_lines_with_width(
                             &tab.text,
@@ -5323,8 +5210,20 @@ impl MorrowApp {
                         tab.selection.clone(),
                     );
                 }
-                tab.apply(edit);
-                let range = tab.pending_selection.take().unwrap();
+                if edit.text != tab.text {
+                    if matches!(
+                        editor_command,
+                        Some(editor_input::Command::MoveLine(_) | editor_input::Command::Duplicate)
+                    ) {
+                        tab.apply_line_move(edit);
+                    } else {
+                        tab.apply(edit);
+                    }
+                }
+                let range = tab
+                    .pending_selection
+                    .take()
+                    .unwrap_or_else(|| tab.selection.clone());
                 let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
                 state
                     .cursor
@@ -6019,10 +5918,12 @@ impl MorrowApp {
                             tab.focus = false;
                         }
                     }
-                    if (response.has_focus() || response.lost_focus())
-                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+                    let previous = (response.has_focus() || response.lost_focus())
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::Enter));
+                    if previous || ((response.has_focus() || response.lost_focus())
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)))
                     {
-                        if !self.find_text.is_empty() { self.find_next(false); }
+                        if !self.find_text.is_empty() { self.find_next(previous); }
                         response.request_focus();
                         if let Some(tab) = self.tab_mut() {
                             tab.focus = false;
@@ -6087,7 +5988,9 @@ impl MorrowApp {
             .is_some_and(|tab| !tab.loading && !tab.saving && tab.error.is_none());
         if editable && replace_one {
             let matches = self.editor_search_matches();
-            let cursor = self.tab().map_or(0, |tab| tab.vim.cursor);
+            let cursor = self.tab().map_or(0, |tab| {
+                self.find.active_cursor(tab, self.current_pane_id())
+            });
             if let Some(range) = matches
                 .iter()
                 .find(|range| range.start >= cursor)
@@ -6163,18 +6066,22 @@ impl MorrowApp {
     fn ex_ui(&mut self, ui: &mut egui::Ui) {
         let mut run = None;
         let mut cancel = false;
+        let mut changed = false;
+        self.ex_input_prefix();
+        self.ex_history_key(ui);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(RichText::new(":").monospace().color(ACCENT));
             if let Some(command) = &mut self.vim_command {
                 let response = ui.add(
                     egui::TextEdit::singleline(command)
-                        .id_salt("ex-command")
+                        .id(egui::Id::new("ex-command"))
                         .font(FontId::monospace(13.0))
-                        .hint_text("w · q · wq · wa · e path · line number")
+                        .hint_text("w · q · bn/bp · split · %s/old/new/g · ↑↓ history")
                         .desired_width(ui.available_width()),
                 );
                 response.request_focus();
+                changed |= response.changed();
                 if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                     run = Some(command.clone());
                 }
@@ -6183,6 +6090,10 @@ impl MorrowApp {
                 }
             }
         });
+        if changed {
+            self.ex_command_changed();
+        }
+        let finished = cancel || run.is_some();
         if cancel || run.is_some() {
             self.vim_command = None;
             if let Some(t) = self.tab_mut() {
@@ -6190,55 +6101,10 @@ impl MorrowApp {
             }
         }
         if let Some(command) = run {
-            let command = command.trim();
-            match command {
-                "w" => self.save_current(),
-                "wa" => self.save_all(),
-                "q" => {
-                    if let Some(t) = self.tab() {
-                        self.request_close(CloseAction::PaneTab {
-                            pane_id: self.current_pane_id(),
-                            id: t.id,
-                        });
-                    }
-                }
-                "q!" => {
-                    if let Some(t) = self.tab() {
-                        self.perform_close(CloseAction::PaneTab {
-                            pane_id: self.current_pane_id(),
-                            id: t.id,
-                        });
-                    }
-                }
-                "wq" | "x" => {
-                    if let Some(t) = self.tab() {
-                        self.close_action = Some(CloseAction::PaneTab {
-                            pane_id: self.current_pane_id(),
-                            id: t.id,
-                        });
-                        self.close_after_save = true;
-                        self.save_current();
-                    }
-                }
-                "noh" | "nohlsearch" => {
-                    self.find_visible = false;
-                    self.find.highlighted = false;
-                }
-                _ => {
-                    if let Ok(line) = command.parse::<usize>() {
-                        if let Some(t) = self.tab_mut() {
-                            let cursor = editor::go_to_line(&t.text, line);
-                            t.set_cursor(cursor..cursor);
-                        }
-                    } else if let Some(path) = command.strip_prefix("e ") {
-                        if let Some(p) = self.project() {
-                            self.open_file(p.root.join(path));
-                        }
-                    } else {
-                        self.status(format!("Unknown command: {command}"), true);
-                    }
-                }
-            }
+            self.execute_ex_command(&command);
+        }
+        if finished {
+            self.finish_ex_command();
         }
     }
     fn welcome(&mut self, ui: &mut egui::Ui) {
@@ -6758,7 +6624,6 @@ impl MorrowApp {
         if self.settings_open {
             let mut done = false;
             let mut changed = false;
-            let previous_visibility = self.settings.show_ignored_files;
             let modal = egui::Modal::new(egui::Id::new("settings_dialog")).show(&ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 32.0).clamp(220.0, 440.0));
                 ui.horizontal(|ui| {
@@ -6797,9 +6662,6 @@ impl MorrowApp {
             });
             self.settings_open = !(done || modal.should_close());
             self.session_dirty |= changed;
-            if previous_visibility != self.settings.show_ignored_files {
-                self.reindex_explorer_visibility();
-            }
             self.ctx.set_zoom_factor(self.settings.ui_scale);
             self.apply_editor_font();
             if !self.settings_open {

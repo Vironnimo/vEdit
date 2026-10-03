@@ -390,7 +390,7 @@ fn legacy_session_adds_bundled_font_without_resetting_existing_preferences() {
     assert_eq!(restored.line_height, 1.35);
     assert_eq!(restored.line_numbers, crate::cli::LineNumbers::Absolute);
     assert!(restored.highlight_current_line);
-    assert!(!restored.show_ignored_files);
+    assert!(restored.show_ignored_files);
     assert_eq!(restored.autosave_delay_ms, 850);
     let updated = serde_json::to_value(&restored).unwrap();
     for (key, value) in old_settings.as_object().unwrap() {

@@ -384,8 +384,8 @@ pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> EditResult
     };
     // A trailing newline terminates the last complete row; its synthetic empty
     // row should not turn a line move into removal of that terminator.
-    let complete_rows = rows.len()
-        - usize::from(rows.len() > 1 && rows.last().unwrap().start == chars.len());
+    let complete_rows =
+        rows.len() - usize::from(rows.len() > 1 && rows.last().unwrap().start == chars.len());
     if chosen.end > complete_rows
         || (down && chosen.end >= complete_rows)
         || (!down && chosen.start == 0)
@@ -432,9 +432,18 @@ pub fn insert_tab(text: &str, selection: Range<usize>, width: usize, tabs: bool)
         .rposition(|&ch| ch == '\n')
         .map_or(0, |at| at + 1);
     let column = chars[start..selection.start].iter().fold(0, |column, &ch| {
-        column + if ch == '\t' { width - column % width } else { 1 }
+        column
+            + if ch == '\t' {
+                width - column % width
+            } else {
+                1
+            }
     });
-    let insertion = if tabs { "\t".into() } else { " ".repeat(width - column % width) };
+    let insertion = if tabs {
+        "\t".into()
+    } else {
+        " ".repeat(width - column % width)
+    };
     replace_selection(text, selection, &insertion)
 }
 
@@ -666,7 +675,10 @@ mod tests {
         let moved = move_lines("α\r\nβ\r\nγ", 0..1, true);
         assert_eq!(moved.text, "β\r\nα\r\nγ");
         assert_eq!(moved.selection, 3..4);
-        assert_eq!(move_lines(&moved.text, moved.selection, false).text, "α\r\nβ\r\nγ");
+        assert_eq!(
+            move_lines(&moved.text, moved.selection, false).text,
+            "α\r\nβ\r\nγ"
+        );
         assert_eq!(move_lines("a\nb", 0..1, true).text, "b\na");
         assert_eq!(move_lines("a\nb\n", 0..1, true).text, "b\na\n");
         let moved = move_lines("a\nb\nc\nd", 2..6, true);

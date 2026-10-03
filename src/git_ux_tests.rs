@@ -277,7 +277,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     let mut screen = harness(app, 1000.0, true);
     screen.run_steps(3);
     let idle = [
-        screen.get_by_label("Source control").rect(),
+        screen.get_by_label("Source control panel tab").rect(),
         screen.get_by_label(branch).rect(),
         screen.get_by_label("···").rect(),
     ];
@@ -286,7 +286,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     assert_eq!(
         idle,
         [
-            screen.get_by_label("Source control").rect(),
+            screen.get_by_label("Source control panel tab").rect(),
             screen.get_by_label(branch).rect(),
             screen.get_by_label("···").rect()
         ]
@@ -299,7 +299,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     assert_eq!(
         idle,
         [
-            screen.get_by_label("Source control").rect(),
+            screen.get_by_label("Source control panel tab").rect(),
             screen.get_by_label(branch).rect(),
             screen.get_by_label("···").rect()
         ]
@@ -459,6 +459,8 @@ fn git_keyboard_leaves_composer_arrows_and_enter_for_text_entry() {
         Key::ArrowDown,
         Key::ArrowLeft,
         Key::ArrowRight,
+        Key::PageUp,
+        Key::PageDown,
         Key::Enter,
     ] {
         screen.key_press(key);
@@ -473,6 +475,10 @@ fn git_keyboard_leaves_composer_arrows_and_enter_for_text_entry() {
         2
     );
     assert!(screen.state().git_busy.is_none());
+    screen.event(egui::Event::Text("jk".into()));
+    screen.run_steps(2);
+    assert!(screen.state().projects[0].commit_message.contains("jk"));
+    assert_eq!(screen.ctx.memory(|memory| memory.focused()), Some(composer));
     screen.ctx.memory_mut(|m| m.surrender_focus(composer));
     screen.state_mut().focus_git_content();
     screen.run_steps(2);
@@ -481,6 +487,128 @@ fn git_keyboard_leaves_composer_arrows_and_enter_for_text_entry() {
         Some(composer),
         "Returning to Git restores the composer"
     );
+}
+
+#[test]
+fn git_vim_navigation_handles_batched_keys_once_and_respects_swap() {
+    let mut screen = harness(keyboard_changes_fixture(), 360.0, false);
+    screen.run_steps(3);
+    screen.state_mut().focus_git_content();
+    screen.run_steps(2);
+    let root = screen.state().projects[0].root.clone();
+    for repeat in [false, true] {
+        screen.input_mut().events.extend([
+            egui::Event::Key {
+                key: Key::J,
+                physical_key: None,
+                pressed: true,
+                repeat,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Text("j".into()),
+        ]);
+    }
+    screen.run_steps(2);
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(git_row_id(&root, "working:changes:file:src/first.py"))
+    );
+    screen.state_mut().settings.swap_jk = true;
+    screen.key_press(Key::K);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(git_row_id(&root, "working:changes:file:src/second.dart"))
+    );
+    screen.event(egui::Event::Text("j".into()));
+    screen.run_steps(2);
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(git_row_id(&root, "working:changes:file:src/first.py"))
+    );
+    screen.ctx.memory_mut(|memory| {
+        memory.request_focus(git_row_id(&root, "working:changes:folder:src"));
+    });
+    screen.run_steps(2);
+    screen.key_press(Key::H);
+    screen.run_steps(2);
+    assert!(!screen.state().projects[0].git_view.expanded["working:changes:folder:src"]);
+    screen.event(egui::Event::Text("l".into()));
+    screen.run_steps(2);
+    assert!(screen.state().projects[0].git_view.expanded["working:changes:folder:src"]);
+    assert!(screen.state().git_busy.is_none() && screen.state().diff.is_none());
+    assert!(screen.state().projects[0].commit_message.is_empty());
+}
+
+#[test]
+fn git_page_and_half_page_motions_reveal_rows_and_clamp_at_ends() {
+    let mut app = keyboard_changes_fixture();
+    app.projects[0].git_changes = (0..100)
+        .map(|index| git::FileStatus {
+            path: format!("file{index:03}.py"),
+            original_path: None,
+            index: git::FileChange::None,
+            worktree: git::FileChange::Modified,
+        })
+        .collect();
+    let root = app.projects[0].root.clone();
+    let mut screen = harness(app, 360.0, false);
+    screen.run_steps(3);
+    screen.state_mut().focus_git_content();
+    screen.run_steps(2);
+    let page = screen.state().projects[0].git_view.keyboard_page_rows;
+    assert!(page > 2);
+    screen.key_press(Key::PageDown);
+    screen.run_steps(3);
+    let page_row = git_row_id(
+        &root,
+        &format!("working:changes:file:file{:03}.py", page - 1),
+    );
+    assert_eq!(screen.ctx.memory(|memory| memory.focused()), Some(page_row));
+    screen.event(egui::Event::Key {
+        key: Key::D,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::CTRL,
+    });
+    screen.run_steps(3);
+    let half_page_index = page - 1 + (page / 2).max(1);
+    let half_page_row = git_row_id(
+        &root,
+        &format!("working:changes:file:file{half_page_index:03}.py"),
+    );
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(half_page_row)
+    );
+    assert!(
+        screen.ctx.content_rect().contains(
+            screen
+                .ctx
+                .read_response(half_page_row)
+                .unwrap()
+                .rect
+                .center()
+        )
+    );
+    screen.key_press(Key::Home);
+    screen.run_steps(2);
+    screen.key_press(Key::PageUp);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(git_row_id(&root, "working:changes"))
+    );
+    screen.key_press(Key::End);
+    screen.run_steps(2);
+    screen.key_press(Key::PageDown);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(git_row_id(&root, "working:changes:file:file099.py"))
+    );
+    assert!(screen.state().git_busy.is_none());
 }
 
 #[test]

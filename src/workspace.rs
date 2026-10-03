@@ -8,7 +8,7 @@ use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::RegexBuilder;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -20,9 +20,12 @@ use std::time::{Duration, Instant, SystemTime};
 pub const MAX_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_WARNINGS: usize = 20;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static EXPLORER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
 pub struct IndexOptions {
+    /// Internal Quick Open indexing policy. The Explorer always uses complete
+    /// lazy directory listings and never consults this option.
     pub show_ignored_files: bool,
     pub max_entries: usize,
     pub max_depth: usize,
@@ -47,7 +50,6 @@ pub struct WorkspaceEntry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
-    pub depth: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -55,14 +57,16 @@ pub struct WorkspaceIndex {
     pub root: PathBuf,
     pub entries: Vec<WorkspaceEntry>,
     pub files: Vec<PathBuf>,
-    /// A Cargo manifest admitted by the default index policy, independent of
-    /// the Explorer's option to display ignored and generated files.
+    /// A Cargo manifest admitted by the default analysis policy, independent
+    /// of whether ignored and generated files are indexed for Quick Open.
     pub has_rust_manifest: bool,
     pub truncated: bool,
     pub warnings: Vec<String>,
     children: BTreeMap<PathBuf, Vec<usize>>,
     searchable_files: Vec<String>,
     quick_open_cache: Arc<Mutex<VecDeque<QuickOpenResults>>>,
+    explorer_directories: BTreeMap<PathBuf, Arc<ExplorerDirectory>>,
+    explorer_snapshot: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -84,16 +88,52 @@ impl WorkspaceIndex {
             children: BTreeMap::new(),
             searchable_files: Vec::new(),
             quick_open_cache: Arc::new(Mutex::new(VecDeque::new())),
+            explorer_directories: BTreeMap::new(),
+            explorer_snapshot: false,
         }
     }
 
     /// A cached directory listing, sorted with folders first. Does not touch the disk.
     pub fn children<'a>(&'a self, parent: &Path) -> impl Iterator<Item = &'a WorkspaceEntry> {
-        self.children
+        self.explorer_directories
             .get(parent)
             .into_iter()
-            .flatten()
-            .map(|&index| &self.entries[index])
+            .flat_map(|directory| directory.entries.iter())
+            .chain(
+                self.children
+                    .get(parent)
+                    .into_iter()
+                    .flatten()
+                    .map(|&index| &self.entries[index]),
+            )
+    }
+
+    pub fn entry(&self, path: &Path) -> Option<&WorkspaceEntry> {
+        self.children(path.parent()?)
+            .find(|entry| entry.path == path)
+    }
+
+    pub fn has_entry(&self, path: &Path) -> bool {
+        self.entry(path).is_some()
+    }
+
+    #[cfg(test)]
+    pub fn all_entries(&self) -> impl Iterator<Item = &WorkspaceEntry> {
+        self.entries.iter().chain(
+            self.explorer_directories
+                .values()
+                .flat_map(|directory| directory.entries.iter()),
+        )
+    }
+
+    pub fn is_explorer_snapshot(&self) -> bool {
+        self.explorer_snapshot
+    }
+
+    /// An absent row in an unloaded lazy directory is not proof that a selected
+    /// file disappeared. Eager indexes retain their existing reconciliation.
+    pub fn directory_loaded(&self, directory: &Path) -> bool {
+        !self.explorer_snapshot || self.explorer_directories.contains_key(directory)
     }
 
     /// Ranked path search. At most `limit` paths are cloned, even in large workspaces.
@@ -147,6 +187,213 @@ impl WorkspaceIndex {
             cache.truncate(MAX_CACHED_QUERIES);
         }
         paths
+    }
+}
+
+/// A complete, nonrecursive folder listing for the Explorer. Git ignore rules,
+/// generated-folder policies, search limits and maximum tree depth never hide
+/// ordinary entries here. Only version-control metadata stays hidden.
+#[derive(Clone, Debug)]
+pub struct ExplorerDirectory {
+    pub root: PathBuf,
+    pub path: PathBuf,
+    pub entries: Vec<WorkspaceEntry>,
+    pub warnings: Vec<String>,
+}
+
+/// Enumerate one folder on a background worker. Never call this from rendering.
+/// User-expanded linked folders are followed, including external targets. This
+/// remains a single directory read, so a link never triggers recursive scanning.
+pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<ExplorerDirectory, String> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| "The Explorer folder is outside this project".to_owned())?;
+    if relative.components().any(|part| {
+        matches!(
+            part,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err("The Explorer folder is outside this project".into());
+    }
+    let reader = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "Could not list {}: {error}",
+            crate::paths::display(directory)
+        )
+    })?;
+    let mut listing = ExplorerDirectory {
+        root: root.to_path_buf(),
+        path: directory.to_path_buf(),
+        entries: Vec::new(),
+        warnings: Vec::new(),
+    };
+    for result in reader {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(error) => {
+                if listing.warnings.len() < MAX_WARNINGS {
+                    listing.warnings.push(error.to_string());
+                }
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if [".git", ".hg", ".svn"]
+            .iter()
+            .any(|metadata| name.eq_ignore_ascii_case(metadata))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = match entry.file_type() {
+            Ok(kind) => kind.is_dir() || (kind.is_symlink() && path.is_dir()),
+            Err(error) => {
+                // A metadata error must not silently hide an otherwise named
+                // entry. Keep it visible and report the failed inspection.
+                if listing.warnings.len() < MAX_WARNINGS {
+                    listing.warnings.push(format!(
+                        "Could not inspect {}: {error}",
+                        crate::paths::display(&path)
+                    ));
+                }
+                false
+            }
+        };
+        listing.entries.push(WorkspaceEntry { path, name, is_dir });
+    }
+    listing.entries.sort_unstable_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(listing)
+}
+
+/// A lazy Explorer cache, independent of the bounded Quick Open index.
+/// Snapshots share immutable directory arrays, so loading one child never copies
+/// the entries of a large root folder. `snapshot().children(path)` is compatible
+/// with existing Explorer navigation; flat `entries`/`files` stay unused here.
+#[derive(Debug)]
+pub struct ExplorerTree {
+    snapshot: Arc<WorkspaceIndex>,
+    generation: u64,
+    loaded: BTreeSet<PathBuf>,
+    pending: BTreeSet<PathBuf>,
+    errors: BTreeMap<PathBuf, String>,
+}
+
+impl ExplorerTree {
+    pub fn new(root: PathBuf) -> Self {
+        let mut snapshot = WorkspaceIndex::empty(root);
+        snapshot.explorer_snapshot = true;
+        Self {
+            snapshot: Arc::new(snapshot),
+            generation: EXPLORER_GENERATION.fetch_add(1, Ordering::Relaxed),
+            loaded: BTreeSet::new(),
+            pending: BTreeSet::new(),
+            errors: BTreeMap::new(),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<WorkspaceIndex> {
+        self.snapshot.clone()
+    }
+
+    /// Reserve a worker request. Duplicate, cached and failed requests wait
+    /// until refresh; return this generation with the worker completion.
+    pub fn begin(&mut self, directory: &Path) -> Option<u64> {
+        if !directory.starts_with(&self.snapshot.root)
+            || self.loaded.contains(directory)
+            || self.pending.contains(directory)
+            || self.errors.contains_key(directory)
+        {
+            return None;
+        }
+        self.pending.insert(directory.to_path_buf());
+        Some(self.generation)
+    }
+
+    /// Publish only a reserved request from the current refresh generation.
+    pub fn complete(
+        &mut self,
+        directory: &Path,
+        generation: u64,
+        result: Result<ExplorerDirectory, String>,
+    ) -> bool {
+        if generation != self.generation || !self.pending.remove(directory) {
+            return false;
+        }
+        match result {
+            Ok(listing) if listing.root == self.snapshot.root && listing.path == directory => {
+                // Navigation remembers snapshot identity while awaiting a
+                // rename refresh. Publish a distinct allocation even when no
+                // renderer currently holds the previous Arc. Directory arrays
+                // remain shared, so this only clones the small directory map.
+                let mut snapshot = (*self.snapshot).clone();
+                snapshot
+                    .explorer_directories
+                    .insert(directory.to_path_buf(), Arc::new(listing));
+                snapshot.warnings = snapshot
+                    .explorer_directories
+                    .values()
+                    .flat_map(|listing| listing.warnings.iter().cloned())
+                    .take(MAX_WARNINGS)
+                    .collect();
+                self.snapshot = Arc::new(snapshot);
+                self.loaded.insert(directory.to_path_buf());
+                self.errors.remove(directory);
+            }
+            Ok(_) => {
+                self.errors.insert(
+                    directory.to_path_buf(),
+                    "The folder listing belongs to a different project or folder".into(),
+                );
+            }
+            Err(error) => {
+                self.errors.insert(directory.to_path_buf(), error);
+            }
+        }
+        true
+    }
+
+    /// Keep previous rows visible while fresh requests run. Late workers from
+    /// the previous generation cannot replace the refreshed directory cache.
+    pub fn invalidate(&mut self) {
+        self.generation = EXPLORER_GENERATION.fetch_add(1, Ordering::Relaxed);
+        self.loaded.clear();
+        self.pending.clear();
+        self.errors.clear();
+    }
+
+    pub fn has_listing(&self, directory: &Path) -> bool {
+        self.snapshot.explorer_directories.contains_key(directory)
+    }
+
+    #[cfg(test)]
+    pub fn is_loaded(&self, directory: &Path) -> bool {
+        self.loaded.contains(directory)
+    }
+
+    pub fn is_loading(&self, directory: &Path) -> bool {
+        self.pending.contains(directory)
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn error(&self, directory: &Path) -> Option<&str> {
+        self.errors.get(directory).map(String::as_str)
+    }
+
+    pub fn errors(&self) -> impl Iterator<Item = (&Path, &str)> {
+        self.errors
+            .iter()
+            .map(|(path, error)| (path.as_path(), error.as_str()))
     }
 }
 
@@ -246,7 +493,9 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
             {
                 return false;
             }
-            show_ignored_files || !generated_index_name(entry.file_name())
+            show_ignored_files
+                || !entry.file_type().is_some_and(|kind| kind.is_dir())
+                || !generated_index_name(entry.file_name())
         });
     // Showing dependency caches must not give their Cargo manifests authority
     // to start Rust analysis. Match just the encountered manifest candidates
@@ -314,7 +563,6 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
             path: entry.path().to_path_buf(),
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: file_type.is_dir(),
-            depth: entry.depth(),
         });
     }
     index.entries.sort_unstable_by(|a, b| {
@@ -407,7 +655,7 @@ pub struct SearchResults {
     pub warnings: Vec<String>,
 }
 
-/// Optional project-search filters. The Explorer's cached index has independent
+/// Optional project-search filters. The Quick Open index has independent
 /// pruning: a search with an empty list can inspect these folders when Git allows it.
 pub fn default_search_excludes() -> Vec<String> {
     [
@@ -428,7 +676,7 @@ pub fn default_search_excludes() -> Vec<String> {
         ".vs",
     ]
     .into_iter()
-    .map(str::to_owned)
+    .map(|folder| format!("{folder}/"))
     .collect()
 }
 
@@ -509,7 +757,12 @@ pub fn search_with_excludes(
                 return false;
             }
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            if is_dir && matches!(entry.file_name().to_str(), Some(".git" | ".hg" | ".svn")) {
+            if [".git", ".hg", ".svn"].iter().any(|metadata| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(metadata)
+            }) {
                 return false;
             }
             if is_dir && entry.depth() == 64 {
@@ -584,7 +837,26 @@ fn search_paths(
         };
         let remaining = options.max_total_bytes.saturating_sub(bytes_searched);
         let limit = remaining.min(options.max_file_bytes);
-        let document = match read_document(&path, limit) {
+        let (bytes, fingerprint) = match read_bytes(&path, limit) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                results.files_skipped += 1;
+                if error.kind() != io::ErrorKind::InvalidInput
+                    && results.warnings.len() < MAX_WARNINGS
+                {
+                    results.warnings.push(format!(
+                        "Could not open {}: {error}",
+                        crate::paths::display(&path)
+                    ));
+                }
+                continue;
+            }
+        };
+        // Reading a binary or malformed text file still consumes the search
+        // budget. Charge the snapshot before decoding it, so repositories full
+        // of assets cannot bypass the advertised bound.
+        bytes_searched += fingerprint.len;
+        let document = match decode_document(&path, bytes, fingerprint) {
             Ok(document) => document,
             Err(error) => {
                 results.files_skipped += 1;
@@ -599,7 +871,6 @@ fn search_paths(
                 continue;
             }
         };
-        bytes_searched += document.fingerprint.len;
         results.files_searched += 1;
         let text = &document.text;
         let mut last_byte = 0;
@@ -717,6 +988,17 @@ pub struct LoadedDocument {
 pub fn read_document(path: &Path, max_bytes: u64) -> Result<LoadedDocument, String> {
     let (bytes, fingerprint) = read_bytes(path, max_bytes)
         .map_err(|error| format!("Could not open {}: {error}", crate::paths::display(path)))?;
+    decode_document(path, bytes, fingerprint)
+}
+
+/// Decode one already-read snapshot. Recovery format detection and legacy
+/// decoding must operate on the same bytes, even when a writer replaces the
+/// file concurrently.
+pub(crate) fn decode_document(
+    path: &Path,
+    bytes: Vec<u8>,
+    fingerprint: FileFingerprint,
+) -> Result<LoadedDocument, String> {
     let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
     let bytes = if bom { &bytes[3..] } else { &bytes[..] };
     if bytes.contains(&0) {
@@ -777,7 +1059,15 @@ pub fn fingerprint(path: &Path, max_bytes: u64) -> Result<FileFingerprint, Strin
         })
 }
 
-fn read_bytes(path: &Path, max_bytes: u64) -> io::Result<(Vec<u8>, FileFingerprint)> {
+pub(crate) fn read_bytes(path: &Path, max_bytes: u64) -> io::Result<(Vec<u8>, FileFingerprint)> {
+    // Explorer listings include special filesystem entries. Inspect before
+    // opening so selecting a FIFO or device cannot block a document worker.
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     let mut file = File::open(path)?;
     let before = file.metadata()?;
     if !before.is_file() {
@@ -1165,6 +1455,255 @@ mod tests {
     }
 
     #[test]
+    fn explorer_lists_ignored_and_generated_entries_without_recursing() {
+        let fixture = Fixture::new("explorer-complete-directory");
+        fixture.write(".gitignore", "ignored/\n*.log\n");
+        fixture.write("ignored/nested/secret.txt", "ignored");
+        fixture.write("target/debug/generated.txt", "generated");
+        fixture.write("node_modules/package/index.js", "dependency");
+        fixture.write("output.log", "ignored log");
+        fixture.write(".git/config", "metadata");
+        fixture.write(".Hg/store/data", "metadata");
+        fixture.write(".SVN/entries", "metadata");
+        let listing = read_explorer_directory(&fixture.0, &fixture.0).unwrap();
+        let names: Vec<_> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ignored",
+                "node_modules",
+                "target",
+                ".gitignore",
+                "output.log"
+            ]
+        );
+        assert!(listing.entries.iter().all(|entry| {
+            entry
+                .path
+                .strip_prefix(&fixture.0)
+                .unwrap()
+                .components()
+                .count()
+                == 1
+        }));
+        assert!(listing.warnings.is_empty());
+        let ignored = read_explorer_directory(&fixture.0, &fixture.0.join("ignored")).unwrap();
+        assert_eq!(ignored.entries.len(), 1);
+        assert_eq!(ignored.entries[0].name, "nested");
+        assert!(ignored.entries[0].is_dir);
+        assert_eq!(
+            ignored.entries[0]
+                .path
+                .strip_prefix(&fixture.0)
+                .unwrap()
+                .components()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn explorer_can_access_all_rows_when_quick_open_index_is_truncated() {
+        let fixture = Fixture::new("explorer-independent-index");
+        for index in 0..240 {
+            fixture.write(&format!("file-{index:03}.txt"), "source");
+        }
+        let index = build_index(
+            &fixture.0,
+            IndexOptions {
+                max_entries: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(index.truncated);
+        assert_eq!(index.files.len(), 5);
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        let generation = tree.begin(&fixture.0).unwrap();
+        assert!(tree.complete(
+            &fixture.0,
+            generation,
+            read_explorer_directory(&fixture.0, &fixture.0)
+        ));
+        let snapshot = tree.snapshot();
+        assert_eq!(snapshot.children(&fixture.0).count(), 240);
+        assert!(snapshot.has_entry(&fixture.0.join("file-239.txt")));
+        assert!(!snapshot.truncated);
+    }
+
+    #[test]
+    fn explorer_snapshots_share_directory_arrays_and_load_only_requested_folders() {
+        let fixture = Fixture::new("explorer-lazy-snapshot");
+        let source = fixture.write("nested/source.txt", "source");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        assert!(tree.snapshot().is_explorer_snapshot());
+        assert!(!tree.snapshot().directory_loaded(&fixture.0));
+        let generation = tree.begin(&fixture.0).unwrap();
+        assert!(tree.begin(&fixture.0).is_none());
+        assert!(tree.is_loading(&fixture.0));
+        tree.complete(
+            &fixture.0,
+            generation,
+            read_explorer_directory(&fixture.0, &fixture.0),
+        );
+        let before = tree.snapshot();
+        assert!(before.directory_loaded(&fixture.0));
+        assert_eq!(before.children(&fixture.0).count(), 1);
+        assert!(!before.has_entry(&source));
+        let parent = source.parent().unwrap();
+        assert!(!before.directory_loaded(parent));
+        let generation = tree.begin(parent).unwrap();
+        tree.complete(
+            parent,
+            generation,
+            read_explorer_directory(&fixture.0, parent),
+        );
+        let after = tree.snapshot();
+        assert!(after.has_entry(&source));
+        assert!(after.directory_loaded(parent));
+        assert!(
+            before.children(parent).next().is_none(),
+            "older snapshots stay immutable"
+        );
+        assert_eq!(
+            before.children(&fixture.0).next().unwrap() as *const WorkspaceEntry,
+            after.children(&fixture.0).next().unwrap() as *const WorkspaceEntry,
+            "loading a child must not copy a large parent directory's entries"
+        );
+        assert_eq!(after.all_entries().count(), 2);
+        assert!(after.entries.is_empty());
+        assert!(tree.begin(parent).is_none());
+    }
+
+    #[test]
+    fn explorer_publication_changes_identity_without_external_snapshot_readers() {
+        let fixture = Fixture::new("explorer-publication-identity");
+        fixture.write("nested/source.txt", "source");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        let generation = tree.begin(&fixture.0).unwrap();
+        tree.complete(
+            &fixture.0,
+            generation,
+            read_explorer_directory(&fixture.0, &fixture.0),
+        );
+        // Keep only an address, as navigation does. The temporary Arc is gone
+        // before complete(), so the cache owns the sole strong reference.
+        let previous_identity = Arc::as_ptr(&tree.snapshot()) as usize;
+        assert_eq!(Arc::strong_count(&tree.snapshot), 1);
+        let nested = fixture.0.join("nested");
+        let generation = tree.begin(&nested).unwrap();
+        tree.complete(
+            &nested,
+            generation,
+            read_explorer_directory(&fixture.0, &nested),
+        );
+        assert_ne!(Arc::as_ptr(&tree.snapshot()) as usize, previous_identity);
+        assert!(tree.snapshot().has_entry(&nested.join("source.txt")));
+    }
+
+    #[test]
+    fn explorer_refresh_retains_rows_and_rejects_late_directory_workers() {
+        let fixture = Fixture::new("explorer-stale-generation");
+        let old = fixture.write("old.txt", "old");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        let original = tree.begin(&fixture.0).unwrap();
+        tree.complete(
+            &fixture.0,
+            original,
+            read_explorer_directory(&fixture.0, &fixture.0),
+        );
+        let stale = read_explorer_directory(&fixture.0, &fixture.0);
+        tree.invalidate();
+        assert!(tree.has_listing(&fixture.0));
+        assert!(!tree.is_loaded(&fixture.0));
+        let next = tree.begin(&fixture.0).unwrap();
+        fs::remove_file(&old).unwrap();
+        let new = fixture.write("new.txt", "new");
+        assert!(!tree.complete(&fixture.0, original, stale));
+        assert!(
+            tree.is_loading(&fixture.0),
+            "stale completion must not cancel the fresh request"
+        );
+        assert!(tree.snapshot().has_entry(&old));
+        assert!(tree.complete(
+            &fixture.0,
+            next,
+            read_explorer_directory(&fixture.0, &fixture.0)
+        ));
+        assert!(!tree.snapshot().has_entry(&old));
+        assert!(tree.snapshot().has_entry(&new));
+    }
+
+    #[test]
+    fn explorer_reopened_project_rejects_workers_from_the_previous_cache() {
+        let fixture = Fixture::new("explorer-reopened-generation");
+        fixture.write("source.txt", "source");
+        let mut previous = ExplorerTree::new(fixture.0.clone());
+        let old_generation = previous.begin(&fixture.0).unwrap();
+        let old_listing = read_explorer_directory(&fixture.0, &fixture.0);
+        let mut reopened = ExplorerTree::new(fixture.0.clone());
+        let new_generation = reopened.begin(&fixture.0).unwrap();
+        assert_ne!(old_generation, new_generation);
+        assert!(!reopened.complete(&fixture.0, old_generation, old_listing));
+        assert!(reopened.is_loading(&fixture.0));
+        assert!(reopened.complete(
+            &fixture.0,
+            new_generation,
+            read_explorer_directory(&fixture.0, &fixture.0)
+        ));
+        assert!(reopened.snapshot().has_entry(&fixture.0.join("source.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explorer_lists_and_expands_user_selected_external_linked_folders() {
+        let fixture = Fixture::new("explorer-linked-directory");
+        let outside = Fixture::new("explorer-linked-target");
+        outside.write("package/source.txt", "external dependency");
+        let link = fixture.0.join("node_modules");
+        std::os::unix::fs::symlink(&outside.0, &link).unwrap();
+        let root = read_explorer_directory(&fixture.0, &fixture.0).unwrap();
+        assert_eq!(root.entries.len(), 1);
+        assert!(root.entries[0].is_dir);
+        let linked = read_explorer_directory(&fixture.0, &link).unwrap();
+        assert_eq!(linked.entries.len(), 1);
+        assert_eq!(linked.entries[0].name, "package");
+        let package = read_explorer_directory(&fixture.0, &link.join("package")).unwrap();
+        assert_eq!(package.entries.len(), 1);
+        assert_eq!(package.entries[0].path, link.join("package/source.txt"));
+    }
+
+    #[test]
+    fn explorer_read_errors_wait_for_explicit_refresh_and_cannot_escape_the_project() {
+        let fixture = Fixture::new("explorer-retry");
+        let missing = fixture.0.join("missing");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        let generation = tree.begin(&missing).unwrap();
+        assert!(tree.complete(
+            &missing,
+            generation,
+            read_explorer_directory(&fixture.0, &missing)
+        ));
+        assert!(tree.error(&missing).is_some());
+        assert!(tree.begin(&missing).is_none());
+        fs::create_dir(&missing).unwrap();
+        tree.invalidate();
+        let generation = tree.begin(&missing).unwrap();
+        assert!(tree.complete(
+            &missing,
+            generation,
+            read_explorer_directory(&fixture.0, &missing)
+        ));
+        assert!(tree.error(&missing).is_none());
+        assert!(tree.is_loaded(&missing));
+        assert!(read_explorer_directory(&fixture.0, &fixture.0.join("..")).is_err());
+    }
+
+    #[test]
     fn index_respects_nested_gitignore_and_generated_directories() {
         let fixture = Fixture::new("ignore");
         fixture.write(".gitignore", "ignored/\n*.log\n");
@@ -1193,6 +1732,47 @@ mod tests {
         let root_entries: Vec<_> = index.children(&fixture.0).collect();
         assert!(root_entries.first().unwrap().is_dir);
         assert!(!index.truncated);
+    }
+
+    #[test]
+    fn generated_directory_names_do_not_hide_extensionless_source_files() {
+        let fixture = Fixture::new("generated-name-files");
+        let files: Vec<_> = ["build", "target", "dist", "venv", "node_modules"]
+            .into_iter()
+            .map(|name| fixture.write(&format!("scripts/{name}"), "#!/bin/sh\necho hello\n"))
+            .collect();
+        fixture.write("build/generated.txt", "generated");
+        let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
+        for path in files {
+            assert!(index.files.contains(&path), "{path:?}");
+            assert!(
+                index
+                    .quick_open(&path.file_name().unwrap().to_string_lossy(), 10)
+                    .contains(&path)
+            );
+        }
+        assert!(
+            !index
+                .files
+                .iter()
+                .any(|path| path.ends_with("generated.txt"))
+        );
+    }
+
+    #[test]
+    fn default_search_excludes_keep_source_files_named_after_generated_folders() {
+        let fixture = Fixture::new("search-generated-name-files");
+        let source = fixture.write("scripts/build", "needle");
+        fixture.write("build/generated.txt", "needle");
+        let results = search_with_excludes(
+            &fixture.0,
+            "needle",
+            SearchOptions::default(),
+            &default_search_excludes(),
+        )
+        .unwrap();
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].path, fs::canonicalize(source).unwrap());
     }
 
     #[test]
@@ -1426,7 +2006,6 @@ mod tests {
                 .push(position);
             index.entries.push(WorkspaceEntry {
                 name: format!("module_{file:06}.rs"),
-                depth: 3,
                 is_dir: false,
                 path: path.clone(),
             });
@@ -1543,6 +2122,51 @@ mod tests {
         .unwrap();
         assert_eq!(limited.matches.len(), 1);
         assert!(limited.truncated);
+    }
+
+    #[test]
+    fn binary_and_invalid_utf8_snapshots_consume_the_search_byte_budget() {
+        let fixture = Fixture::new("search-invalid-byte-budget");
+        let following = fixture.write("following.txt", "needle");
+        for (name, bytes) in [
+            ("binary.dat", vec![0, 1, 2, 3, 4, 5, 6, 7]),
+            ("invalid.txt", vec![0xff; 8]),
+        ] {
+            let rejected = fixture.write(name, bytes);
+            let results = search_paths(
+                [rejected, following.clone()].into_iter().map(Ok),
+                "needle",
+                SearchOptions {
+                    max_total_bytes: 8,
+                    ..Default::default()
+                },
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(results.files_skipped, 1);
+            assert_eq!(results.files_searched, 0);
+            assert!(results.matches.is_empty());
+            assert!(results.truncated);
+            assert!(results.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn search_never_lists_vcs_metadata_files_or_case_variants() {
+        let fixture = Fixture::new("search-vcs-metadata");
+        for path in [
+            "nested/.GIT/config",
+            "nested/.Hg/store/data",
+            "nested/.SVN/entries",
+            "worktree/.git",
+        ] {
+            fixture.write(path, "needle");
+        }
+        let source = fixture.write(".github/workflow.yml", "needle");
+        let results =
+            search_with_excludes(&fixture.0, "needle", SearchOptions::default(), &[]).unwrap();
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].path, fs::canonicalize(source).unwrap());
     }
 
     #[test]
@@ -1698,6 +2322,14 @@ mod tests {
         .unwrap();
         assert!(index.truncated);
         assert!(index.files.is_empty());
-        assert!(index.entries.iter().all(|entry| entry.depth <= 2));
+        assert!(index.entries.iter().all(|entry| {
+            entry
+                .path
+                .strip_prefix(&fixture.0)
+                .unwrap()
+                .components()
+                .count()
+                <= 2
+        }));
     }
 }

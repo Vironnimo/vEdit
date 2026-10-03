@@ -11,6 +11,7 @@ pub(super) enum Command {
     Redo,
     Comment,
     Duplicate,
+    MoveLine(bool),
     Indent(bool),
     Newline,
 }
@@ -44,6 +45,12 @@ fn continuation_id() -> egui::Id {
 }
 
 pub(super) fn native_input(event: &egui::Event) -> bool {
+    if let egui::Event::Key {
+        key, pressed: true, ..
+    } = event
+    {
+        return !keybindings::modifier_key(*key);
+    }
     matches!(
         event,
         egui::Event::Text(_)
@@ -51,7 +58,6 @@ pub(super) fn native_input(event: &egui::Event) -> bool {
             | egui::Event::Copy
             | egui::Event::Cut
             | egui::Event::Ime(_)
-            | egui::Event::Key { pressed: true, .. }
     )
 }
 
@@ -65,6 +71,8 @@ pub(super) fn command(
         (keybindings::Action::Redo, Command::Redo),
         (keybindings::Action::ToggleComment, Command::Comment),
         (keybindings::Action::DuplicateLine, Command::Duplicate),
+        (keybindings::Action::MoveLineUp, Command::MoveLine(false)),
+        (keybindings::Action::MoveLineDown, Command::MoveLine(true)),
     ] {
         if (!matches!(command, Command::Undo | Command::Redo) || history)
             && keybindings::matches(bindings, action, event)

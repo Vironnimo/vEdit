@@ -292,12 +292,14 @@ fn explorer_row(screen: &Harness<'_, MorrowApp>, name: &str) -> egui::Rect {
 }
 
 fn filled_selection(screen: &Harness<'_, MorrowApp>, row: egui::Rect) -> bool {
-    let selected_fill = screen
-        .ctx
-        .style_of(egui::Theme::Dark)
-        .visuals
+    let visuals = screen.ctx.style_of(egui::Theme::Dark).visuals.clone();
+    // Explorer deliberately softens the theme's selection fill. Keep testing
+    // the exact filled row so the active file and keyboard selection remain
+    // distinguishable from a mere hover or the thin active-file marker.
+    let selected_fill = visuals
         .selection
-        .bg_fill;
+        .bg_fill
+        .lerp_to_gamma(visuals.panel_fill, 0.24);
     screen.output().shapes.iter().any(|shape| {
         matches!(&shape.shape,
         egui::epaint::Shape::Rect(rect) if rect.fill == selected_fill

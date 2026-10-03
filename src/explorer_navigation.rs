@@ -1,10 +1,10 @@
 //! Explorer selection is separate from the active editor document.
-//! All rows come from the immutable workspace index; navigation never reads disk.
+//! All rows come from cached folder listings; navigation never reads disk.
 
 use super::*;
 use std::collections::HashSet;
 
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = design::EXPLORER_ROW_HEIGHT;
 
 #[derive(Default)]
 pub(super) struct ExplorerNavigationState {
@@ -27,6 +27,8 @@ struct ProjectNavigation {
 pub(super) struct VisibleRow<'a> {
     pub(super) entry: &'a workspace::WorkspaceEntry,
     pub(super) depth: usize,
+    pub(super) ancestor_continuations: Vec<bool>,
+    pub(super) last_sibling: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,23 +83,27 @@ fn visible_rows<'a>(
         state: &ProjectNavigation,
         parent: &Path,
         depth: usize,
+        ancestors: &mut Vec<bool>,
         rows: &mut Vec<VisibleRow<'a>>,
     ) {
-        if depth > 32 {
-            return;
-        }
-        for entry in index.children(parent) {
-            if entry.depth > 32 {
-                continue;
-            }
-            rows.push(VisibleRow { entry, depth });
+        let children: Vec<_> = index.children(parent).collect();
+        for (position, entry) in children.iter().copied().enumerate() {
+            let last_sibling = position + 1 == children.len();
+            rows.push(VisibleRow {
+                entry,
+                depth,
+                ancestor_continuations: ancestors.clone(),
+                last_sibling,
+            });
             if entry.is_dir && state.expanded.contains(&entry.path) {
-                collect(index, state, &entry.path, depth + 1, rows);
+                ancestors.push(!last_sibling);
+                collect(index, state, &entry.path, depth + 1, ancestors, rows);
+                ancestors.pop();
             }
         }
     }
     let mut rows = Vec::new();
-    collect(index, state, &index.root, 0, &mut rows);
+    collect(index, state, &index.root, 0, &mut Vec::new(), &mut rows);
     rows
 }
 
@@ -115,6 +121,7 @@ impl ProjectNavigation {
                 self.expanded.insert(ancestor.into());
             }
             self.selected = Some(active.into());
+            self.scroll_to_selection = true;
         }
         self.reconcile(index);
     }
@@ -123,13 +130,42 @@ impl ProjectNavigation {
     /// visible parent before falling back to the first row.
     fn reconcile(&mut self, index: &workspace::WorkspaceIndex) {
         let identity = index as *const workspace::WorkspaceIndex as usize;
-        if self.awaiting_renamed_index && self.index_identity == identity {
+        if self.awaiting_renamed_index
+            && self.index_identity == identity
+            && self
+                .selected
+                .as_ref()
+                .is_none_or(|selected| !index.has_entry(selected))
+        {
             // The old immutable index is deliberately kept visible while its
             // replacement is built. It cannot invalidate a successful rename.
             return;
         }
         self.awaiting_renamed_index = false;
         self.index_identity = identity;
+        // Active-file ancestors can still be loading in the lazy Explorer.
+        // A loaded parent that no longer contains its child proves deletion;
+        // an unloaded listing must never discard the pending selection.
+        if index.is_explorer_snapshot()
+            && let Some(selected) = &self.selected
+        {
+            let mut ancestors: Vec<_> = selected
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&index.root))
+                .collect();
+            ancestors.reverse();
+            for directory in ancestors {
+                if directory != index.root
+                    && (!self.expanded.contains(directory) || !index.has_entry(directory))
+                {
+                    break;
+                }
+                if !index.directory_loaded(directory) {
+                    return;
+                }
+            }
+        }
         let rows = visible_rows(index, self);
         if self
             .selected
@@ -149,6 +185,9 @@ impl ProjectNavigation {
             })
             .map(Path::to_path_buf)
             .or_else(|| rows.first().map(|row| row.entry.path.clone()));
+        // Refresh can remove a row while the viewport is still at its former
+        // location. Reveal the replacement so keyboard focus stays visible.
+        self.scroll_to_selection = self.selected.is_some();
     }
 
     fn apply(&mut self, index: &workspace::WorkspaceIndex, movement: Move) -> Effect {
@@ -325,7 +364,7 @@ impl MorrowApp {
             tab.focus = false;
         }
         let active = self.tab().and_then(|tab| tab.path.clone());
-        if let Some(index) = self.project().and_then(|project| project.index.clone()) {
+        if let Some(index) = self.explorer_index() {
             let state = self
                 .explorer_navigation
                 .projects
@@ -398,12 +437,11 @@ impl MorrowApp {
             self.ctx
                 .memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
-        let Some((root, index)) = self.project().and_then(|project| {
-            project
-                .index
-                .clone()
-                .map(|index| (project.root.clone(), index))
-        }) else {
+        let Some((root, index)) = self
+            .project()
+            .map(|project| project.root.clone())
+            .zip(self.explorer_index())
+        else {
             if moves.contains(&Move::Editor) {
                 self.focus_editor();
             }
@@ -849,6 +887,29 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_selected_offscreen_file_reveals_the_replacement_row() {
+        let (fixture, app) = Fixture::new(80);
+        let mut screen = harness(app);
+        screen.state_mut().focus_explorer();
+        key(&mut screen, Key::End, egui::Modifiers::NONE);
+        assert_eq!(selected(screen.state()), Some(fixture.0.join("row079.txt")));
+        assert!(screen.query_by_label("src").is_none());
+        fs::remove_file(fixture.0.join("row079.txt")).unwrap();
+        screen.state_mut().projects[0].index = Some(Arc::new(
+            workspace::build_index(&fixture.0, Default::default()).unwrap(),
+        ));
+        screen.run_steps(3);
+        assert_eq!(selected(screen.state()), Some(fixture.0.join("src")));
+        assert!(
+            screen
+                .get_by_label("src")
+                .rect()
+                .intersects(screen.ctx.content_rect())
+        );
+        assert!(screen.state().explorer_keyboard_focused());
+    }
+
+    #[test]
     fn mouse_selection_and_keyboard_selection_share_one_state() {
         let (fixture, app) = Fixture::new(0);
         let mut screen = harness(app);
@@ -983,6 +1044,69 @@ mod tests {
         state.expanded.remove(&root.join("src"));
         state.reconcile(index);
         assert_eq!(state.selected, Some(root.join("src")));
+    }
+
+    #[test]
+    fn lazy_directory_arrivals_preserve_active_selection_and_detect_deletion() {
+        let (fixture, _app) = Fixture::new(0);
+        let active = fixture.0.join("src/nested/deep.rs");
+        let mut tree = workspace::ExplorerTree::new(fixture.0.clone());
+        let mut state = ProjectNavigation::default();
+        state.initialize(&tree.snapshot(), Some(&active));
+        assert_eq!(state.selected, Some(active.clone()));
+        assert!(visible_rows(&tree.snapshot(), &state).is_empty());
+        for directory in [
+            fixture.0.clone(),
+            fixture.0.join("src"),
+            fixture.0.join("src/nested"),
+        ] {
+            let generation = tree.begin(&directory).unwrap();
+            tree.complete(
+                &directory,
+                generation,
+                workspace::read_explorer_directory(&fixture.0, &directory),
+            );
+            state.reconcile(&tree.snapshot());
+            assert_eq!(state.selected, Some(active.clone()));
+        }
+        let snapshot = tree.snapshot();
+        let rows = visible_rows(&snapshot, &state);
+        let deep = rows.iter().find(|row| row.entry.path == active).unwrap();
+        assert_eq!(deep.depth, 2);
+        assert_eq!(deep.ancestor_continuations, vec![true, true]);
+        assert!(deep.last_sibling);
+        assert!(state.scroll_to_selection);
+        state.scroll_to_selection = false;
+        fs::remove_file(&active).unwrap();
+        tree.invalidate();
+        let directory = fixture.0.join("src/nested");
+        let generation = tree.begin(&directory).unwrap();
+        tree.complete(
+            &directory,
+            generation,
+            workspace::read_explorer_directory(&fixture.0, &directory),
+        );
+        state.reconcile(&tree.snapshot());
+        assert_eq!(state.selected, Some(directory));
+        assert!(state.scroll_to_selection);
+    }
+
+    #[test]
+    fn collapsing_an_unloaded_active_ancestor_selects_its_visible_parent() {
+        let (fixture, _app) = Fixture::new(0);
+        let active = fixture.0.join("src/nested/deep.rs");
+        let mut tree = workspace::ExplorerTree::new(fixture.0.clone());
+        let mut state = ProjectNavigation::default();
+        state.initialize(&tree.snapshot(), Some(&active));
+        let generation = tree.begin(&fixture.0).unwrap();
+        tree.complete(
+            &fixture.0,
+            generation,
+            workspace::read_explorer_directory(&fixture.0, &fixture.0),
+        );
+        state.expanded.remove(&fixture.0.join("src"));
+        state.reconcile(&tree.snapshot());
+        assert_eq!(state.selected, Some(fixture.0.join("src")));
     }
 
     #[test]

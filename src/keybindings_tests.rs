@@ -30,6 +30,153 @@ fn defaults_are_valid_unique_and_use_native_safe_clipboard_keys() {
 }
 
 #[test]
+fn shortcut_parser_accepts_case_insensitive_names_and_literal_plus() {
+    for (value, expected) in [
+        (" ctrl + shift + f8 ", "Ctrl+Shift+F8"),
+        ("alt+arrowdown", "Alt+Down"),
+        ("CTRL+BACKSLASH", "Ctrl+Backslash"),
+        ("Ctrl++", "Ctrl+Plus"),
+        ("Ctrl+Shift++", "Ctrl+Shift+Plus"),
+    ] {
+        assert_eq!(Stroke::parse(value).unwrap().label(), expected, "{value}");
+    }
+    for value in ["Ctrl+", "Ctrl+++", "Ctrl++F8", "Ctrl+Shift+"] {
+        assert!(Stroke::parse(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn every_supported_function_key_can_be_recorded_without_modifiers() {
+    for &key in Key::ALL {
+        if key.name().strip_prefix('F').is_some_and(|number| {
+            number
+                .parse::<usize>()
+                .is_ok_and(|number| (1..=35).contains(&number))
+        }) {
+            Stroke {
+                key,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            }
+            .safe(Action::Save)
+            .unwrap();
+        }
+    }
+    let bindings = Bindings::from([(Action::Save.id().into(), Some("f35".into()))]);
+    assert!(validate(&bindings).is_ok());
+    assert!(matches(
+        &bindings,
+        Action::Save,
+        &event(Key::F35, egui::Modifiers::NONE)
+    ));
+}
+
+#[test]
+fn altgr_emitted_text_wins_without_disabling_actual_ctrl_alt_shortcuts() {
+    let ctx = egui::Context::default();
+    let chord = egui::Modifiers::CTRL.plus(egui::Modifiers::ALT);
+    let real_shortcut = event(Key::E, chord);
+    let normal_altgr = event(Key::E, egui::Modifiers::NONE);
+    let right_alt = event(Key::AltRight, chord);
+    let mut release_right_alt = event(Key::AltRight, egui::Modifiers::NONE);
+    if let egui::Event::Key { pressed, .. } = &mut release_right_alt {
+        *pressed = false;
+    }
+    ctx.input_mut(|input| {
+        input.events = vec![
+            right_alt.clone(),
+            real_shortcut.clone(),
+            egui::Event::Text("€".into()),
+            event(Key::M, chord),
+            egui::Event::Text("µ".into()),
+            release_right_alt.clone(),
+            normal_altgr.clone(),
+            egui::Event::Text("€".into()),
+            real_shortcut.clone(),
+            egui::Event::Text("later typing".into()),
+            event(Key::U, chord),
+            egui::Event::Text("Y".into()),
+            real_shortcut.clone(),
+            egui::Event::Text("é".into()),
+        ];
+    });
+    preserve_altgr_text(&ctx);
+    assert_eq!(
+        ctx.input(|input| input.events.clone()),
+        vec![
+            right_alt,
+            egui::Event::Text("€".into()),
+            egui::Event::Text("µ".into()),
+            release_right_alt,
+            normal_altgr,
+            egui::Event::Text("€".into()),
+            real_shortcut.clone(),
+            egui::Event::Text("later typing".into()),
+            event(Key::U, chord),
+            egui::Event::Text("Y".into()),
+            real_shortcut,
+            egui::Event::Text("é".into()),
+        ]
+    );
+}
+
+#[test]
+fn recording_altgr_text_does_not_create_a_shortcut_or_stop_recording() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    app.keybinding_ui.capture = Some(Action::Save);
+    let chord = egui::Modifiers::CTRL.plus(egui::Modifiers::ALT);
+    app.ctx.input_mut(|input| {
+        input.events = vec![
+            event(Key::AltRight, chord),
+            event(Key::E, chord),
+            egui::Event::Text("€".into()),
+        ];
+    });
+    app.capture_shortcut_input();
+    assert_eq!(app.keybinding_ui.capture, Some(Action::Save));
+    assert!(app.settings.keybindings.is_empty());
+    assert!(app.ctx.input(|input| input.events.is_empty()));
+}
+
+#[test]
+fn invalid_recorded_chord_can_be_corrected_by_pressing_another_without_reclicking() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    app.keybinding_ui.capture = Some(Action::Save);
+    app.ctx
+        .input_mut(|input| input.events.push(event(Key::A, egui::Modifiers::NONE)));
+    app.capture_shortcut_input();
+    assert_eq!(app.keybinding_ui.capture, Some(Action::Save));
+    assert!(app.keybinding_ui.feedback.as_ref().unwrap().1);
+    assert!(app.settings.keybindings.is_empty());
+    app.ctx
+        .input_mut(|input| input.events.push(event(Key::F35, egui::Modifiers::NONE)));
+    app.capture_shortcut_input();
+    assert!(app.keybinding_ui.capture.is_none());
+    assert_eq!(app.shortcut_label(Action::Save), "F35");
+    assert!(!app.keybinding_ui.feedback.as_ref().unwrap().1);
+}
+
+#[test]
+fn deferred_widget_shortcuts_are_cancelled_when_a_vim_command_prompt_opens() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    app.ctx
+        .run_ui(Default::default(), |_| {})
+        .textures_delta
+        .clear();
+    app.defer_widget_shortcut_input(vec![event(Key::Z, egui::Modifiers::ALT)]);
+    app.finish_shortcut_input();
+    app.vim_command = Some("".into());
+    app.ctx
+        .run_ui(Default::default(), |_| {})
+        .textures_delta
+        .clear();
+    app.resume_shortcut_input();
+    assert!(app.ctx.input(|input| input.events.is_empty()));
+    assert!(app.keybinding_ui.continuation.is_none());
+}
+
+#[test]
 fn overrides_replace_all_aliases_disable_and_restore_defaults() {
     let mut bindings = Bindings::new();
     let old = event(Key::Y, egui::Modifiers::CTRL);

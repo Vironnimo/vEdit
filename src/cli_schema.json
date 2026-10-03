@@ -189,7 +189,7 @@
         "line_numbers": "absolute",
         "highlight_current_line": true,
         "autosave_delay_ms": 850,
-        "show_ignored_files": false,
+        "show_ignored_files": true,
         "editor_font": "jetbrains_mono",
         "tab_width": 4,
         "detect_indentation": true,
@@ -500,7 +500,7 @@
     "highlight_current_line": "true by default; subtle highlight behind the active source cursor row",
     "autosave_delay_ms": "300..5000; default 850 milliseconds after the last edit. Only applies when autosave is true; recovery copies keep their independent 850 ms delay.",
     "keybindings": "Complete override object from stable action IDs to shortcut strings or null (disabled); missing IDs use defaults, {} resets all. Example {\"save\":\"F8\",\"toggle_left_sidebar\":null}. Settings responses include keybinding_actions with IDs, effective shortcuts and defaults. Ctrl/Alt/Shift plus egui key name; duplicate, unknown, typing-only and native clipboard/editing conflicts reject the entire patch before any preference changes. User overrides replace all default aliases. Vim motions and native text/clipboard navigation remain contextual.",
-    "show_ignored_files": "false by default. Include gitignored and generated files in Explorer and its file picker; .git and other VCS metadata stay hidden. Changing this reindexes open projects in the background. Project-search exclusions are separate.",
+    "show_ignored_files": "Deprecated compatibility field; Explorer always lists ignored and generated files. The supplied value has no effect. Explorer lazily lists complete folders independently of the bounded Quick Open index. VCS metadata stays hidden; project-search exclusions are separate.",
     "editor_font": {
       "enum": ["jetbrains_mono", "consolas", "cascadia_mono"],
       "default": "jetbrains_mono",

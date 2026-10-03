@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(settings.line_height, 1.35);
         assert_eq!(settings.line_numbers, crate::cli::LineNumbers::Absolute);
         assert!(settings.highlight_current_line);
-        assert!(!settings.show_ignored_files);
+        assert!(settings.show_ignored_files);
         assert_eq!(settings.autosave_delay_ms, 850);
         settings.ui_scale = f32::NAN;
         settings.font_size = 100.0;

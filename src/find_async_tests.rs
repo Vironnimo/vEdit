@@ -305,3 +305,71 @@ fn toolbar_completion_keeps_query_widget_focused_for_following_text() {
     assert!(screen.state().find_text.contains('x'));
     assert_eq!(screen.state().tab().unwrap().text, original);
 }
+
+#[test]
+fn repeated_toolbar_steps_before_completion_keep_their_count_and_match_identity() {
+    let mut app = fixture();
+    app.find_visible = true;
+    app.find_text = "foo".into();
+    app.find_next(false);
+    app.find_next(false);
+    assert_eq!(app.find.pending_navigation.as_ref().unwrap().count, 2);
+    finish(&app);
+    app.validate_vim_search();
+    assert_eq!(app.tab().unwrap().selection, 17..20);
+    assert_eq!(app.find_match, Some(17));
+    assert!(!app.tab().unwrap().focus);
+    app.find_next(false);
+    assert_eq!(app.tab().unwrap().selection, 6..9);
+}
+
+#[test]
+fn closing_toolbar_cancels_pending_navigation_before_a_ready_result_jumps() {
+    let mut app = fixture();
+    app.find_visible = true;
+    app.find_text = "foo".into();
+    app.find_next(false);
+    finish(&app);
+    app.find_visible = false;
+    app.validate_vim_search();
+    assert!(app.find.pending_navigation.is_none());
+    assert_eq!(app.tab().unwrap().vim.cursor, 0);
+    assert_eq!(app.tab().unwrap().selection, 0..0);
+    assert!(!app.find_search_running());
+}
+
+#[test]
+fn changing_toolbar_query_does_not_accumulate_old_pending_steps() {
+    let mut app = fixture();
+    app.find_visible = true;
+    app.find_text = "foo".into();
+    app.find_next(false);
+    app.find_next(false);
+    app.find_text = "middle".into();
+    app.find_next(false);
+    assert_eq!(app.find.pending_navigation.as_ref().unwrap().count, 1);
+    let tab = app.tab().unwrap();
+    let matches = crate::search::search(&tab.text, "middle", true, false, false).unwrap();
+    app.find.worker.as_ref().unwrap().finish(tab.id, matches);
+    app.validate_vim_search();
+    assert_eq!(app.tab().unwrap().selection, 10..16);
+    assert_eq!(app.find_match, Some(10));
+}
+
+#[test]
+fn next_press_as_worker_becomes_ready_preserves_steps_and_clears_old_origin() {
+    let mut app = fixture();
+    app.find_visible = true;
+    app.find_text = "foo".into();
+    app.find_next(false);
+    finish(&app);
+    // Shortcuts can run before the next deferred-results poll.
+    app.find_next(false);
+    assert_eq!(app.tab().unwrap().selection, 17..20);
+    assert!(app.find.pending_navigation.is_none());
+    app.validate_vim_search();
+    assert_eq!(app.find_match, Some(17));
+    assert!(app.find.current_match.is_some());
+    app.find_next(false);
+    assert_eq!(app.tab().unwrap().selection, 6..9);
+}

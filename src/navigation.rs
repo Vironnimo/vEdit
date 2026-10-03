@@ -493,6 +493,7 @@ impl MorrowApp {
         let mut clear = false;
         let mut add = false;
         let mut close = false;
+        let mut reset_results = picker.selected.is_none();
         let modal = egui::Modal::new(egui::Id::new("bookmark_picker")).show(&ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 70.0).clamp(280.0, 620.0));
             ui.horizontal(|ui| {
@@ -515,6 +516,7 @@ impl MorrowApp {
                 );
                 if response.changed() {
                     picker.selected = None;
+                    reset_results = true;
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -528,6 +530,7 @@ impl MorrowApp {
                         picker.project_only = true;
                         picker.selected = None;
                         picker.focus = true;
+                        reset_results = true;
                     }
                     if ui
                         .add(egui::Button::new("All projects").selected(!picker.project_only))
@@ -536,6 +539,7 @@ impl MorrowApp {
                         picker.project_only = false;
                         picker.selected = None;
                         picker.focus = true;
+                        reset_results = true;
                     }
                 });
             });
@@ -590,6 +594,12 @@ impl MorrowApp {
                     let mut scroll = egui::ScrollArea::vertical()
                         .id_salt("bookmark_results")
                         .max_height(height);
+                    // Filtering and scope changes select the first result.
+                    // Reveal it even when the previous list was scrolled far
+                    // down and the filtered list still has many rows.
+                    if reset_results {
+                        scroll = scroll.vertical_scroll_offset(0.0);
+                    }
                     if (up || down)
                         && let Some(index) = matches
                             .iter()
@@ -1351,5 +1361,55 @@ mod tests {
             11
         );
         assert!(bookmark_matches(&app.bookmarks.items, "deployment", Some(root)).is_empty());
+    }
+
+    #[test]
+    fn filtering_a_scrolled_bookmark_list_reveals_the_new_first_selection() {
+        let mut app = fixture();
+        let path = app.tab().unwrap().path.clone().unwrap();
+        app.bookmarks = crate::bookmarks::BookmarkStore::from_items(
+            (0..80)
+                .map(|index| Bookmark {
+                    id: index + 1,
+                    path: path.clone(),
+                    line: index as usize + 1,
+                    column: 1,
+                    label: format!("Mark {index:03}"),
+                    context_line: String::new(),
+                })
+                .collect(),
+        );
+        let mut screen = harness(app);
+        screen.state_mut().open_bookmarks();
+        screen.run_steps(2);
+        screen
+            .state_mut()
+            .navigation
+            .picker
+            .as_mut()
+            .unwrap()
+            .selected = Some(70);
+        screen.key_press(Key::ArrowDown);
+        screen.run_steps(2);
+        assert_eq!(
+            screen.state().navigation.picker.as_ref().unwrap().selected,
+            Some(71)
+        );
+        assert!(screen.query_by_label_contains("Mark 000:").is_none());
+        screen
+            .ctx
+            .memory_mut(|memory| memory.request_focus(egui::Id::new("bookmark_query")));
+        screen.event(egui::Event::Text("mark".into()));
+        screen.run_steps(3);
+        assert_eq!(
+            screen.state().navigation.picker.as_ref().unwrap().query,
+            "mark"
+        );
+        assert_eq!(
+            screen.state().navigation.picker.as_ref().unwrap().selected,
+            Some(1)
+        );
+        assert!(screen.query_by_label_contains("Mark 000:").is_some());
+        assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
     }
 }

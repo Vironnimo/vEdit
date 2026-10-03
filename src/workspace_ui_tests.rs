@@ -167,6 +167,48 @@ fn project_switcher_is_on_the_left_before_the_file_menu() {
 }
 
 #[test]
+fn opening_project_picker_reveals_the_current_project_beyond_the_first_page() {
+    let mut app = fixture(25);
+    app.switch_project(22);
+    let mut screen = harness(app);
+    screen.get_by_label("Switch project").click();
+    screen.run_steps(3);
+    assert!(screen.state().workspace_picker_open());
+    assert!(
+        screen
+            .query_by_label_contains("morrow-workspace-ui-22 ·")
+            .is_some(),
+        "the selected project must be rendered in the visible virtualized rows"
+    );
+    let next = screen
+        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .rect();
+    assert!(
+        next.bottom() <= screen.get_by_label("Add project…").rect().top(),
+        "the next project must be completely visible before pointer switching: {next:?}"
+    );
+    screen.hover_at(next.center());
+    screen.run_steps(1);
+    let after_hover = screen
+        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .rect();
+    assert_eq!(
+        next, after_hover,
+        "opening near the end must not move project hit targets after hover"
+    );
+    screen
+        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .click();
+    screen.run_steps(3);
+    assert_eq!(
+        screen.state().active_project,
+        23,
+        "pointer switch must choose the clicked project; popup open: {}",
+        screen.state().workspace_picker_open()
+    );
+}
+
+#[test]
 fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     let (app, expected_groups) = split_fixture();
     let mut screen = harness(app);
@@ -470,6 +512,39 @@ fn typed_project_filter_does_not_reach_the_editor() {
 }
 
 #[test]
+fn project_filter_accepts_pasted_paths_with_forward_or_backward_slashes() {
+    for separator in ['/', '\\'] {
+        let mut screen = harness(fixture(3));
+        let path = crate::paths::display(&screen.state().projects[2].root)
+            .replace(['/', '\\'], &separator.to_string());
+        project_shortcut(&mut screen, Key::P);
+        screen.event(egui::Event::Text(path));
+        screen.run_steps(3);
+        assert!(
+            screen
+                .query_by_label_contains("morrow-workspace-ui-02 ·")
+                .is_some(),
+            "separator {separator:?}"
+        );
+        assert!(
+            screen
+                .query_by_label_contains("morrow-workspace-ui-01 ·")
+                .is_none()
+        );
+        screen.key_press(Key::Enter);
+        screen.run_steps(3);
+        assert_eq!(screen.state().active_project, 2);
+        assert!(
+            screen
+                .state()
+                .projects
+                .iter()
+                .all(|project| { project.tabs[0].text == DOCUMENT && !project.tabs[0].dirty })
+        );
+    }
+}
+
+#[test]
 fn many_projects_keep_a_bounded_picker_and_keyboard_reveal_the_last_row() {
     let mut screen = harness(fixture(40));
     project_shortcut(&mut screen, Key::P);
@@ -628,7 +703,27 @@ fn explorer_root_heading_stays_open_and_children_have_one_level_of_indent() {
     let nested = screen.get_by_label("main.rs").rect();
     assert!((heading.left() - readme.left()).abs() < 1.0);
     assert!((folder.left() - readme.left()).abs() < 1.0);
-    assert!((nested.left() - folder.left() - 14.0).abs() < 2.0);
+    assert!((nested.left() - folder.left()).abs() < 1.0);
+    assert!((nested.right() - folder.right()).abs() < 1.0);
+    // Indentation belongs to the painted contents. Full-width interaction and
+    // selection bounds remain aligned across every depth.
+    let painted_left = |label: &str, row: egui::Rect| {
+        screen
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.text() == label && row.contains(text.pos) =>
+                {
+                    Some(text.pos.x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("painted Explorer label {label}"))
+    };
+    assert!((painted_left("README.md", readme) - painted_left("src", folder)).abs() < 1.0);
+    assert!((painted_left("main.rs", nested) - painted_left("src", folder) - 16.0).abs() < 1.0);
     for _ in 0..2 {
         screen.get_by_label(&root_title).click();
         screen.run_steps(3);

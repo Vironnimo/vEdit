@@ -1,5 +1,6 @@
 use super::*;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 
 const TEXT_DOCUMENT: &str = "intro 🦀\nfoo first\nbar FOO\nfoo second\nfood is a word\nfoo last\n";
 
@@ -541,6 +542,154 @@ fn regex_unicode_case_override_and_all_hit_highlights_use_character_ranges() {
         "All visible matches have a background, with one current hit"
     );
     assert_unedited(&screen, document);
+}
+
+#[test]
+fn search_history_recall_keeps_the_draft_caret_and_cancelled_queries_out() {
+    let mut screen = harness(fixture(TEXT_DOCUMENT));
+    input(&mut screen, "/foo");
+    key(&mut screen, Key::Enter);
+    input(&mut screen, "?bar");
+    key(&mut screen, Key::Enter);
+    input(&mut screen, "/unused");
+    key(&mut screen, Key::Escape);
+    input(&mut screen, "/🦀draft");
+    key(&mut screen, Key::ArrowLeft);
+    let draft_cursor = screen.state().find.prompt.as_ref().unwrap().query_cursor;
+    key(&mut screen, Key::ArrowUp);
+    assert_eq!(screen.state().find.prompt.as_ref().unwrap().query, "bar");
+    key(&mut screen, Key::ArrowUp);
+    assert_eq!(screen.state().find.prompt.as_ref().unwrap().query, "foo");
+    key(&mut screen, Key::ArrowDown);
+    key(&mut screen, Key::ArrowDown);
+    let prompt = screen.state().find.prompt.as_ref().unwrap();
+    assert_eq!(prompt.query, "🦀draft");
+    assert_eq!(prompt.query_cursor, draft_cursor);
+    key(&mut screen, Key::ArrowUp);
+    key(&mut screen, Key::Enter);
+    assert_eq!(screen.state().find.history, ["foo", "bar"]);
+    assert_unedited(&screen, TEXT_DOCUMENT);
+}
+
+#[test]
+fn recalled_search_can_be_edited_without_destroying_previous_history() {
+    let mut state = FindState::default();
+    let mut tab = EditorTab::new(None, "history".into());
+    tab.text = "foo bar".into();
+    for query in ["foo", "bar", "foo"] {
+        state.start(&mut tab, 1, false);
+        state.text(&mut tab, query);
+        state.key(&mut tab, Key::Enter, egui::Modifiers::NONE);
+    }
+    assert_eq!(state.history, ["bar", "foo"]);
+    state.start(&mut tab, 1, false);
+    state.key(&mut tab, Key::P, egui::Modifiers::CTRL);
+    state.text(&mut tab, "tail");
+    state.key(&mut tab, Key::P, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "foo");
+    state.key(&mut tab, Key::N, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "footail");
+    assert_eq!(state.history, ["bar", "foo"]);
+    assert!(!tab.vim.can_undo());
+}
+
+#[test]
+fn search_history_is_bounded_and_empty_confirmation_keeps_it_unchanged() {
+    let mut state = FindState::default();
+    let mut tab = EditorTab::new(None, "history".into());
+    for number in 0..MAX_SEARCH_HISTORY + 4 {
+        state.start(&mut tab, 1, false);
+        state.text(&mut tab, &number.to_string());
+        state.key(&mut tab, Key::Enter, egui::Modifiers::NONE);
+    }
+    assert_eq!(state.history.len(), MAX_SEARCH_HISTORY);
+    assert_eq!(state.history.first().unwrap(), "4");
+    let history = state.history.clone();
+    state.start(&mut tab, 1, true);
+    state.key(&mut tab, Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(state.history, history);
+}
+
+#[test]
+fn search_word_editing_and_ctrl_u_preserve_unicode_suffix_at_the_caret() {
+    let mut state = FindState::default();
+    let mut tab = EditorTab::new(None, "editing".into());
+    state.start(&mut tab, 1, false);
+    state.text(&mut tab, "Äpfel βeta.* 🦀tail");
+    state.key(&mut tab, Key::ArrowLeft, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query_cursor, 14);
+    state.key(&mut tab, Key::ArrowLeft, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query_cursor, 13);
+    state.key(&mut tab, Key::U, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "🦀tail");
+    assert_eq!(state.prompt.as_ref().unwrap().query_cursor, 0);
+    state.key(&mut tab, Key::Delete, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "tail");
+    state.key(&mut tab, Key::E, egui::Modifiers::CTRL);
+    state.key(&mut tab, Key::W, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "");
+    state.text(&mut tab, "Äpfel βeta.*");
+    state.key(&mut tab, Key::B, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query_cursor, 0);
+    state.key(&mut tab, Key::E, egui::Modifiers::CTRL);
+    state.key(&mut tab, Key::Backspace, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "Äpfel βeta");
+    state.key(&mut tab, Key::W, egui::Modifiers::CTRL);
+    assert_eq!(state.prompt.as_ref().unwrap().query, "Äpfel ");
+    assert!(!tab.vim.can_undo());
+}
+
+#[test]
+fn toolbar_shift_enter_moves_backwards_and_preserves_query_focus() {
+    let mut app = fixture(TEXT_DOCUMENT);
+    app.find_visible = true;
+    app.find_focus = true;
+    app.find_text = "foo".into();
+    app.find_case = true;
+    app.find_next(false);
+    app.find_next(false);
+    let mut screen = harness(app);
+    let focused = screen.ctx.memory(|memory| memory.focused());
+    assert!(focused.is_some());
+    screen
+        .input_mut()
+        .events
+        .extend([true, false].map(|pressed| egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        }));
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().vim.cursor,
+        matches(TEXT_DOCUMENT, "foo")[0].start
+    );
+    assert_eq!(screen.ctx.memory(|memory| memory.focused()), focused);
+    assert_unedited(&screen, TEXT_DOCUMENT);
+}
+
+#[test]
+fn replacing_adjacent_unicode_matches_steps_forward_and_undo_restores_one_change() {
+    let document = "🦀äää end";
+    let mut app = fixture(document);
+    app.find_visible = true;
+    app.replace_visible = true;
+    app.find_focus = true;
+    app.find_text = "ä".into();
+    app.replace_text.clear();
+    app.find_next(false);
+    let mut screen = harness(app);
+    screen.get_by_label("Replace").click();
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().text, "🦀ää end");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 1);
+    assert_eq!(screen.state().find_match, Some(1));
+    screen.get_by_label("Close find").click();
+    screen.run_steps(2);
+    input(&mut screen, "u");
+    assert_eq!(screen.state().tab().unwrap().text, document);
 }
 
 #[test]

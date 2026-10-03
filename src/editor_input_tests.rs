@@ -108,12 +108,12 @@ fn native_text_enter_and_tab_use_the_preceding_text_and_native_caret() {
             egui::Event::Text("🦀".into()),
         ],
     );
-    assert_eq!(text(&screen), "a\nb    🦀");
-    assert_eq!(screen.state().tab().unwrap().selection, 8..8);
+    assert_eq!(text(&screen), "a\nb   🦀");
+    assert_eq!(screen.state().tab().unwrap().selection, 7..7);
     events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
     assert_eq!(text(&screen), "a\nb");
     events(&mut screen, [key(Key::Y, egui::Modifiers::CTRL)]);
-    assert_eq!(text(&screen), "a\nb    🦀");
+    assert_eq!(text(&screen), "a\nb   🦀");
 }
 
 #[test]
@@ -132,6 +132,19 @@ fn a_leading_native_command_applies_immediately() {
     events(&mut screen, [key(Key::Y, egui::Modifiers::CTRL)]);
     assert_eq!(text(&screen), "\ntail");
     assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+}
+
+#[test]
+fn modifier_press_does_not_delay_a_command_without_native_text_before_it() {
+    let mut screen = harness("tail", false);
+    events(&mut screen, [egui::Event::Text("X".into())]);
+    screen.input_mut().events.extend([
+        key(Key::ControlLeft, egui::Modifiers::CTRL),
+        key(Key::Z, egui::Modifiers::CTRL),
+    ]);
+    screen.run_steps(1);
+    assert_eq!(text(&screen), "tail");
+    assert!(!screen.state().editor_input_pending());
 }
 
 #[test]
@@ -471,5 +484,132 @@ fn vim_alt_edit_does_not_execute_its_generated_character_as_a_motion_or_search()
             VimMode::Insert,
             "binding={binding}"
         );
+    }
+}
+
+#[test]
+fn move_line_shortcuts_follow_native_prefix_and_keep_the_moved_caret_undoable() {
+    let mut screen = harness("one\ntwo🦀\nthree", false);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::ArrowDown, egui::Modifiers::ALT),
+        ],
+    );
+    assert_eq!(text(&screen), "two🦀\nXone\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 6..6);
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), "Xone\ntwo🦀\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+    events(&mut screen, [key(Key::Y, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), "two🦀\nXone\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 6..6);
+    events(&mut screen, [key(Key::ArrowUp, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), "Xone\ntwo🦀\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+}
+
+#[test]
+fn move_line_in_vim_normal_mode_moves_cursor_with_text_and_undoes_once() {
+    let original = "one\ntwo🦀\nthree";
+    let mut screen = harness(original, true);
+    events(&mut screen, [key(Key::ArrowDown, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), "two🦀\none\nthree");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 5);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), original);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 0);
+    assert!(!screen.state().tab().unwrap().dirty);
+    let revision = screen.state().tab().unwrap().revision;
+    events(&mut screen, [key(Key::ArrowUp, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), original);
+    assert_eq!(screen.state().tab().unwrap().revision, revision);
+    assert!(!screen.state().tab().unwrap().vim.can_undo());
+}
+
+#[test]
+fn move_line_at_native_buffer_edges_does_not_dirty_or_create_history() {
+    let original = "one\ntwo";
+    let mut screen = harness(original, false);
+    let revision = screen.state().tab().unwrap().revision;
+    events(&mut screen, [key(Key::ArrowUp, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), original);
+    assert_eq!(screen.state().tab().unwrap().revision, revision);
+    assert!(!screen.state().tab().unwrap().dirty);
+    let id = screen.state().tab().unwrap().id;
+    assert_eq!(screen.state().context_native_history(id), (false, false));
+}
+
+#[test]
+fn move_visual_lines_keeps_the_area_selected_for_repeated_moves_and_undo() {
+    let original = "one\ntwo🦀\nthree";
+    let mut screen = harness(original, true);
+    events(&mut screen, [egui::Event::Text("Vj".into())]);
+    events(&mut screen, [key(Key::ArrowDown, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), "three\none\ntwo🦀");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualLine);
+    assert_eq!(screen.state().tab().unwrap().selection, 6..14);
+    events(&mut screen, [key(Key::ArrowUp, egui::Modifiers::ALT)]);
+    assert_eq!(text(&screen), original);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualLine);
+    assert_eq!(screen.state().tab().unwrap().selection, 0..9);
+    events(&mut screen, [key(Key::Escape, egui::Modifiers::NONE)]);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), "three\none\ntwo🦀");
+}
+
+#[test]
+fn duplicate_line_in_vim_follows_the_duplicate_and_can_be_edited_then_undone() {
+    let original = "one\ntwo🦀";
+    let mut screen = harness(original, true);
+    events(
+        &mut screen,
+        [key(
+            Key::ArrowDown,
+            egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
+        )],
+    );
+    assert_eq!(text(&screen), "one\none\ntwo🦀");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 4);
+    events(&mut screen, [egui::Event::Text("x".into())]);
+    assert_eq!(text(&screen), "one\nne\ntwo🦀");
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), "one\none\ntwo🦀");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 4);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), original);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 0);
+}
+
+#[test]
+fn altgr_characters_do_not_trigger_layout_commands_in_native_or_vim_insert() {
+    for vim in [false, true] {
+        let mut screen = harness("tail", vim);
+        if vim {
+            events(&mut screen, [egui::Event::Text("i".into())]);
+        }
+        let sidebar = screen.state().sidebar_visible;
+        let mut release_right_alt = key(Key::AltRight, egui::Modifiers::NONE);
+        if let egui::Event::Key { pressed, .. } = &mut release_right_alt {
+            *pressed = false;
+        }
+        events(
+            &mut screen,
+            [
+                key(
+                    Key::AltRight,
+                    egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+                ),
+                key(Key::E, egui::Modifiers::CTRL.plus(egui::Modifiers::ALT)),
+                egui::Event::Text("€".into()),
+                release_right_alt,
+                key(Key::M, egui::Modifiers::NONE),
+                egui::Event::Text("µ".into()),
+            ],
+        );
+        assert_eq!(text(&screen), "€µtail", "vim={vim}");
+        assert_eq!(screen.state().sidebar_visible, sidebar, "vim={vim}");
     }
 }

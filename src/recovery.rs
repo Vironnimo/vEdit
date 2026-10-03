@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -62,16 +62,13 @@ pub fn encode_document(
 /// provable baseline and must never authorize replacement of a named file.
 pub fn read_document(path: &Path, max_bytes: u64) -> Result<RecoveredDocument, String> {
     let maximum = max_bytes.saturating_add((DOCUMENT_HEADER.len() + MAX_METADATA_BYTES + 1) as u64);
-    let file = fs::File::open(path).map_err(|error| format!("Could not open recovery: {error}"))?;
-    let mut bytes = Vec::new();
-    file.take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
+    let (bytes, fingerprint) = crate::workspace::read_bytes(path, maximum)
         .map_err(|error| format!("Could not read recovery: {error}"))?;
-    if bytes.len() as u64 > maximum {
-        return Err("Recovery document exceeds the supported size".into());
-    }
     let Some(record) = bytes.strip_prefix(DOCUMENT_HEADER) else {
-        let legacy = crate::workspace::read_document(path, max_bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err("Recovery document exceeds the supported size".into());
+        }
+        let legacy = crate::workspace::decode_document(path, bytes, fingerprint)?;
         return Ok(RecoveredDocument {
             text: legacy.text,
             baseline: None,
@@ -465,5 +462,25 @@ mod tests {
         assert_eq!(read_document(&path, text.len() as u64).unwrap().text, text);
         assert!(read_document(&path, text.len() as u64 - 1).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_recovery_cannot_use_the_metadata_size_allowance_for_its_text() {
+        let directory = Directory::new();
+        let path = directory.file("oversized-legacy.txt");
+        let text = "legacy text is larger than the buffer limit";
+        fs::write(&path, text).unwrap();
+        assert!(read_document(&path, text.len() as u64 - 1).is_err());
+        assert_eq!(read_document(&path, text.len() as u64).unwrap().text, text);
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn recovery_requires_a_regular_file() {
+        let directory = Directory::new();
+        let nested = directory.file("not-a-snapshot");
+        fs::create_dir(&nested).unwrap();
+        assert!(read_document(&nested, 1024).is_err());
+        assert!(nested.is_dir());
     }
 }

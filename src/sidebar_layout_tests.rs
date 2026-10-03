@@ -98,7 +98,8 @@ fn showing_an_empty_side_does_not_move_or_restore_any_panel() {
     assert!(app.sidebar_views(Side::Right).is_empty());
     assert_eq!(app.sidebar_side(SidebarView::SourceControl), Side::Left);
     assert!(app.sidebar_view_visible(SidebarView::SourceControl));
-    assert!(app.sidebar_view_visible(SidebarView::Explorer));
+    assert!(!app.sidebar_view_visible(SidebarView::Explorer));
+    assert!(app.sidebar_panel_open(SidebarView::Explorer));
 }
 
 #[test]
@@ -151,6 +152,54 @@ fn hiding_or_replacing_focused_explorer_returns_input_to_editor() {
         app.cycle_focus_region(false);
         assert!(!app.sidebar_view_visible(SidebarView::Explorer));
         assert!(app.tab().unwrap().focus);
+    }
+}
+
+#[test]
+fn hiding_or_moving_an_offscreen_git_row_restores_editor_focus() {
+    let mut app = fixture();
+    let root = app.projects[0].root.clone();
+    app.projects[0].git_root = Some(root.clone());
+    app.projects[0].git_changes = (0..100)
+        .map(|index| git::FileStatus {
+            path: format!("file{index:03}.py"),
+            original_path: None,
+            index: git::FileChange::None,
+            worktree: git::FileChange::Modified,
+        })
+        .collect();
+    app.move_sidebar(SidebarView::SourceControl, Side::Left);
+    let row = egui::Id::new(("git-content", &root, "working:changes:file:file099.py"));
+    let mut screen = harness(app, 1400.0);
+    let row_rect = screen.ctx.read_response(row).unwrap().rect;
+    assert!(
+        !screen.state().sidebar_layout.view_rects[SidebarView::SourceControl.index()]
+            .unwrap()
+            .contains(row_rect.center())
+    );
+    for moving in [false, true] {
+        screen.state_mut().show_sidebar(SidebarView::SourceControl);
+        screen.run_steps(2);
+        screen.ctx.memory_mut(|memory| memory.request_focus(row));
+        screen.state_mut().tab_mut().unwrap().focus = false;
+        assert!(
+            screen
+                .state()
+                .sidebar_view_has_focus(SidebarView::SourceControl)
+        );
+        if moving {
+            screen
+                .state_mut()
+                .move_sidebar(SidebarView::SourceControl, Side::Right);
+        } else {
+            screen
+                .state_mut()
+                .set_sidebar_view_visible(SidebarView::SourceControl, false);
+        }
+        assert!(screen.state().tab().unwrap().focus);
+        assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
+        screen.run_steps(2);
+        assert!(!screen.state().git_content_has_focus());
     }
 }
 
@@ -257,20 +306,26 @@ fn region_cycle_reaches_both_visible_sidebars_without_unhiding_them() {
 }
 
 #[test]
-fn search_added_to_sidebar_keeps_other_panels_and_query_focus() {
+fn switching_to_search_replaces_git_content_and_keeps_its_tab() {
     let mut app = fixture();
     app.explorer_git_layout();
+    app.move_sidebar(SidebarView::Search, Side::Right);
+    app.show_sidebar(SidebarView::SourceControl);
     let mut screen = harness(app, 1200.0);
-    screen.get_by_label("Add panel to right sidebar").click();
-    screen.run_steps(2);
-    screen.get_by_label("Search").click();
+    screen.get_by_label("Search panel tab").click();
     screen.run_steps(3);
     assert_eq!(screen.state().sidebar_layout.right, SidebarView::Search);
     assert!(
-        screen
+        !screen
             .state()
             .sidebar_view_visible(SidebarView::SourceControl)
     );
+    assert!(
+        screen
+            .state()
+            .sidebar_panel_open(SidebarView::SourceControl)
+    );
+    assert!(screen.state().sidebar_view_visible(SidebarView::Search));
     assert_eq!(
         screen.ctx.memory(|memory| memory.focused()),
         Some(egui::Id::new("project_search_query"))
@@ -355,7 +410,7 @@ fn toggle_reveals_a_temporarily_collapsed_sidebar_in_one_action() {
 }
 
 #[test]
-fn moving_panels_never_replaces_neighbors_and_search_can_be_alone_on_right() {
+fn moving_panels_preserves_tabs_and_one_active_panel_per_side() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
     app.move_sidebar(SidebarView::Search, Side::Right);
@@ -364,16 +419,13 @@ fn moving_panels_never_replaces_neighbors_and_search_can_be_alone_on_right() {
         vec![SidebarView::Explorer, SidebarView::SourceControl]
     );
     assert_eq!(app.sidebar_views(Side::Right), vec![SidebarView::Search]);
-    for view in [
-        SidebarView::Explorer,
-        SidebarView::SourceControl,
-        SidebarView::Search,
-    ] {
-        assert!(app.sidebar_view_visible(view));
-    }
-    app.move_sidebar(SidebarView::Explorer, Side::Right);
+    assert!(!app.sidebar_view_visible(SidebarView::Explorer));
     assert!(app.sidebar_view_visible(SidebarView::SourceControl));
     assert!(app.sidebar_view_visible(SidebarView::Search));
+    app.move_sidebar(SidebarView::Explorer, Side::Right);
+    assert!(app.sidebar_view_visible(SidebarView::SourceControl));
+    assert!(!app.sidebar_view_visible(SidebarView::Search));
+    assert!(app.sidebar_panel_open(SidebarView::Search));
     assert!(app.sidebar_view_visible(SidebarView::Explorer));
     app.set_sidebar_view_visible(SidebarView::Search, false);
     assert!(app.sidebar_view_visible(SidebarView::Explorer));
@@ -422,7 +474,9 @@ fn all_assignments_and_panel_visibility_combinations_round_trip() {
                     );
                     assert_eq!(
                         restored.sidebar_view_visible(view),
-                        opened & (1 << index) != 0 && if side == Side::Left { left } else { right }
+                        opened & (1 << index) != 0
+                            && restored.sidebar_selected_view(side) == Some(view)
+                            && if side == Side::Left { left } else { right }
                     );
                 }
             }
@@ -461,130 +515,81 @@ fn old_two_panel_sessions_migrate_without_changing_their_layout() {
 }
 
 #[test]
-fn panels_share_one_sidebar_without_overlapping_and_collapse_independently() {
+fn same_side_tabs_switch_content_and_keep_full_sidebar_height() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
     app.move_sidebar(SidebarView::Search, Side::Right);
     let mut screen = harness(app, 1200.0);
-    let explorer = screen.state().sidebar_layout.view_rects[SidebarView::Explorer.index()].unwrap();
+    assert!(screen.state().sidebar_layout.view_rects[SidebarView::Explorer.index()].is_none());
     let git = screen.state().sidebar_layout.view_rects[SidebarView::SourceControl.index()].unwrap();
-    assert!(explorer.bottom() < git.top());
-    assert!(
-        git.bottom()
-            <= screen
-                .state()
-                .sidebar_region_rect(Side::Left)
-                .unwrap()
-                .bottom()
-    );
-    screen.get_by_label("Collapse Explorer panel").click();
+    assert!(git.height() > 500.0);
+    screen.get_by_label("Explorer panel tab").click();
     screen.run_steps(3);
-    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
     assert!(
-        screen
+        !screen
             .state()
             .sidebar_view_visible(SidebarView::SourceControl)
     );
+    assert!(screen.state().sidebar_layout.view_rects[SidebarView::SourceControl.index()].is_none());
+    let explorer = screen.state().sidebar_layout.view_rects[SidebarView::Explorer.index()].unwrap();
+    assert!(explorer.height() > 500.0);
     assert!(screen.state().sidebar_view_visible(SidebarView::Search));
-    let session = screen.state().sidebar_session();
-    assert!(session.collapsed_views.contains(&SidebarView::Explorer));
-    screen.get_by_label("Expand Explorer panel").click();
+    assert!(screen.query_by_label("Collapse Explorer panel").is_none());
+    assert!(screen.query_by_label("LEFT SIDEBAR").is_none());
+    screen.get_by_label("Source control panel tab").click();
     screen.run_steps(3);
-    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
-}
-
-fn sidebar_pointer(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2, pressed: bool) {
-    screen.event(egui::Event::PointerMoved(point));
-    screen.event(egui::Event::PointerButton {
-        pos: point,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: egui::Modifiers::NONE,
-    });
-    screen.run_steps(1);
-}
-
-fn start_panel_drag(screen: &mut Harness<'_, MorrowApp>, view: SidebarView, target: egui::Pos2) {
-    let start = screen.state().sidebar_layout.title_rects[view.index()]
-        .unwrap()
-        .center();
-    sidebar_pointer(screen, start, true);
-    screen.event(egui::Event::PointerMoved(start + Vec2::new(15.0, 0.0)));
-    screen.run_steps(2);
-    screen.event(egui::Event::PointerMoved(target));
-    screen.run_steps(2);
-    assert_eq!(screen.state().sidebar_layout.dragged, Some(view));
-}
-
-#[test]
-fn dragging_a_panel_to_a_hidden_sidebar_and_back_preserves_its_neighbors() {
-    let mut app = fixture();
-    app.move_sidebar(SidebarView::SourceControl, Side::Left);
-    let mut screen = harness(app, 1200.0);
-    let target = egui::pos2(1170.0, 300.0);
-    start_panel_drag(&mut screen, SidebarView::Explorer, target);
-    sidebar_pointer(&mut screen, target, false);
-    screen.run_steps(3);
-    assert_eq!(
-        screen.state().sidebar_views(Side::Left),
-        vec![SidebarView::SourceControl]
-    );
-    assert_eq!(
-        screen.state().sidebar_views(Side::Right),
-        vec![SidebarView::Explorer]
-    );
-    let target = screen
-        .state()
-        .sidebar_region_rect(Side::Left)
-        .unwrap()
-        .center();
-    start_panel_drag(&mut screen, SidebarView::Explorer, target);
-    sidebar_pointer(&mut screen, target, false);
-    screen.run_steps(3);
-    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
     assert!(
         screen
             .state()
             .sidebar_view_visible(SidebarView::SourceControl)
     );
-    assert!(!screen.state().sidebar_layout.right_visible);
-    assert_eq!(screen.state().tab().unwrap().text, "first\nsecond\nthird\n");
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
 }
 
 #[test]
-fn panel_drag_can_reorder_and_cancel_without_changing_buffers_or_assignments() {
+fn old_stacked_sessions_restore_as_tabs_with_one_active_panel() {
+    let old = r#"{"left":"source_control","left_visible":true,"right":"search","right_visible":true,"right_views":["search"],"open_views":["explorer","source_control","search"],"collapsed_views":["source_control"]}"#;
     let mut app = fixture();
-    app.move_sidebar(SidebarView::SourceControl, Side::Left);
+    app.restore_sidebars(Some(serde_json::from_str(old).unwrap()), None);
+    assert_eq!(
+        app.sidebar_views(Side::Left),
+        vec![SidebarView::Explorer, SidebarView::SourceControl]
+    );
+    assert!(app.sidebar_view_visible(SidebarView::SourceControl));
+    assert!(!app.sidebar_view_visible(SidebarView::Explorer));
+    assert!(app.sidebar_view_visible(SidebarView::Search));
+    assert!(app.sidebar_session().collapsed_views.is_empty());
+    app.show_sidebar(SidebarView::Explorer);
+    assert!(app.sidebar_view_visible(SidebarView::Explorer));
+    assert!(!app.sidebar_view_visible(SidebarView::SourceControl));
+}
+
+#[test]
+fn switching_away_from_focused_search_restores_editor_without_losing_query() {
+    let mut app = fixture();
+    app.open_project_search();
+    app.project_query = "retained query".into();
     let mut screen = harness(app, 1200.0);
-    let target = screen.state().sidebar_layout.title_rects[SidebarView::Explorer.index()]
-        .unwrap()
-        .center();
-    start_panel_drag(&mut screen, SidebarView::SourceControl, target);
-    sidebar_pointer(&mut screen, target, false);
-    screen.run_steps(3);
-    assert_eq!(
-        screen.state().sidebar_views(Side::Left),
-        vec![SidebarView::SourceControl, SidebarView::Explorer]
+    assert!(
+        screen.state().project_search_focus
+            || screen
+                .ctx
+                .memory(|memory| memory.has_focus(egui::Id::new("project_search_query")))
     );
-    let target = egui::pos2(1170.0, 300.0);
-    start_panel_drag(&mut screen, SidebarView::SourceControl, target);
-    screen.event(egui::Event::Text("must not be inserted".into()));
-    screen.event(egui::Event::Key {
-        key: Key::Escape,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    screen.run_steps(2);
-    sidebar_pointer(&mut screen, target, false);
+    screen.state_mut().show_sidebar(SidebarView::Explorer);
+    assert!(screen.state().tab().unwrap().focus);
     screen.run_steps(3);
-    assert_eq!(
-        screen.state().sidebar_side(SidebarView::SourceControl),
-        Side::Left
-    );
-    assert!(!screen.state().sidebar_layout.right_visible);
-    assert_eq!(screen.state().tab().unwrap().text, "first\nsecond\nthird\n");
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Search));
+    assert!(!screen.state().project_search_focus);
+    assert_eq!(screen.state().project_query, "retained query");
+    assert!(screen.ctx.memory(|memory| {
+        memory.has_focus(
+            screen
+                .state()
+                .document_widget_id(screen.state().tab().unwrap().id),
+        )
+    }));
 }
 
 #[test]
@@ -610,6 +615,24 @@ fn hiding_search_before_it_renders_cancels_pending_query_focus() {
 }
 
 #[test]
+fn hiding_search_sidebar_before_render_restores_source_focus() {
+    let mut screen = harness(fixture(), 1200.0);
+    screen.state_mut().open_project_search();
+    assert!(screen.state().project_search_focus);
+    screen.state_mut().set_sidebar_visible(Side::Left, false);
+    assert!(!screen.state().project_search_focus);
+    assert!(screen.state().tab().unwrap().focus);
+    screen.run_steps(3);
+    assert!(screen.ctx.memory(|memory| {
+        memory.has_focus(
+            screen
+                .state()
+                .document_widget_id(screen.state().tab().unwrap().id),
+        )
+    }));
+}
+
+#[test]
 fn moving_search_preserves_expanded_filters_and_query() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::Search, Side::Right);
@@ -632,7 +655,8 @@ fn moving_search_preserves_expanded_filters_and_query() {
             .is_some()
     );
     assert_eq!(screen.state().project_query, "keep this query");
-    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(screen.state().sidebar_panel_open(SidebarView::Explorer));
     assert!(screen.state().sidebar_view_visible(SidebarView::Search));
     assert!(!screen.state().sidebar_layout.right_visible);
 }
@@ -641,6 +665,7 @@ fn moving_search_preserves_expanded_filters_and_query() {
 fn panel_menu_moves_one_panel_without_removing_the_others() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
+    app.show_sidebar(SidebarView::Explorer);
     let mut screen = harness(app, 1200.0);
     screen.get_by_label("Explorer panel actions").click();
     screen.run_steps(2);

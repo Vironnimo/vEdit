@@ -75,8 +75,6 @@ impl MorrowApp {
             "Layout" => {
                 editor_preferences::preference_heading(ui, "LAYOUT & EXPLORER");
                 self.sidebar_settings_ui(ui);
-                changed |= ui.checkbox(&mut self.settings.show_ignored_files, "Show ignored and generated files")
-                    .on_hover_text("Include gitignored files and generated folders in the Explorer. Git metadata stays hidden; project-search exclusions are separate.").changed();
             }
             "Vim" => {
                 editor_preferences::preference_heading(ui, "VIM");

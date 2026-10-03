@@ -127,8 +127,8 @@ fn quick_open_distinguishes_indexing_failures_and_real_no_matches() {
         .collect();
     assert_eq!(
         loading.len(),
-        2,
-        "Explorer and Quick Open each show loading feedback"
+        1,
+        "Quick Open reports its own indexing state independently of Explorer"
     );
     assert!(loading.iter().any(|rect| rect.left() >= header.left() - 1.0
         && rect.top() >= header.bottom()

@@ -1,4 +1,4 @@
-//! Independently arranged sidebars with explicit, persisted visibility.
+//! One active panel per sidebar, with persisted assignments and compact tabs.
 use super::*;
 
 const MIN_SIDEBAR: f32 = 200.0;
@@ -56,15 +56,11 @@ pub(super) struct SidebarLayout {
     right_width: f32,
     right_views: Vec<SidebarView>,
     open_views: Vec<SidebarView>,
-    collapsed_views: Vec<SidebarView>,
     view_rects: [Option<egui::Rect>; 4],
-    title_rects: [Option<egui::Rect>; 4],
-    dragged: Option<SidebarView>,
-    drop_rects: [Option<egui::Rect>; 2],
     collapsed: [bool; 2],
     compact_preferred: Side,
     rects: [Option<egui::Rect>; 2],
-    last_widgets: [Option<egui::Id>; 2],
+    last_widgets: [Option<egui::Id>; 4],
     available_width: Option<f32>,
 }
 
@@ -78,15 +74,11 @@ impl Default for SidebarLayout {
             right_width: defaults.right_width,
             right_views: defaults.right_views,
             open_views: vec![SidebarView::Explorer],
-            collapsed_views: Vec::new(),
             view_rects: [None; 4],
-            title_rects: [None; 4],
-            dragged: None,
-            drop_rects: [None; 2],
             collapsed: [false; 2],
             compact_preferred: Side::Left,
             rects: [None; 2],
-            last_widgets: [None; 2],
+            last_widgets: [None; 4],
             available_width: None,
         }
     }
@@ -146,7 +138,7 @@ impl MorrowApp {
             right_width: self.sidebar_layout.right_width,
             right_views: self.sidebar_layout.right_views.clone(),
             open_views: Some(self.sidebar_layout.open_views.clone()),
-            collapsed_views: self.sidebar_layout.collapsed_views.clone(),
+            collapsed_views: Vec::new(),
         }
     }
 
@@ -203,17 +195,15 @@ impl MorrowApp {
             right_width: valid_width(saved.right_width, 310.0),
             right_views: saved.right_views,
             open_views,
-            collapsed_views: saved.collapsed_views,
             view_rects: [None; 4],
-            title_rects: [None; 4],
-            dragged: None,
-            drop_rects: [None; 2],
             collapsed: [false; 2],
             compact_preferred: Side::Left,
             rects: [None; 2],
-            last_widgets: [None; 2],
+            last_widgets: [None; 4],
             available_width: None,
         };
+        self.reconcile_sidebar_selection(Side::Left);
+        self.reconcile_sidebar_selection(Side::Right);
     }
 
     pub(super) fn sidebar_view_visible(&self, view: SidebarView) -> bool {
@@ -221,7 +211,7 @@ impl MorrowApp {
             && self
                 .visible_sidebar_sides()
                 .contains(&self.sidebar_side(view))
-            && !self.sidebar_layout.collapsed_views.contains(&view)
+            && self.sidebar_selected_view(self.sidebar_side(view)) == Some(view)
     }
 
     pub(super) fn sidebar_panel_open(&self, view: SidebarView) -> bool {
@@ -276,12 +266,18 @@ impl MorrowApp {
         if view == SidebarView::Search && self.project_search_focus {
             return true;
         }
+        if view == SidebarView::SourceControl && self.git_content_has_focus() {
+            return true;
+        }
         self.ctx
             .memory(|memory| memory.focused())
             .is_some_and(|id| {
                 self.ctx.read_response(id).is_some_and(|response| {
-                    self.sidebar_layout.view_rects[view.index()]
-                        .is_some_and(|rect| rect.contains(response.rect.center()))
+                    self.ctx
+                        .read_response(sidebar_focus_id(self.sidebar_side(view)))
+                        .is_some_and(|anchor| anchor.layer_id == response.layer_id)
+                        && self.sidebar_layout.view_rects[view.index()]
+                            .is_some_and(|rect| rect.contains(response.rect.center()))
                 })
             })
     }
@@ -341,6 +337,9 @@ impl MorrowApp {
 
     pub(super) fn visible_sidebar_sides(&self) -> Vec<Side> {
         let mut sides = Vec::new();
+        if self.projects.is_empty() {
+            return sides;
+        }
         if self.sidebar_visible && !self.sidebar_layout.collapsed[0] {
             sides.push(Side::Left);
         }
@@ -353,6 +352,9 @@ impl MorrowApp {
     pub(super) fn focused_sidebar(&self) -> Option<Side> {
         if self.sidebar_view_visible(SidebarView::Explorer) && self.explorer_keyboard_focused() {
             return Some(self.sidebar_side(SidebarView::Explorer));
+        }
+        if self.sidebar_view_visible(SidebarView::Search) && self.project_search_focus {
+            return Some(self.sidebar_side(SidebarView::Search));
         }
         if self.sidebar_view_visible(SidebarView::SourceControl) && self.git_content_has_focus() {
             return Some(self.sidebar_side(SidebarView::SourceControl));
@@ -393,9 +395,6 @@ impl MorrowApp {
                 .memory_mut(|memory| memory.request_focus(sidebar_focus_id(side)));
             return;
         }
-        self.sidebar_layout
-            .collapsed_views
-            .retain(|candidate| *candidate != view);
         match view {
             SidebarView::Explorer => self.focus_explorer(),
             SidebarView::Search => self.open_project_search(),
@@ -410,9 +409,7 @@ impl MorrowApp {
                 if let Some(tab) = self.tab_mut() {
                     tab.focus = false;
                 }
-                let remembered = self.sidebar_layout.last_widgets
-                    [if side == Side::Left { 0 } else { 1 }]
-                .filter(|id| {
+                let remembered = self.sidebar_layout.last_widgets[view.index()].filter(|id| {
                     self.ctx.read_response(*id).is_some_and(|response| {
                         response.enabled()
                             && self
@@ -441,12 +438,19 @@ impl MorrowApp {
 
     pub(super) fn show_sidebar(&mut self, view: SidebarView) {
         let side = self.sidebar_side(view);
+        if let Some(previous) = self.sidebar_selected_view(side)
+            && previous != view
+        {
+            if !self.settings_open && self.sidebar_view_has_focus(previous) {
+                self.focus_editor();
+            }
+            if previous == SidebarView::Search {
+                self.project_search_focus = false;
+            }
+        }
         if !self.sidebar_layout.open_views.contains(&view) {
             self.sidebar_layout.open_views.push(view);
         }
-        self.sidebar_layout
-            .collapsed_views
-            .retain(|candidate| *candidate != view);
         self.select_sidebar_view(view);
         self.set_sidebar_visible(side, true);
     }
@@ -465,9 +469,6 @@ impl MorrowApp {
             self.sidebar_layout
                 .open_views
                 .retain(|candidate| *candidate != view);
-            self.sidebar_layout
-                .collapsed_views
-                .retain(|candidate| *candidate != view);
             self.reconcile_sidebar_selection(side);
             if self.sidebar_views(side).is_empty() {
                 self.set_sidebar_visible(side, false);
@@ -479,7 +480,7 @@ impl MorrowApp {
 
     pub(super) fn toggle_sidebar_view(&mut self, view: SidebarView) {
         if self.sidebar_view_visible(view) {
-            self.set_sidebar_view_visible(view, false);
+            self.set_sidebar_visible(self.sidebar_side(view), false);
         } else if view == SidebarView::Search {
             self.open_project_search();
         } else {
@@ -600,26 +601,25 @@ impl MorrowApp {
                 });
             });
         }
-        ui.label(RichText::new("Drag panel titles to either sidebar, or use each panel's menu. Multiple panels can share a side. Either side can stay empty. Drag the inner edges to resize.").small().color(MUTED));
+        ui.label(RichText::new("Each sidebar shows one panel. Switch with its tabs. Use the panel menu to move it to the other side. Drag the inner edges to resize.").small().color(MUTED));
     }
 
     pub(super) fn sidebars_status(&self) -> serde_json::Value {
+        let visible = self.visible_sidebar_sides();
         serde_json::json!({
-            "left": {"panel": self.sidebar_selected_view(Side::Left), "panels": self.sidebar_views(Side::Left), "visible": self.sidebar_visible, "effective_visible": self.sidebar_visible && !self.sidebar_layout.collapsed[0], "width": self.sidebar_layout.left_width},
-            "right": {"panel": self.sidebar_selected_view(Side::Right), "panels": self.sidebar_views(Side::Right), "visible": self.sidebar_layout.right_visible, "effective_visible": self.sidebar_layout.right_visible && !self.sidebar_layout.collapsed[1], "width": self.sidebar_layout.right_width},
+            "left": {"panel": self.sidebar_selected_view(Side::Left), "panels": self.sidebar_views(Side::Left), "visible": self.sidebar_visible, "effective_visible": visible.contains(&Side::Left), "width": self.sidebar_layout.left_width},
+            "right": {"panel": self.sidebar_selected_view(Side::Right), "panels": self.sidebar_views(Side::Right), "visible": self.sidebar_layout.right_visible, "effective_visible": visible.contains(&Side::Right), "width": self.sidebar_layout.right_width},
             "right_panels": self.sidebar_layout.right_views,
-            "collapsed_panels": self.sidebar_layout.collapsed_views,
+            "collapsed_panels": [],
         })
     }
 
     pub(super) fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
+        self.sidebar_layout.view_rects = [None; 4];
         if self.projects.is_empty() {
+            self.sidebar_layout.rects = [None; 2];
             return;
         }
-        self.sidebar_layout.view_rects = [None; 4];
-        self.sidebar_layout.title_rects = [None; 4];
-        self.sidebar_layout.drop_rects = [None; 2];
-        let available = ui.available_rect_before_wrap();
         let focused = self.focused_sidebar();
         self.sidebar_layout.available_width = Some(ui.available_width());
         self.update_sidebar_collapsed();
@@ -677,7 +677,6 @@ impl MorrowApp {
             let (minimum, maximum) = sidebar_limits(ui.available_width(), false, 0.0);
             self.render_sidebar(ui, Side::Right, minimum, maximum);
         }
-        self.sidebar_drop_targets(ui, available);
     }
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui, side: Side, minimum: f32, maximum: f32) {
@@ -736,69 +735,18 @@ impl MorrowApp {
                 if self.awaiting_sidebar_owner(side) {
                     self.focus_sidebar_region(side);
                 }
-                ui.horizontal(|ui| {
-                    let add = ui.menu_button("+", |ui| {
-                        for view in VIEWS {
-                            if ui.button(view.title()).clicked() {
-                                self.move_sidebar(view, side);
-                                if view == SidebarView::Search {
-                                    self.open_project_search();
-                                }
-                                ui.close();
-                            }
-                        }
-                    });
-                    add.response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            if side == Side::Left {
-                                "Add panel to left sidebar"
-                            } else {
-                                "Add panel to right sidebar"
-                            },
-                        )
-                    });
-                    ui.label(
-                        RichText::new(if side == Side::Left {
-                            "LEFT SIDEBAR"
-                        } else {
-                            "RIGHT SIDEBAR"
-                        })
-                        .small()
-                        .color(MUTED),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(
-                            ui,
-                            "×",
-                            &format!(
-                                "Hide {} sidebar · {}",
-                                if side == Side::Left { "left" } else { "right" },
-                                self.shortcut_label(if side == Side::Left {
-                                    keybindings::Action::ToggleLeftSidebar
-                                } else {
-                                    keybindings::Action::ToggleRightSidebar
-                                })
-                            ),
-                        )
-                        .clicked()
-                        {
-                            self.set_sidebar_visible(side, false);
-                        }
-                    });
-                });
+                self.sidebar_header(ui, side);
                 ui.separator();
-                self.render_sidebar_panels(ui, side);
+                self.render_sidebar_panel(ui, side);
             });
         self.sidebar_layout.rects[if side == Side::Left { 0 } else { 1 }] =
             Some(result.response.rect);
         if self.focused_sidebar() == Some(side) {
             if let Some(widget) = self.ctx.memory(|memory| memory.focused())
                 && widget != sidebar_focus_id(side)
+                && let Some(view) = self.sidebar_selected_view(side)
             {
-                self.sidebar_layout.last_widgets[if side == Side::Left { 0 } else { 1 }] =
-                    Some(widget);
+                self.sidebar_layout.last_widgets[view.index()] = Some(widget);
             }
             ui.painter().rect_stroke(
                 result.response.rect.shrink(1.0),
@@ -821,156 +769,141 @@ impl MorrowApp {
         }
     }
 
-    fn render_sidebar_panels(&mut self, ui: &mut egui::Ui, side: Side) {
-        let views: Vec<_> = self
-            .sidebar_views(side)
-            .into_iter()
-            .filter(|view| self.sidebar_layout.view_rects[view.index()].is_none())
-            .collect();
-        if views.is_empty() {
-            ui.label(RichText::new("No panels on this side").color(MUTED));
+    fn sidebar_header(&mut self, ui: &mut egui::Ui, side: Side) {
+        ui.horizontal(|ui| {
+            let tabs_width = (ui.available_width() - 58.0).max(40.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(tabs_width, 26.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("sidebar_panel_tabs", side == Side::Right))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                for view in self.sidebar_views(side) {
+                                    let active = self.sidebar_selected_view(side) == Some(view);
+                                    let label = if view == SidebarView::SourceControl {
+                                        "Git"
+                                    } else {
+                                        view.title()
+                                    };
+                                    let tab = ui
+                                        .selectable_label(active, label)
+                                        .on_hover_text(view.title());
+                                    tab.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::SelectableLabel,
+                                            ui.is_enabled(),
+                                            active,
+                                            format!("{} panel tab", view.title()),
+                                        )
+                                    });
+                                    if tab.clicked() {
+                                        self.show_sidebar(view);
+                                        self.focus_sidebar_region(side);
+                                    }
+                                    tab.context_menu(|ui| self.sidebar_panel_menu(ui, view));
+                                    if view == SidebarView::SourceControl {
+                                        git_panel::refresh_indicator(
+                                            ui,
+                                            self.project()
+                                                .is_some_and(|project| project.git_loading),
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                },
+            );
+            let selected = self.sidebar_selected_view(side);
+            let menu = ui.menu_button("⋯", |ui| {
+                if let Some(view) = selected {
+                    self.sidebar_panel_menu(ui, view);
+                    ui.separator();
+                }
+                for view in VIEWS {
+                    if self.sidebar_side(view) == side
+                        && !self.sidebar_panel_open(view)
+                        && ui.button(format!("Show {}", view.title())).clicked()
+                    {
+                        self.show_sidebar(view);
+                        self.focus_sidebar_region(side);
+                        ui.close();
+                    }
+                }
+            });
+            menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    selected.map_or_else(
+                        || "Sidebar panels".to_owned(),
+                        |view| format!("{} panel actions", view.title()),
+                    ),
+                )
+            });
+            let close = small_button(
+                ui,
+                "×",
+                &format!(
+                    "Hide {} sidebar",
+                    if side == Side::Left { "left" } else { "right" }
+                ),
+            );
+            close.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    if side == Side::Left {
+                        "Hide left sidebar"
+                    } else {
+                        "Hide right sidebar"
+                    },
+                )
+            });
+            if close.clicked() {
+                self.set_sidebar_visible(side, false);
+            }
+        });
+    }
+
+    fn render_sidebar_panel(&mut self, ui: &mut egui::Ui, side: Side) {
+        let Some(view) = self.sidebar_selected_view(side) else {
+            ui.label(RichText::new("No panel selected").color(MUTED));
             ui.label(
-                RichText::new("Add a panel with + or drag a panel title here.")
+                RichText::new("Choose a panel from the sidebar menu.")
                     .small()
                     .color(MUTED),
             );
             return;
+        };
+        if !self.sidebar_view_visible(view) {
+            return;
         }
-        let area = ui.available_rect_before_wrap();
-        let expanded = views
-            .iter()
-            .filter(|view| !self.sidebar_layout.collapsed_views.contains(view))
-            .count();
-        let header_height = 28.0;
-        let gap = 6.0;
-        let body_height = ((area.height() - views.len() as f32 * (header_height + gap))
-            / expanded.max(1) as f32)
-            .max(0.0);
-        let mut top = area.top();
-        for view in views {
-            let collapsed = self.sidebar_layout.collapsed_views.contains(&view);
-            let height = header_height + if collapsed { 0.0 } else { body_height };
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(area.left(), top),
-                Vec2::new(area.width(), height),
-            );
-            self.sidebar_layout.view_rects[view.index()] = Some(rect);
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .id(egui::Id::new(("sidebar_view", view.index()))),
-                |ui| {
-                    ui.set_clip_rect(ui.clip_rect().intersect(rect));
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                    ui.horizontal(|ui| {
-                        let collapse = ui.small_button(if collapsed { "▸" } else { "▾" });
-                        collapse.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                format!(
-                                    "{} {} panel",
-                                    if collapsed { "Expand" } else { "Collapse" },
-                                    view.title()
-                                ),
-                            )
-                        });
-                        if collapse.clicked() {
-                            if collapsed {
-                                self.sidebar_layout
-                                    .collapsed_views
-                                    .retain(|candidate| *candidate != view);
-                            } else {
-                                if self.sidebar_view_has_focus(view) {
-                                    self.focus_editor();
-                                }
-                                self.sidebar_layout.collapsed_views.push(view);
-                            }
-                            self.session_dirty = true;
-                        }
-                        let title = ui
-                            .add_sized(
-                                Vec2::new(
-                                    (ui.available_width()
-                                        - if view == SidebarView::SourceControl {
-                                            60.0
-                                        } else {
-                                            40.0
-                                        })
-                                    .max(30.0),
-                                    23.0,
-                                ),
-                                egui::Label::new(RichText::new(view.title()).strong().color(TEXT))
-                                    .truncate()
-                                    .sense(egui::Sense::click_and_drag()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::Grab)
-                            .on_hover_text(
-                                "Drag to either sidebar. Right-click for panel actions.",
-                            );
-                        self.sidebar_layout.title_rects[view.index()] = Some(title.rect);
-                        title.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, view.title())
-                        });
-                        if title.drag_started_by(egui::PointerButton::Primary) {
-                            self.sidebar_layout.dragged = Some(view);
-                        }
-                        if title.clicked() {
-                            self.select_sidebar_view(view);
-                            self.focus_sidebar_region(side);
-                        }
-                        title.context_menu(|ui| self.sidebar_panel_menu(ui, view));
-                        if view == SidebarView::SourceControl {
-                            git_panel::refresh_indicator(
-                                ui,
-                                self.project().is_some_and(|project| project.git_loading),
-                            );
-                        }
-                        let menu = ui.menu_button("⋯", |ui| self.sidebar_panel_menu(ui, view));
-                        menu.response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                format!("{} panel actions", view.title()),
-                            )
-                        });
-                    });
-                    if !collapsed
-                        && body_height > 4.0
-                        && self.sidebar_view_visible(view)
-                        && self.sidebar_side(view) == side
-                    {
-                        let body = egui::Rect::from_min_max(
-                            rect.left_top() + Vec2::new(0.0, header_height + 4.0),
-                            rect.right_bottom(),
-                        );
-                        ui.scope_builder(
-                            egui::UiBuilder::new().max_rect(body).id_salt("body"),
-                            |ui| match view {
-                                SidebarView::Explorer => self.explorer(ui),
-                                SidebarView::Search => {
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("sidebar_search_content")
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| self.project_search_ui(ui));
-                                }
-                                SidebarView::SourceControl => self.git_ui(ui),
-                                SidebarView::Review => self.review_ui(ui),
-                            },
-                        );
+        let rect = ui.available_rect_before_wrap();
+        self.sidebar_layout.view_rects[view.index()] = Some(rect);
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id(egui::Id::new(("sidebar_view", view.index()))),
+            |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                match view {
+                    SidebarView::Explorer => self.explorer(ui),
+                    SidebarView::Search => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("sidebar_search_content")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.project_search_ui(ui));
                     }
-                },
-            );
-            if self.sidebar_view_has_focus(view) {
-                self.select_sidebar_view(view);
-            }
-            top += height + gap;
-            if top < area.bottom() {
-                ui.painter()
-                    .hline(area.x_range(), top - gap * 0.5, Stroke::new(1.0, BORDER));
-            }
-        }
-        ui.allocate_rect(area, egui::Sense::hover());
+                    SidebarView::SourceControl => self.git_ui(ui),
+                    SidebarView::Review => self.review_ui(ui),
+                }
+            },
+        );
+        ui.allocate_rect(rect, egui::Sense::hover());
     }
 
     fn sidebar_panel_menu(&mut self, ui: &mut egui::Ui, view: SidebarView) {
@@ -1006,131 +939,7 @@ impl MorrowApp {
     }
 
     pub(super) fn sidebar_drag_keys(&mut self) -> bool {
-        if self.sidebar_layout.dragged.is_none() {
-            return false;
-        }
-        if self
-            .ctx
-            .input(|input| input.key_pressed(Key::Escape) || !input.focused)
-        {
-            self.sidebar_layout.dragged = None;
-        }
-        self.ctx.input_mut(|input| {
-            input.events.retain(|event| {
-                !matches!(
-                    event,
-                    egui::Event::Key { .. }
-                        | egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::Copy
-                        | egui::Event::Cut
-                        | egui::Event::Ime(_)
-                )
-            })
-        });
-        true
-    }
-
-    fn sidebar_drop_targets(&mut self, ui: &mut egui::Ui, available: egui::Rect) {
-        let Some(view) = self.sidebar_layout.dragged else {
-            return;
-        };
-        let Some(pointer) = self.ctx.pointer_interact_pos() else {
-            self.sidebar_layout.dragged = None;
-            return;
-        };
-        let painter = self.ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("sidebar_drag_overlay"),
-        ));
-        let mut target = None;
-        for (index, side) in [(0, Side::Left), (1, Side::Right)] {
-            let rect = self.sidebar_region_rect(side).unwrap_or_else(|| {
-                egui::Rect::from_x_y_ranges(
-                    if side == Side::Left {
-                        self.ctx.content_rect().left()..=available.left() + 72.0
-                    } else {
-                        available.right() - 72.0..=available.right()
-                    },
-                    available.y_range(),
-                )
-            });
-            self.sidebar_layout.drop_rects[index] = Some(rect);
-            let hovered = rect.contains(pointer);
-            if hovered {
-                target = Some(side);
-            }
-            if hovered || !self.visible_sidebar_sides().contains(&side) {
-                painter.rect_filled(
-                    rect.shrink(2.0),
-                    3.0,
-                    ACCENT.gamma_multiply(if hovered { 0.22 } else { 0.08 }),
-                );
-                painter.rect_stroke(
-                    rect.shrink(2.0),
-                    3.0,
-                    Stroke::new(2.0, ACCENT),
-                    egui::StrokeKind::Inside,
-                );
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if side == Side::Left {
-                        "Drop\nleft"
-                    } else {
-                        "Drop\nright"
-                    },
-                    FontId::proportional(12.0),
-                    ACCENT,
-                );
-            }
-        }
-        if let Some(side) = target {
-            let before = self.sidebar_views(side).into_iter().find(|candidate| {
-                *candidate != view
-                    && self.sidebar_layout.view_rects[candidate.index()]
-                        .is_some_and(|rect| pointer.y < rect.center().y)
-            });
-            let y = before.and_then(|candidate| {
-                self.sidebar_layout.view_rects[candidate.index()].map(|rect| rect.top())
-            });
-            if let (Some(rect), Some(y)) = (
-                self.sidebar_layout.drop_rects[if side == Side::Left { 0 } else { 1 }],
-                y,
-            ) {
-                painter.hline(rect.x_range(), y, Stroke::new(3.0, ACCENT));
-            }
-            if self.ctx.input(|input| input.pointer.primary_released()) {
-                self.move_sidebar(view, side);
-                self.sidebar_layout
-                    .open_views
-                    .retain(|candidate| *candidate != view);
-                let position = before
-                    .and_then(|candidate| {
-                        self.sidebar_layout
-                            .open_views
-                            .iter()
-                            .position(|v| *v == candidate)
-                    })
-                    .unwrap_or(self.sidebar_layout.open_views.len());
-                self.sidebar_layout.open_views.insert(position, view);
-            }
-        }
-        painter.text(
-            pointer + Vec2::new(14.0, 14.0),
-            egui::Align2::LEFT_TOP,
-            view.title(),
-            FontId::proportional(13.0),
-            ACCENT,
-        );
-        self.ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        if self
-            .ctx
-            .input(|input| input.pointer.primary_released() || !input.pointer.primary_down())
-        {
-            self.sidebar_layout.dragged = None;
-        }
-        ui.ctx().request_repaint();
+        false
     }
 }
 

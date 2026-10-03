@@ -2,6 +2,7 @@
 use super::*;
 
 const MAX_QUERY_CHARS: usize = 4096;
+const MAX_SEARCH_HISTORY: usize = 100;
 const ASYNC_DOCUMENT_BYTES: usize = 256 * 1024;
 
 #[path = "find_worker.rs"]
@@ -74,6 +75,8 @@ pub(super) struct VimSearch {
     origin_selection: Range<usize>,
     query: String,
     query_cursor: usize,
+    history_index: Option<usize>,
+    history_draft: Option<(String, usize)>,
     backwards: bool,
     count: usize,
     original_scroll: Option<(egui::Id, Vec2)>,
@@ -89,6 +92,7 @@ pub(super) struct VimSearch {
 pub(super) struct FindState {
     pub(super) prompt: Option<VimSearch>,
     last: Option<Pattern>,
+    history: Vec<String>,
     backwards: bool,
     pub(super) highlighted: bool,
     last_escape: Option<f64>,
@@ -109,6 +113,37 @@ pub(super) struct FindState {
 }
 
 impl FindState {
+    /// Convert the last Find/search pattern to the regex dialect used by :s//.
+    pub(super) fn last_substitute_pattern(&self) -> Option<String> {
+        let pattern = self.last.as_ref()?;
+        if pattern.query.is_empty() {
+            return None;
+        }
+        let mut query = if pattern.regex {
+            pattern.query.clone()
+        } else {
+            regex::escape(&pattern.query)
+        };
+        if pattern.whole_word {
+            query = format!(r"\b(?:{query})\b");
+        }
+        if !pattern.case_sensitive {
+            query = format!("(?i:{query})");
+        }
+        Some(query)
+    }
+
+    pub(super) fn remember_substitute_pattern(&mut self, query: String, case_sensitive: bool) {
+        self.last = Some(Pattern {
+            query,
+            case_sensitive,
+            whole_word: false,
+            regex: true,
+        });
+        self.highlighted = true;
+        self.current_match = None;
+    }
+
     /// A repeated held key is not a second Escape. Only consecutive key presses
     /// suppress highlights; the last pattern and logical match remain intact.
     pub(super) fn observe_escape(&mut self, event: &egui::Event, time: f64) {
@@ -223,8 +258,9 @@ impl FindState {
                 .is_some_and(|pending| pending.modal)
     }
 
-    fn poll_deferred(&mut self, tab: &mut EditorTab) {
+    fn poll_deferred(&mut self, tab: &mut EditorTab) -> Option<Option<usize>> {
         self.collect_results();
+        let mut toolbar_match = None;
         if let Some(pending) = self.pending_navigation.take() {
             if pending.key.document == tab.id
                 && pending.pane == self.current_pane
@@ -235,7 +271,7 @@ impl FindState {
             {
                 if self.matches(tab, &pending.key.pattern).is_some() {
                     tab.vim.restore_navigation(&tab.text, &pending.navigation);
-                    self.navigate_from(
+                    let matched = self.navigate_from(
                         tab,
                         &pending.key.pattern,
                         pending.backwards,
@@ -246,6 +282,7 @@ impl FindState {
                     );
                     if pending.preserve_focus {
                         tab.focus = false;
+                        toolbar_match = Some(matched);
                     }
                 } else {
                     self.pending_navigation = Some(pending);
@@ -278,6 +315,7 @@ impl FindState {
                 self.preview(tab);
             }
         }
+        toolbar_match
     }
 
     fn pattern(&self) -> Option<Pattern> {
@@ -348,6 +386,8 @@ impl FindState {
             origin_selection: tab.selection.clone(),
             query: String::new(),
             query_cursor: 0,
+            history_index: None,
+            history_draft: None,
             backwards,
             count,
             original_scroll: self.view_scroll.get(&(pane_id, tab.id)).copied(),
@@ -499,6 +539,46 @@ impl FindState {
             .map_or(prompt.query.len(), |(byte, _)| byte);
         prompt.query.insert_str(byte, &inserted);
         prompt.query_cursor += inserted.chars().count();
+        prompt.history_index = None;
+        prompt.history_draft = None;
+        self.preview(tab);
+    }
+
+    /// Browsing history keeps the unfinished query, including its caret, so
+    /// returning past the newest entry never loses what the user was typing.
+    fn recall_history(&mut self, tab: &mut EditorTab, older: bool) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        if older {
+            if self.history.is_empty() || prompt.history_index == Some(0) {
+                return;
+            }
+            let index = prompt
+                .history_index
+                .map_or(self.history.len() - 1, |index| index - 1);
+            if prompt.history_index.is_none() {
+                prompt.history_draft = Some((prompt.query.clone(), prompt.query_cursor));
+            }
+            prompt.query.clone_from(&self.history[index]);
+            prompt.query_cursor = prompt.query.chars().count();
+            prompt.history_index = Some(index);
+        } else {
+            let Some(index) = prompt.history_index else {
+                return;
+            };
+            if let Some(query) = self.history.get(index + 1) {
+                prompt.query.clone_from(query);
+                prompt.query_cursor = prompt.query.chars().count();
+                prompt.history_index = Some(index + 1);
+            } else {
+                if let Some((query, cursor)) = prompt.history_draft.take() {
+                    prompt.query = query;
+                    prompt.query_cursor = cursor;
+                }
+                prompt.history_index = None;
+            }
+        }
         self.preview(tab);
     }
 
@@ -521,11 +601,35 @@ impl FindState {
             self.confirm(tab);
             return;
         }
+        if key == Key::ArrowUp || modifiers.ctrl && key == Key::P {
+            self.recall_history(tab, true);
+            return;
+        }
+        if key == Key::ArrowDown || modifiers.ctrl && key == Key::N {
+            self.recall_history(tab, false);
+            return;
+        }
         let Some(prompt) = self.prompt.as_mut() else {
             return;
         };
         let len = prompt.query.chars().count();
+        let mut edited = false;
         match key {
+            Key::Backspace | Key::W if modifiers.ctrl && prompt.query_cursor > 0 => {
+                let start = query_word_boundary(&prompt.query, prompt.query_cursor, true);
+                let bytes = query_byte(&prompt.query, start)
+                    ..query_byte(&prompt.query, prompt.query_cursor);
+                prompt.query.replace_range(bytes, "");
+                prompt.query_cursor = start;
+                edited = true;
+            }
+            Key::Delete if modifiers.ctrl && prompt.query_cursor < len => {
+                let end = query_word_boundary(&prompt.query, prompt.query_cursor, false);
+                let bytes =
+                    query_byte(&prompt.query, prompt.query_cursor)..query_byte(&prompt.query, end);
+                prompt.query.replace_range(bytes, "");
+                edited = true;
+            }
             Key::Backspace if prompt.query_cursor > 0 => {
                 let start = prompt
                     .query
@@ -540,6 +644,7 @@ impl FindState {
                     .map_or(prompt.query.len(), |(byte, _)| byte);
                 prompt.query.replace_range(start..end, "");
                 prompt.query_cursor -= 1;
+                edited = true;
             }
             Key::Delete if prompt.query_cursor < len => {
                 let start = prompt
@@ -554,16 +659,33 @@ impl FindState {
                     .nth(prompt.query_cursor + 1)
                     .map_or(prompt.query.len(), |(byte, _)| byte);
                 prompt.query.replace_range(start..end, "");
+                edited = true;
+            }
+            Key::ArrowLeft if modifiers.ctrl => {
+                prompt.query_cursor = query_word_boundary(&prompt.query, prompt.query_cursor, true)
+            }
+            Key::ArrowRight if modifiers.ctrl => {
+                prompt.query_cursor = query_word_boundary(&prompt.query, prompt.query_cursor, false)
             }
             Key::ArrowLeft => prompt.query_cursor = prompt.query_cursor.saturating_sub(1),
             Key::ArrowRight => prompt.query_cursor = (prompt.query_cursor + 1).min(len),
             Key::Home => prompt.query_cursor = 0,
             Key::End => prompt.query_cursor = len,
             Key::U if modifiers.ctrl => {
-                prompt.query.clear();
+                // Vim command-line Ctrl-U deletes only the prefix before the
+                // caret; a suffix being corrected must remain intact.
+                let end = query_byte(&prompt.query, prompt.query_cursor);
+                prompt.query.replace_range(..end, "");
                 prompt.query_cursor = 0;
+                edited = true;
             }
+            Key::A | Key::B if modifiers.ctrl => prompt.query_cursor = 0,
+            Key::E if modifiers.ctrl => prompt.query_cursor = len,
             _ => return,
+        }
+        if edited {
+            prompt.history_index = None;
+            prompt.history_draft = None;
         }
         self.preview(tab);
     }
@@ -589,6 +711,13 @@ impl FindState {
         let Some(prompt) = self.prompt.take() else {
             return;
         };
+        if !prompt.query.is_empty() {
+            self.history.retain(|query| query != &prompt.query);
+            self.history.push(prompt.query.clone());
+            if self.history.len() > MAX_SEARCH_HISTORY {
+                self.history.remove(0);
+            }
+        }
         let pattern = if prompt.query.is_empty() {
             self.last.clone()
         } else {
@@ -644,6 +773,26 @@ impl FindState {
         modal: bool,
         origin: usize,
     ) -> Option<usize> {
+        // Several Next presses can arrive while a large document is still
+        // searching, including the frame where its worker becomes ready.
+        let (count, include_current) = self
+            .pending_navigation
+            .as_ref()
+            .filter(|pending| {
+                self.toolbar_navigation
+                    && pending.preserve_focus
+                    && pending.key.document == tab.id
+                    && pending.key.revision == tab.revision
+                    && pending.key.pattern == *pattern
+                    && pending.pane == self.current_pane
+                    && pending.backwards == backwards
+                    && pending.origin == origin
+                    && pending.motion_epoch == tab.vim.motion_epoch()
+                    && pending.selection == tab.selection
+            })
+            .map_or((count, include_current), |pending| {
+                (pending.count.saturating_add(count), pending.include_current)
+            });
         let Some((matches, error)) = self.matches(tab, pattern) else {
             self.pending_navigation = Some(PendingNavigation {
                 key: worker::Key {
@@ -666,6 +815,9 @@ impl FindState {
             self.message = Some(("Searching… · Esc cancels".into(), false));
             return None;
         };
+        // An immediate navigation supersedes queued movement. Otherwise its
+        // stale origin would cancel the freshly selected match next frame.
+        self.pending_navigation = None;
         if let Some(error) = error {
             tab.vim.cancel_pending_command();
             self.message = Some((error, true));
@@ -880,6 +1032,7 @@ impl MorrowApp {
         });
         let pending_valid = self.find.pending_navigation.as_ref().is_none_or(|pending| {
             (!pending.modal || self.settings.vim)
+                && (!pending.preserve_focus || self.find_visible)
                 && (!self.find_visible
                     || pending.key.pattern.regex
                     || pending.key.pattern
@@ -996,8 +1149,8 @@ impl MorrowApp {
         }
         self.find.dispatch_poll_frame = Some(frame);
         let mut state = std::mem::take(&mut self.find);
-        if let Some(tab) = self.tab_mut() {
-            state.poll_deferred(tab);
+        if let Some(matched) = self.tab_mut().and_then(|tab| state.poll_deferred(tab)) {
+            self.find_match = matched;
         }
         if let Some(yank) = state.take_yank() {
             self.register = Some(yank);
@@ -1239,7 +1392,7 @@ impl MorrowApp {
                     if show_hint {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
-                                RichText::new("Enter confirm · Esc cancel")
+                                RichText::new("↑ ↓ history · Enter confirm · Esc cancel")
                                     .size(11.0)
                                     .color(MUTED),
                             );
@@ -1251,6 +1404,48 @@ impl MorrowApp {
             prompt.horizontal_scroll = horizontal_scroll;
         }
     }
+}
+
+fn query_byte(query: &str, cursor: usize) -> usize {
+    query
+        .char_indices()
+        .nth(cursor)
+        .map_or(query.len(), |(byte, _)| byte)
+}
+
+/// Command-line editing uses character positions, with punctuation separated
+/// from Unicode words so deleting a regex suffix need not delete its pattern.
+fn query_word_boundary(query: &str, cursor: usize, backwards: bool) -> usize {
+    let chars: Vec<_> = query.chars().collect();
+    let mut cursor = cursor.min(chars.len());
+    if backwards {
+        while cursor > 0 && chars[cursor - 1].is_whitespace() {
+            cursor -= 1;
+        }
+        if cursor > 0 {
+            let word = crate::search::word_char(chars[cursor - 1]);
+            while cursor > 0
+                && !chars[cursor - 1].is_whitespace()
+                && crate::search::word_char(chars[cursor - 1]) == word
+            {
+                cursor -= 1;
+            }
+        }
+    } else {
+        if cursor < chars.len() && !chars[cursor].is_whitespace() {
+            let word = crate::search::word_char(chars[cursor]);
+            while cursor < chars.len()
+                && !chars[cursor].is_whitespace()
+                && crate::search::word_char(chars[cursor]) == word
+            {
+                cursor += 1;
+            }
+        }
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    }
+    cursor
 }
 
 /// Keep the insertion marker visible during both editing and Home/End motion.

@@ -304,6 +304,49 @@ fn explicit_focus_switches_compact_sidebars_before_dispatching_queued_text() {
 }
 
 #[test]
+fn same_side_search_switch_preserves_git_prefix_and_routes_query_suffix() {
+    let mut app = fixture();
+    app.projects[0].git_root = Some(app.projects[0].root.clone());
+    app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
+    let composer = egui::Id::new(("git-content", &app.projects[0].root, "commit-message"));
+    let source = app.tab().unwrap().text.clone();
+    let mut screen = harness(app);
+    screen
+        .ctx
+        .memory_mut(|memory| memory.request_focus(composer));
+    screen.run_steps(2);
+    screen.input_mut().events.extend([
+        egui::Event::Text("commit prefix".into()),
+        key(
+            Key::F,
+            egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+        ),
+        egui::Event::Text("query suffix".into()),
+    ]);
+    screen.run_steps(4);
+    assert_eq!(screen.state().projects[0].commit_message, "commit prefix");
+    assert_eq!(screen.state().project_query, "query suffix");
+    assert!(screen.state().sidebar_view_visible(SidebarView::Search));
+    assert!(
+        !screen
+            .state()
+            .sidebar_view_visible(SidebarView::SourceControl)
+    );
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(
+        screen
+            .state()
+            .sidebar_panel_open(SidebarView::SourceControl)
+    );
+    assert!(screen.state().sidebar_panel_open(SidebarView::Explorer));
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(egui::Id::new("project_search_query"))
+    );
+    assert_eq!(screen.state().tab().unwrap().text, source);
+}
+
+#[test]
 fn offscreen_git_row_still_owns_region_navigation() {
     let mut app = fixture();
     app.projects[0].git_root = Some(app.projects[0].root.clone());
@@ -482,6 +525,35 @@ fn output_navigation_also_works_for_an_empty_workspace() {
     screen.run_steps(2);
     assert!(!screen.state().output_keyboard_focused());
     assert!(screen.state().tab().is_none());
+}
+
+#[test]
+fn region_cycle_skips_sidebars_after_the_last_project_is_closed() {
+    let mut app = fixture();
+    app.projects.clear();
+    app.editor_layout = EditorLayout::default();
+    app.output_visible = true;
+    let mut screen = harness(app);
+    assert!(screen.state().visible_sidebar_sides().is_empty());
+    assert!(
+        !screen.state().sidebars_status()["left"]["effective_visible"]
+            .as_bool()
+            .unwrap()
+    );
+    screen.state_mut().focus_editor();
+    screen.state_mut().cycle_focus_region(false);
+    screen.run_steps(2);
+    assert!(screen.state().output_keyboard_focused());
+    screen.state_mut().cycle_focus_region(false);
+    screen.run_steps(2);
+    assert!(!screen.state().output_keyboard_focused());
+    assert!(matches!(
+        screen.state().navigation_region(),
+        Region::Pane(_)
+    ));
+    screen.state_mut().cycle_focus_region(true);
+    screen.run_steps(2);
+    assert!(screen.state().output_keyboard_focused());
 }
 
 fn focused_git_composer() -> Harness<'static, MorrowApp> {

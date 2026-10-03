@@ -1,35 +1,37 @@
+//! Explorer completeness is independent of search indexing and legacy filters.
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new() -> Self {
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn new(extra_files: usize) -> Self {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-explorer-filter-{}-{}",
+            "morrow-lazy-explorer-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
-        for project in ["alpha", "beta"] {
-            let project = root.join(project);
-            fs::create_dir_all(project.join("target")).unwrap();
-            fs::write(project.join("visible.txt"), "visible").unwrap();
-            fs::write(project.join("target/generated.txt"), "generated").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "secret.txt\n").unwrap();
+        fs::write(root.join("visible.txt"), "visible").unwrap();
+        fs::write(root.join("secret.txt"), "ignored").unwrap();
+        fs::write(root.join("target/generated.txt"), "generated").unwrap();
+        for number in 0..extra_files {
+            fs::write(root.join(format!("file-{number:04}.txt")), "fixture").unwrap();
         }
         Self(root)
     }
 
     fn app(&self) -> MorrowApp {
         let mut app = MorrowApp::empty(egui::Context::default());
-        for name in ["alpha", "beta"] {
-            let root = self.0.join(name);
-            let mut project = Project::new(root.clone());
-            project.index = Some(Arc::new(
-                workspace::build_index(&root, workspace::IndexOptions::default()).unwrap(),
-            ));
-            app.projects.push(project);
-        }
+        app.settings.autosave = false;
+        let mut project = Project::new(self.0.clone());
+        project.index = Some(Arc::new(
+            workspace::build_index(&self.0, Default::default()).unwrap(),
+        ));
+        app.projects.push(project);
         app
     }
 }
@@ -40,130 +42,222 @@ impl Drop for Fixture {
     }
 }
 
-fn finish_indexing(app: &mut MorrowApp) {
+fn finish(app: &mut MorrowApp, directory: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while app.projects.iter().any(|project| project.indexing) {
-        assert!(Instant::now() < deadline, "Explorer reindex did not finish");
+    loop {
         app.poll();
+        let project = app.project().unwrap();
+        let tree = project.explorer.as_ref().unwrap();
+        if !project.indexing && !tree.is_loading(directory) {
+            assert!(
+                tree.is_loaded(directory),
+                "folder failed: {:?}",
+                tree.error(directory)
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "Explorer worker did not finish");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
 
 #[test]
-fn explorer_filter_toggle_refreshes_every_project_and_quick_open_without_clearing_the_old_index() {
-    let fixture = Fixture::new();
-    let app = fixture.app();
-    let old: Vec<_> = app
-        .projects
-        .iter()
-        .map(|project| project.index.clone().unwrap())
-        .collect();
+fn ignored_and_generated_entries_are_visible_without_changing_quick_open_policy() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    app.settings.show_ignored_files = true;
+    app.index_project(0);
+    finish(&mut app, &fixture.0);
+    let index = app.explorer_index().unwrap();
+    for name in ["target", "secret.txt", "visible.txt", ".gitignore"] {
+        assert!(index.has_entry(&fixture.0.join(name)), "missing {name}");
+    }
+    assert!(!index.has_entry(&fixture.0.join(".git")));
+    let quick_open = app.project().unwrap().index.as_ref().unwrap();
+    assert!(quick_open.quick_open("secret.txt", 40).is_empty());
+    assert!(quick_open.quick_open("generated.txt", 40).is_empty());
+    assert!(
+        !index.directory_loaded(&fixture.0.join("target")),
+        "root loading must not recurse"
+    );
+    app.request_explorer_directory(0, fixture.0.join("target"));
+    finish(&mut app, &fixture.0.join("target"));
+    assert!(
+        app.explorer_index()
+            .unwrap()
+            .has_entry(&fixture.0.join("target/generated.txt"))
+    );
+}
+
+#[test]
+fn explorer_lists_complete_root_when_the_quick_open_index_is_truncated() {
+    let fixture = Fixture::new(64);
+    let mut app = fixture.app();
+    app.projects[0].index = Some(Arc::new(
+        workspace::build_index(
+            &fixture.0,
+            workspace::IndexOptions {
+                max_entries: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    ));
+    assert!(app.projects[0].index.as_ref().unwrap().truncated);
+    app.projects[0].explorer = Some(workspace::ExplorerTree::new(fixture.0.clone()));
+    app.request_explorer_directory(0, fixture.0.clone());
+    finish(&mut app, &fixture.0);
+    let explorer = app.explorer_index().unwrap();
+    assert_eq!(explorer.children(&fixture.0).count(), 68);
+    assert!(explorer.has_entry(&fixture.0.join("file-0063.txt")));
+    assert!(!explorer.truncated);
+    assert!(app.projects[0].index.as_ref().unwrap().truncated);
+}
+
+#[test]
+fn refresh_retains_visible_snapshot_while_reloading_on_background_workers() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    app.index_project(0);
+    finish(&mut app, &fixture.0);
+    let old_explorer = app.explorer_index().unwrap();
+    let old_quick_open = app.project().unwrap().index.clone().unwrap();
+    fs::write(fixture.0.join("new.txt"), "new").unwrap();
+    app.index_project(0);
+    assert!(Arc::ptr_eq(&app.explorer_index().unwrap(), &old_explorer));
+    assert!(Arc::ptr_eq(
+        app.project().unwrap().index.as_ref().unwrap(),
+        &old_quick_open
+    ));
+    finish(&mut app, &fixture.0);
+    assert!(
+        app.explorer_index()
+            .unwrap()
+            .has_entry(&fixture.0.join("new.txt"))
+    );
+    assert!(!old_explorer.has_entry(&fixture.0.join("new.txt")));
+}
+
+#[test]
+fn app_poll_rejects_directory_results_from_a_closed_and_reopened_project() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    let mut previous = workspace::ExplorerTree::new(fixture.0.clone());
+    let old_generation = previous.begin(&fixture.0).unwrap();
+    let mut replacement = workspace::ExplorerTree::new(fixture.0.clone());
+    let new_generation = replacement.begin(&fixture.0).unwrap();
+    app.projects[0].explorer = Some(replacement);
+    let listing = |name: &str| workspace::ExplorerDirectory {
+        root: fixture.0.clone(),
+        path: fixture.0.clone(),
+        entries: vec![workspace::WorkspaceEntry {
+            path: fixture.0.join(name),
+            name: name.into(),
+            is_dir: false,
+        }],
+        warnings: Vec::new(),
+    };
+    for (generation, name) in [(new_generation, "fresh.txt"), (old_generation, "stale.txt")] {
+        app.sender
+            .send(WorkerResult::ExplorerDirectory {
+                root: fixture.0.clone(),
+                path: fixture.0.clone(),
+                generation,
+                result: Ok(listing(name)),
+            })
+            .unwrap();
+    }
+    app.poll();
+    let index = app.explorer_index().unwrap();
+    assert!(index.has_entry(&fixture.0.join("fresh.txt")));
+    assert!(!index.has_entry(&fixture.0.join("stale.txt")));
+}
+
+#[test]
+fn folder_error_waits_for_retry_instead_of_restarting_a_worker_every_frame() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    let mut explorer = workspace::ExplorerTree::new(fixture.0.clone());
+    let generation = explorer.begin(&fixture.0).unwrap();
+    app.projects[0].explorer = Some(explorer);
+    app.sender
+        .send(WorkerResult::ExplorerDirectory {
+            root: fixture.0.clone(),
+            path: fixture.0.clone(),
+            generation,
+            result: Err("Temporary directory error".into()),
+        })
+        .unwrap();
+    app.poll();
+    for _ in 0..3 {
+        app.request_explorer_directory(0, fixture.0.clone());
+    }
+    let tree = app.project().unwrap().explorer.as_ref().unwrap();
+    assert_eq!(tree.error(&fixture.0), Some("Temporary directory error"));
+    assert_eq!(tree.pending_count(), 0);
+    app.retry_explorer();
+    finish(&mut app, &fixture.0);
+    assert!(
+        app.project()
+            .unwrap()
+            .explorer
+            .as_ref()
+            .unwrap()
+            .error(&fixture.0)
+            .is_none()
+    );
+}
+
+#[test]
+fn expanded_folder_reads_keep_concurrent_workers_bounded() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    app.projects[0].explorer = Some(workspace::ExplorerTree::new(fixture.0.clone()));
+    for number in 0..16 {
+        let path = fixture.0.join(format!("folder-{number:02}"));
+        fs::create_dir(&path).unwrap();
+        app.request_explorer_directory(0, path);
+    }
+    assert_eq!(
+        app.projects[0].explorer.as_ref().unwrap().pending_count(),
+        8
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.projects[0].explorer.as_ref().unwrap().pending_count() != 0 {
+        app.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !app.explorer_index()
+            .unwrap()
+            .directory_loaded(&fixture.0.join("folder-15"))
+    );
+}
+
+#[test]
+fn synthetic_explorer_snapshots_render_without_filters_limit_banners_or_workers() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    let root = PathBuf::from("C:/morrow-in-memory-explorer-fixture");
+    let mut index = workspace::WorkspaceIndex::empty(root.clone());
+    index.truncated = true;
+    let mut project = Project::new(root);
+    project.index = Some(Arc::new(index));
+    app.projects.push(project);
     let mut screen = Harness::builder().with_size([300.0, 220.0]).build_ui_state(
         |ui, app: &mut MorrowApp| {
             app.ctx = ui.ctx().clone();
-            app.explorer_filter_ui(ui);
+            app.explorer(ui);
         },
         app,
     );
-    screen.run_steps(2);
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Show ignored files").is_none());
     assert!(
         screen
-            .query_by_label("Ignore rules and generated folders are hidden.")
-            .is_some()
+            .query_by_label("Index limit reached. Some files may be missing.")
+            .is_none()
     );
-    assert!(
-        screen
-            .query_by_label("Open a file directly: Ctrl+O")
-            .is_some()
-    );
-    screen.get_by_label("Show ignored files").click();
-    screen.run_steps(2);
-    assert!(screen.state().settings.show_ignored_files);
-    assert!(screen.state().session_dirty);
-    for (project, old) in screen.state().projects.iter().zip(&old) {
-        assert!(project.indexing);
-        assert!(Arc::ptr_eq(project.index.as_ref().unwrap(), old));
-        assert!(old.quick_open("generated.txt", 40).is_empty());
-    }
-    finish_indexing(screen.state_mut());
-    for project in &screen.state().projects {
-        assert_eq!(
-            project
-                .index
-                .as_ref()
-                .unwrap()
-                .quick_open("generated.txt", 40),
-            vec![project.root.join("target/generated.txt")],
-        );
-    }
-    screen.get_by_label("Show ignored files").click();
-    screen.run_steps(2);
-    assert!(!screen.state().settings.show_ignored_files);
-    finish_indexing(screen.state_mut());
-    assert!(screen.state().projects.iter().all(|project| {
-        project
-            .index
-            .as_ref()
-            .unwrap()
-            .quick_open("generated.txt", 40)
-            .is_empty()
-    }));
-}
-
-#[test]
-fn changing_filter_cancels_stale_indexes_and_a_successful_refresh_clears_the_error() {
-    let fixture = Fixture::new();
-    let mut app = fixture.app();
-    app.projects[0].index_error = Some("Temporary indexing error".into());
-    app.settings.show_ignored_files = true;
-    app.reindex_explorer_visibility();
-    let previous = app.projects[0].index_cancel.clone();
-    app.settings.show_ignored_files = false;
-    app.reindex_explorer_visibility();
-    assert!(previous.load(Ordering::Relaxed));
-    finish_indexing(&mut app);
-    assert!(app.projects[0].index_error.is_none());
-    for project in &app.projects {
-        assert!(
-            project
-                .index
-                .as_ref()
-                .unwrap()
-                .quick_open("generated.txt", 40)
-                .is_empty()
-        );
-    }
-}
-
-#[test]
-fn showing_dependency_manifests_never_starts_rust_analysis_for_a_non_rust_project() {
-    let fixture = Fixture::new();
-    let mut app = fixture.app();
-    for project in &app.projects {
-        fs::create_dir_all(project.root.join("node_modules/native")).unwrap();
-        fs::write(
-            project.root.join("node_modules/native/Cargo.toml"),
-            "[package]",
-        )
-        .unwrap();
-    }
-    for show_ignored_files in [true, false] {
-        app.settings.show_ignored_files = show_ignored_files;
-        app.reindex_explorer_visibility();
-        finish_indexing(&mut app);
-        app.sync_languages(false);
-        for project in &app.projects {
-            assert!(!project.rust_project);
-            assert!(project.rust_language().server.is_none());
-            assert_eq!(
-                project
-                    .index
-                    .as_ref()
-                    .unwrap()
-                    .quick_open("Cargo.toml", 40)
-                    .len(),
-                usize::from(show_ignored_files)
-            );
-        }
-    }
+    assert!(screen.state().project().unwrap().explorer.is_none());
+    assert!(screen.state().receiver.try_recv().is_err());
 }
