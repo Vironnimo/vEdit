@@ -1,6 +1,8 @@
-# Morrow 0.4.12
+# Morrow 0.4.13
 
-Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.13 überarbeitet Explorer, Seitenleisten und Vim-Eingabe und enthält einen Windows-Fix für Monitorwechsel mit unterschiedlicher Skalierung. Details und Prüfungen stehen in den [Polish-Notizen](docs/interaction-polish-0.4.13.md).
 
 ![Morrow mit geöffnetem Projekt](tests/snapshots/morrow_workspace.png)
 
@@ -37,21 +39,21 @@ Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öff
 - **Settings** (**Ctrl+,**) gruppiert Lese-, Layout-, Speicher- und Vim-Einstellungen. **Interface zoom** vergrößert die gesamte Oberfläche einschließlich Explorer, Git und Vorschau (75–200 %); **Ctrl++ / Ctrl+−** ändern den Zoom, **Ctrl+0** stellt 100 % wieder her, auch im Einstellungsdialog. Unabhängig davon sind Codeschriftgröße (10–32), Zeilenabstand (1–2×), absolute/relative/ausgeschaltete Zeilennummern und die Hervorhebung der Cursorzeile einstellbar. Dazu kommen Einrückungsbreite, Zeilenumbruch, **Smooth scrolling**, Vim, Leader-Taste und Autosave samt Verzögerung. Änderungen wirken sofort und werden gespeichert. Vim und Autosave sind standardmäßig eingeschaltet, weiches Scrollen ist ausgeschaltet.
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
 - **Ctrl+Z** sowie **Ctrl+Y** / **Ctrl+Shift+Z** verwenden mit eingeschaltetem Vim dieselbe Undo-Historie wie `u` / **Ctrl+R**, auch im Insert- und Visual-Modus. Im Insert-Modus bleibt die Texteingabe aktiv; Vim-Register und System-Zwischenablage bleiben getrennt.
-- Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** rückt ein, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um und **Alt+Shift+↓** dupliziert Zeilen. Neue Zeilen übernehmen die Einrückung.
+- Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** springt zur nächsten Einrückungsposition, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um. **Alt+↑/↓** verschiebt Zeilen oder ausgewählte Zeilenblöcke; **Alt+Shift+↓** dupliziert sie. Beide Aktionen erhalten Cursor beziehungsweise Vim-Auswahl und sind rückgängig machbar. Neue Zeilen übernehmen die Einrückung.
 
-Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergrund. Auch die Suche in großen offenen Dateien berechnet ihre Treffer im Hintergrund; währenddessen zeigt sie **Searching…** und verwirft überholte Ergebnisse bei weiterer Eingabe oder einem Dateiwechsel. Der Explorer berücksichtigt `.gitignore` und überspringt unter anderem `.git`, `target`, `node_modules` und generierte Build-Ordner. Die Projektsuche bietet unter **Exclusions** eine gespeicherte Liste von Ordnern und Dateimustern, etwa `src/generated` oder `**/*.min.js`. Sie liest unabhängig vom Explorer-Index den Datenträger; eine leere Filterliste erlaubt auch generierte Ordner, während `.gitignore` und VCS-Verzeichnisse weiter berücksichtigt werden. Symbolische Links werden nicht verfolgt. Bei erreichten Such- oder Indexgrenzen erscheint ein Hinweis; dann hilft ein kleinerer Projektordner oder eine genauere Suche.
+Dateiindex, Dateizugriffe, Projektsuche, Git und Sprachanalyse laufen im Hintergrund. Auch die Suche in großen offenen Dateien berechnet ihre Treffer im Hintergrund; währenddessen zeigt sie **Searching…** und verwirft überholte Ergebnisse bei weiterer Eingabe oder einem Dateiwechsel. Der Explorer zeigt auch ignorierte und generierte Projektdateien. Er liest jeden geöffneten Ordner vollständig und lädt Unterordner erst beim Aufklappen; ein begrenzter Quick-Open-Index kann daher keine Explorer-Dateien ausblenden. VCS-Metadaten wie `.git` bleiben verborgen. Die Projektsuche bietet unter **Exclusions** eine gespeicherte Liste von Ordnern und Dateimustern, etwa `src/generated` oder `**/*.min.js`. Sie liest unabhängig vom Explorer den Datenträger; eine leere Filterliste erlaubt auch generierte Ordner, während `.gitignore` und VCS-Verzeichnisse weiter berücksichtigt werden. Die Projektsuche verfolgt symbolische Links nicht. Ihre Ressourcenlimits und die des Quick-Open-Index bleiben als Hinweise sichtbar.
 
 Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Auf der freien Fläche im Explorer lassen sich neue Dateien und Ordner direkt im Projekt anlegen; dort sind auch Projektpfad, Windows-Explorer und Aktualisieren erreichbar. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
 
 Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffnet die Datei, **Home/End** und **Page Up/Down** bewegen sich durch längere Listen. **F2** startet Umbenennen mit ausgewähltem Dateinamen ohne Erweiterung; bei Ordnern wird der ganze Name ausgewählt. **Shift+F10** öffnet das Kontextmenü des ausgewählten Eintrags.
 
-**Show ignored files** im Explorer oder **Settings → Show ignored and generated files** blendet bei Bedarf auch ignorierte Dateien und generierte Ordner ein. Explorer und **Ctrl+P** verwenden dann denselben erweiterten Dateiindex; `.git` und andere VCS-Metadaten bleiben verborgen. Die Umstellung läuft für offene Projekte im Hintergrund. Projektsuchfilter bleiben separat. **Ctrl+O** öffnet Dateien unabhängig von den Explorer-Filtern.
+Der Explorer sortiert Ordner vor Dateien und macht die Hierarchie mit dezenten Verbindungslinien sichtbar. Dateinamen stehen in einheitlichen Spalten; Auswahl und aktive Datei bleiben über die gesamte Zeilenbreite lesbar. Ignorierte Dateien benötigen keinen Sichtbarkeitsschalter. **Ctrl+O** öffnet Dateien direkt; **Ctrl+P** verwendet einen eigenen Suchindex.
 
 ## Seitenleisten einrichten
 
-Explorer, Suche, Source control und Review lassen sich unabhängig links oder rechts anordnen. Mehrere Panels können auf derselben Seite gleichzeitig untereinander stehen, etwa Explorer und Git links und nur die Suche rechts. Beide Seiten können auch leer oder ausgeblendet bleiben. **Ctrl+Alt+B** blendet nur rechts aus oder ein; **Ctrl+Alt+E** tut dasselbe links. Beide Kürzel funktionieren auch im Vim-Normalmodus. Das **×** im Seitenleistenkopf blendet die ganze Seite aus, ohne Panels auf die andere Seite zu verschieben. Ziehen an der Innenkante ändert ihre Breite.
+Explorer, Suche, Source control und Review lassen sich unabhängig links oder rechts anordnen. Jede Seite zeigt genau einen aktiven Inhalt. Die Tabs im Seitenleistenkopf wechseln zwischen den dort zugeordneten Ansichten. Explorer und Git können nebeneinander oder beide auf derselben Seite liegen; auf derselben Seite wechseln die Tabs zwischen ihnen. Ein Klick auf Search wechselt zum Suchpanel. Beide Seiten können auch leer oder ausgeblendet bleiben. **Ctrl+Alt+B** blendet nur rechts aus oder ein; **Ctrl+Alt+E** tut dasselbe links. Beide Kürzel funktionieren auch im Vim-Normalmodus. Das **×** im Seitenleistenkopf blendet die ganze Seite aus, ohne die Zuordnung zu verändern. Ziehen an der Innenkante ändert ihre Breite.
 
-Ziehe einen Paneltitel auf die andere Seitenleiste oder an den linken/rechten Rand, wenn diese Seite geschlossen ist. Auf derselben Seite lässt sich damit auch die Reihenfolge ändern; **Escape** bricht das Ziehen ab. Das **⋯**-Menü jedes Panels bietet **Move panel to left/right** und **Hide panel**. Der Pfeil vor dem Titel klappt nur dieses Panel ein. **＋** im Seitenleistenkopf fügt ein Panel hinzu, ohne andere zu ersetzen. **View → Arrange sidebar panels…** und **Settings → Layout** bieten dieselbe unabhängige Zuordnung und Sichtbarkeit. Belegung, Reihenfolge, eingeklappte Panels und Breiten werden gespeichert; bisherige Sitzungen werden übernommen. Bei schmalen Fenstern begrenzt Morrow die Breiten zugunsten des Editors. Reicht der Platz nicht für beide Seiten, erscheint ein Hinweis zum Wechseln der vorübergehend ausgeblendeten Seite; das gespeicherte Layout bleibt erhalten.
+Das **⋯**-Menü des aktiven Panels bietet **Move panel to left/right**, **Hide panel** und **Show …** für weitere Ansichten derselben Seite. **View → Arrange sidebar panels…** und **Settings → Layout** bieten dieselbe Zuordnung und Sichtbarkeit. Zuordnung, aktiver Tab und Breiten werden gespeichert; bisherige Sitzungen werden übernommen. Bei schmalen Fenstern begrenzt Morrow die Breiten zugunsten des Editors. Reicht der Platz nicht für beide Seiten, erscheint ein Hinweis zum Wechseln der vorübergehend ausgeblendeten Seite; das gespeicherte Layout bleibt erhalten.
 
 ## Bereiche für Agenten markieren
 
@@ -134,8 +136,8 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 
 | Aufgabe | Beispiele |
 | --- | --- |
-| Bewegen | `h j k l`, `w b e`, `W B E` |
-| Zeilen- und Dateigrenzen | `0 ^ $`, `gg`, `G`, `42G` |
+| Bewegen | `h j k l`, `w b e ge`, `W B E gE` |
+| Zeilen- und Dateigrenzen | `0 ^ $ g_`, `gg`, `G`, `42G`, `8\|`, `Enter`, `+` / `-` |
 | Klammern / Absätze | `%`, `{`, `}` |
 | Zeichen in der Datei finden | `f` / `F`, `t` / `T` suchen über Zeilengrenzen hinweg; `;` wiederholt, `,` sucht in Gegenrichtung |
 | Einfügen | `i a I A`, `o O` |
@@ -144,7 +146,8 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 | Anzahl voranstellen | `3w`, `2dd`, `d2w`, `2d3w` |
 | Textobjekte | `ciw`, `daw`, `di(`, `ca{`, `yi"`, `viw` |
 | Klammern und Anführungszeichen | `ysiw)` umschließt ein Wort, `yss"` eine Zeile; `ds"` entfernt, `cs"'` ersetzt; im Visual-Modus `S` + Zeichen |
-| Einrücken / Zeilen verbinden | `>>`, `<<`, `J` |
+| Einrücken / Zeilen verbinden | `>>`, `<<`, `J`; `gJ` verbindet ohne zusätzliche Leerzeichen |
+| Groß-/Kleinschreibung | `~`, `guw`, `gUiw`, `g~$`; in Visual `u`, `U`, `~` |
 | Letzte Änderung wiederholen | `.`; auch Insert-Änderungen werden erfasst |
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
 | Blättern | Ctrl+F / Ctrl+B; Ctrl+D / Ctrl+U für halbe Seiten |
@@ -153,6 +156,8 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 Das unbenannte Kopierregister wird zwischen Tabs geteilt: etwa in einer Datei `yy`, in einer anderen `p`. Es bleibt von der Systemzwischenablage getrennt. Jeder Tab hat seine eigene Undo-Historie; eine zusammenhängende Insert-Änderung wird als Schritt behandelt.
 
 Die Vim-Suche springt schon während der Eingabe zum Treffer und markiert alle sichtbaren Ergebnisse. **Enter** bestätigt und gibt den Editor frei, **Esc** bricht ab und stellt die Ausgangsposition wieder her. Eine leere bestätigte Eingabe wiederholt das letzte Suchmuster. Im Visual-Modus erweitert die Suche die Auswahl; `n` und `N` unterstützen Zählwerte wie `3n`. `:noh` blendet die Treffer-Markierungen aus und behält das Suchmuster für den nächsten Sprung.
+
+**↑/↓** beziehungsweise **Ctrl+P/N** in der Vim-Suche rufen bestätigte Suchmuster auf; die aktuelle Eingabe bleibt beim Zurückkehren erhalten. **Ctrl+W** löscht das Wort vor dem Cursor, **Ctrl+U** den Anfang der Eingabe. **Shift+Enter** in Find springt zum vorherigen Treffer.
 
 Die Zeichensuche `f` / `F` und `t` / `T` reicht bis zum Datei-Ende beziehungsweise Datei-Anfang und funktioniert auch mit Zählwerten, Auswahlen und Operatoren wie `dfx` oder `cfx`. `;` wiederholt die ursprüngliche Richtung, `,` sucht einmal in Gegenrichtung; die Zeichensuche bleibt unabhängig vom Suchmuster für `n` / `N`. `.` wiederholt Textänderungen. `p` / `P` fügen aus dem Vim-Register ein; im Visual-Modus behält `P` dessen Inhalt für weitere Einfügungen bei.
 
@@ -171,6 +176,12 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 - `:q!` Tab schließen und ungespeicherte Änderungen verwerfen.
 - `:e src/main.rs` eine Datei relativ zum Projekt öffnen.
 - `:42` zu Zeile 42 springen; `:noh` die Treffer-Markierungen ausblenden.
+- `:bn` / `:bp` zum nächsten beziehungsweise vorherigen Tab wechseln; `:new` eine Datei anlegen.
+- `:split` / `:vsplit` den Editor unterhalb beziehungsweise rechts teilen; optional folgt ein Dateipfad.
+- `:set wrap` / `:set nowrap` den Zeilenumbruch einstellen; `number`, `nonumber` und `relativenumber` steuern Zeilennummern.
+- `:s/alt/neu/` ersetzt den ersten Treffer der aktuellen Zeile; `:%s/alt/neu/g` ersetzt alle Treffer im Dokument. Bereiche wie `:2,8s/alt/neu/g` und die Visual-Auswahl sind möglich. `i` ignoriert Groß-/Kleinschreibung, `I` erzwingt sie, `n` zählt ohne Änderung, `e` erlaubt null Treffer. Muster verwenden wie die Vim-Suche Rust-Regex-Syntax; `&` und `\1` bis `\9` setzen Treffer und Gruppen in der Ersetzung ein. `\r` erzeugt einen Zeilenumbruch. Die Änderung bildet einen Undo-Schritt; ungültige Muster oder nicht unterstützte Flags verändern keinen Text. Interaktive Bestätigung mit `c` ist nicht enthalten.
+
+Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
 
 Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
