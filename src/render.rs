@@ -10,7 +10,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     mem::size_of,
-    sync::{Arc, Mutex, Weak, mpsc},
+    sync::{Arc, Mutex, OnceLock, Weak, mpsc},
 };
 
 const MAX_DOCUMENT_BYTES: usize = 192 * 1024;
@@ -883,8 +883,8 @@ fn next_request(shared: &Weak<Shared>) -> Option<Request> {
 }
 
 fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
-    // Both the expensive grammar initialization and parser own a private egui
-    // Context. They never lock the UI's memory or font caches.
+    // Grammar initialization stays off the UI thread and is shared by workers.
+    // Each parser keeps its own egui Context and never locks live UI caches.
     let settings = syntax_settings();
     let parser_ctx = egui::Context::default();
     while receiver.recv().is_ok() {
@@ -899,7 +899,7 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
                 &CodeTheme::dark(request.font),
                 &request.text,
                 &request.language,
-                &settings,
+                settings,
             );
             if job.text.len() + job.sections.len() * size_of::<egui::text::LayoutSection>()
                 > MAX_SYNTAX_JOB_BYTES
@@ -941,19 +941,22 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
     }
 }
 
-fn syntax_settings() -> SyntectSettings {
-    let mut settings = SyntectSettings::default();
-    let mut builder = settings.ps.into_builder();
-    builder.add(
-        syntect::parsing::SyntaxDefinition::load_from_str(
-            include_str!("../assets/syntaxes/Dart.sublime-syntax"),
-            true,
-            Some("Dart"),
-        )
-        .expect("the bundled Dart syntax must parse"),
-    );
-    settings.ps = builder.build();
-    settings
+fn syntax_settings() -> &'static SyntectSettings {
+    static SETTINGS: OnceLock<SyntectSettings> = OnceLock::new();
+    SETTINGS.get_or_init(|| {
+        let mut settings = SyntectSettings::default();
+        let mut builder = settings.ps.into_builder();
+        builder.add(
+            syntect::parsing::SyntaxDefinition::load_from_str(
+                include_str!("../assets/syntaxes/Dart.sublime-syntax"),
+                true,
+                Some("Dart"),
+            )
+            .expect("the bundled Dart syntax must parse"),
+        );
+        settings.ps = builder.build();
+        settings
+    })
 }
 
 #[cfg(test)]
