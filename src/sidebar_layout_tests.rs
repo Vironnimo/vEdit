@@ -705,3 +705,131 @@ fn opening_another_project_preserves_empty_and_hidden_sides() {
         assert!(app.visible_sidebar_sides().is_empty());
     }
 }
+
+fn overflowing_explorer_fixture(side: Side, width: f32) -> MorrowApp {
+    let mut app = fixture();
+    let root = app.projects[0].root.clone();
+    let mut tree = workspace::ExplorerTree::new(root.clone());
+    let generation = tree.begin(&root).unwrap();
+    let mut entries: Vec<_> = (0..160)
+        .map(|index| workspace::WorkspaceEntry {
+            path: root.join(format!("file{index:03}.rs")),
+            name: format!("file{index:03}.rs"),
+            is_dir: false,
+        })
+        .collect();
+    entries.push(workspace::WorkspaceEntry {
+        path: root.join("source.rs"),
+        name: "source.rs".into(),
+        is_dir: false,
+    });
+    assert!(tree.complete(
+        &root,
+        generation,
+        Ok(workspace::ExplorerDirectory {
+            root: root.clone(),
+            path: root.clone(),
+            entries,
+            warnings: Vec::new(),
+        })
+    ));
+    app.projects[0].index = Some(tree.snapshot());
+    app.settings.smooth_scroll = false;
+    if side == Side::Right {
+        app.move_sidebar(SidebarView::Explorer, Side::Right);
+        app.set_sidebar_visible(Side::Left, false);
+        app.sidebar_layout.right_width = width;
+    } else {
+        app.set_sidebar_visible(Side::Right, false);
+        app.sidebar_layout.left_width = width;
+    }
+    app
+}
+
+fn assert_sidebar_edge_painted(screen: &mut Harness<'_, MorrowApp>, side: Side, width: f32) {
+    let rect = screen.state().sidebar_region_rect(side).unwrap();
+    assert!(
+        (rect.width() - width).abs() <= 1.0,
+        "header contents must not expand the reserved panel width: {rect:?}, expected {width}"
+    );
+    let inner_edge = match side {
+        Side::Left => rect.right() - 4.0,
+        Side::Right => rect.left() + 4.0,
+    };
+    let scale = screen.ctx.pixels_per_point();
+    let image = screen.render().expect("render sidebar edge pixels");
+    // Check above the tabs, beside scrolled rows and below the scrollbar. These
+    // points stay clear of the one-pixel separator and pointer affordance.
+    for y in [rect.top() + 4.0, rect.center().y, rect.bottom() - 4.0] {
+        let x = (inner_edge * scale).floor() as u32;
+        let y = (y * scale).floor() as u32;
+        assert_eq!(
+            image.get_pixel(x, y).0,
+            PANEL.to_array(),
+            "the sidebar frame must paint its entire reserved edge on {side:?} at {scale}x ({x},{y})"
+        );
+    }
+    let bar = screen
+        .query_all_by_role(egui::accesskit::Role::ScrollBar)
+        .map(|node| node.rect())
+        .find(|bar| {
+            rect.contains_rect(*bar)
+                && bar.width() > 0.0
+                && bar.width() <= 20.0
+                && bar.height() > 100.0
+        })
+        .expect("overflowing Explorer keeps its vertical scrollbar");
+    assert!(bar.top() > rect.top() && bar.bottom() < rect.bottom());
+}
+
+#[test]
+fn sidebar_frame_has_no_unpainted_gutter_at_native_dpi_or_after_resize() {
+    for side in [Side::Left, Side::Right] {
+        let mut screen = visual_tests::harness(overflowing_explorer_fixture(side, 292.0));
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(4);
+        assert_sidebar_edge_painted(&mut screen, side, 292.0);
+        screen
+            .input_mut()
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .native_pixels_per_point = Some(1.25);
+        screen.run_steps(4);
+        assert!((screen.ctx.pixels_per_point() - 1.25).abs() < 0.001);
+        assert_sidebar_edge_painted(&mut screen, side, 292.0);
+        let rect = screen.state().sidebar_region_rect(side).unwrap();
+        let edge = egui::pos2(
+            if side == Side::Left {
+                rect.right()
+            } else {
+                rect.left()
+            },
+            rect.center().y - 90.0,
+        );
+        screen.hover_at(edge);
+        screen.run_steps(2);
+        assert_eq!(
+            screen.output().platform_output.cursor_icon,
+            egui::CursorIcon::ResizeHorizontal
+        );
+        assert_sidebar_edge_painted(&mut screen, side, 292.0);
+        screen.drag_at(edge);
+        screen.run_steps(1);
+        let resized = edge + Vec2::new(if side == Side::Left { 40.0 } else { -40.0 }, 0.0);
+        screen.hover_at(resized);
+        screen.run_steps(2);
+        assert_sidebar_edge_painted(&mut screen, side, 332.0);
+        screen.drop_at(resized);
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(3);
+        assert_sidebar_edge_painted(&mut screen, side, 332.0);
+        // A compact panel must keep actions and the actual scrollbar inside it.
+        match side {
+            Side::Left => screen.state_mut().sidebar_layout.left_width = MIN_SIDEBAR,
+            Side::Right => screen.state_mut().sidebar_layout.right_width = MIN_SIDEBAR,
+        }
+        screen.run_steps(3);
+        assert_sidebar_edge_painted(&mut screen, side, MIN_SIDEBAR);
+    }
+}

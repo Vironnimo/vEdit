@@ -168,13 +168,12 @@ impl MorrowApp {
         rows: &[explorer_navigation::VisibleRow<'_>],
         active: &Option<PathBuf>,
     ) {
-        let explorer_focused = self.explorer_keyboard_focused();
         for row in rows {
             let entry = row.entry;
             ui.push_id(&entry.path, |ui| {
                 let selected = self.explorer_selected(&entry.path);
                 let active_file = !entry.is_dir && active.as_ref() == Some(&entry.path);
-                let emphasized = if explorer_focused {
+                let emphasized = if self.explorer_keyboard_focused() {
                     selected
                 } else {
                     active_file

@@ -770,103 +770,109 @@ impl MorrowApp {
     }
 
     fn sidebar_header(&mut self, ui: &mut egui::Ui, side: Side) {
-        ui.horizontal(|ui| {
-            let tabs_width = (ui.available_width() - 58.0).max(40.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(tabs_width, 26.0),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    egui::ScrollArea::horizontal()
-                        .id_salt(("sidebar_panel_tabs", side == Side::Right))
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 3.0;
-                                for view in self.sidebar_views(side) {
-                                    let active = self.sidebar_selected_view(side) == Some(view);
-                                    let label = if view == SidebarView::SourceControl {
-                                        "Git"
-                                    } else {
-                                        view.title()
-                                    };
-                                    let tab = ui
-                                        .selectable_label(active, label)
-                                        .on_hover_text(view.title());
-                                    tab.widget_info(|| {
-                                        egui::WidgetInfo::selected(
-                                            egui::WidgetType::SelectableLabel,
-                                            ui.is_enabled(),
-                                            active,
-                                            format!("{} panel tab", view.title()),
-                                        )
-                                    });
-                                    if tab.clicked() {
-                                        self.show_sidebar(view);
-                                        self.focus_sidebar_region(side);
-                                    }
-                                    tab.context_menu(|ui| self.sidebar_panel_menu(ui, view));
-                                    if view == SidebarView::SourceControl {
-                                        git_panel::refresh_indicator(
-                                            ui,
-                                            self.project()
-                                                .is_some_and(|project| project.git_loading),
-                                        );
-                                    }
-                                }
-                            });
-                        });
-                },
-            );
-            let selected = self.sidebar_selected_view(side);
-            let menu = ui.menu_button("⋯", |ui| {
-                if let Some(view) = selected {
-                    self.sidebar_panel_menu(ui, view);
-                    ui.separator();
-                }
-                for view in VIEWS {
-                    if self.sidebar_side(view) == side
-                        && !self.sidebar_panel_open(view)
-                        && ui.button(format!("Show {}", view.title())).clicked()
-                    {
-                        self.show_sidebar(view);
-                        self.focus_sidebar_region(side);
-                        ui.close();
-                    }
-                }
-            });
-            menu.response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    ui.is_enabled(),
-                    selected.map_or_else(
-                        || "Sidebar panels".to_owned(),
-                        |view| format!("{} panel actions", view.title()),
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                let close = small_button(
+                    ui,
+                    "×",
+                    &format!(
+                        "Hide {} sidebar",
+                        if side == Side::Left { "left" } else { "right" }
                     ),
-                )
-            });
-            let close = small_button(
-                ui,
-                "×",
-                &format!(
-                    "Hide {} sidebar",
-                    if side == Side::Left { "left" } else { "right" }
-                ),
-            );
-            close.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    ui.is_enabled(),
-                    if side == Side::Left {
-                        "Hide left sidebar"
-                    } else {
-                        "Hide right sidebar"
+                );
+                close.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        if side == Side::Left {
+                            "Hide left sidebar"
+                        } else {
+                            "Hide right sidebar"
+                        },
+                    )
+                });
+                if close.clicked() {
+                    self.set_sidebar_visible(side, false);
+                }
+                let selected = self.sidebar_selected_view(side);
+                let menu = ui.menu_button("⋯", |ui| {
+                    if let Some(view) = selected {
+                        self.sidebar_panel_menu(ui, view);
+                        ui.separator();
+                    }
+                    for view in VIEWS {
+                        if self.sidebar_side(view) == side
+                            && !self.sidebar_panel_open(view)
+                            && ui.button(format!("Show {}", view.title())).clicked()
+                        {
+                            self.show_sidebar(view);
+                            self.focus_sidebar_region(side);
+                            ui.close();
+                        }
+                    }
+                });
+                menu.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        selected.map_or_else(
+                            || "Sidebar panels".to_owned(),
+                            |view| format!("{} panel actions", view.title()),
+                        ),
+                    )
+                });
+                // Measure both actions first. A guessed reserve can expand the
+                // panel response past its paint clip and leave an unpainted gutter.
+                let tabs_width = ui.available_width().max(1.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(tabs_width, 26.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt(("sidebar_panel_tabs", side == Side::Right))
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
+                                    for view in self.sidebar_views(side) {
+                                        let active = self.sidebar_selected_view(side) == Some(view);
+                                        let label = if view == SidebarView::SourceControl {
+                                            "Git"
+                                        } else {
+                                            view.title()
+                                        };
+                                        let tab = ui
+                                            .selectable_label(active, label)
+                                            .on_hover_text(view.title());
+                                        tab.widget_info(|| {
+                                            egui::WidgetInfo::selected(
+                                                egui::WidgetType::SelectableLabel,
+                                                ui.is_enabled(),
+                                                active,
+                                                format!("{} panel tab", view.title()),
+                                            )
+                                        });
+                                        if tab.clicked() {
+                                            self.show_sidebar(view);
+                                            self.focus_sidebar_region(side);
+                                        }
+                                        tab.context_menu(|ui| self.sidebar_panel_menu(ui, view));
+                                        if view == SidebarView::SourceControl {
+                                            git_panel::refresh_indicator(
+                                                ui,
+                                                self.project()
+                                                    .is_some_and(|project| project.git_loading),
+                                            );
+                                        }
+                                    }
+                                });
+                            });
                     },
-                )
-            });
-            if close.clicked() {
-                self.set_sidebar_visible(side, false);
-            }
-        });
+                );
+            },
+        );
     }
 
     fn render_sidebar_panel(&mut self, ui: &mut egui::Ui, side: Side) {

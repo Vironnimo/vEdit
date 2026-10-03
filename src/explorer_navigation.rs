@@ -614,12 +614,20 @@ impl MorrowApp {
             if response.clicked() && is_dir && !state.expanded.remove(path) {
                 state.expanded.insert(path.into());
             }
-            if let Some(tab) = self.tab_mut() {
-                tab.focus = false;
+            if response.clicked() {
+                // A folder has exactly the same input ownership as a file
+                // row. Clear pending editor/search owners and restore the
+                // Explorer widget on the following render, when native focus
+                // changes from this pointer click have finished.
+                self.focus_explorer();
+            } else {
+                if let Some(tab) = self.tab_mut() {
+                    tab.focus = false;
+                }
+                self.ctx
+                    .memory_mut(|memory| memory.request_focus(focus_id(&root)));
+                lock_explorer_focus(&self.ctx, focus_id(&root));
             }
-            self.ctx
-                .memory_mut(|memory| memory.request_focus(focus_id(&root)));
-            lock_explorer_focus(&self.ctx, focus_id(&root));
             self.ctx.request_repaint();
         }
         let selected = self.explorer_selected(path);
@@ -800,6 +808,132 @@ mod tests {
     fn selected(app: &MorrowApp) -> Option<PathBuf> {
         let root = &app.project()?.root;
         app.explorer_navigation.projects.get(root)?.selected.clone()
+    }
+
+    fn selected_row_is_filled(screen: &Harness<'_, MorrowApp>, label: &str) -> bool {
+        let row = screen.get_by_label(label).rect();
+        let visuals = &screen.ctx.style_of(screen.ctx.theme()).visuals;
+        let fill = visuals
+            .selection
+            .bg_fill
+            .lerp_to_gamma(visuals.panel_fill, 0.24);
+        screen.output().shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::epaint::Shape::Rect(rect)
+                if rect.fill == fill && rect.rect.contains(row.center())
+                    && rect.rect.width() > row.width() * 0.8)
+        })
+    }
+
+    #[test]
+    fn folder_and_disclosure_clicks_show_selection_and_own_vim_navigation_in_full_editor() {
+        for disclosure in [false, true] {
+            for pending_find_focus in [false, true] {
+                let (fixture, app) = Fixture::new(0);
+                let mut screen = visual_tests::harness(app);
+                screen.state_mut().focus_editor();
+                screen.run_steps(3);
+                let document = screen.state().tab().unwrap().id;
+                let document_path = screen.state().tab().unwrap().path.clone();
+                let folder = screen.get_by_label("src").rect();
+                let pointer = if disclosure {
+                    egui::pos2(folder.left() + 15.0, folder.center().y)
+                } else {
+                    folder.center()
+                };
+                // A pending Find focus request is a real editor owner rendered
+                // after the sidebar. A folder click must win that request just
+                // as clicking a file does, without clearing the user's query.
+                screen.state_mut().find_visible = pending_find_focus;
+                screen.state_mut().find_focus = pending_find_focus;
+                screen.state_mut().find_text = "Plan".into();
+                screen.input_mut().events.extend([
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::PointerButton {
+                        pos: pointer,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: pointer,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                screen.run_steps(1);
+                assert_eq!(selected(screen.state()), Some(fixture.0.join("src")));
+                assert!(
+                    screen.state().explorer_keyboard_focused(),
+                    "folder owns input immediately; disclosure={disclosure}, pending Find={pending_find_focus}"
+                );
+                assert!(
+                    selected_row_is_filled(&screen, "src"),
+                    "folder selection must be filled in the pointer frame"
+                );
+                screen.hover_at(egui::pos2(-20.0, -20.0));
+                screen.run_steps(3);
+                assert!(screen.state().explorer_keyboard_focused());
+                assert!(
+                    selected_row_is_filled(&screen, "src"),
+                    "selection must remain visible after the pointer leaves"
+                );
+                assert!(screen.state().explorer_expanded(&fixture.0.join("src")));
+
+                screen.input_mut().events.extend([
+                    egui::Event::Key {
+                        key: Key::J,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Text("j".into()),
+                    egui::Event::Key {
+                        key: Key::J,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                screen.run_steps(2);
+                assert_eq!(selected(screen.state()), Some(fixture.0.join("src/nested")));
+                key(&mut screen, Key::L, egui::Modifiers::NONE);
+                assert!(
+                    screen
+                        .state()
+                        .explorer_expanded(&fixture.0.join("src/nested"))
+                );
+                key(&mut screen, Key::J, egui::Modifiers::NONE);
+                assert_eq!(
+                    selected(screen.state()),
+                    Some(fixture.0.join("src/nested/deep.rs"))
+                );
+                key(&mut screen, Key::K, egui::Modifiers::NONE);
+                assert_eq!(selected(screen.state()), Some(fixture.0.join("src/nested")));
+                key(&mut screen, Key::H, egui::Modifiers::NONE);
+                assert!(
+                    !screen
+                        .state()
+                        .explorer_expanded(&fixture.0.join("src/nested"))
+                );
+                key(&mut screen, Key::H, egui::Modifiers::NONE);
+                assert_eq!(selected(screen.state()), Some(fixture.0.join("src")));
+                key(&mut screen, Key::H, egui::Modifiers::NONE);
+                assert!(!screen.state().explorer_expanded(&fixture.0.join("src")));
+
+                assert_eq!(
+                    screen.state().projects[0].tabs.len(),
+                    1,
+                    "folder navigation must never open a document"
+                );
+                assert_eq!(screen.state().tab().unwrap().id, document);
+                assert_eq!(screen.state().tab().unwrap().path, document_path);
+                assert_eq!(screen.state().tab().unwrap().text, "# Plan\n");
+                assert_eq!(screen.state().find_text, "Plan");
+            }
+        }
     }
 
     #[test]
