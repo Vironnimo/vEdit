@@ -2,7 +2,7 @@
 use super::*;
 
 impl MorrowApp {
-    pub(super) fn save_status_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn save_status_ui(&mut self, ui: &mut egui::Ui, show_autosave: bool) {
         let autosave = self.settings.autosave;
         let save_binding = self.shortcut_label(keybindings::Action::Save);
         let save = if save_binding.is_empty() {
@@ -75,6 +75,9 @@ impl MorrowApp {
             };
             ui.label(RichText::new(label).size(10.5).color(color))
                 .on_hover_text(hint);
+        }
+        if !show_autosave {
+            return;
         }
         let label = if autosave {
             "Auto save on"

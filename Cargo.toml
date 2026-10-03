@@ -1,6 +1,6 @@
 [package]
 name = "morrow"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2024"
 description = "A calm, multi-project code editor for Windows"
 license = "MIT"
@@ -30,7 +30,7 @@ egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
 egui-wgpu = { version = "0.36.2", default-features = false }
 
 [patch.crates-io]
-# Windows mixed-DPI titlebar drags: see vendor/winit/MORROW_PATCH.md.
+# Windows mixed-DPI dragging and custom chrome: see vendor/winit/MORROW_PATCH.md.
 winit = { path = "vendor/winit" }
 
 [profile.release]

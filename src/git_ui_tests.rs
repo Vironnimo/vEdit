@@ -16,8 +16,15 @@ fn flexible_sidebars_and_zoom_screenshots() {
         screen.query_by_label("Go to file").is_none(),
         "the optional file finder must not overlap menus at high zoom"
     );
+    for menu in ["File", "View", "Run"] {
+        assert!(
+            screen.query_by_label(menu).is_none(),
+            "menus live inside Main menu"
+        );
+    }
     assert!(
-        screen.get_by_label("File").rect().right() <= screen.get_by_label("View").rect().left()
+        screen.get_by_label("Main menu").rect().bottom()
+            < screen.get_by_label("Explorer").rect().top()
     );
     assert!(
         screen.get_by_label("src").rect().bottom() < screen.ctx.content_rect().bottom() - 27.0,
@@ -52,13 +59,7 @@ fn independently_arranged_sidebar_screenshots() {
         .state()
         .sidebar_region_rect(sidebar_layout::Side::Left)
         .unwrap();
-    assert!(
-        screen
-            .get_by_label("Source control panel tab")
-            .rect()
-            .right()
-            <= left.right() - 9.0
-    );
+    assert!(screen.get_by_label("Explorer panel title").rect().right() <= left.right() - 9.0);
     screen.state_mut().show_sidebar(SidebarView::SourceControl);
     screen.run_steps(3);
     assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));

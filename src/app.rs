@@ -22,6 +22,8 @@ use std::{
 mod agent_marks_control;
 #[path = "agent_marks_ui.rs"]
 mod agent_marks_ui;
+#[path = "app_menu.rs"]
+mod app_menu;
 #[path = "context_actions.rs"]
 mod context_actions;
 #[path = "control.rs"]
@@ -55,6 +57,8 @@ mod language_settings;
 mod language_support;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "project_status.rs"]
+mod project_status;
 #[path = "project_tasks.rs"]
 mod project_tasks;
 #[path = "save_state.rs"]
@@ -216,8 +220,12 @@ struct Project {
     git_view: git_panel::GitViewState,
     git_error: Option<String>,
     git_loading: bool,
+    git_status_request: Option<u64>,
     git_refresh_pending: bool,
     last_git_refresh: Instant,
+    git_indicator_count: Option<usize>,
+    git_indicator_request: Option<u64>,
+    last_git_indicator_refresh: Instant,
     commit_message: String,
     languages: HashMap<String, language_support::LanguageSession>,
     diagnostics: HashMap<PathBuf, Vec<crate::lsp::Diagnostic>>,
@@ -254,8 +262,12 @@ impl Project {
             git_view: git_panel::GitViewState::default(),
             git_error: None,
             git_loading: false,
+            git_status_request: None,
             git_refresh_pending: false,
             last_git_refresh: Instant::now() - Duration::from_secs(30),
+            git_indicator_count: None,
+            git_indicator_request: None,
+            last_git_indicator_refresh: Instant::now() - Duration::from_secs(30),
             commit_message: String::new(),
             languages: HashMap::from([(
                 "rust".into(),
@@ -448,7 +460,13 @@ enum WorkerResult {
     },
     GitStatus {
         root: PathBuf,
+        request_id: u64,
         result: Result<GitSnapshot, String>,
+    },
+    GitIndicator {
+        root: PathBuf,
+        request_id: u64,
+        result: Result<Option<usize>, String>,
     },
     GitCommit {
         root: PathBuf,
@@ -634,6 +652,7 @@ pub struct MorrowApp {
     close_after_save: bool,
     exit_ready: bool,
     git_busy: Option<PathBuf>,
+    git_indicator_requests: HashMap<u64, PathBuf>,
     diff: Option<(String, String)>,
     diff_view: crate::git_diff_view::DiffView,
     diff_generation: u64,
@@ -880,6 +899,7 @@ impl MorrowApp {
             close_after_save: false,
             exit_ready: false,
             git_busy: None,
+            git_indicator_requests: HashMap::new(),
             diff: None,
             diff_view: crate::git_diff_view::DiffView::default(),
             diff_generation: 0,
@@ -1665,13 +1685,25 @@ impl MorrowApp {
                     }
                     self.session_dirty = true;
                 }
-                WorkerResult::GitStatus { root, result } => {
-                    if let Some(index) = self.projects.iter().position(|p| p.root == root) {
+                WorkerResult::GitStatus {
+                    root,
+                    request_id,
+                    result,
+                } => {
+                    if let Some(index) = self
+                        .projects
+                        .iter()
+                        .position(|p| p.root == root && p.git_status_request == Some(request_id))
+                    {
                         let p = &mut self.projects[index];
                         p.git_loading = false;
+                        p.git_status_request = None;
                         p.last_git_refresh = Instant::now();
+                        p.last_git_indicator_refresh = Instant::now();
+                        p.git_indicator_request = None;
                         match result {
                             Ok(s) => {
+                                p.git_indicator_count = s.root.as_ref().map(|_| s.files.len());
                                 let repository = s.root.as_ref().unwrap_or(&p.root);
                                 p.git_view
                                     .hover_stats_pending
@@ -1712,13 +1744,23 @@ impl MorrowApp {
                                 }
                                 p.git_error = None;
                             }
-                            Err(e) => p.git_error = Some(e),
+                            Err(e) => {
+                                p.git_indicator_count = None;
+                                p.git_error = Some(e);
+                            }
                         }
                         let refresh = std::mem::take(&mut p.git_refresh_pending);
                         if refresh {
                             self.refresh_git(index, true);
                         }
                     }
+                }
+                WorkerResult::GitIndicator {
+                    root,
+                    request_id,
+                    result,
+                } => {
+                    self.finish_git_indicator(root, request_id, result);
                 }
                 WorkerResult::GitCommit { root, hash, result } => {
                     if let Some(p) = self.projects.iter_mut().find(|p| p.root == root) {
@@ -1981,6 +2023,7 @@ impl MorrowApp {
         }
     }
     fn refresh_git(&mut self, index: usize, force: bool) {
+        static NEXT_STATUS_REQUEST: AtomicU64 = AtomicU64::new(1);
         let interval = if self.sidebar_view_visible(SidebarView::SourceControl) {
             Duration::from_secs(3)
         } else {
@@ -1997,6 +2040,10 @@ impl MorrowApp {
             return;
         }
         p.git_loading = true;
+        let request_id = NEXT_STATUS_REQUEST.fetch_add(1, Ordering::Relaxed);
+        p.git_status_request = Some(request_id);
+        // An older lightweight inactive refresh must not supersede this snapshot.
+        p.git_indicator_request = None;
         let root = p.root.clone();
         let previous_history = p.git_history_snapshot.clone();
         let refresh_history = std::mem::take(&mut p.git_history_refresh_requested);
@@ -2055,7 +2102,11 @@ impl MorrowApp {
                     })
                 }
             })();
-            WorkerResult::GitStatus { root, result }
+            WorkerResult::GitStatus {
+                root,
+                request_id,
+                result,
+            }
         });
     }
     fn git_action(&mut self, root: PathBuf, action: GitAction) {
@@ -3748,319 +3799,50 @@ impl MorrowApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("header")
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(Margin::symmetric(12, 5)),
-            )
+        let options = crate::window_chrome::ChromeOptions {
+            interaction_allowed: !self.chrome_blocked(),
+            native_titlebar: self.ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new("native_window_chrome"))
+                    .unwrap_or(false)
+            }),
+            native_maximize_state: self.ctx.data(|data| {
+                data.get_temp::<(bool, bool)>(egui::Id::new("native_window_maximize_state"))
+                    .unwrap_or_default()
+            }),
+        };
+        let geometry = egui::Panel::top("header")
+            .exact_size(crate::window_chrome::HEIGHT)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::ZERO))
             .show(ui, |ui| {
-                egui::MenuBar::new()
-                    .style(|style: &mut egui::Style| {
-                        style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                        style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-                        style.visuals.widgets.hovered.weak_bg_fill = HOVER;
-                        style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-                        style.visuals.widgets.active.bg_stroke = Stroke::NONE;
-                        style.spacing.item_spacing.x = 3.0;
-                    })
-                    .ui(ui, |ui| {
-                        brand(ui, 21.0);
-                        ui.label(RichText::new("morrow").size(16.0).strong().color(TEXT));
-                        ui.add_space(15.0);
-                        self.workspace_header_button(ui);
-                        ui.add_space(10.0);
-                        design::menu(ui, "File", "Files, projects and saving", |ui| {
-                            if design::menu_item(
-                                ui,
-                                "Open project",
-                                &self.shortcut_label(keybindings::Action::OpenProject),
-                                "Add a project folder",
-                            )
-                            .clicked()
-                            {
-                                self.pick_project();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Open file",
-                                &self.shortcut_label(keybindings::Action::OpenFile),
-                                "Choose a file from disk",
-                            )
-                            .clicked()
-                            {
-                                self.pick_file();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "New file",
-                                &self.shortcut_label(keybindings::Action::NewFile),
-                                "Create an untitled draft",
-                            )
-                            .clicked()
-                            {
-                                self.new_file();
-                                ui.close();
-                            }
-                            ui.separator();
-                            if design::menu_item(ui, "Save", &self.shortcut_label(keybindings::Action::Save), "Save the current document")
-                                .clicked()
-                            {
-                                self.save_current();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Save all",
-                                &self.shortcut_label(keybindings::Action::SaveAll),
-                                "Save changes in every project",
-                            )
-                            .clicked()
-                            {
-                                self.save_all();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Save as...",
-                                &self.shortcut_label(keybindings::Action::SaveAs),
-                                "Save this document to a new path",
-                            )
-                            .clicked()
-                            {
-                                if let Some(id) = self.tab().map(|tab| tab.id) {
-                                    self.request_save_as(id);
-                                }
-                                ui.close();
-                            }
-                            ui.separator();
-                            if design::menu_item(
-                                ui,
-                                "Settings",
-                                &self.shortcut_label(keybindings::Action::Settings),
-                                "Vim, font and editor preferences",
-                            )
-                            .clicked()
-                            {
-                                self.settings_open = true;
-                                ui.close();
-                            }
-                        });
-                        design::menu(ui, "View", "Navigate and arrange your workspace", |ui| {
-                            if design::menu_item(ui, "For agent", &self.shortcut_label(keybindings::Action::AgentMarks), "Open selected blocks across all projects, add notes, or restore the last collection").clicked() {
-                                self.open_agent_marks();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Bookmarks",
-                                &self.shortcut_label(keybindings::Action::Bookmarks),
-                                "Search saved file and cursor positions",
-                            )
-                            .clicked()
-                            {
-                                self.open_bookmarks();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Toggle bookmark",
-                                &self.shortcut_label(keybindings::Action::ToggleBookmark),
-                                "Mark or unmark the current file and line",
-                            )
-                            .clicked()
-                            {
-                                self.toggle_bookmark();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Jump to visible text",
-                                &self.shortcut_label(keybindings::Action::ScreenJump),
-                                "Find a visible match and jump by its label",
-                            )
-                            .clicked()
-                            {
-                                self.start_screen_jump();
-                                ui.close();
-                            }
-                            ui.separator();
-                            if design::menu_item(
-                                ui,
-                                "Explorer",
-                                &self.shortcut_label(keybindings::Action::FocusExplorer),
-                                "Focus project files · Arrows or J/K to navigate · F2 to rename",
-                            )
-                            .clicked()
-                            {
-                                self.focus_explorer();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Search project",
-                                &self.shortcut_label(keybindings::Action::SearchProject),
-                                "Find text across files",
-                            )
-                            .clicked()
-                            {
-                                self.open_project_search();
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Source control",
-                                &self.shortcut_label(keybindings::Action::SourceControl),
-                                "Changes, staging and commits",
-                            )
-                            .clicked()
-                            {
-                                self.show_sidebar(SidebarView::SourceControl);
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Problems",
-                                &self.shortcut_label(keybindings::Action::Problems),
-                                "Language errors and warnings",
-                            )
-                            .clicked()
-                            {
-                                self.output_visible = true;
-                                self.problems_visible = true;
-                                ui.close();
-                            }
-                            if design::menu_item(
-                                ui,
-                                "Output",
-                                &self.shortcut_label(keybindings::Action::ToggleOutput),
-                                "Show or hide command output",
-                            )
-                            .clicked()
-                            {
-                                self.output_visible = !self.output_visible;
-                                self.problems_visible = false;
-                                ui.close();
-                            }
-                            if self
-                                .tab()
-                                .is_some_and(|tab| is_markdown(tab.path.as_deref()))
-                                && design::menu_item(
-                                    ui,
-                                    "Markdown source / preview",
-                                    &self.shortcut_label(keybindings::Action::MarkdownPreview),
-                                    "Read Markdown or edit its source",
-                                )
-                                .clicked()
-                            {
-                                let view = if self.tab().is_some_and(|tab| {
-                                    tab.agent_view == crate::cli::DocumentView::Preview
-                                }) {
-                                    crate::cli::DocumentView::Source
-                                } else {
-                                    crate::cli::DocumentView::Preview
-                                };
-                                self.set_document_view(view);
-                                ui.close();
-                            }
-                            ui.separator();
-                            self.sidebar_menu_ui(ui);
-                            self.split_menu_ui(ui);
-                            ui.separator();
-                            if ui
-                                .checkbox(&mut self.settings.word_wrap, "Word wrap")
-                                .on_hover_text(format!("Wrap long lines · {}", self.shortcut_label(keybindings::Action::ToggleWrap)))
-                                .changed()
-                            {
-                                self.session_dirty = true;
-                            }
-                            if ui
-                                .checkbox(&mut self.settings.vim, "Vim motions")
-                                .on_hover_text("Normal, Insert, Visual and line Visual modes")
-                                .changed()
-                            {
-                                self.session_dirty = true;
-                            }
-                        });
-                        design::menu(ui, "Run", "Build, test and run commands", |ui| {
-                            if design::menu_item(
-                                ui,
-                                "Restart language analysis",
-                                &self.shortcut_label(keybindings::Action::RestartLanguage),
-                                "Reconnect the active language server and refresh diagnostics and suggestions",
-                            )
-                            .clicked()
-                            {
-                                self.restart_active_language();
-                                ui.close();
-                            }
-                            ui.separator();
-                            if design::menu_item(
-                                ui,
-                                "Open terminal",
-                                &self.shortcut_label(keybindings::Action::Terminal),
-                                "Open PowerShell in this project",
-                            )
-                            .clicked()
-                            {
-                                self.open_terminal();
-                                ui.close();
-                            }
-                            ui.separator();
-                            for (name, action, command) in [
-                                ("Check", keybindings::Action::CheckProject, project_tasks::ProjectTaskAction::Check),
-                                ("Test", keybindings::Action::TestProject, project_tasks::ProjectTaskAction::Test),
-                                ("Build", keybindings::Action::BuildProject, project_tasks::ProjectTaskAction::Build),
-                                ("Run active file", keybindings::Action::RunFile, project_tasks::ProjectTaskAction::RunFile),
-                            ] {
-                                if design::menu_item(ui, name, &self.shortcut_label(action), "Use this project's configured command").clicked() {
-                                    self.run_project_task(command);
-                                    ui.close();
-                                }
-                            }
-                            if design::menu_item(ui, "Configure project tasks", &self.shortcut_label(keybindings::Action::ConfigureTasks), "Choose commands and runtime for this project").clicked() {
-                                self.open_project_task_settings();
-                                ui.close();
-                            }
-                            ui.separator();
-                            if design::menu_item(
-                                ui,
-                                "Custom command",
-                                "",
-                                "Run a command and view its output",
-                            )
-                            .clicked()
-                            {
-                                self.output_visible = true;
-                                self.problems_visible = false;
-                                ui.close();
-                            }
-                        });
-                        if ui.available_width() >= 145.0 {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let search = ui.add_sized(
-                                [ui.available_width().min(228.0), 28.0],
-                                egui::Button::new(
-                                    RichText::new("Go to file").size(12.0).color(MUTED),
-                                )
-                                .shortcut_text(RichText::new(self.shortcut_label(keybindings::Action::QuickOpen)).size(10.5).color(MUTED))
-                                .frame_when_inactive(false)
-                                .corner_radius(5.0),
-                            );
-                            if search
-                                .on_hover_text(format!("Find a file: {} · Commands: {}", self.shortcut_label(keybindings::Action::QuickOpen), self.shortcut_label(keybindings::Action::CommandPalette)))
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .clicked()
-                            {
-                                self.open_palette(Palette::Files);
-                            }
-                        });
-                        }
-                    });
-            });
+                crate::window_chrome::draw_top_bar(ui, options, |ui| {
+                    self.workspace_header_button(ui);
+                })
+            })
+            .inner;
+        if geometry.close_requested {
+            self.request_close(CloseAction::Exit);
+        }
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("morrow_window_chrome"), geometry);
+        });
     }
+
+    fn chrome_blocked(&self) -> bool {
+        egui::Popup::is_any_open(&self.ctx)
+            || self.workspace_picker_open()
+            || self.palette.is_some()
+            || self.picker.is_some()
+            || self.settings_open
+            || self.agent_marks_modal_open()
+            || self.close_action.is_some()
+            || self.context_file_dialog.is_some()
+            || self.save_as.is_some()
+            || self.diff.is_some()
+            || self.git_detail_open()
+            || self.navigation_modal_open()
+    }
+
     fn switch_project(&mut self, index: usize) {
         if index < self.projects.len() {
             self.set_active_project_context(index);
@@ -4069,9 +3851,6 @@ impl MorrowApp {
         }
     }
     fn activity(&mut self, ui: &mut egui::Ui) {
-        if self.projects.is_empty() {
-            return;
-        }
         egui::Panel::left("activity")
             .exact_size(49.0)
             .resizable(false)
@@ -4081,36 +3860,40 @@ impl MorrowApp {
                     .inner_margin(Margin::symmetric(5, 8)),
             )
             .show(ui, |ui| {
-                for (view, icon, hint) in [
-                    (
-                        SidebarView::Explorer,
-                        Icon::Files,
-                        format!(
-                            "Explorer · {}",
-                            self.shortcut_label(keybindings::Action::FocusExplorer)
+                self.main_menu_button(ui);
+                ui.add_space(9.0);
+                if !self.projects.is_empty() {
+                    for (view, icon, hint) in [
+                        (
+                            SidebarView::Explorer,
+                            Icon::Files,
+                            format!(
+                                "Explorer · {}",
+                                self.shortcut_label(keybindings::Action::FocusExplorer)
+                            ),
                         ),
-                    ),
-                    (
-                        SidebarView::Search,
-                        Icon::Search,
-                        format!(
-                            "Search project · {}",
-                            self.shortcut_label(keybindings::Action::SearchProject)
+                        (
+                            SidebarView::Search,
+                            Icon::Search,
+                            format!(
+                                "Search project · {}",
+                                self.shortcut_label(keybindings::Action::SearchProject)
+                            ),
                         ),
-                    ),
-                    (
-                        SidebarView::SourceControl,
-                        Icon::Branch,
-                        format!(
-                            "Source control · {}",
-                            self.shortcut_label(keybindings::Action::FocusGit)
+                        (
+                            SidebarView::SourceControl,
+                            Icon::Branch,
+                            format!(
+                                "Source control · {}",
+                                self.shortcut_label(keybindings::Action::FocusGit)
+                            ),
                         ),
-                    ),
-                ] {
-                    if icon_button(ui, icon, self.sidebar_view_visible(view), &hint).clicked() {
-                        self.toggle_sidebar_view(view);
+                    ] {
+                        if icon_button(ui, icon, self.sidebar_view_visible(view), &hint).clicked() {
+                            self.toggle_sidebar_view(view);
+                        }
+                        ui.add_space(6.0);
                     }
-                    ui.add_space(6.0);
                 }
                 if self.review.is_some() {
                     if icon_button(
@@ -4333,6 +4116,8 @@ impl MorrowApp {
         egui::Panel::bottom("status").exact_size(27.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 2)))
             .show(ui, |ui| {
+                let compact = ui.available_width() < 600.0;
+                let narrow = ui.available_width() < 360.0;
                 ui.horizontal(|ui| {
                     let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", BLUE) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
@@ -4346,10 +4131,12 @@ impl MorrowApp {
                         let pending = tab.vim.pending_command();
                         if !pending.is_empty() { ui.label(RichText::new(pending).monospace().size(10.5).color(ORANGE)); }
                     }
-                    if let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
+                    if !narrow && let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
                         let tracking = self.project().and_then(|p| p.git_tracking.as_ref());
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
-                        if design::ghost_button(ui, &branch, &hint).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                        let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(10.5), TEXT)).size().x + 16.0;
+                        let budget = (ui.available_width() - if compact { 290.0 } else { 540.0 }).clamp(30.0, 180.0);
+                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(10.5)).truncate().frame_when_inactive(false)).on_hover_text(&hint).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if let Some(jump) = &self.screen_jump {
                         let hint = if jump.state.query.is_empty() {
@@ -4369,19 +4156,20 @@ impl MorrowApp {
                         if let Some(t) = self.tab() {
                             let (line, col) = t.lines.line_col(&t.text, t.revision, t.vim.cursor);
                             let total = t.lines.line_count(&t.text, t.revision);
-                            ui.label(RichText::new(format!("Ln {line}/{total}, Col {col}")).size(10.5).color(MUTED)).on_hover_text(format!("Current line / total lines · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
+                            let position = if narrow { format!("{line}:{col}") } else { format!("Ln {line}/{total}, Col {col}") };
+                            ui.label(RichText::new(position).size(10.5).color(MUTED)).on_hover_text(format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
                             let selected = t.selection.end.saturating_sub(t.selection.start);
-                            if selected > 0 { ui.label(RichText::new(format!("{selected} selected")).size(10.5).color(ORANGE)).on_hover_text("Selected characters"); }
+                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(10.5).color(ORANGE)).on_hover_text("Selected characters"); }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            ui.label(RichText::new(language_name(t.path.as_deref())).size(10.5).color(MUTED)).on_hover_text(details);
+                            if !compact { ui.label(RichText::new(language_name(t.path.as_deref())).size(10.5).color(MUTED)).on_hover_text(details); }
                         }
-                        self.indentation_status_ui(ui);
-                        self.save_status_ui(ui);
-                        if let Some(project) = self.project() {
+                        if !compact { self.indentation_status_ui(ui); }
+                        self.save_status_ui(ui, !narrow);
+                        if !compact && let Some(project) = self.project() {
                             let problem_count = project.diagnostics.values().map(Vec::len).sum::<usize>();
                             if problem_count > 0 && design::ghost_button(ui, &format!("{problem_count} problems"), &format!("Show errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems))).clicked() { self.problems_visible = true; self.output_visible = true; }
                         }
-                        self.rust_analysis_status_ui(ui);
+                        if !compact { self.rust_analysis_status_ui(ui); }
                     });
                 });
             });
@@ -7058,6 +6846,7 @@ impl MorrowApp {
             self.handle_vim();
         }
         self.refresh_git(self.active_project, false);
+        self.refresh_inactive_git_indicators();
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();
             if elapsed >= Duration::from_millis(250) {
@@ -7109,13 +6898,56 @@ impl MorrowApp {
     }
 }
 impl eframe::App for MorrowApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        let window = frame.winit_window().cloned();
+        #[cfg(windows)]
+        self.ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("native_window_chrome"), window.is_some());
+            data.insert_temp(
+                egui::Id::new("native_window_maximize_state"),
+                window
+                    .as_ref()
+                    .map(|window| window.custom_titlebar_maximize_state())
+                    .unwrap_or_default(),
+            );
+        });
+        #[cfg(not(windows))]
+        let _ = frame;
         if self.ctx.input(|i| i.viewport().close_requested()) && !self.exit_ready {
             self.ctx
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.request_close(CloseAction::Exit);
         }
         self.draw_ui(ui);
+        #[cfg(windows)]
+        if let Some(window) = window {
+            let geometry = self.ctx.data(|data| {
+                data.get_temp::<crate::window_chrome::ChromeGeometry>(egui::Id::new(
+                    "morrow_window_chrome",
+                ))
+            });
+            if !self.chrome_blocked()
+                && let Some(geometry) = geometry
+            {
+                let scale = self.ctx.pixels_per_point();
+                let physical = |rect: egui::Rect| {
+                    [
+                        (rect.left() * scale).floor() as i32,
+                        (rect.top() * scale).floor() as i32,
+                        (rect.right() * scale).ceil() as i32,
+                        (rect.bottom() * scale).ceil() as i32,
+                    ]
+                };
+                let draggable: Vec<_> = geometry.drag_regions.into_iter().map(physical).collect();
+                window.set_custom_titlebar_regions(
+                    &draggable,
+                    geometry.native_maximize.map(physical),
+                );
+            } else {
+                window.set_custom_titlebar_regions(&[], None);
+            }
+        }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.flush_recovery();
@@ -7254,6 +7086,7 @@ fn accent_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 #[derive(Clone, Copy)]
 enum Icon {
+    Menu,
     Files,
     Search,
     Branch,
@@ -7262,7 +7095,23 @@ enum Icon {
     Review,
 }
 fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(35.0), egui::Sense::click());
+    let response = ui.add_sized(
+        Vec2::splat(35.0),
+        egui::Button::new("").frame_when_inactive(false),
+    );
+    let rect = response.rect;
+    let label = match icon {
+        Icon::Menu => "Main menu",
+        Icon::Files => "Explorer",
+        Icon::Search => "Search project",
+        Icon::Branch => "Source control",
+        Icon::Console => "Output",
+        Icon::Settings => "Settings",
+        Icon::Review => "Agent review",
+    };
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
     let c = rect.center();
     let painter = ui.painter();
     let color = if selected {
@@ -7276,10 +7125,23 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
     if selected || response.hovered() {
         painter.rect_filled(rect, 5.0, if selected { SURFACE } else { HOVER });
     }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            5.0,
+            Stroke::new(1.5, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
     let line = |a: Vec2, b: Vec2| {
         painter.line_segment([c + a, c + b], stroke);
     };
     match icon {
+        Icon::Menu => {
+            for y in [-6.0, 0.0, 6.0] {
+                line(Vec2::new(-7.0, y), Vec2::new(7.0, y));
+            }
+        }
         Icon::Files => {
             painter.rect_stroke(
                 egui::Rect::from_center_size(c + Vec2::new(2.0, 2.0), Vec2::new(12.0, 16.0)),
@@ -7348,6 +7210,10 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "app_menu_tests.rs"]
+mod app_menu_tests;
 
 #[cfg(test)]
 #[path = "interaction_tests.rs"]

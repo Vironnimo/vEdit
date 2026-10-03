@@ -167,7 +167,7 @@ pub(super) fn workspace(app: &mut MorrowApp) {
     );
 }
 
-pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
+pub(super) fn settle_render(screen: &mut Harness<'_, MorrowApp>) {
     // Keep periodic disk/Git/session work out of render-only review fixtures.
     let app = screen.state_mut();
     app.last_disk_check = Instant::now();
@@ -188,6 +188,10 @@ pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
         screen.run_steps(1);
     }
     screen.run_steps(2);
+}
+
+pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
+    settle_render(screen);
     if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
         screen.snapshot_options(
             name,
@@ -250,6 +254,23 @@ fn project_switcher_screenshot() {
     screen.run_steps(3);
     assert!(screen.state().workspace_picker_open());
     snapshot(&mut screen, "morrow_project_picker");
+}
+
+#[test]
+fn project_tabs_and_git_indicators_screenshots() {
+    let mut app = MorrowApp::empty(egui::Context::default());
+    workspace(&mut app);
+    app.projects[0].git_indicator_count = Some(2);
+    for (name, count) in [("vBot", 7), ("notes", 0), ("game-client", 0)] {
+        let mut project = Project::new(std::env::temp_dir().join(name));
+        project.last_git_refresh = Instant::now();
+        project.git_indicator_count = Some(count);
+        app.projects.push(project);
+    }
+    let mut screen = harness(app);
+    snapshot(&mut screen, "morrow_project_tabs");
+    screen.set_size(Vec2::new(500.0, 360.0));
+    snapshot(&mut screen, "morrow_project_tabs_compact");
 }
 
 #[test]
@@ -415,13 +436,15 @@ fn menu_hover_explains_actions_and_keyboard_navigation_preserves_the_document() 
     let mut screen = harness(app);
     screen.run_steps(3);
 
-    screen.get_by_label("File").hover();
-    screen.run_steps(5);
+    screen.get_by_label("Main menu").hover();
+    screen.run_steps(35);
     assert!(
         screen
-            .query_by_label("Files, projects and saving")
+            .query_by_label("File, View and Run actions")
             .is_some()
     );
+    screen.get_by_label("Main menu").click();
+    screen.run_steps(2);
     screen.get_by_label("File").click();
     screen.run_steps(2);
     assert!(screen.query_by_label_contains("Open project").is_some());
@@ -438,6 +461,10 @@ fn menu_hover_explains_actions_and_keyboard_navigation_preserves_the_document() 
     screen.run_steps(1);
     screen.key_press(Key::Escape);
     screen.run_steps(2);
+    if egui::Popup::is_any_open(&screen.ctx) {
+        screen.key_press(Key::Escape);
+        screen.run_steps(2);
+    }
     assert_eq!(screen.state().tab().unwrap().text, original_text);
     assert_eq!(screen.state().tab().unwrap().vim.cursor, original_cursor);
     assert!(screen.query_by_label_contains("Open project").is_none());

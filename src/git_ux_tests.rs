@@ -306,7 +306,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     let mut screen = harness(app, 1000.0, true);
     screen.run_steps(3);
     let idle = [
-        screen.get_by_label("Source control panel tab").rect(),
+        screen.get_by_label("Source control panel title").rect(),
         screen.get_by_label(branch).rect(),
         screen.get_by_label("···").rect(),
     ];
@@ -315,7 +315,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     assert_eq!(
         idle,
         [
-            screen.get_by_label("Source control panel tab").rect(),
+            screen.get_by_label("Source control panel title").rect(),
             screen.get_by_label(branch).rect(),
             screen.get_by_label("···").rect()
         ]
@@ -328,7 +328,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     assert_eq!(
         idle,
         [
-            screen.get_by_label("Source control panel tab").rect(),
+            screen.get_by_label("Source control panel title").rect(),
             screen.get_by_label(branch).rect(),
             screen.get_by_label("···").rect()
         ]

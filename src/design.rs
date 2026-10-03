@@ -59,6 +59,7 @@ pub(crate) fn menu<R>(
             button.right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
         )
         .ui(ui, contents);
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
         return response
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(tooltip);

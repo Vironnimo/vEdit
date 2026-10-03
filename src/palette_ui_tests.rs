@@ -281,19 +281,17 @@ fn active_activity_point(screen: &Harness<'_, MorrowApp>) -> egui::Pos2 {
 }
 
 #[test]
-fn dismissal_over_header_menus_does_not_open_the_menu() {
-    for label in ["File", "View", "Run"] {
-        let (_fixture, app) = Fixture::new(2);
-        let mut screen = harness(app);
-        let point = screen.get_by_label(label).rect().center();
-        let before = editor_state(screen.state());
-        open(&mut screen, Palette::Files);
-        click(&mut screen, point, egui::PointerButton::Primary);
-        assert!(screen.state().palette.is_none(), "{label}");
-        assert!(!egui::Popup::is_any_open(&screen.ctx), "{label}");
-        assert_eq!(editor_state(screen.state()), before);
-        assert_source_focus(&screen);
-    }
+fn dismissal_over_main_menu_does_not_open_the_menu() {
+    let (_fixture, app) = Fixture::new(2);
+    let mut screen = harness(app);
+    let point = screen.get_by_label("Main menu").rect().center();
+    let before = editor_state(screen.state());
+    open(&mut screen, Palette::Files);
+    click(&mut screen, point, egui::PointerButton::Primary);
+    assert!(screen.state().palette.is_none());
+    assert!(!egui::Popup::is_any_open(&screen.ctx));
+    assert_eq!(editor_state(screen.state()), before);
+    assert_source_focus(&screen);
 }
 
 #[test]
@@ -378,7 +376,7 @@ fn preview_dismissal_keeps_reading_view_without_source_focus() {
             .set_document_view(crate::cli::DocumentView::Preview);
         screen.run_steps(3);
         let before = editor_state(screen.state());
-        let point = screen.get_by_label("File").rect().center();
+        let point = screen.get_by_label("Main menu").rect().center();
         open(&mut screen, palette);
         click(&mut screen, point, egui::PointerButton::Primary);
         assert!(screen.state().palette.is_none());

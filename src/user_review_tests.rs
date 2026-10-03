@@ -214,10 +214,11 @@ fn same_named_projects_have_distinct_visible_header_labels_after_switching() {
     }
     app.bind_current_pane();
     let mut screen = harness(app);
-    assert!(painted_text(&screen, "project — client  ▾").is_some());
+    assert!(painted_text(&screen, "project — client").is_some());
+    assert!(painted_text(&screen, "project — server").is_some());
     screen.state_mut().activate_project_layout(1);
     screen.run_steps(3);
-    assert!(painted_text(&screen, "project — server  ▾").is_some());
+    assert!(painted_text(&screen, "project — server").is_some());
     assert!(screen.query_by_label("Switch project").is_some());
 }
 

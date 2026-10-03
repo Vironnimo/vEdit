@@ -1,4 +1,4 @@
-//! One active panel per sidebar, with persisted assignments and compact tabs.
+//! One active panel per sidebar, with persisted assignments and quiet headers.
 use super::*;
 
 const MIN_SIDEBAR: f32 = 200.0;
@@ -601,7 +601,7 @@ impl MorrowApp {
                 });
             });
         }
-        ui.label(RichText::new("Each sidebar shows one panel. Switch with its tabs. Use the panel menu to move it to the other side. Drag the inner edges to resize.").small().color(MUTED));
+        ui.label(RichText::new("Each sidebar shows one panel. Switch with the activity rail or panel menu. Use the panel menu to move it to the other side. Drag the inner edges to resize.").small().color(MUTED));
     }
 
     pub(super) fn sidebars_status(&self) -> serde_json::Value {
@@ -804,7 +804,7 @@ impl MorrowApp {
                     }
                     for view in VIEWS {
                         if self.sidebar_side(view) == side
-                            && !self.sidebar_panel_open(view)
+                            && selected != Some(view)
                             && ui.button(format!("Show {}", view.title())).clicked()
                         {
                             self.show_sidebar(view);
@@ -823,52 +823,31 @@ impl MorrowApp {
                         ),
                     )
                 });
-                // Measure both actions first. A guessed reserve can expand the
-                // panel response past its paint clip and leave an unpainted gutter.
-                let tabs_width = ui.available_width().max(1.0);
+                if selected == Some(SidebarView::SourceControl) {
+                    git_panel::refresh_indicator(
+                        ui,
+                        self.project().is_some_and(|project| project.git_loading),
+                    );
+                }
+                // Measure actions first so a long title cannot expand the panel
+                // response past its paint clip and leave an unpainted gutter.
+                let title = selected.map_or("Sidebar", SidebarView::title);
                 ui.allocate_ui_with_layout(
-                    Vec2::new(tabs_width, 26.0),
+                    Vec2::new(ui.available_width().max(1.0), 26.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt(("sidebar_panel_tabs", side == Side::Right))
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 3.0;
-                                    for view in self.sidebar_views(side) {
-                                        let active = self.sidebar_selected_view(side) == Some(view);
-                                        let label = if view == SidebarView::SourceControl {
-                                            "Git"
-                                        } else {
-                                            view.title()
-                                        };
-                                        let tab = ui
-                                            .selectable_label(active, label)
-                                            .on_hover_text(view.title());
-                                        tab.widget_info(|| {
-                                            egui::WidgetInfo::selected(
-                                                egui::WidgetType::SelectableLabel,
-                                                ui.is_enabled(),
-                                                active,
-                                                format!("{} panel tab", view.title()),
-                                            )
-                                        });
-                                        if tab.clicked() {
-                                            self.show_sidebar(view);
-                                            self.focus_sidebar_region(side);
-                                        }
-                                        tab.context_menu(|ui| self.sidebar_panel_menu(ui, view));
-                                        if view == SidebarView::SourceControl {
-                                            git_panel::refresh_indicator(
-                                                ui,
-                                                self.project()
-                                                    .is_some_and(|project| project.git_loading),
-                                            );
-                                        }
-                                    }
-                                });
-                            });
+                        let heading = ui.add(
+                            egui::Label::new(RichText::new(title).size(12.0).color(MUTED))
+                                .selectable(false)
+                                .truncate(),
+                        );
+                        heading.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Label,
+                                ui.is_enabled(),
+                                format!("{title} panel title"),
+                            )
+                        });
                     },
                 );
             },

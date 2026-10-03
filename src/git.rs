@@ -293,6 +293,17 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
 /// Reads the current branch and concise staged, unstaged, and untracked file
 /// status. Renames retain both the new path and Git's reported previous path.
 pub fn status(root: &Path) -> GitResult<RepoStatus> {
+    let files = status_files(root)?;
+    let branch = current_branch(root)?;
+    Ok(RepoStatus { branch, files })
+}
+
+/// Count changed paths without reading branch, diff statistics or history.
+pub fn uncommitted_change_count(root: &Path) -> GitResult<usize> {
+    Ok(status_files(root)?.len())
+}
+
+fn status_files(root: &Path) -> GitResult<Vec<FileStatus>> {
     let args = string_args(&[
         "status",
         "--porcelain=v1",
@@ -301,9 +312,7 @@ pub fn status(root: &Path) -> GitResult<RepoStatus> {
         "--renames",
     ]);
     let output = checked_git(root, &args, "read repository status")?;
-    let branch = current_branch(root)?;
-    let files = parse_status(&output.stdout)?;
-    Ok(RepoStatus { branch, files })
+    parse_status(&output.stdout)
 }
 
 /// Stage the given repository-relative paths.

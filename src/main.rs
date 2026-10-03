@@ -24,12 +24,17 @@ mod single_instance;
 mod tasks;
 mod typography;
 mod vim;
+mod window_chrome;
 mod workspace;
 
 // Exercise the exact dependency fix in the normal Morrow regression suite.
 #[cfg(test)]
 #[path = "../vendor/winit/src/platform_impl/windows/dpi_change.rs"]
 mod window_dpi_tests;
+
+#[cfg(test)]
+#[path = "../vendor/winit/src/platform_impl/windows/chrome_hit_test.rs"]
+mod window_chrome_native_tests;
 
 fn main() -> eframe::Result {
     let paths: Vec<_> = std::env::args_os()
@@ -65,8 +70,9 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Morrow")
             .with_icon(app_icon())
+            .with_decorations(!cfg!(windows))
             .with_inner_size([1440.0, 920.0])
-            .with_min_inner_size([960.0, 640.0])
+            .with_min_inner_size([500.0, 360.0])
             .with_app_id("morrow-editor"),
         ..Default::default()
     };

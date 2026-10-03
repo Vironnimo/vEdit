@@ -242,6 +242,8 @@ fn search_shortcut_focuses_the_query_and_then_allows_editor_focus() {
 #[test]
 fn view_menu_search_focuses_the_query_and_then_allows_editor_focus() {
     let mut screen = harness(fixture());
+    screen.get_by_label("Main menu").click();
+    screen.run_steps(2);
     screen.get_by_label("View").click();
     screen.run_steps(3);
     screen.get_by_label("Search project Ctrl+Shift+F").click();

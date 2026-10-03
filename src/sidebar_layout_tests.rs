@@ -306,13 +306,15 @@ fn region_cycle_reaches_both_visible_sidebars_without_unhiding_them() {
 }
 
 #[test]
-fn switching_to_search_replaces_git_content_and_keeps_its_tab() {
+fn panel_menu_switching_to_search_keeps_git_available_and_focuses_query() {
     let mut app = fixture();
     app.explorer_git_layout();
     app.move_sidebar(SidebarView::Search, Side::Right);
     app.show_sidebar(SidebarView::SourceControl);
     let mut screen = harness(app, 1200.0);
-    screen.get_by_label("Search panel tab").click();
+    screen.get_by_label("Source control panel actions").click();
+    screen.run_steps(2);
+    screen.get_by_label("Show Search").click();
     screen.run_steps(3);
     assert_eq!(screen.state().sidebar_layout.right, SidebarView::Search);
     assert!(
@@ -410,7 +412,7 @@ fn toggle_reveals_a_temporarily_collapsed_sidebar_in_one_action() {
 }
 
 #[test]
-fn moving_panels_preserves_tabs_and_one_active_panel_per_side() {
+fn moving_panels_preserves_assignments_and_one_active_panel_per_side() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
     app.move_sidebar(SidebarView::Search, Side::Right);
@@ -515,7 +517,7 @@ fn old_two_panel_sessions_migrate_without_changing_their_layout() {
 }
 
 #[test]
-fn same_side_tabs_switch_content_and_keep_full_sidebar_height() {
+fn same_side_panel_menu_switches_content_and_keeps_full_sidebar_height() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
     app.move_sidebar(SidebarView::Search, Side::Right);
@@ -523,7 +525,9 @@ fn same_side_tabs_switch_content_and_keep_full_sidebar_height() {
     assert!(screen.state().sidebar_layout.view_rects[SidebarView::Explorer.index()].is_none());
     let git = screen.state().sidebar_layout.view_rects[SidebarView::SourceControl.index()].unwrap();
     assert!(git.height() > 500.0);
-    screen.get_by_label("Explorer panel tab").click();
+    screen.get_by_label("Source control panel actions").click();
+    screen.run_steps(2);
+    screen.get_by_label("Show Explorer").click();
     screen.run_steps(3);
     assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
     assert!(
@@ -537,7 +541,9 @@ fn same_side_tabs_switch_content_and_keep_full_sidebar_height() {
     assert!(screen.state().sidebar_view_visible(SidebarView::Search));
     assert!(screen.query_by_label("Collapse Explorer panel").is_none());
     assert!(screen.query_by_label("LEFT SIDEBAR").is_none());
-    screen.get_by_label("Source control panel tab").click();
+    screen.get_by_label("Explorer panel actions").click();
+    screen.run_steps(2);
+    screen.get_by_label("Show Source control").click();
     screen.run_steps(3);
     assert!(
         screen
@@ -548,7 +554,7 @@ fn same_side_tabs_switch_content_and_keep_full_sidebar_height() {
 }
 
 #[test]
-fn old_stacked_sessions_restore_as_tabs_with_one_active_panel() {
+fn old_stacked_sessions_restore_assignments_with_one_active_panel() {
     let old = r#"{"left":"source_control","left_visible":true,"right":"search","right_visible":true,"right_views":["search"],"open_views":["explorer","source_control","search"],"collapsed_views":["source_control"]}"#;
     let mut app = fixture();
     app.restore_sidebars(Some(serde_json::from_str(old).unwrap()), None);
@@ -758,7 +764,7 @@ fn assert_sidebar_edge_painted(screen: &mut Harness<'_, MorrowApp>, side: Side, 
     };
     let scale = screen.ctx.pixels_per_point();
     let image = screen.render().expect("render sidebar edge pixels");
-    // Check above the tabs, beside scrolled rows and below the scrollbar. These
+    // Check above the title, beside scrolled rows and below the scrollbar. These
     // points stay clear of the one-pixel separator and pointer affordance.
     for y in [rect.top() + 4.0, rect.center().y, rect.bottom() - 4.0] {
         let x = (inner_edge * scale).floor() as u32;
@@ -799,22 +805,36 @@ fn sidebar_frame_has_no_unpainted_gutter_at_native_dpi_or_after_resize() {
         assert!((screen.ctx.pixels_per_point() - 1.25).abs() < 0.001);
         assert_sidebar_edge_painted(&mut screen, side, 292.0);
         let rect = screen.state().sidebar_region_rect(side).unwrap();
-        let edge = egui::pos2(
-            if side == Side::Left {
-                rect.right()
-            } else {
-                rect.left()
-            },
-            rect.center().y - 90.0,
-        );
-        screen.hover_at(edge);
+        let resize_id = egui::Id::new(if side == Side::Left {
+            "sidebar"
+        } else {
+            "right_sidebar"
+        })
+        .with("__resize");
+        let handle = screen
+            .ctx
+            .read_response(resize_id)
+            .expect("sidebar resize handle");
+        let own_handle = handle.interact_rect.intersect(rect);
+        assert!(own_handle.width() > 0.0 && own_handle.height() > 100.0);
+        // The mathematical boundary also belongs to the later editor panel.
+        // Hover the visible resize strip inside this sidebar's actual hit rect.
+        let edge = egui::pos2(handle.rect.center().x, rect.center().y - 90.0);
+        let press = egui::pos2(own_handle.center().x, edge.y);
+        screen.hover_at(press);
         screen.run_steps(2);
+        let handle = screen.ctx.read_response(resize_id).unwrap();
+        assert!(
+            handle.hovered(),
+            "side={side:?}, press={press:?}, panel={rect:?}, resize={handle:?}"
+        );
         assert_eq!(
             screen.output().platform_output.cursor_icon,
-            egui::CursorIcon::ResizeHorizontal
+            egui::CursorIcon::ResizeHorizontal,
+            "side={side:?}, press={press:?}, panel={rect:?}, resize={handle:?}"
         );
         assert_sidebar_edge_painted(&mut screen, side, 292.0);
-        screen.drag_at(edge);
+        screen.drag_at(press);
         screen.run_steps(1);
         let resized = edge + Vec2::new(if side == Side::Left { 40.0 } else { -40.0 }, 0.0);
         screen.hover_at(resized);
@@ -832,4 +852,97 @@ fn sidebar_frame_has_no_unpainted_gutter_at_native_dpi_or_after_resize() {
         screen.run_steps(3);
         assert_sidebar_edge_painted(&mut screen, side, MIN_SIDEBAR);
     }
+}
+
+#[test]
+fn sidebar_header_shows_only_active_title_and_keeps_other_panels_in_menu() {
+    let mut app = fixture();
+    app.move_sidebar(SidebarView::SourceControl, Side::Left);
+    app.move_sidebar(SidebarView::Search, Side::Left);
+    app.show_sidebar(SidebarView::Explorer);
+    let mut screen = harness(app, 1200.0);
+    for active in [
+        SidebarView::Explorer,
+        SidebarView::SourceControl,
+        SidebarView::Search,
+    ] {
+        let side = screen.state().sidebar_region_rect(Side::Left).unwrap();
+        for view in VIEWS {
+            assert!(
+                screen
+                    .query_by_label(&format!("{} panel tab", view.title()))
+                    .is_none()
+            );
+            let titles: Vec<_> = screen
+                .query_all_by_label(&format!("{} panel title", view.title()))
+                .map(|node| node.rect())
+                .collect();
+            if view == active {
+                assert_eq!(titles.len(), 1, "one quiet title for the active panel");
+                assert!(side.contains_rect(titles[0]));
+            } else {
+                assert!(
+                    titles.is_empty(),
+                    "inactive panels never duplicate the rail in the header"
+                );
+            }
+        }
+        let next = match active {
+            SidebarView::Explorer => SidebarView::SourceControl,
+            SidebarView::SourceControl => SidebarView::Search,
+            _ => SidebarView::Explorer,
+        };
+        screen
+            .get_by_label(&format!("{} panel actions", active.title()))
+            .click();
+        screen.run_steps(2);
+        screen
+            .get_by_label(&format!("Show {}", next.title()))
+            .click();
+        screen.run_steps(3);
+        assert!(screen.state().sidebar_view_visible(next));
+        assert_eq!(screen.state().sidebar_views(Side::Left).len(), 3);
+    }
+}
+
+#[test]
+fn title_actions_still_move_hide_and_restore_panel_assignments() {
+    let mut app = fixture();
+    app.move_sidebar(SidebarView::SourceControl, Side::Left);
+    app.show_sidebar(SidebarView::Explorer);
+    let mut screen = harness(app, 1200.0);
+    screen.get_by_label("Explorer panel actions").click();
+    screen.run_steps(2);
+    screen.get_by_label("Move panel to right").click();
+    screen.run_steps(3);
+    assert_eq!(
+        screen.state().sidebar_side(SidebarView::Explorer),
+        Side::Right
+    );
+    assert!(
+        screen
+            .state()
+            .sidebar_view_visible(SidebarView::SourceControl)
+    );
+    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(screen.query_by_label("Explorer panel title").is_some());
+    assert!(
+        screen
+            .query_by_label("Source control panel title")
+            .is_some()
+    );
+    screen.get_by_label("Hide right sidebar").click();
+    screen.run_steps(3);
+    assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(screen.state().sidebar_panel_open(SidebarView::Explorer));
+    let saved =
+        serde_json::from_str(&serde_json::to_string(&screen.state().sidebar_session()).unwrap())
+            .unwrap();
+    let mut restored = fixture();
+    restored.restore_sidebars(Some(saved), None);
+    assert_eq!(restored.sidebar_side(SidebarView::Explorer), Side::Right);
+    assert!(!restored.sidebar_layout.right_visible);
+    assert!(restored.sidebar_view_visible(SidebarView::SourceControl));
+    restored.show_sidebar(SidebarView::Explorer);
+    assert!(restored.sidebar_view_visible(SidebarView::Explorer));
 }

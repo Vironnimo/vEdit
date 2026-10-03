@@ -53,9 +53,11 @@ fn deliver_refresh(
     snapshot: git::HistorySnapshot,
     page: Option<git::HistoryPage>,
 ) {
+    app.projects[0].git_status_request = Some(u64::MAX);
     app.sender
         .send(WorkerResult::GitStatus {
             root: app.projects[0].root.clone(),
+            request_id: u64::MAX,
             result: Ok(GitSnapshot {
                 root: app.projects[0].git_root.clone(),
                 branch: Some("main".into()),
@@ -352,9 +354,11 @@ fn repository_relocation_releases_hover_slots_and_discards_old_repository_result
             .contains_key(&current_key)
     );
 
+    app.projects[0].git_status_request = Some(u64::MAX);
     app.sender
         .send(WorkerResult::GitStatus {
             root: root.clone(),
+            request_id: u64::MAX,
             result: Ok(GitSnapshot {
                 root: Some(repository.0.clone()),
                 branch: Some("main".into()),

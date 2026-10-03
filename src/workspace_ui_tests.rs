@@ -1,7 +1,10 @@
 //! Exercise project navigation and Explorer structure through real UI input.
 
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 
 const DOCUMENT: &str = "alpha 🦀 document\nsecond line\nunsaved review text\n";
 
@@ -25,8 +28,12 @@ fn fixture(count: usize) -> MorrowApp {
 }
 
 fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+    harness_with_size(app, Vec2::new(1360.0, 900.0))
+}
+
+fn harness_with_size(app: MorrowApp, size: Vec2) -> Harness<'static, MorrowApp> {
     let mut screen = Harness::builder()
-        .with_size([1360.0, 900.0])
+        .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
             |ui, app: &mut MorrowApp| {
@@ -157,13 +164,36 @@ fn assert_groups_belong_to_project(app: &MorrowApp, project: usize) {
 }
 
 #[test]
-fn project_switcher_is_on_the_left_before_the_file_menu() {
+fn project_tabs_and_the_compact_project_list_stay_in_the_titlebar() {
     let screen = harness(fixture(3));
-    let project = screen.get_by_label("Switch project").rect();
-    let file = screen.get_by_label("File").rect();
-    assert!(project.right() < file.left());
+    let project = screen
+        .get_by_label("Project: morrow-workspace-ui-00")
+        .rect();
+    let second = screen
+        .get_by_label("Project: morrow-workspace-ui-01")
+        .rect();
+    let third = screen
+        .get_by_label("Project: morrow-workspace-ui-02")
+        .rect();
+    let list = screen.get_by_label("Switch project").rect();
+    let menu = screen.get_by_label("Main menu").rect();
+    assert!(project.top() < menu.top());
     assert!(project.left() < 300.0);
-    assert!((project.center().y - file.center().y).abs() < 5.0);
+    assert!(project.right() < second.left());
+    assert!(second.right() < third.left());
+    assert!(third.right() < list.left());
+    assert!(list.right() < screen.get_by_label("Minimize window").rect().left());
+    assert!(list.width() <= 30.0);
+    assert_eq!(
+        screen
+            .get_by_label("Project: morrow-workspace-ui-00")
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::True),
+    );
+    for title in ["File", "View", "Run"] {
+        assert!(screen.query_by_label(title).is_none());
+    }
 }
 
 #[test]
@@ -213,16 +243,8 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     let (app, expected_groups) = split_fixture();
     let mut screen = harness(app);
     assert_eq!(tab_groups(screen.state()), expected_groups[0]);
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
-    assert!(screen.state().workspace_picker_open());
-    assert!(
-        screen
-            .query_by_label_contains("morrow-workspace-ui-00 · 1 open · 1 unsaved")
-            .is_some()
-    );
     screen
-        .get_by_label_contains("morrow-workspace-ui-01 ·")
+        .get_by_label("Project: morrow-workspace-ui-01")
         .click();
     screen.run_steps(3);
     assert_eq!(screen.state().active_project, 1);
@@ -231,10 +253,8 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     assert_eq!(screen.state().tab_drag_pane_ids().len(), 1);
     assert_groups_belong_to_project(screen.state(), 1);
     assert_draft(screen.state(), 0);
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
     screen
-        .get_by_label_contains("morrow-workspace-ui-00 ·")
+        .get_by_label("Project: morrow-workspace-ui-00")
         .click();
     screen.run_steps(3);
     let tab = screen.state().tab().unwrap();
@@ -249,6 +269,300 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     assert!(screen.state().projects.iter().all(|project| {
         project.index_generation == 0 && project.tabs.iter().all(|tab| !tab.loading)
     }));
+}
+
+#[test]
+fn project_tabs_support_keyboard_and_accesskit_activation() {
+    let mut screen = harness(fixture(3));
+    for (index, key) in [(1, Key::Enter), (2, Key::Space)] {
+        screen
+            .get_by_label(&format!("Project: morrow-workspace-ui-{index:02}"))
+            .focus();
+        screen.run_steps(1);
+        screen.key_press(key);
+        screen.run_steps(3);
+        assert_eq!(screen.state().active_project, index);
+        assert!(!screen.state().workspace_picker_open());
+    }
+    screen
+        .get_by_label("Project: morrow-workspace-ui-00")
+        .click_accesskit();
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 0);
+    assert!(
+        screen
+            .state()
+            .projects
+            .iter()
+            .all(|project| project.tabs[0].text == DOCUMENT)
+    );
+    screen.get_by_label("Switch project").focus();
+    screen.run_steps(1);
+    screen.key_press(Key::Space);
+    screen.run_steps(3);
+    assert!(screen.state().workspace_picker_open());
+    assert_eq!(
+        screen.ctx.memory(|memory| memory.focused()),
+        Some(query_id())
+    );
+}
+
+#[test]
+fn direct_project_click_keeps_same_frame_insert_prefix_in_the_old_buffer_and_undo() {
+    for vim in [true, false] {
+        let mut app = fixture(2);
+        app.settings.vim = vim;
+        let mut screen = harness(app);
+        if vim {
+            screen.event(egui::Event::Text("i".into()));
+            screen.run_steps(3);
+            assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Insert);
+        }
+        let old_id = screen.state().tab().unwrap().id;
+        assert!(
+            screen
+                .ctx
+                .memory(|memory| memory.has_focus(screen.state().document_widget_id(old_id)))
+        );
+        let focus_policy = screen
+            .ctx
+            .options(|options| options.input_options.surrender_focus_on);
+        let point = screen
+            .get_by_label("Project: morrow-workspace-ui-01")
+            .rect()
+            .center();
+        // All events share one RawInput frame; Harness::event would instead
+        // render each separately and hide the old/new document ownership bug.
+        screen.input_mut().events.extend([
+            egui::Event::Text("abc".into()),
+            egui::Event::PointerMoved(point),
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Text("unowned suffix".into()),
+        ]);
+        screen.run_steps(3);
+        assert_eq!(screen.state().active_project, 1);
+        assert_eq!(
+            screen.state().projects[0].tabs[0].text,
+            format!("abc{DOCUMENT}"),
+            "vim={vim}"
+        );
+        assert_eq!(
+            screen.state().projects[1].tabs[0].text,
+            DOCUMENT,
+            "vim={vim}"
+        );
+        assert!(screen.state().projects[0].tabs[0].dirty);
+        assert!(!screen.state().projects[1].tabs[0].dirty);
+        assert_eq!(
+            screen
+                .ctx
+                .options(|options| options.input_options.surrender_focus_on),
+            focus_policy,
+            "the prefix guard must restore ordinary pointer focus behavior"
+        );
+        screen
+            .get_by_label("Project: morrow-workspace-ui-00")
+            .click();
+        screen.run_steps(3);
+        if vim {
+            screen.key_press(Key::Escape);
+            screen.run_steps(3);
+            screen.event(egui::Event::Text("u".into()));
+            screen.run_steps(3);
+        } else {
+            shortcut(&mut screen, Key::Z, egui::Modifiers::CTRL);
+        }
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            DOCUMENT,
+            "vim={vim}: native and Vim undo must own the prefix"
+        );
+    }
+}
+
+#[test]
+fn cached_git_changes_have_a_dot_while_clean_unknown_and_unsaved_only_do_not() {
+    let mut app = fixture(3);
+    visual_draft(&mut app);
+    app.projects[0].git_indicator_count = Some(0);
+    app.projects[1].git_indicator_count = Some(3);
+    app.projects[2].git_indicator_count = None;
+    app.projects[2].tabs[0].dirty = true;
+    let mut screen = harness(app);
+    let changed = screen
+        .get_by_label("Project: morrow-workspace-ui-01")
+        .rect();
+    let marker = screen
+        .get_by_label("3 uncommitted changes in morrow-workspace-ui-01")
+        .rect();
+    assert!(changed.contains_rect(marker));
+    assert!(
+        screen
+            .query_by_label_contains("uncommitted changes in morrow-workspace-ui-00")
+            .is_none()
+    );
+    assert!(
+        screen
+            .query_by_label_contains("uncommitted changes in morrow-workspace-ui-02")
+            .is_none()
+    );
+    assert!(screen.output().shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Circle(circle)
+            if marker.contains(circle.center) && circle.radius < 4.0 && circle.fill == ORANGE.gamma_multiply(0.85))
+    }));
+    screen.state_mut().projects[1].git_indicator_count = Some(0);
+    screen.state_mut().projects[0].git_indicator_count = Some(1);
+    screen.run_steps(3);
+    assert!(
+        screen
+            .query_by_label("3 uncommitted changes in morrow-workspace-ui-01")
+            .is_none()
+    );
+    assert!(
+        screen
+            .query_by_label("1 uncommitted change in morrow-workspace-ui-00")
+            .is_some()
+    );
+    assert_eq!(
+        changed,
+        screen
+            .get_by_label("Project: morrow-workspace-ui-01")
+            .rect(),
+        "status refresh must not move a neighboring tab's hit target"
+    );
+}
+
+#[test]
+fn cycling_many_projects_and_resizing_reveal_the_active_header_tab() {
+    let mut screen = harness(fixture(24));
+    for (key, selected) in [(Key::PageUp, 23), (Key::PageDown, 0), (Key::PageUp, 23)] {
+        project_shortcut(&mut screen, key);
+        assert_eq!(screen.state().active_project, selected);
+        let tab = screen
+            .get_by_label(&format!("Project: morrow-workspace-ui-{selected:02}"))
+            .rect();
+        let list = screen.get_by_label("Switch project").rect();
+        assert!(
+            tab.left() >= 122.0 - 1.0,
+            "selected tab must be revealed after cycling: {tab:?}"
+        );
+        assert!(tab.right() <= list.left() - PROJECT_TAB_GAP + 1.0);
+        assert_eq!(tab.height(), PROJECT_TAB_HEIGHT);
+        assert!(!screen.state().workspace_picker_open());
+    }
+    screen.set_size(Vec2::new(500.0, 360.0));
+    screen.run_steps(3);
+    let active = screen
+        .get_by_label("Project: morrow-workspace-ui-23")
+        .rect();
+    let list = screen.get_by_label("Switch project").rect();
+    assert!(active.left() >= 122.0 - 1.0);
+    assert!(active.right() <= list.left() - PROJECT_TAB_GAP + 1.0);
+    assert!(list.right() < screen.get_by_label("Minimize window").rect().left());
+}
+
+#[test]
+fn long_colliding_project_names_keep_the_distinguishing_parent_visible() {
+    let mut app = fixture(2);
+    let name = "very_long_shared_project_name_".repeat(5);
+    for (project, parent) in app.projects.iter_mut().zip(["client", "server"]) {
+        project.root = PathBuf::from("C:/work").join(parent).join(&name);
+    }
+    let screen = harness(app);
+    for parent in ["client", "server"] {
+        let tab = screen
+            .get_by_label(&format!("Project: {name} — {parent}"))
+            .rect();
+        assert!(tab.width() <= 220.0);
+        assert!(screen.output().shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text)
+                if text.galley.text() == format!(" — {parent}") && tab.contains_rect(egui::Rect::from_min_size(text.pos, text.galley.size())))
+        }), "the parent suffix remains painted inside its project tab: {parent}");
+    }
+}
+
+#[test]
+fn narrow_zoom_keeps_project_list_keyboard_search_and_footer_inside_the_viewport() {
+    let mut app = fixture(3);
+    app.settings.ui_scale = 2.0;
+    // Begin with the native minimum at 100% native DPI. egui applies the
+    // initial interface zoom and transforms this to 250×180 logical points.
+    // Setting zoom and size together on an existing context would let egui's
+    // zoom transition overwrite the requested size with its old viewport.
+    let mut screen = harness_with_size(app, Vec2::new(500.0, 360.0));
+    let viewport = screen.ctx.content_rect();
+    assert_eq!(viewport.size(), Vec2::new(250.0, 180.0));
+    assert_eq!(screen.ctx.pixels_per_point(), 2.0);
+    let list = screen.get_by_label("Switch project").rect();
+    assert!(viewport.contains_rect(list));
+    for label in [
+        "Minimize window",
+        "Maximize window",
+        "Close window",
+        "Main menu",
+    ] {
+        assert!(
+            viewport.contains_rect(screen.get_by_label(label).rect()),
+            "{label}"
+        );
+    }
+    assert!(
+        screen
+            .query_by_label("Project: morrow-workspace-ui-00")
+            .is_none()
+    );
+    project_shortcut(&mut screen, Key::P);
+    assert!(screen.state().workspace_picker_open());
+    let popup = screen
+        .ctx
+        .memory(|memory| memory.area_rect(picker_id()))
+        .unwrap();
+    assert!(
+        viewport.contains_rect(popup),
+        "compact popup must fit {viewport:?}: {popup:?}"
+    );
+    assert!(viewport.contains_rect(screen.get_by_label("Find project").rect()));
+    assert!(viewport.contains_rect(screen.get_by_label("Add project…").rect()));
+    assert!(viewport.contains_rect(screen.get_by_label("Close project").rect()));
+    screen.event(egui::Event::Text("no matching project".into()));
+    screen.run_steps(3);
+    assert!(
+        viewport.contains_rect(
+            screen
+                .ctx
+                .memory(|memory| memory.area_rect(picker_id()))
+                .unwrap()
+        ),
+        "the empty search state must also fit the narrow viewport"
+    );
+    for label in ["Find project", "Add project…", "Close project"] {
+        assert!(
+            viewport.contains_rect(screen.get_by_label(label).rect()),
+            "{label}"
+        );
+    }
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 0);
+    assert!(screen.state().workspace_picker_open());
+    shortcut(&mut screen, Key::A, egui::Modifiers::CTRL);
+    screen.event(egui::Event::Text("workspace-ui-02".into()));
+    screen.run_steps(3);
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 2);
+    assert!(!screen.state().workspace_picker_open());
 }
 
 #[test]
