@@ -490,3 +490,17 @@ fn nested_diff_modal_screenshot() {
     let mut screen = visual_tests::harness(app);
     visual_tests::snapshot(&mut screen, "morrow_nested_diff_modal");
 }
+
+#[test]
+fn wrapped_diff_modal_screenshot() {
+    let mut app = fixture();
+    let previous = "Read this longer explanation while reviewing the change; every part remains visible inside the diff dialog, including the last words. ".repeat(3);
+    let replacement = "Die neue Beschreibung bleibt auch bei langen Zeilen lesbar: Wörter werden umgebrochen, und die Zeilennummer steht nur am Anfang. ".repeat(3);
+    let identifier = "über界_long_unbroken_identifier_".repeat(12);
+    let patch = format!(
+        "diff --git a/notes.txt b/notes.txt\nindex aaaaaaa..bbbbbbb 100644\n--- a/notes.txt\n+++ b/notes.txt\n@@ -41,3 +41,4 @@ Review notes\n-{previous}\n+{replacement}\n+{identifier}\n Keep the surrounding context readable.\n Final context line.\n"
+    );
+    app.diff = Some(("notes.txt · Working tree".into(), patch));
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "morrow_wrapped_diff_modal");
+}

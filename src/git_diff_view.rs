@@ -3,9 +3,12 @@
 use crate::{design, render};
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use std::ops::Range;
+use std::sync::Arc;
 
 const FONT_SIZE: f32 = 12.0;
 const TAB_WIDTH: usize = 4;
+const ROW_PADDING: f32 = 7.0;
+const TEXT_INSET: f32 = 10.0;
 
 /// A resizable Git dialog with a real input-blocking backdrop. Parent dialogs
 /// remain visible but disabled while a child diff owns the modal stack.
@@ -66,7 +69,7 @@ pub(crate) struct DiffView {
     patch: ParsedPatch,
     title: String,
     generation: u64,
-    measured_width: f32,
+    wrapped: WrappedRows,
     details_open: bool,
     last_frame: Option<u64>,
 }
@@ -95,7 +98,7 @@ impl DiffView {
                     .color(palette.muted),
             )
             .on_hover_text(
-                "Scroll: j / k · Page Up / Down · Ctrl+F / B · Home / End. Esc closes the diff.",
+                "Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B · Home / End. Esc closes the diff.",
             );
             if self.patch.files > 1 {
                 let noun = if self.patch.files == 1 {
@@ -183,14 +186,23 @@ impl DiffView {
         let font = FontId::monospace(FONT_SIZE);
         let (character_width, font_height) =
             ui.fonts_mut(|fonts| (fonts.glyph_width(&font, 'M'), fonts.row_height(&font)));
-        let row_height = (font_height + 7.0).max(20.0);
+        let row_height = (font_height + ROW_PADDING).max(20.0);
         let number_width = self.patch.number_digits.max(3) as f32 * character_width + 16.0;
         let gutter_width = number_width * 2.0;
-        let estimated_width = self.patch.max_columns as f32 * character_width + gutter_width + 24.0;
-        let content_width = ui
-            .available_width()
-            .max(estimated_width)
-            .max(self.measured_width);
+        // Reserve the vertical bar before measuring so its appearance cannot
+        // change wrapping. Text never widens this scroll area horizontally.
+        let content_width = (ui.available_width() - ui.spacing().scroll.allocated_width())
+            .floor()
+            .max(1.0);
+        let text_width = (content_width - gutter_width - TEXT_INSET * 2.0).max(1.0);
+        self.wrapped.update(
+            ui,
+            &self.patch,
+            &font,
+            text_width,
+            character_width,
+            font_height,
+        );
         let salt = ("git_unified_diff", title, self.generation);
         let output = ui
             .scope(|ui| {
@@ -215,115 +227,115 @@ impl DiffView {
                 if focus_contents || body.clicked() {
                     body.request_focus();
                 }
-                let mut scroll = egui::ScrollArea::both()
+                let mut scroll = egui::ScrollArea::vertical()
                     .id_salt(salt)
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .content_margin(egui::Margin::ZERO)
                     .auto_shrink([false, false])
                     .animated(false)
+                    .horizontal_scroll_offset(0.0)
                     .scroll_source(egui::scroll_area::ScrollSource {
                         mouse_wheel: false,
                         ..Default::default()
                     });
-                let wheel_offset =
-                    render::instant_scroll_offset_axes(ui, scroll_id, egui::Vec2b::TRUE);
-                if let Some(offset) = keyboard_scroll_offset(
+                let wheel_offset = render::instant_scroll_offset_axes(
+                    ui,
+                    scroll_id,
+                    egui::Vec2b::new(false, true),
+                );
+                let offset = keyboard_scroll_offset(
                     ui,
                     scroll_id,
                     body_id,
                     row_height,
-                    self.patch.presentation.len(),
+                    self.wrapped.height(),
                     wheel_offset,
                 )
                 .or(wheel_offset)
-                {
-                    scroll = scroll.scroll_offset(offset);
-                }
-                scroll.show_rows(
-                    ui,
-                    row_height,
-                    self.patch.presentation.len(),
-                    |ui, visible| {
-                        ui.set_min_width(content_width);
-                        for index in visible {
-                            let presentation = &self.patch.presentation[index];
-                            let row = presentation.raw_row.map(|index| &self.patch.rows[index]);
-                            let kind = presentation.kind;
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(content_width, row_height),
-                                Sense::hover(),
-                            );
-                            if !ui.is_rect_visible(rect) {
-                                continue;
-                            }
-                            if let Some(tooltip) = &presentation.tooltip {
-                                response.on_hover_text(tooltip);
-                            }
-                            if let Some(fill) = palette.background(kind) {
-                                ui.painter().rect_filled(rect, 0.0, fill);
-                            }
-                            let gutter_color = match kind {
-                                RowKind::Added => palette.added.gamma_multiply(0.75),
-                                RowKind::Removed => palette.removed.gamma_multiply(0.75),
-                                _ => palette.muted,
-                            };
-                            for (number, right) in [
-                                (
-                                    row.and_then(|row| row.old_line),
-                                    rect.left() + number_width - 8.0,
-                                ),
-                                (
-                                    row.and_then(|row| row.new_line),
-                                    rect.left() + gutter_width - 8.0,
-                                ),
-                            ] {
-                                if let Some(number) = number {
-                                    ui.painter().text(
-                                        egui::pos2(right, rect.center().y),
-                                        Align2::RIGHT_CENTER,
-                                        number.to_string(),
-                                        font.clone(),
-                                        gutter_color,
-                                    );
-                                }
-                            }
-                            let divider = rect.left() + gutter_width;
-                            ui.painter().line_segment(
-                                [
-                                    egui::pos2(divider, rect.top()),
-                                    egui::pos2(divider, rect.bottom()),
-                                ],
-                                Stroke::new(
-                                    1.0,
-                                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                                ),
-                            );
-                            let display = match row {
-                                Some(row) => {
-                                    display_line(&self.patch.source[row.source.clone()], row.kind)
-                                }
-                                None => presentation.text.clone(),
-                            };
-                            let color = palette.foreground(kind);
-                            let galley = ui.fonts_mut(|fonts| {
-                                fonts.layout_no_wrap(display, font.clone(), color)
-                            });
-                            self.measured_width = self
-                                .measured_width
-                                .max(galley.size().x + gutter_width + 24.0);
-                            let position =
-                                egui::pos2(divider + 10.0, rect.center().y - galley.size().y * 0.5);
-                            ui.painter().galley(position, galley, color);
+                .unwrap_or_else(|| {
+                    egui::scroll_area::State::load(ui.ctx(), scroll_id)
+                        .unwrap_or_default()
+                        .offset
+                });
+                // A resize can shorten wrapped rows while scrolled near the
+                // end. Clamp immediately, before painting the new viewport.
+                scroll = scroll.scroll_offset(Vec2::new(
+                    0.0,
+                    offset.y.clamp(
+                        0.0,
+                        (self.wrapped.height() - ui.available_height()).max(0.0),
+                    ),
+                ));
+                scroll.show_viewport(ui, |ui, viewport| {
+                    ui.set_min_size(Vec2::new(content_width, self.wrapped.height()));
+                    let origin = ui.max_rect().min;
+                    for index in self.wrapped.visible(viewport.top()..viewport.bottom()) {
+                        let presentation = &self.patch.presentation[index];
+                        let row = presentation.raw_row.map(|index| &self.patch.rows[index]);
+                        let kind = presentation.kind;
+                        let rect = egui::Rect::from_min_max(
+                            origin + Vec2::new(0.0, self.wrapped.offsets[index]),
+                            origin + Vec2::new(content_width, self.wrapped.offsets[index + 1]),
+                        );
+                        if !ui.is_rect_visible(rect) {
+                            continue;
                         }
-                    },
-                )
+                        let response = ui.interact(rect, body_id.with(index), Sense::hover());
+                        if let Some(tooltip) = &presentation.tooltip {
+                            response.on_hover_text(tooltip);
+                        }
+                        if let Some(fill) = palette.background(kind) {
+                            ui.painter().rect_filled(rect, 0.0, fill);
+                        }
+                        let gutter_color = match kind {
+                            RowKind::Added => palette.added.gamma_multiply(0.75),
+                            RowKind::Removed => palette.removed.gamma_multiply(0.75),
+                            _ => palette.muted,
+                        };
+                        for (number, right) in [
+                            (
+                                row.and_then(|row| row.old_line),
+                                rect.left() + number_width - 8.0,
+                            ),
+                            (
+                                row.and_then(|row| row.new_line),
+                                rect.left() + gutter_width - 8.0,
+                            ),
+                        ] {
+                            if let Some(number) = number {
+                                ui.painter().text(
+                                    egui::pos2(
+                                        right,
+                                        rect.top() + ROW_PADDING * 0.5 + font_height * 0.5,
+                                    ),
+                                    Align2::RIGHT_CENTER,
+                                    number.to_string(),
+                                    font.clone(),
+                                    gutter_color,
+                                );
+                            }
+                        }
+                        let divider = rect.left() + gutter_width;
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(divider, rect.top()),
+                                egui::pos2(divider, rect.bottom()),
+                            ],
+                            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                        );
+                        let display = self.patch.display(index);
+                        let color = palette.foreground(kind);
+                        let galley = ui.fonts_mut(|fonts| {
+                            fonts.layout_delayed_color(display, font.clone(), text_width)
+                        });
+                        let position =
+                            egui::pos2(divider + TEXT_INSET, rect.top() + ROW_PADDING * 0.5);
+                        ui.painter().galley(position, galley, color);
+                    }
+                })
             })
             .inner;
         render::remember_scroll_limits(ui.ctx(), &output);
-        // Fallback fonts can exceed a monospace column estimate. Keep their full
-        // measured extent reachable on the following frame without laying out
-        // every off-screen line.
-        if self.measured_width > content_width + 0.5 {
-            ui.ctx().request_repaint();
-        }
     }
 
     fn update(&mut self, title: &str, text: &str) {
@@ -331,7 +343,7 @@ impl DiffView {
             self.patch = ParsedPatch::parse(text);
             self.title = title.to_owned();
             self.generation = self.generation.wrapping_add(1);
-            self.measured_width = 0.0;
+            self.wrapped = WrappedRows::default();
             self.details_open = false;
         }
     }
@@ -363,12 +375,116 @@ impl DiffView {
     }
 }
 
+/// Prefix heights virtualize logical rows of different wrapped heights. Keep
+/// only geometry, rather than every off-screen galley's glyphs and meshes.
+#[derive(Default)]
+struct WrappedRows {
+    offsets: Vec<f32>,
+    text_width: f32,
+    character_width: f32,
+    font_height: f32,
+    pixels_per_point: f32,
+    probe: Option<Arc<egui::Galley>>,
+}
+
+impl WrappedRows {
+    fn update(
+        &mut self,
+        ui: &egui::Ui,
+        patch: &ParsedPatch,
+        font: &FontId,
+        text_width: f32,
+        character_width: f32,
+        font_height: f32,
+    ) {
+        // Refresh this probe even when geometry is cached: its identity also
+        // detects replaced fonts whose ASCII metrics happen to be identical.
+        let probe = ui.fonts_mut(|fonts| {
+            fonts.layout_no_wrap(
+                "morrow diff font generation".into(),
+                FontId::monospace(1.0),
+                Color32::WHITE,
+            )
+        });
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        if self.offsets.len() == patch.presentation.len() + 1
+            && self.text_width == text_width
+            && self.character_width == character_width
+            && self.font_height == font_height
+            && self.pixels_per_point == pixels_per_point
+            && self
+                .probe
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, &probe))
+        {
+            return;
+        }
+        self.text_width = text_width;
+        self.character_width = character_width;
+        self.font_height = font_height;
+        self.pixels_per_point = pixels_per_point;
+        self.probe = Some(probe);
+        self.offsets.clear();
+        self.offsets.reserve(patch.presentation.len() + 1);
+        self.offsets.push(0.0);
+        let single_height = (font_height + ROW_PADDING).max(20.0);
+        for index in 0..patch.presentation.len() {
+            let display = patch.display(index);
+            // Short ASCII monospace lines need no off-screen text layout. A
+            // spare column covers fractional advances at different DPI values.
+            let height = if display.is_ascii()
+                && (display.len() + 1) as f32 * character_width <= text_width
+            {
+                single_height
+            } else {
+                let height = ui.fonts_mut(|fonts| {
+                    // The public layout function uses the same shaping and
+                    // wrapping as FontsView, without retaining off-screen
+                    // galleys in egui's frame cache. Drop each row's temporary
+                    // glyphs/meshes immediately after reading its exact height.
+                    let job = egui::text::LayoutJob::simple(
+                        display,
+                        font.clone(),
+                        Color32::PLACEHOLDER,
+                        // Match FontsView's cache-key width normalization.
+                        text_width.round(),
+                    );
+                    egui::epaint::text::layout(fonts.fonts, pixels_per_point, Arc::new(job))
+                        .size()
+                        .y
+                });
+                (height + ROW_PADDING).max(20.0)
+            };
+            self.offsets.push(self.height() + height);
+        }
+    }
+
+    fn height(&self) -> f32 {
+        self.offsets.last().copied().unwrap_or(0.0)
+    }
+
+    fn visible(&self, viewport: Range<f32>) -> Range<usize> {
+        let count = self.offsets.len().saturating_sub(1);
+        let first = self
+            .offsets
+            .partition_point(|&y| y <= viewport.start)
+            .saturating_sub(1)
+            .min(count);
+        let last = self
+            .offsets
+            .partition_point(|&y| y < viewport.end)
+            .min(count)
+            .max(first);
+        first..last
+    }
+}
+
 fn keyboard_scroll_offset(
     ui: &egui::Ui,
     scroll_id: egui::Id,
     body_id: egui::Id,
     row_height: f32,
-    rows: usize,
+    content_height: f32,
     wheel_offset: Option<Vec2>,
 ) -> Option<Vec2> {
     let ctx = ui.ctx();
@@ -387,17 +503,13 @@ fn keyboard_scroll_offset(
         return None;
     }
     let viewport_height = ui.available_height().max(row_height);
-    let maximum = ctx
-        .data(|data| data.get_temp::<Vec2>(scroll_id.with("document_scroll_limit")))
-        .map_or_else(
-            || (rows as f32 * row_height - viewport_height).max(0.0),
-            |limit| limit.y,
-        );
+    let maximum = (content_height - viewport_height).max(0.0);
     let mut offset = wheel_offset.unwrap_or_else(|| {
         egui::scroll_area::State::load(ctx, scroll_id)
             .unwrap_or_default()
             .offset
     });
+    offset.x = 0.0;
     let mut changed = false;
     ctx.input_mut(|input| {
         let has_text_j = input
@@ -607,6 +719,17 @@ struct ParsedPatch {
 }
 
 impl ParsedPatch {
+    fn display(&self, index: usize) -> String {
+        let presentation = &self.presentation[index];
+        match presentation.raw_row {
+            Some(raw) => {
+                let row = &self.rows[raw];
+                display_line(&self.source[row.source.clone()], row.kind)
+            }
+            None => presentation.text.clone(),
+        }
+    }
+
     fn parse(text: &str) -> Self {
         let mut patch = Self {
             source: text.to_owned(),
@@ -1594,12 +1717,13 @@ mod tests {
     }
 
     #[test]
-    fn narrow_diff_keeps_long_source_lines_complete_and_unwrapped() {
+    fn diff_wraps_complete_source_to_viewport_width_and_reflows_on_resize() {
         let context = egui::Context::default();
         let mut view = DiffView::default();
         let source = format!("+{}END", "long_identifier ".repeat(100));
         let patch = format!("@@ -0,0 +1 @@\n{source}\n");
-        for (pass, width) in [300.0, 950.0].into_iter().enumerate() {
+        let mut heights = Vec::new();
+        for (pass, width) in [300.0, 950.0, 300.0].into_iter().enumerate() {
             let (painted, _) = show_pass(
                 &context,
                 &mut view,
@@ -1612,13 +1736,286 @@ mod tests {
                 .iter()
                 .find(|(text, _)| text == &source)
                 .expect("complete source line");
-            assert!(rect.width() > width);
+            assert!(rect.width() <= view.wrapped.text_width + 1.0);
             assert!(
-                rect.height() < 25.0,
-                "source line wrapped to {} points",
-                rect.height()
+                rect.left() > 60.0,
+                "text must leave both number gutters free"
             );
+            assert!(
+                rect.right() < width - 8.0,
+                "wrapped text escaped the viewport: {rect:?}"
+            );
+            assert!(rect.height() > 25.0, "long source must wrap");
+            heights.push(rect.height());
         }
+        assert!(
+            heights[0] > heights[1] * 2.0,
+            "wider dialogs must reflow the text: {heights:?}"
+        );
+        assert_eq!(
+            heights[0], heights[2],
+            "returning to the narrow width must reflow again"
+        );
+    }
+
+    #[test]
+    fn unbroken_unicode_and_tabs_wrap_without_elision_or_horizontal_scrolling() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let raw = format!("+{}\tTAIL", "über界🙂e\u{301}".repeat(120));
+        let displayed = display_line(&raw, RowKind::Added);
+        let patch = format!("@@ -0,0 +1 @@\n{raw}\n");
+        let size = Vec2::new(320.0, 300.0);
+        let (initial, _) = show_pass(&context, &mut view, &patch, size, vec![], 0.0);
+        let before = initial
+            .iter()
+            .find(|(text, _)| text == &displayed)
+            .unwrap()
+            .1;
+        assert!(before.height() > 100.0);
+        assert!(before.width() <= view.wrapped.text_width + 1.0);
+        assert!(before.right() < size.x - 8.0);
+        let (scrolled, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(180.0, 130.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(-10_000.0, 0.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+            0.1,
+        );
+        let after = scrolled
+            .iter()
+            .find(|(text, _)| text == &displayed)
+            .unwrap()
+            .1;
+        assert_eq!(
+            before, after,
+            "a horizontal wheel must not move wrapped diff text"
+        );
+        assert_eq!(
+            view.patch.source, patch,
+            "wrapping must preserve the copied raw patch"
+        );
+    }
+
+    #[test]
+    fn wrapped_rows_have_one_number_on_the_first_visual_line_and_full_tinted_background() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let removed = format!("-{}", "previous_value ".repeat(12));
+        let added = format!("+{}", "replacement_value ".repeat(12));
+        let patch = format!("@@ -321 +654 @@\n{removed}\n{added}\n");
+        let mut fills = (Color32::TRANSPARENT, Color32::TRANSPARENT);
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Default::default(),
+                    Vec2::new(360.0, 1100.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let palette = Palette::new(ui);
+                    fills = (
+                        palette.background(RowKind::Removed).unwrap(),
+                        palette.background(RowKind::Added).unwrap(),
+                    );
+                    view.show(ui, "Review", &patch);
+                });
+            },
+        );
+        let text = collect_text(&output.shapes);
+        let mut backgrounds = Vec::new();
+        fn collect_rects(shape: &egui::Shape, result: &mut Vec<(egui::Rect, Color32)>) {
+            match shape {
+                egui::Shape::Rect(rect) => result.push((rect.rect, rect.fill)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_rects(shape, result);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for shape in &output.shapes {
+            collect_rects(&shape.shape, &mut backgrounds);
+        }
+        for (source, number, fill) in [(&removed, "321", fills.0), (&added, "654", fills.1)] {
+            let source_rect = text
+                .iter()
+                .find(|(painted, _)| painted == source)
+                .unwrap()
+                .1;
+            assert!(source_rect.height() > 25.0);
+            let numbers: Vec<_> = text
+                .iter()
+                .filter(|(painted, _)| painted == number)
+                .collect();
+            assert_eq!(
+                numbers.len(),
+                1,
+                "wrapped rows must not duplicate line numbers"
+            );
+            assert!(
+                (numbers[0].1.top() - source_rect.top()).abs() <= 2.0,
+                "number must align with the first visual row"
+            );
+            let tinted: Vec<_> = backgrounds
+                .iter()
+                .filter(|(_, color)| *color == fill)
+                .collect();
+            assert_eq!(tinted.len(), 1);
+            let background = tinted[0].0;
+            assert!(background.top() < source_rect.top());
+            assert!(background.bottom() > source_rect.bottom());
+            assert!(background.height() >= source_rect.height() + ROW_PADDING - 1.0);
+            assert!(background.left() < numbers[0].1.left());
+            assert!(background.right() > source_rect.right());
+        }
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn wrapped_diff_stays_virtualized_and_end_remains_visible_after_resize() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let patch = format!(
+            "@@ -0,0 +1,1000 @@\n{}",
+            (0..1000)
+                .map(|index| {
+                    let suffix = if index % 4 == 3 {
+                        "long_value ".repeat(30)
+                    } else {
+                        "short".into()
+                    };
+                    format!("+payload {index} {suffix}\n")
+                })
+                .collect::<String>()
+        );
+        let size = Vec2::new(360.0, 280.0);
+        let (initial, _) = show_pass(&context, &mut view, &patch, size, vec![], 0.0);
+        assert!(initial.iter().any(|(text, _)| text == "+payload 0 short"));
+        assert!(
+            initial
+                .iter()
+                .filter(|(text, _)| text.starts_with("+payload "))
+                .count()
+                < 20
+        );
+        let narrow_height = view.wrapped.height();
+        let (last, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            size,
+            vec![key_event(egui::Key::End, egui::Modifiers::NONE)],
+            0.1,
+        );
+        assert!(
+            last.iter()
+                .any(|(text, _)| text.starts_with("+payload 999 "))
+        );
+        let (resized, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            Vec2::new(950.0, 280.0),
+            vec![],
+            0.2,
+        );
+        assert!(view.wrapped.height() < narrow_height);
+        assert!(
+            resized
+                .iter()
+                .any(|(text, _)| text.starts_with("+payload 999 ")),
+            "resize must clamp to the new bottom before painting"
+        );
+        assert!(
+            resized
+                .iter()
+                .filter(|(text, _)| text.starts_with("+payload "))
+                .count()
+                < 20
+        );
+        let (first, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            Vec2::new(950.0, 280.0),
+            vec![key_event(egui::Key::Home, egui::Modifiers::NONE)],
+            0.3,
+        );
+        assert!(first.iter().any(|(text, _)| text == "+payload 0 short"));
+    }
+
+    #[test]
+    fn large_wrapped_unicode_diff_keeps_offscreen_galleys_out_of_font_cache() {
+        let context = egui::Context::default();
+        let mut view = DiffView::default();
+        let patch = format!(
+            "@@ -0,0 +1,2000 @@\n{}",
+            (0..2000)
+                .map(|index| format!(
+                    "+row {index} {}\n",
+                    "über界🙂e\u{301}_long_identifier ".repeat(30)
+                ))
+                .collect::<String>()
+        );
+        for (pass, width) in [360.0, 950.0, 360.0].into_iter().enumerate() {
+            let (painted, _) = show_pass(
+                &context,
+                &mut view,
+                &patch,
+                Vec2::new(width, 280.0),
+                vec![],
+                pass as f64 * 0.1,
+            );
+            assert!(painted.iter().any(|(text, _)| text.starts_with("+row 0 ")));
+            let cache_size = context.fonts_mut(|fonts| fonts.num_galleys_in_cache());
+            assert!(
+                cache_size < 80,
+                "only visible rows and UI labels may remain cached; got {cache_size} galleys"
+            );
+
+            // The uncached public API must agree exactly with the cached paint
+            // API, including Unicode shaping and fractional width rounding.
+            for index in [0, 997, 1999] {
+                let display = view.patch.display(index);
+                let expected = context.fonts_mut(|fonts| {
+                    fonts
+                        .layout_delayed_color(
+                            display,
+                            FontId::monospace(FONT_SIZE),
+                            view.wrapped.text_width,
+                        )
+                        .size()
+                        .y
+                }) + ROW_PADDING;
+                let measured = view.wrapped.offsets[index + 1] - view.wrapped.offsets[index];
+                assert!(
+                    (measured - expected).abs() < 0.1,
+                    "off-screen height changed at row {index}: measured {measured}, paint {expected}"
+                );
+            }
+        }
+        let (last, _) = show_pass(
+            &context,
+            &mut view,
+            &patch,
+            Vec2::new(360.0, 280.0),
+            vec![key_event(egui::Key::End, egui::Modifiers::NONE)],
+            0.3,
+        );
+        assert!(last.iter().any(|(text, _)| text.starts_with("+row 1999 ")));
     }
 
     #[test]
