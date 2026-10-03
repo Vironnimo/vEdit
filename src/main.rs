@@ -26,6 +26,11 @@ mod typography;
 mod vim;
 mod workspace;
 
+// Exercise the exact dependency fix in the normal Morrow regression suite.
+#[cfg(test)]
+#[path = "../vendor/winit/src/platform_impl/windows/dpi_change.rs"]
+mod window_dpi_tests;
+
 fn main() -> eframe::Result {
     let paths: Vec<_> = std::env::args_os()
         .skip(1)

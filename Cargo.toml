@@ -29,6 +29,10 @@ path = "src/cli_main.rs"
 egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
 egui-wgpu = { version = "0.36.2", default-features = false }
 
+[patch.crates-io]
+# Windows mixed-DPI titlebar drags: see vendor/winit/MORROW_PATCH.md.
+winit = { path = "vendor/winit" }
+
 [profile.release]
 opt-level = 2
 lto = "thin"
