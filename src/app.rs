@@ -5384,6 +5384,8 @@ impl MorrowApp {
                 tab.focus = false;
             }
             focused = output.response.has_focus();
+            let native_selection_painted = focused
+                && output.state.cursor.char_range().is_some_and(|range| !range.is_empty());
             rect = Some(output.response.rect.intersect(ui.clip_rect()));
             if let Some(range) = context_selection {
                 output.state.cursor.set_char_range(Some(range));
@@ -5438,6 +5440,7 @@ impl MorrowApp {
                 tab.selection = tab.vim.selection(&tab.text)
                     .unwrap_or(tab.vim.cursor..tab.vim.cursor);
             }
+            let context_menu_was_open = output.response.context_menu_opened();
             context_action = context_actions::editor_menu(
                 ui,
                 &output.response,
@@ -5445,6 +5448,11 @@ impl MorrowApp {
                 !tab.selection.is_empty(),
                 &settings,
             );
+            let retained_selection_painted = !native_selection_painted
+                && (context_selection.is_some()
+                    || context_menu_was_open
+                    || output.response.context_menu_opened())
+                && crate::render::paint_retained_text_selection(ui, &output, tab.selection.clone());
             let cursor = egui::text::CCursor::new(tab.vim.cursor);
             let local = output.galley.pos_from_cursor(cursor);
             let cursor_rect = local.translate(output.galley_pos.to_vec2());
@@ -5494,7 +5502,8 @@ impl MorrowApp {
                 }
                 jump.state.recompute(&jump.glyphs);
             }
-            if !settings.vim && (!focused || restored_native_selection) && !tab.selection.is_empty()
+            if !settings.vim && !retained_selection_painted
+                && (!focused || restored_native_selection) && !tab.selection.is_empty()
             {
                 // Keep search matches and another pane's selection visible
                 // while keyboard focus belongs to Find or a different pane.

@@ -146,6 +146,48 @@ pub fn visual_rows(galley: &egui::Galley) -> impl Iterator<Item = VisualRow> + '
     })
 }
 
+/// Restore a menu-owned selection in the existing text shape, behind its glyphs.
+/// Keep the cached syntax galley and the widget's original clip rectangle intact.
+pub fn paint_retained_text_selection(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    selection: std::ops::Range<usize>,
+) -> bool {
+    if selection.is_empty() {
+        return false;
+    }
+    let position = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
+    let mut selected = output.galley.clone();
+    egui::text_selection::visuals::paint_text_selection(
+        &mut selected,
+        ui.visuals(),
+        &egui::text::CCursorRange::two(
+            egui::text::CCursor::new(selection.start),
+            egui::text::CCursor::new(selection.end),
+        ),
+        None,
+    );
+    ui.ctx().graphics_mut(|graphics| {
+        let Some(shapes) = graphics.get_mut(ui.layer_id()) else {
+            return false;
+        };
+        let index = shapes.all_entries().enumerate().find_map(|(index, shape)| {
+            matches!(&shape.shape, egui::Shape::Text(text)
+                if text.pos == position && Arc::ptr_eq(&text.galley, &output.galley))
+            .then_some(egui::layers::ShapeIdx(index))
+        });
+        let Some(index) = index else {
+            return false;
+        };
+        shapes.mutate_shape(index, |shape| {
+            if let egui::Shape::Text(text) = &mut shape.shape {
+                text.galley = selected;
+            }
+        });
+        true
+    })
+}
+
 /// Clip a half-open character range to one shaped visual row. Keeping this in
 /// character space avoids marking the next wrapped row at an exclusive end.
 pub fn range_on_visual_row(

@@ -299,6 +299,29 @@ fn point_at_character(screen: &Harness<'static, MorrowApp>, character: usize) ->
     document.pos + egui::vec2(rect.left() + 1.0, rect.center().y)
 }
 
+fn painted_selection_rows(screen: &Harness<'static, MorrowApp>) -> Vec<usize> {
+    let fill = screen
+        .ctx
+        .style_of(screen.ctx.theme())
+        .visuals
+        .selection
+        .bg_fill;
+    document_shape(screen)
+        .galley
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            row.visuals
+                .mesh
+                .vertices
+                .iter()
+                .any(|vertex| vertex.color == fill)
+                .then_some(index)
+        })
+        .collect()
+}
+
 #[test]
 fn real_mouse_click_moves_vim_cursor_on_press_and_keeps_it_after_release() {
     let mut app = fixture();
@@ -726,6 +749,7 @@ fn opening_editor_context_menu_preserves_visual_selection() {
     tab.selection = 6..12;
     tab.pending_selection = Some(6..12);
     let mut screen = harness(app);
+    assert_eq!(painted_selection_rows(&screen), [1]);
     let point = point_at_character(&screen, 8);
     screen.hover_at(point);
     screen.event(egui::Event::PointerButton {
@@ -745,6 +769,11 @@ fn opening_editor_context_menu_preserves_visual_selection() {
     assert_eq!(screen.state().tab().unwrap().selection, 6..12);
     assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Visual);
     assert!(egui::Popup::is_any_open(&screen.ctx));
+    assert_eq!(
+        painted_selection_rows(&screen),
+        [1],
+        "the actual source galley must keep its selection background while the menu owns focus"
+    );
     let copy_point = screen.get_by_label("Copy Ctrl+C").rect().center();
     let mut copied = false;
     for event in [
@@ -777,6 +806,64 @@ fn opening_editor_context_menu_preserves_visual_selection() {
     assert!(tab.vim.register().is_none());
     assert_eq!(tab.selection, 6..12);
     assert_eq!(tab.vim.mode, VimMode::Visual);
+}
+
+#[test]
+fn context_menu_keeps_wrapped_unicode_selection_visible_in_all_editing_modes() {
+    for (vim, insert, linewise) in [
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (false, false, false),
+    ] {
+        let mut app = fixture();
+        app.settings.vim = vim;
+        app.settings.word_wrap = true;
+        app.projects[0].active_tab = 1;
+        let tab = app.tab_mut().unwrap();
+        tab.text = format!("αβ 🦀 {}\nsecond line\n", "identifier ".repeat(36));
+        tab.saved_text = tab.text.clone();
+        let original = tab.text.clone();
+        let mut selection = 0..240;
+        if vim && !insert {
+            tab.vim.set_selection(&tab.text, selection.clone());
+            if linewise {
+                tab.vim.mode = VimMode::VisualLine;
+                selection = tab.vim.selection(&tab.text).unwrap();
+            }
+        } else if insert {
+            tab.vim.handle_key(&mut tab.text, VimKey::Char('i'));
+        }
+        tab.selection = selection.clone();
+        tab.pending_selection = Some(selection.clone());
+        let mut screen = harness(app);
+        let can_undo = screen.state().tab().unwrap().vim.can_undo();
+        let before = painted_selection_rows(&screen);
+        assert!(before.len() > 1, "the selection must span wrapped rows");
+        let point = point_at_character(&screen, 2);
+        screen.hover_at(point);
+        for pressed in [true, false] {
+            screen.event(egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            screen.run_steps(1);
+            assert_eq!(painted_selection_rows(&screen), before);
+        }
+        screen.run_steps(3);
+        assert!(egui::Popup::is_any_open(&screen.ctx));
+        assert_eq!(painted_selection_rows(&screen), before);
+        screen.get_by_label("Copy Ctrl+C").hover();
+        screen.run_steps(2);
+        assert_eq!(painted_selection_rows(&screen), before);
+        let tab = screen.state().tab().unwrap();
+        assert_eq!(tab.selection, selection);
+        assert_eq!(tab.text, original);
+        assert!(!tab.dirty);
+        assert_eq!(tab.vim.can_undo(), can_undo);
+    }
 }
 
 #[test]
