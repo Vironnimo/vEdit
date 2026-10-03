@@ -34,7 +34,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Controls::{HOVER_DEFAULT, WM_MOUSELEAVE};
 use windows_sys::Win32::UI::Input::Ime::{GCS_COMPSTR, GCS_RESULTSTR, ISC_SHOWUICOMPOSITIONWINDOW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::Input::Pointer::{
     POINTER_FLAG_DOWN, POINTER_FLAG_UP, POINTER_FLAG_UPDATE,
@@ -48,17 +48,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMenu, LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW,
     RegisterClassExW, RegisterWindowMessageA, SetCursor, SetWindowPos, TranslateMessage,
-    CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE, GWL_USERDATA, HTCAPTION, HTCLIENT,
+    CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE, GWL_USERDATA, HTCAPTION, HTCLIENT, HTMAXBUTTON,
     MINMAXINFO, MNC_CLOSE, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
-    PT_TOUCH, QS_ALLINPUT, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE,
+    PT_TOUCH, QS_ALLINPUT, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
+    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
     SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA, WINDOWPOS,
     WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
-    WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WMSZ_TOPRIGHT, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
     WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_KEYDOWN,
     WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MENUCHAR, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
-    WM_NCCREATE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WM_PAINT, WM_POINTERDOWN, WM_POINTERUP,
+    WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_POINTERDOWN, WM_POINTERUP,
     WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE,
     WM_SIZE, WM_SIZING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TOUCH, WM_WINDOWPOSCHANGED,
     WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
@@ -94,6 +96,7 @@ use crate::window::{
 use runner::{EventLoopRunner, EventLoopRunnerShared};
 
 use super::window::set_skip_taskbar;
+use super::chrome_hit_test;
 use super::SelectedCursor;
 
 /// some backends like macos uses an uninhabited `Never` type,
@@ -1115,6 +1118,18 @@ pub(super) unsafe extern "system" fn public_window_callback(
     result
 }
 
+fn update_custom_maximize_hover(window: HWND, userdata: &WindowData, hovered: bool) {
+    let changed = {
+        let mut state = userdata.window_state_lock();
+        let changed = state.custom_titlebar.maximize_hovered != hovered;
+        state.custom_titlebar.maximize_hovered = hovered;
+        changed
+    };
+    if changed {
+        unsafe { RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT) };
+    }
+}
+
 unsafe fn public_window_callback_inner(
     window: HWND,
     msg: u32,
@@ -1161,6 +1176,94 @@ unsafe fn public_window_callback_inner(
     // the closure to catch_unwind directly so that the match body indentation wouldn't change and
     // the git blame and history would be preserved.
     let callback = || match msg {
+        WM_NCHITTEST => {
+            let state = userdata.window_state_lock();
+            let flags = state.window_flags;
+            if flags.intersects(WindowFlags::MARKER_DECORATIONS | WindowFlags::CHILD) {
+                result = ProcResult::DefWindowProc(wparam);
+                return;
+            }
+            if state.fullscreen.is_some() {
+                result = ProcResult::Value(HTCLIENT as _);
+                return;
+            }
+            let screen_point = [
+                super::get_x_lparam(lparam as u32) as i32,
+                super::get_y_lparam(lparam as u32) as i32,
+            ];
+            if let Ok(rect) = util::WindowArea::Outer.get_rect(window) {
+                let dpi = (state.scale_factor * 96.0).round() as u32;
+                let border = if let Some(metrics) = *util::GET_SYSTEM_METRICS_FOR_DPI {
+                    unsafe {
+                        let padding = metrics(SM_CXPADDEDBORDER, dpi);
+                        [metrics(SM_CXSIZEFRAME, dpi) + padding, metrics(SM_CYSIZEFRAME, dpi) + padding]
+                    }
+                } else {
+                    [(8.0 * state.scale_factor).round() as i32; 2]
+                };
+                if let Some(hit) = chrome_hit_test::resize_hit_test(
+                    screen_point,
+                    [rect.left, rect.top, rect.right, rect.bottom],
+                    border,
+                    flags.contains(WindowFlags::RESIZABLE),
+                    flags.contains(WindowFlags::MAXIMIZED),
+                ) {
+                    result = ProcResult::Value(hit as _);
+                    return;
+                }
+            }
+            let mut point = POINT { x: screen_point[0], y: screen_point[1] };
+            if unsafe { ScreenToClient(window, &mut point) } != 0 {
+                let hit = state.custom_titlebar.hit_test([point.x, point.y], state.scale_factor);
+                result = ProcResult::Value(if hit == chrome_hit_test::MAX_BUTTON
+                    && !flags.contains(WindowFlags::MAXIMIZABLE)
+                {
+                    HTCLIENT as _
+                } else {
+                    hit as _
+                });
+            } else {
+                result = ProcResult::Value(HTCLIENT as _);
+            }
+        },
+
+        WM_NCMOUSEMOVE => {
+            let custom_maximize = userdata.window_state_lock().custom_titlebar.maximize.is_some();
+            if custom_maximize {
+                update_custom_maximize_hover(window, userdata, wparam == HTMAXBUTTON as _);
+                unsafe {
+                    TrackMouseEvent(&mut TRACKMOUSEEVENT {
+                        cbSize: mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_NONCLIENT | TME_LEAVE,
+                        hwndTrack: window,
+                        dwHoverTime: HOVER_DEFAULT,
+                    })
+                };
+            }
+            // DefWindowProc owns the Windows 11 Snap Layout hover menu.
+            result = ProcResult::DefWindowProc(wparam);
+        },
+
+        WM_NCMOUSELEAVE => {
+            update_custom_maximize_hover(window, userdata, false);
+            result = ProcResult::DefWindowProc(wparam);
+        },
+
+        WM_CANCELMODE => {
+            let (pressed, hovered) = {
+                let mut state = userdata.window_state_lock();
+                let hovered = state.custom_titlebar.maximize_hovered;
+                (state.custom_titlebar.cancel_maximize_press(), hovered)
+            };
+            if pressed {
+                unsafe { release_mouse(userdata.window_state_lock()) };
+            }
+            if pressed || hovered {
+                unsafe { RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT) };
+            }
+            result = ProcResult::DefWindowProc(wparam);
+        },
+
         WM_NCCALCSIZE => {
             let window_flags = userdata.window_state_lock().window_flags;
             if wparam == 0 || window_flags.contains(WindowFlags::MARKER_DECORATIONS) {
@@ -1219,6 +1322,20 @@ unsafe fn public_window_callback_inner(
         },
 
         WM_NCLBUTTONDOWN => {
+            if wparam == HTMAXBUTTON as _ {
+                let mut state = userdata.window_state_lock();
+                if state.custom_titlebar.maximize.is_some()
+                    && !state.window_flags.contains(WindowFlags::MARKER_DECORATIONS)
+                    && state.window_flags.contains(WindowFlags::MAXIMIZABLE)
+                {
+                    state.custom_titlebar.begin_maximize_press();
+                    unsafe { capture_mouse(window, &mut state) };
+                    drop(state);
+                    unsafe { RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT) };
+                    result = ProcResult::Value(0);
+                    return;
+                }
+            }
             if wparam == HTCAPTION as _ {
                 // Prevent the user event loop from pausing when left clicking the title bar.
                 //
@@ -1649,6 +1766,17 @@ unsafe fn public_window_callback_inner(
             let y = super::get_y_lparam(lparam as u32) as i32;
             let position = PhysicalPosition::new(x as f64, y as f64);
 
+            let custom_maximize_hover = {
+                let state = userdata.window_state_lock();
+                state.custom_titlebar.maximize_pressed.then(|| {
+                    state.custom_titlebar.hit_test([x, y], state.scale_factor)
+                        == chrome_hit_test::MAX_BUTTON
+                })
+            };
+            if let Some(hovered) = custom_maximize_hover {
+                update_custom_maximize_hover(window, userdata, hovered);
+            }
+
             let cursor_moved;
             {
                 let mut w = userdata.window_state_lock();
@@ -1797,6 +1925,26 @@ unsafe fn public_window_callback_inner(
         },
 
         WM_LBUTTONUP => {
+            let custom_maximize_click = {
+                let mut state = userdata.window_state_lock();
+                let point = [
+                    super::get_x_lparam(lparam as u32) as i32,
+                    super::get_y_lparam(lparam as u32) as i32,
+                ];
+                let enabled = state.window_flags.contains(WindowFlags::MAXIMIZABLE);
+                let scale = state.scale_factor;
+                state.custom_titlebar.release_maximize_press(point, scale, enabled)
+            };
+            if let Some(clicked) = custom_maximize_click {
+                unsafe { release_mouse(userdata.window_state_lock()) };
+                if clicked {
+                    let command = if util::is_maximized(window) { SC_RESTORE } else { SC_MAXIMIZE };
+                    unsafe { PostMessageW(window, WM_SYSCOMMAND, command as _, 0) };
+                }
+                unsafe { RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT) };
+                result = ProcResult::Value(0);
+                return;
+            }
             use crate::event::ElementState::Released;
             use crate::event::MouseButton::Left;
             use crate::event::WindowEvent::MouseInput;
@@ -1932,7 +2080,14 @@ unsafe fn public_window_callback_inner(
             // can happen if `SetCapture` is called on our window when it already has the mouse
             // capture.
             if lparam != window {
-                userdata.window_state_lock().mouse.capture_count = 0;
+                let mut state = userdata.window_state_lock();
+                state.mouse.capture_count = 0;
+                let custom_maximize_hovered = state.custom_titlebar.maximize_hovered;
+                let custom_maximize_pressed = state.custom_titlebar.cancel_maximize_press();
+                if custom_maximize_pressed || custom_maximize_hovered {
+                    drop(state);
+                    unsafe { RedrawWindow(window, ptr::null(), 0, RDW_INTERNALPAINT) };
+                }
             }
             result = ProcResult::Value(0);
         },

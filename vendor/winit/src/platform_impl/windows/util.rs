@@ -226,6 +226,7 @@ pub type GetDpiForMonitor = unsafe extern "system" fn(
     dpi_y: *mut u32,
 ) -> HRESULT;
 pub type EnableNonClientDpiScaling = unsafe extern "system" fn(hwnd: HWND) -> BOOL;
+pub type GetSystemMetricsForDpi = unsafe extern "system" fn(index: i32, dpi: u32) -> i32;
 pub type AdjustWindowRectExForDpi = unsafe extern "system" fn(
     rect: *mut RECT,
     dw_style: u32,
@@ -256,6 +257,8 @@ pub type GetPointerPenInfo =
 
 pub(crate) static GET_DPI_FOR_WINDOW: Lazy<Option<GetDpiForWindow>> =
     Lazy::new(|| get_function!("user32.dll", GetDpiForWindow));
+pub(crate) static GET_SYSTEM_METRICS_FOR_DPI: Lazy<Option<GetSystemMetricsForDpi>> =
+    Lazy::new(|| get_function!("user32.dll", GetSystemMetricsForDpi));
 pub(crate) static ADJUST_WINDOW_RECT_EX_FOR_DPI: Lazy<Option<AdjustWindowRectExForDpi>> =
     Lazy::new(|| get_function!("user32.dll", AdjustWindowRectExForDpi));
 pub(crate) static GET_DPI_FOR_MONITOR: Lazy<Option<GetDpiForMonitor>> =

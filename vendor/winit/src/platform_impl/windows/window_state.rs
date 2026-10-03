@@ -23,6 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// Contains information about states and the window that the callback is going to use.
 pub(crate) struct WindowState {
     pub mouse: MouseProperties,
+    pub custom_titlebar: super::chrome_hit_test::CustomTitlebar,
 
     /// Used by `WM_GETMINMAXINFO`.
     pub min_size: Option<Size>,
@@ -143,6 +144,7 @@ impl WindowState {
         preferred_theme: Option<Theme>,
     ) -> WindowState {
         WindowState {
+            custom_titlebar: Default::default(),
             mouse: MouseProperties {
                 selected_cursor: SelectedCursor::default(),
                 capture_count: 0,

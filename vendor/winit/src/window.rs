@@ -42,6 +42,26 @@ impl fmt::Debug for Window {
     }
 }
 
+#[cfg(windows_platform)]
+impl Window {
+    /// Morrow custom titlebar regions, in client physical pixels [left, top,
+    /// right, bottom]. Publish after layout; pass empty regions while a popup
+    /// or modal needs those areas. Windows owns caption drags/double-clicks and
+    /// maximize interactions, including Windows 11's Snap Layout hover menu.
+    pub fn set_custom_titlebar_regions(
+        &self,
+        draggable: &[[i32; 4]],
+        maximize: Option<[i32; 4]>,
+    ) {
+        self.window.set_custom_titlebar_regions(draggable, maximize);
+    }
+
+    /// Hover/press feedback for painting the custom maximize/restore button.
+    pub fn custom_titlebar_maximize_state(&self) -> (bool, bool) {
+        self.window.custom_titlebar_maximize_state()
+    }
+}
+
 impl Drop for Window {
     /// This will close the [`Window`].
     ///

@@ -21,6 +21,8 @@ use crate::icon::Icon;
 use crate::keyboard::Key;
 use crate::platform::windows::{BackdropType, Color, CornerPreference};
 
+mod chrome_hit_test;
+
 #[derive(Clone, Debug)]
 pub struct PlatformSpecificWindowAttributes {
     pub owner: Option<HWND>,

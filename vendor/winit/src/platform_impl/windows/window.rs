@@ -858,6 +858,27 @@ impl Window {
         });
     }
 
+    pub fn set_custom_titlebar_regions(
+        &self,
+        draggable: &[[i32; 4]],
+        maximize: Option<[i32; 4]>,
+    ) {
+        let mut state = self.window_state_lock();
+        let scale = state.scale_factor;
+        state.custom_titlebar.draggable.clear();
+        state.custom_titlebar.draggable.extend_from_slice(draggable);
+        state.custom_titlebar.maximize = maximize;
+        state.custom_titlebar.geometry_scale = scale;
+        if maximize.is_none() {
+            state.custom_titlebar.maximize_hovered = false;
+        }
+    }
+
+    pub fn custom_titlebar_maximize_state(&self) -> (bool, bool) {
+        let state = self.window_state_lock();
+        (state.custom_titlebar.maximize_hovered, state.custom_titlebar.maximize_pressed)
+    }
+
     #[inline]
     pub fn is_decorated(&self) -> bool {
         let window_state = self.window_state_lock();
