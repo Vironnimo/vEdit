@@ -140,6 +140,93 @@ fn vim_yank_delete_and_change_never_write_to_the_system_clipboard() {
 }
 
 #[test]
+fn multiline_character_find_repeats_keep_the_target_visible_in_the_editor() {
+    let document = format!(
+        "a🦀\n{}x first\n{}x last\n",
+        "ordinary line\n".repeat(90),
+        "ordinary line\n".repeat(90)
+    );
+    let targets: Vec<_> = document
+        .chars()
+        .enumerate()
+        .filter_map(|(index, ch)| (ch == 'x').then_some(index))
+        .collect();
+    let mut app = fixture(&document);
+    app.settings.smooth_scroll = false;
+    let mut screen = harness(app);
+    for (command, target) in [("fx", targets[0]), (";", targets[1]), (",", targets[0])] {
+        text(&mut screen, command);
+        screen.run_steps(3);
+        let tab = screen.state().tab().unwrap();
+        assert_eq!(tab.vim.cursor, target, "{command}");
+        assert_eq!(tab.selection, target..target, "{command}");
+        let caret = screen.state().editor_cursor_rect.unwrap();
+        let bounds = screen.state().editor_rect.unwrap();
+        assert!(
+            bounds.contains(caret.center()),
+            "{command}: caret {caret:?} in {bounds:?}"
+        );
+    }
+    assert_eq!(screen.state().tab().unwrap().text, document);
+    assert_no_clipboard_write(&screen);
+}
+
+#[test]
+fn multiline_find_change_dot_and_paste_publish_the_correct_unnamed_register() {
+    let mut screen = harness(fixture("a🦀\nx b\nx tail"));
+    text(&mut screen, "dfx");
+    assert_eq!(screen.state().tab().unwrap().text, " b\nx tail");
+    assert_unnamed(screen.state(), "a🦀\nx", false);
+    text(&mut screen, ".");
+    assert_eq!(screen.state().tab().unwrap().text, " tail");
+    assert_unnamed(screen.state(), " b\nx", false);
+    text(&mut screen, "p");
+    assert_eq!(screen.state().tab().unwrap().text, "  b\nxtail");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 1);
+    text(&mut screen, "uuu");
+    assert_eq!(screen.state().tab().unwrap().text, "a🦀\nx b\nx tail");
+    assert_no_clipboard_write(&screen);
+}
+
+#[test]
+fn visual_uppercase_p_keeps_the_global_register_for_following_normal_paste() {
+    let mut screen = harness(fixture("abcdefghi"));
+    text(&mut screen, "v2lP");
+    assert_eq!(screen.state().tab().unwrap().text, "KEEP🦀defghi");
+    assert_unnamed(screen.state(), UNNAMED, false);
+    text(&mut screen, "p");
+    assert_eq!(screen.state().tab().unwrap().text, "KEEP🦀KEEP🦀defghi");
+    assert_unnamed(screen.state(), UNNAMED, false);
+    assert_no_clipboard_write(&screen);
+}
+
+#[test]
+fn yank_register_zero_is_shared_across_tabs_and_surround_leaves_both_registers_intact() {
+    let mut app = fixture("α🦀 beta");
+    let mut other = EditorTab::new(None, "other.txt".into());
+    other.text = "old tail".into();
+    other.saved_text = other.text.clone();
+    app.projects[0].tabs.push(other);
+    let mut screen = harness(app);
+    text(&mut screen, "y2l");
+    assert_eq!(screen.state().yank_register.as_ref().unwrap().text, "α🦀");
+    screen.state_mut().activate_tab(0, 1);
+    screen.run_steps(3);
+    text(&mut screen, "diw\"0p");
+    assert_eq!(screen.state().tab().unwrap().text, " α🦀tail");
+    assert_unnamed(screen.state(), "old", false);
+    text(&mut screen, "ggysfx)");
+    // A failed find consumes the unfinished surround without replacing either register.
+    assert_eq!(screen.state().yank_register.as_ref().unwrap().text, "α🦀");
+    assert_unnamed(screen.state(), "old", false);
+    text(&mut screen, "ys2l]");
+    assert_eq!(screen.state().tab().unwrap().text, " [α🦀]tail");
+    assert_unnamed(screen.state(), "old", false);
+    assert_eq!(screen.state().yank_register.as_ref().unwrap().text, "α🦀");
+    assert_no_clipboard_write(&screen);
+}
+
+#[test]
 fn vim_search_operator_updates_only_the_unnamed_register() {
     let mut screen = harness(fixture("start 测试 next 测试\n"));
     events(

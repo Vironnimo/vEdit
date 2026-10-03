@@ -1,10 +1,68 @@
 use super::*;
 use egui_kittest::kittest::Queryable;
 
+#[test]
+fn flexible_sidebars_and_zoom_screenshots() {
+    let mut app = git_workspace();
+    app.explorer_git_layout();
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "morrow_two_sidebars");
+    screen.set_size(Vec2::new(960.0, 640.0));
+    visual_tests::snapshot(&mut screen, "morrow_two_sidebars_compact");
+    screen.state_mut().settings.ui_scale = 2.0;
+    screen.ctx.set_zoom_factor(2.0);
+    screen.run_steps(4);
+    assert!(
+        screen.query_by_label("Go to file").is_none(),
+        "the optional file finder must not overlap menus at high zoom"
+    );
+    assert!(
+        screen.get_by_label("File").rect().right() <= screen.get_by_label("View").rect().left()
+    );
+    assert!(
+        screen.get_by_label("src").rect().bottom() < screen.ctx.content_rect().bottom() - 27.0,
+        "the Explorer must retain visible file rows at high zoom"
+    );
+    visual_tests::snapshot(&mut screen, "morrow_zoomed_workspace");
+    screen.state_mut().settings_open = true;
+    screen.run_steps(4);
+    visual_tests::snapshot(&mut screen, "morrow_zoomed_settings");
+}
+
+#[test]
+fn independently_arranged_sidebar_screenshots() {
+    let mut app = git_workspace();
+    app.move_sidebar(SidebarView::Explorer, sidebar_layout::Side::Left);
+    app.move_sidebar(SidebarView::Search, sidebar_layout::Side::Right);
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "morrow_sidebar_panels");
+    assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
+    assert!(
+        screen
+            .state()
+            .sidebar_view_visible(SidebarView::SourceControl)
+    );
+    assert!(screen.state().sidebar_view_visible(SidebarView::Search));
+    let left = screen
+        .state()
+        .sidebar_region_rect(sidebar_layout::Side::Left)
+        .unwrap();
+    assert!(screen.get_by_label("History").rect().right() <= left.right() - 9.0);
+    screen
+        .state_mut()
+        .set_sidebar_visible(sidebar_layout::Side::Left, false);
+    visual_tests::snapshot(&mut screen, "morrow_search_right_only");
+    screen
+        .state_mut()
+        .set_sidebar_visible(sidebar_layout::Side::Right, false);
+    visual_tests::snapshot(&mut screen, "morrow_no_sidebars");
+}
+
 fn git_workspace() -> MorrowApp {
     let mut app = MorrowApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
-    app.sidebar = SidebarView::SourceControl;
+    app.set_sidebar_view_visible(SidebarView::Explorer, false);
+    app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
     let project = &mut app.projects[0];
     project.git_root = Some(project.root.clone());
     project.last_git_refresh = Instant::now() + Duration::from_secs(3600);
@@ -237,7 +295,8 @@ fn dismissed_or_older_diff_result_cannot_reopen_or_replace_the_current_patch() {
 #[test]
 fn bookmarks_and_visible_jump_snapshots() {
     let mut app = git_workspace();
-    app.sidebar = SidebarView::Explorer;
+    app.set_sidebar_view_visible(SidebarView::SourceControl, false);
+    app.show_sidebar(SidebarView::Explorer);
     for (index, line, column, label) in [
         (0, 11, 9, "Workspace construction"),
         (0, 18, 9, "Open a file"),

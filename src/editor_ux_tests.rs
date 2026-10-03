@@ -327,8 +327,22 @@ fn suggestions(screen: &mut Harness<'_, MorrowApp>, count: usize) {
     let revision = tab.revision;
     let cursor = tab.vim.cursor;
     let path = tab.path.clone().unwrap();
+    // The generic editing fixture uses notes.txt. Its simulated language
+    // service must explicitly own that extension, just like a configured one.
+    let extension = path.extension().unwrap().to_string_lossy().into_owned();
+    {
+        let app = screen.state_mut();
+        app.settings
+            .language_servers
+            .iter_mut()
+            .find(|config| config.language_id == "rust")
+            .unwrap()
+            .extensions = vec![extension.clone()];
+        app.projects[0].rust_language_mut().config.extensions = vec![extension];
+    }
     screen.state_mut().projects[0]
-        .language_opened
+        .rust_language_mut()
+        .opened
         .insert(path, (revision, 7));
     screen.state_mut().completions = Some(CompletionPopup {
         tab_id: id,
@@ -346,6 +360,37 @@ fn suggestions(screen: &mut Harness<'_, MorrowApp>, count: usize) {
             .collect(),
     });
     screen.run_steps(2);
+}
+
+#[test]
+fn completion_popup_preserves_remapped_modified_keys_and_command_event_order() {
+    let mut screen = harness(fixture("fo", false), [960.0, 640.0]);
+    suggestions(&mut screen, 3);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::ToggleWrap.id().into(),
+        Some("Alt+Enter".into()),
+    );
+    key(&mut screen, Key::Enter, egui::Modifiers::ALT);
+    assert!(screen.state().settings.word_wrap);
+    assert_eq!(screen.state().tab().unwrap().text, "fo");
+    assert!(screen.state().completions.is_some());
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::ToggleWrap.id().into(),
+        Some("F8".into()),
+    );
+    screen
+        .input_mut()
+        .events
+        .extend([Key::F8, Key::Enter].map(|key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }));
+    screen.run_steps(6);
+    assert!(!screen.state().settings.word_wrap);
+    assert_eq!(screen.state().tab().unwrap().text, "candidate000");
 }
 
 #[test]

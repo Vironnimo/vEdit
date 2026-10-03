@@ -191,16 +191,34 @@ pub fn replace_selection(text: &str, selection: Range<usize>, replacement: &str)
 
 /// Indent or outdent the selected lines. A collapsed selection edits its line.
 /// Outdent removes one tab or up to `indent`'s width in leading spaces.
+#[cfg(test)]
 pub fn indent_lines(
     text: &str,
     selection: Range<usize>,
     indent: &str,
     outdent: bool,
 ) -> EditResult {
+    indent_lines_with_width(
+        text,
+        selection,
+        indent,
+        indent.chars().count().max(1),
+        outdent,
+    )
+}
+
+/// `width` is the visual indentation width, also when `indent` is a tab.
+pub fn indent_lines_with_width(
+    text: &str,
+    selection: Range<usize>,
+    indent: &str,
+    width: usize,
+    outdent: bool,
+) -> EditResult {
     let chars: Vec<char> = text.chars().collect();
     let selection = clamp_selection(selection, chars.len());
     let rows = lines(&chars);
-    let width = indent.chars().count().max(1);
+    let width = width.clamp(1, 16);
     let edits = selected_rows(&rows, &selection)
         .filter_map(|row| {
             let line = rows[row];
@@ -232,9 +250,10 @@ pub fn indent_lines(
 fn comment_markers(language: &str) -> (&'static str, &'static str) {
     let language = language.trim_start_matches('.').to_ascii_lowercase();
     match language.as_str() {
-        "py" | "python" | "pyw" | "rb" | "ruby" | "sh" | "bash" | "zsh" | "fish" | "ps1"
-        | "psm1" | "powershell" | "toml" | "yaml" | "yml" | "r" | "julia" | "jl" | "conf"
-        | "dockerfile" | "makefile" | "make" => ("#", ""),
+        "py" | "python" | "pyi" | "pyw" | "rb" | "ruby" | "sh" | "shell" | "shellscript"
+        | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "powershell" | "toml" | "yaml" | "yml"
+        | "r" | "julia" | "jl" | "conf" | "dockerfile" | "makefile" | "make" | "cmake"
+        | "ignore" | "ignore patterns" => ("#", ""),
         "sql" | "lua" | "hs" | "haskell" | "elm" => ("--", ""),
         "html" | "htm" | "xml" | "svg" | "markdown" | "md" => ("<!--", "-->"),
         "css" => ("/*", "*/"),
@@ -242,7 +261,7 @@ fn comment_markers(language: &str) -> (&'static str, &'static str) {
         "tex" | "latex" | "matlab" | "erl" | "erlang" => ("%", ""),
         "vb" | "vbs" | "vbnet" => ("'", ""),
         "f" | "f90" | "fortran" => ("!", ""),
-        "bat" | "cmd" => ("REM", ""),
+        "bat" | "cmd" | "batch" => ("REM", ""),
         _ => ("//", ""),
     }
 }
@@ -348,6 +367,75 @@ pub fn duplicate_lines(text: &str, selection: Range<usize>) -> EditResult {
     );
     result.selection = selection.start + shift..selection.end + shift;
     result
+}
+
+/// Move the selected complete lines one row, keeping their character selection
+/// and preserving an unterminated final line and the document's line endings.
+pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> EditResult {
+    let chars: Vec<char> = text.chars().collect();
+    let selection = clamp_selection(selection, chars.len());
+    let rows = lines(&chars);
+    let chosen = selected_rows(&rows, &selection);
+    let first = rows[chosen.start];
+    let last = rows[chosen.end - 1];
+    let unchanged = || EditResult {
+        text: text.to_owned(),
+        selection: selection.clone(),
+    };
+    // A trailing newline terminates the last complete row; its synthetic empty
+    // row should not turn a line move into removal of that terminator.
+    let complete_rows = rows.len()
+        - usize::from(rows.len() > 1 && rows.last().unwrap().start == chars.len());
+    if chosen.end > complete_rows
+        || (down && chosen.end >= complete_rows)
+        || (!down && chosen.start == 0)
+    {
+        return unchanged();
+    }
+    let block: String = chars[first.start..last.end].iter().collect();
+    let (range, replacement, moved_start) = if down {
+        let next = rows[chosen.end];
+        let neighbor: String = chars[next.start..next.end].iter().collect();
+        let separator: String = chars[last.end..last.break_end].iter().collect();
+        let ending: String = chars[next.end..next.break_end].iter().collect();
+        let moved_start = first.start + neighbor.chars().count() + separator.chars().count();
+        (
+            first.start..next.break_end,
+            format!("{neighbor}{separator}{block}{ending}"),
+            moved_start,
+        )
+    } else {
+        let previous = rows[chosen.start - 1];
+        let neighbor: String = chars[previous.start..previous.end].iter().collect();
+        let separator: String = chars[previous.end..previous.break_end].iter().collect();
+        let ending: String = chars[last.end..last.break_end].iter().collect();
+        (
+            previous.start..last.break_end,
+            format!("{block}{separator}{neighbor}{ending}"),
+            previous.start,
+        )
+    };
+    let mut result = replace_selection(text, range, &replacement);
+    let offset = |position: usize| moved_start + position.saturating_sub(first.start);
+    let len = result.text.chars().count();
+    result.selection = offset(selection.start).min(len)..offset(selection.end).min(len);
+    result
+}
+
+/// Insert a tab or advance to the next visual tab stop with spaces.
+pub fn insert_tab(text: &str, selection: Range<usize>, width: usize, tabs: bool) -> EditResult {
+    let width = width.clamp(1, 16);
+    let chars: Vec<char> = text.chars().collect();
+    let selection = clamp_selection(selection, chars.len());
+    let start = chars[..selection.start]
+        .iter()
+        .rposition(|&ch| ch == '\n')
+        .map_or(0, |at| at + 1);
+    let column = chars[start..selection.start].iter().fold(0, |column, &ch| {
+        column + if ch == '\t' { width - column % width } else { 1 }
+    });
+    let insertion = if tabs { "\t".into() } else { " ".repeat(width - column % width) };
+    replace_selection(text, selection, &insertion)
 }
 
 /// Insert a newline with the current line's indent. Opening braces, brackets,
@@ -571,5 +659,30 @@ mod tests {
         let (result, count) = replace_all(text, 0..0, "git", "svn", options);
         assert_eq!(count, highlighted.len());
         assert_eq!(result.text, "git\u{301} svn git\u{203f}other");
+    }
+
+    #[test]
+    fn moving_lines_preserves_unicode_crlf_eof_and_selection_boundaries() {
+        let moved = move_lines("α\r\nβ\r\nγ", 0..1, true);
+        assert_eq!(moved.text, "β\r\nα\r\nγ");
+        assert_eq!(moved.selection, 3..4);
+        assert_eq!(move_lines(&moved.text, moved.selection, false).text, "α\r\nβ\r\nγ");
+        assert_eq!(move_lines("a\nb", 0..1, true).text, "b\na");
+        assert_eq!(move_lines("a\nb\n", 0..1, true).text, "b\na\n");
+        let moved = move_lines("a\nb\nc\nd", 2..6, true);
+        assert_eq!(moved.text, "a\nd\nb\nc");
+        assert_eq!(moved.selection, 4..7);
+        assert_eq!(move_lines("a\nb", 0..0, false).text, "a\nb");
+        assert_eq!(move_lines("a\nb\n", 2..2, true).text, "a\nb\n");
+        assert_eq!(move_lines("", 99..99, true).selection, 0..0);
+    }
+
+    #[test]
+    fn space_tabs_advance_to_visual_stops_after_unicode_and_existing_tabs() {
+        assert_eq!(insert_tab("α", 1..1, 4, false).text, "α   ");
+        assert_eq!(insert_tab("\tα", 2..2, 4, false).text, "\tα   ");
+        assert_eq!(insert_tab("1234", 4..4, 4, false).text, "1234    ");
+        assert_eq!(insert_tab("α\r\nβ", 4..4, 4, false).text, "α\r\nβ   ");
+        assert_eq!(insert_tab("α", 1..1, 4, true).text, "α\t");
     }
 }

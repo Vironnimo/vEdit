@@ -323,7 +323,8 @@ fn polished_screenshots() {
     snapshot(&mut screen, "morrow_review");
 
     let app = screen.state_mut();
-    app.sidebar = SidebarView::Explorer;
+    app.clear_review_sidebar();
+    app.show_sidebar(SidebarView::Explorer);
     app.review = None;
     app.activate_tab(0, 1);
     app.set_document_view(crate::cli::DocumentView::Source);
@@ -401,7 +402,8 @@ fn review(app: &mut MorrowApp) {
         note: "Two areas to check before applying this change.".into(),
         files: app.projects[0].tabs.iter().map(|tab| tab.id).collect(),
     });
-    app.sidebar = SidebarView::Review;
+    app.set_sidebar_view_visible(SidebarView::Explorer, false);
+    app.show_sidebar(SidebarView::Review);
 }
 
 #[test]
@@ -467,9 +469,9 @@ fn markdown_preview_toggle_preserves_source_and_shift_v_keeps_selecting_lines() 
     let mut screen = harness(app);
     screen.run_steps(3);
     let source_id = screen.state().tab().unwrap().id;
-    let preview_shortcut = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
+    let preview_shortcut = egui::Modifiers::COMMAND.plus(egui::Modifiers::ALT);
 
-    screen.key_press_modifiers(preview_shortcut, Key::V);
+    screen.key_press_modifiers(preview_shortcut, Key::M);
     screen.run_steps(3);
     assert_eq!(
         screen.state().tab().unwrap().agent_view,
@@ -486,7 +488,7 @@ fn markdown_preview_toggle_preserves_source_and_shift_v_keeps_selecting_lines() 
     assert_eq!(screen.state().tab().unwrap().text, MARKDOWN_DOCUMENT);
     assert!(!screen.state().tab().unwrap().dirty);
 
-    screen.key_press_modifiers(preview_shortcut, Key::V);
+    screen.key_press_modifiers(preview_shortcut, Key::M);
     screen.run_steps(3);
     assert_eq!(
         screen.state().tab().unwrap().agent_view,
@@ -682,7 +684,11 @@ fn review_note_reveals_source_and_clear_keeps_documents_open() {
     screen.get_by_label("Clear").click();
     screen.run_steps(3);
     assert!(screen.state().review.is_none());
-    assert_eq!(screen.state().sidebar, SidebarView::Explorer);
+    assert!(!screen.state().sidebar_visible);
+    assert_eq!(
+        screen.state().sidebars_status()["left"]["panels"],
+        serde_json::json!([])
+    );
     assert_eq!(screen.state().projects[0].tabs.len(), 2);
     assert!(
         screen.state().projects[0]

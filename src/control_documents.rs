@@ -171,6 +171,11 @@ impl MorrowApp {
             }
             Request::Settings { patch } => {
                 if let Some(patch) = patch {
+                    if let Some(bindings) = &patch.keybindings
+                        && let Err(error) = keybindings::validate(bindings)
+                    {
+                        return Response::failure("invalid_keybindings", error);
+                    }
                     if patch.vim.is_some_and(|value| value != self.settings.vim)
                         && self
                             .projects
@@ -187,22 +192,29 @@ impl MorrowApp {
                         .search_excludes
                         .as_ref()
                         .map(|_| self.settings.search_excludes.clone());
+                    let previous_visibility = self.settings.show_ignored_files;
                     apply_settings_patch(&mut self.settings, &patch);
+                    if previous_visibility != self.settings.show_ignored_files {
+                        self.reindex_explorer_visibility();
+                    }
                     if previous_excludes
                         .is_some_and(|previous| previous != self.settings.search_excludes)
                     {
                         self.invalidate_project_search();
                     }
                     for tab in self.projects.iter_mut().flat_map(|p| &mut p.tabs) {
-                        tab.vim.set_indent_width(self.settings.tab_width);
+                        let indent = tab.indentation(&self.settings);
+                        tab.vim.set_indentation(indent.width, indent.tabs);
                     }
                     self.session_dirty = true;
                     self.persist_session();
                     Response::success(
-                        json!({"applied":true,"settings":self.settings,"persistence":"queued","autosave_paused_tabs":self.projects.iter().flat_map(|p|&p.tabs).filter(|t|t.agent_unsaved).map(|t|t.id).collect::<Vec<_>>()}),
+                        json!({"applied":true,"settings":self.settings,"keybinding_actions":self.keybindings_catalog(),"persistence":"queued","autosave_paused_tabs":self.projects.iter().flat_map(|p|&p.tabs).filter(|t|t.agent_unsaved).map(|t|t.id).collect::<Vec<_>>()}),
                     )
                 } else {
-                    Response::success(json!({"settings":self.settings}))
+                    Response::success(
+                        json!({"settings":self.settings,"keybinding_actions":self.keybindings_catalog()}),
+                    )
                 }
             }
             Request::Command {
@@ -415,25 +427,19 @@ impl MorrowApp {
                         "A task is already running. Inspect output or stop it explicitly before starting another",
                     );
                 }
-                let Some(project) = self.project() else {
-                    return Response::failure(
-                        "no_workspace",
-                        "Add a workspace before running a task",
-                    );
-                };
-                if !project.root.join("Cargo.toml").is_file() {
-                    return Response::failure(
-                        "not_a_rust_workspace",
-                        "Check/test/build are curated Cargo tasks and require Cargo.toml in the active workspace",
-                    );
-                }
-                let command = match action {
-                    TaskAction::Check => "cargo check",
-                    TaskAction::Test => "cargo test",
-                    TaskAction::Build => "cargo build",
+                let action = match action {
+                    TaskAction::Check => project_tasks::ProjectTaskAction::Check,
+                    TaskAction::Test => project_tasks::ProjectTaskAction::Test,
+                    TaskAction::Build => project_tasks::ProjectTaskAction::Build,
+                    TaskAction::RunFile => project_tasks::ProjectTaskAction::RunFile,
                     TaskAction::Stop => unreachable!(),
                 };
-                self.run_task(command.into());
+                let task = match self.resolve_project_task(action) {
+                    Ok(task) => task,
+                    Err(error) => return Response::failure("task_unavailable", error),
+                };
+                let command = task.command.display();
+                self.start_resolved_task(task);
                 Response::success(
                     json!({"applied":true,"running":self.task.is_some(),"status":self.task_status,"command":command,"source":"Tasks read saved files on disk; unsaved buffers are not written"}),
                 )
@@ -595,7 +601,7 @@ impl MorrowApp {
                 json!({"applied":true,"changed":changed,"command":command,"tab":self.control_tab_value(project,index),"selection":self.control_selection_value(project,index)}),
             );
         }
-        let width = self.settings.tab_width;
+        let indent = self.projects[project].tabs[index].indentation(&self.settings);
         let tab = &mut self.projects[project].tabs[index];
         let selection = if self.settings.vim {
             tab.vim
@@ -643,16 +649,19 @@ impl MorrowApp {
             | EditorCommand::DuplicateLine
             | EditorCommand::DeleteLine => {
                 let edit = match command {
-                    EditorCommand::Indent | EditorCommand::Outdent => editor::indent_lines(
-                        &tab.text,
-                        selection,
-                        &" ".repeat(width),
-                        matches!(command, EditorCommand::Outdent),
-                    ),
+                    EditorCommand::Indent | EditorCommand::Outdent => {
+                        editor::indent_lines_with_width(
+                            &tab.text,
+                            selection,
+                            &indent.unit(),
+                            indent.width,
+                            matches!(command, EditorCommand::Outdent),
+                        )
+                    }
                     EditorCommand::ToggleComment => editor::toggle_line_comment(
                         &tab.text,
                         selection,
-                        extension(tab.path.as_deref()),
+                        crate::file_kind::comment_language(tab.path.as_deref()),
                     ),
                     EditorCommand::DuplicateLine => editor::duplicate_lines(&tab.text, selection),
                     EditorCommand::DeleteLine => {
@@ -761,6 +770,9 @@ fn ready_for_edit(tab: &EditorTab, revision: u64) -> Option<Response> {
     None
 }
 fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
+    if let Some(bindings) = &patch.keybindings {
+        settings.keybindings = bindings.clone();
+    }
     if let Some(value) = patch.vim {
         settings.vim = value;
     }
@@ -775,6 +787,24 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.autosave {
         settings.autosave = value;
     }
+    if let Some(value) = patch.autosave_delay_ms {
+        settings.autosave_delay_ms = value;
+    }
+    if let Some(value) = patch.ui_scale {
+        settings.ui_scale = value;
+    }
+    if let Some(value) = patch.line_height {
+        settings.line_height = value;
+    }
+    if let Some(value) = patch.line_numbers {
+        settings.line_numbers = value;
+    }
+    if let Some(value) = patch.highlight_current_line {
+        settings.highlight_current_line = value;
+    }
+    if let Some(value) = patch.show_ignored_files {
+        settings.show_ignored_files = value;
+    }
     if let Some(value) = patch.font_size {
         settings.font_size = value;
     }
@@ -783,6 +813,18 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     }
     if let Some(value) = patch.tab_width {
         settings.tab_width = value;
+    }
+    if let Some(value) = patch.detect_indentation {
+        settings.detect_indentation = value;
+    }
+    if let Some(value) = patch.indent_with_tabs {
+        settings.indent_with_tabs = value;
+    }
+    if let Some(value) = &patch.language_indent_widths {
+        settings.language_indent_widths = value.clone();
+    }
+    if let Some(value) = &patch.language_indent_with_tabs {
+        settings.language_indent_with_tabs = value.clone();
     }
     if let Some(value) = patch.word_wrap {
         settings.word_wrap = value;
@@ -1441,6 +1483,13 @@ mod tests {
                 word_wrap: Some(true),
                 smooth_scroll: Some(true),
                 swap_jk: Some(true),
+                ui_scale: Some(1.25),
+                font_size: Some(28.0),
+                line_height: Some(1.7),
+                line_numbers: Some(cli::LineNumbers::Relative),
+                highlight_current_line: Some(false),
+                autosave_delay_ms: Some(1500),
+                show_ignored_files: Some(true),
                 search_excludes: Some(vec![" generated ".into(), "src\\cache".into()]),
                 ..Default::default()
             }),
@@ -1448,7 +1497,7 @@ mod tests {
         assert!(response.ok);
         assert!(app.settings.vim);
         assert!(app.settings.autosave);
-        assert_eq!(app.settings.font_size, 14.0);
+        assert_eq!(app.settings.font_size, 28.0);
         assert!(app.settings.word_wrap);
         assert!(app.settings.smooth_scroll);
         assert!(app.settings.swap_jk);
@@ -1460,6 +1509,12 @@ mod tests {
         let snapshot: Session =
             serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
         let saved = snapshot.settings.unwrap();
+        assert_eq!(saved.ui_scale, 1.25);
+        assert_eq!(saved.line_height, 1.7);
+        assert_eq!(saved.line_numbers, cli::LineNumbers::Relative);
+        assert!(!saved.highlight_current_line);
+        assert_eq!(saved.autosave_delay_ms, 1500);
+        assert!(saved.show_ignored_files);
         assert!(saved.word_wrap && saved.swap_jk);
         assert_eq!(saved.search_excludes, ["generated", "src/cache"]);
         drop(app);
@@ -1545,7 +1600,7 @@ mod tests {
         let response = app.control_request(Request::Settings {
             patch: Some(SettingsPatch {
                 editor_font: Some(cli::EditorFont::Consolas),
-                font_size: Some(25.0),
+                font_size: Some(33.0),
                 autosave: Some(false),
                 ..Default::default()
             }),
@@ -1555,6 +1610,93 @@ mod tests {
         assert_eq!(serde_json::to_value(&app.settings).unwrap(), before);
         assert_eq!(app.tab().unwrap().text, "unchanged");
         assert_eq!(app.tab().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn invalid_comfort_settings_leave_every_preference_unchanged() {
+        for mut patch in [
+            SettingsPatch {
+                ui_scale: Some(2.01),
+                ..Default::default()
+            },
+            SettingsPatch {
+                ui_scale: Some(f32::NAN),
+                ..Default::default()
+            },
+            SettingsPatch {
+                line_height: Some(0.9),
+                ..Default::default()
+            },
+            SettingsPatch {
+                line_height: Some(f32::INFINITY),
+                ..Default::default()
+            },
+            SettingsPatch {
+                autosave_delay_ms: Some(299),
+                ..Default::default()
+            },
+            SettingsPatch {
+                autosave_delay_ms: Some(5001),
+                ..Default::default()
+            },
+        ] {
+            let (mut app, _) = app_with_text("unchanged");
+            let before = serde_json::to_value(&app.settings).unwrap();
+            patch.word_wrap = Some(true);
+            patch.show_ignored_files = Some(true);
+            let response = app.control_request(Request::Settings { patch: Some(patch) });
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, "invalid_request");
+            assert_eq!(serde_json::to_value(&app.settings).unwrap(), before);
+            assert_eq!(app.tab().unwrap().text, "unchanged");
+        }
+    }
+
+    #[test]
+    fn indentation_patch_is_atomic_and_commands_use_document_language() {
+        let (mut app, id) = app_with_text("value\n");
+        app.projects[0].tabs[0].path = Some(PathBuf::from("fixture.dart"));
+        let response = app.control_request(Request::Command {
+            tab_id: id,
+            command: EditorCommand::Indent,
+            expected_revision: 0,
+        });
+        assert!(response.ok);
+        assert_eq!(app.tab().unwrap().text, "  value\n");
+        let before = serde_json::to_value(&app.settings).unwrap();
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                detect_indentation: Some(false),
+                language_indent_widths: Some(HashMap::from([("python".into(), 9)])),
+                ..Default::default()
+            }),
+        });
+        assert!(!response.ok);
+        assert_eq!(serde_json::to_value(&app.settings).unwrap(), before);
+        let response = app.control_request(Request::Settings {
+            patch: Some(SettingsPatch {
+                detect_indentation: Some(false),
+                language_indent_widths: Some(HashMap::from([("dart".into(), 4)])),
+                language_indent_with_tabs: Some(HashMap::from([("dart".into(), true)])),
+                ..Default::default()
+            }),
+        });
+        assert!(response.ok);
+        assert_eq!(app.tab().unwrap().text, "  value\n");
+        let response = app.control_request(Request::Command {
+            tab_id: id,
+            command: EditorCommand::Outdent,
+            expected_revision: 1,
+        });
+        assert!(response.ok);
+        assert_eq!(app.tab().unwrap().text, "value\n");
+        let response = app.control_request(Request::Command {
+            tab_id: id,
+            command: EditorCommand::Indent,
+            expected_revision: 2,
+        });
+        assert!(response.ok);
+        assert_eq!(app.tab().unwrap().text, "\tvalue\n");
     }
 
     #[test]

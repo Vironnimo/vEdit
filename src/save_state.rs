@@ -4,6 +4,12 @@ use super::*;
 impl MorrowApp {
     pub(super) fn save_status_ui(&mut self, ui: &mut egui::Ui) {
         let autosave = self.settings.autosave;
+        let save_binding = self.shortcut_label(keybindings::Action::Save);
+        let save = if save_binding.is_empty() {
+            "File > Save"
+        } else {
+            &save_binding
+        };
         if let Some(tab) = self.tab() {
             let (label, color, hint) = if tab.loading {
                 (
@@ -21,33 +27,44 @@ impl MorrowApp {
                     RED,
                     if tab.dirty {
                         format!(
-                            "{error}\nYour buffer is retained. Ctrl+S retries saving; reload from the File menu."
+                            "{error}\nYour buffer is retained. Use Save as… in the document banner to preserve your edits in another file. {save} retries saving."
                         )
                     } else {
-                        format!("{error}\nReload from disk in the File menu.")
+                        format!(
+                            "{error}\nUse Reload from disk in the document banner to retry loading."
+                        )
                     },
                 )
             } else if tab.saving {
                 ("Saving…", MUTED, "Writing the document to disk.".to_owned())
             } else if tab.dirty && tab.agent_unsaved {
-                ("Agent draft", ORANGE, "These agent edits are unsaved. Auto save is paused for this document until you save with Ctrl+S.".to_owned())
+                (
+                    "Agent draft",
+                    ORANGE,
+                    format!(
+                        "These agent edits are unsaved. Auto save is paused for this document until you save with {save}."
+                    ),
+                )
             } else if tab.path.is_none() {
                 (
                     "New file",
                     ORANGE,
-                    "Choose a file name with Ctrl+S. New files are not automatically saved."
-                        .to_owned(),
+                    format!(
+                        "Choose a file name with {save}. New files are not automatically saved."
+                    ),
                 )
             } else if tab.dirty {
                 (
                     "Unsaved",
                     ORANGE,
                     if autosave {
-                        "Changes will be saved after 850 ms without typing. Ctrl+S saves now."
+                        format!(
+                            "Changes will be saved after {} ms without typing. {save} saves now.",
+                            self.settings.autosave_delay_ms
+                        )
                     } else {
-                        "Changes are in memory. Ctrl+S saves them to disk."
-                    }
-                    .to_owned(),
+                        format!("Changes are in memory. {save} saves them to disk.")
+                    },
                 )
             } else {
                 (
@@ -65,7 +82,8 @@ impl MorrowApp {
             "Auto save off"
         };
         let hint = format!(
-            "Save named files 850 ms after you stop typing. Applies to all projects.\nNew files and unsaved agent drafts wait for Ctrl+S.\nClick to turn auto save {}.",
+            "Save named files {} ms after you stop typing. Applies to all projects.\nNew files and unsaved agent drafts wait for {save}.\nClick to turn auto save {}.",
+            self.settings.autosave_delay_ms,
             if autosave { "off" } else { "on" }
         );
         let response = ui

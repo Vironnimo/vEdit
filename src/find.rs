@@ -1001,6 +1001,7 @@ impl MorrowApp {
         }
         if let Some(yank) = state.take_yank() {
             self.register = Some(yank);
+            self.yank_register = self.tab().and_then(|tab| tab.vim.yank_register().cloned());
         }
         if !state.waiting() && !state.deferred_events.is_empty() {
             let mut queued = std::mem::take(&mut state.deferred_events);

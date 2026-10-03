@@ -595,7 +595,10 @@ fn commands_navigation_keeps_query_focus_and_enter_runs_only_the_selection() {
     screen.key_press(Key::End);
     screen.run_steps(3);
     assert_eq!(screen.state().palette_selected, COMMANDS.len() - 1);
-    let (name, hint) = COMMANDS[COMMANDS.len() - 1];
+    let (name, _) = COMMANDS[COMMANDS.len() - 1];
+    let hint = screen
+        .state()
+        .shortcut_label(keybindings::Action::from_label(name).unwrap());
     assert_row_visible(&screen, &format!("{name}: {hint}"));
     assert!(!screen.state().settings_open);
     screen.key_press(Key::Home);

@@ -8,6 +8,7 @@ mod cli;
 mod design;
 mod editor;
 mod file_identity;
+mod file_kind;
 mod git;
 mod git_diff_view;
 mod git_graph;

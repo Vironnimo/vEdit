@@ -110,6 +110,35 @@ fn status_persistently_explains_save_state_and_controls_autosave_without_editing
 }
 
 #[test]
+fn file_conflict_banner_offers_save_as_without_reloading_unsaved_text() {
+    let mut app = fixture();
+    let tab = app.tab_mut().unwrap();
+    tab.text.push_str("// preserved local work\n");
+    tab.changed();
+    tab.error = Some("This file changed outside Morrow.".into());
+    let id = tab.id;
+    let original = tab.text.clone();
+    let revision = tab.revision;
+    let mut screen = harness(app);
+    assert!(
+        screen
+            .query_by_label("Your edits are kept. Save as… preserves them in another file.")
+            .is_some()
+    );
+    // A pointer click on the disabled reload action must not dispatch a load.
+    screen.get_by_label("Reload from disk").click();
+    screen.run_steps(2);
+    let tab = screen.state().tab().unwrap();
+    assert!(!tab.loading);
+    assert_eq!(tab.text, original);
+    assert_eq!(tab.revision, revision);
+    screen.get_by_label("Save as…").click();
+    screen.run_steps(2);
+    assert_eq!(screen.state().save_as, Some(id));
+    assert_eq!(screen.state().tab().unwrap().text, original);
+}
+
+#[test]
 fn colliding_file_tabs_are_distinguishable_and_recompute_in_each_split() {
     let mut app = fixture();
     app.sidebar_visible = false;
@@ -337,7 +366,8 @@ fn review_severity_is_readable_without_interpreting_colors() {
         note: String::new(),
         files: vec![tab.id],
     });
-    app.sidebar = SidebarView::Review;
+    app.set_sidebar_view_visible(SidebarView::Explorer, false);
+    app.show_sidebar(SidebarView::Review);
     let screen = harness(app);
     for detail in ["Info · Line 1", "Warning · Line 2", "Critical · Line 3"] {
         assert!(painted_text(&screen, detail).is_some());
@@ -393,7 +423,7 @@ fn markdown_scroll_tracks_are_visible_without_hover_in_actual_narrow_split() {
 #[test]
 fn welcome_explains_how_to_type_and_find_vim_settings_at_minimum_height() {
     let screen = harness(MorrowApp::empty(egui::Context::default()));
-    for label in ["i / Esc", "v / V", "Ctrl ,"] {
+    for label in ["i / Esc", "v / V", "Ctrl+Comma"] {
         let rect = screen.get_by_label(label).rect();
         assert!(
             rect.top() > 0.0 && rect.bottom() < 610.0,

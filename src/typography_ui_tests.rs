@@ -112,6 +112,88 @@ fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers
 }
 
 #[test]
+fn interface_zoom_is_bounded_saved_and_resettable_while_settings_is_open() {
+    let mut app = fixture();
+    app.settings.ui_scale = 1.4;
+    let mut screen = harness(app);
+    assert!((screen.ctx.zoom_factor() - 1.4).abs() < 0.001);
+    key(&mut screen, Key::Comma, egui::Modifiers::COMMAND);
+    key(&mut screen, Key::Plus, egui::Modifiers::COMMAND);
+    assert!((screen.state().settings.ui_scale - 1.5).abs() < 0.001);
+    assert!((screen.ctx.zoom_factor() - 1.5).abs() < 0.001);
+    let saved: Session =
+        serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
+    assert_eq!(saved.settings.unwrap().ui_scale, 1.5);
+    screen.state_mut().settings.ui_scale = 2.0;
+    screen.set_size(Vec2::new(960.0, 640.0));
+    screen.run_steps(5);
+    key(&mut screen, Key::Plus, egui::Modifiers::COMMAND);
+    assert_eq!(screen.state().settings.ui_scale, 2.0);
+    let done = screen.get_by_label("Done").rect();
+    assert!(
+        screen.ctx.content_rect().contains_rect(done),
+        "Done must remain accessible at 200%: {done:?}"
+    );
+    key(&mut screen, Key::Num0, egui::Modifiers::COMMAND);
+    assert_eq!(screen.state().settings.ui_scale, 1.0);
+    assert_eq!(screen.ctx.zoom_factor(), 1.0);
+    assert!(screen.state().settings_open);
+    assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
+    assert_eq!(screen.state().tab().unwrap().revision, 0);
+}
+
+#[test]
+fn source_reading_preferences_change_geometry_numbers_and_highlight_without_editing() {
+    let mut app = fixture();
+    app.tab_mut().unwrap().set_cursor(21..21);
+    let mut screen = harness(app);
+    let before = source_shape(&screen, DOCUMENT);
+    screen.state_mut().settings.font_size = 32.0;
+    screen.state_mut().settings.line_height = 2.0;
+    screen.state_mut().settings.line_numbers = crate::cli::LineNumbers::Relative;
+    screen.run_steps(3);
+    let larger = source_shape(&screen, DOCUMENT);
+    assert!(larger.galley.rows[1].pos.y > before.galley.rows[1].pos.y * 2.0);
+    assert_eq!(larger.galley.job.sections[0].format.line_height, Some(64.0));
+    let numbers = |screen: &Harness<'_, MorrowApp>| -> Vec<String> {
+        let source = source_shape(screen, DOCUMENT);
+        screen
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(shape)
+                    if shape.pos.x < source.pos.x
+                        && shape.pos.y >= source.pos.y
+                        && shape.pos.y < source.pos.y + source.galley.size().y
+                        && !shape.galley.text().is_empty()
+                        && shape.galley.text().chars().all(|ch| ch.is_ascii_digit()) =>
+                {
+                    Some(shape.galley.text().to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(numbers(&screen), ["1", "2", "1"]);
+    let has_highlight = |screen: &Harness<'_, MorrowApp>| {
+        screen.output().shapes.iter().any(|shape| {
+            matches!(&shape.shape,
+            egui::epaint::Shape::Rect(rect) if rect.fill == ACCENT.linear_multiply(0.055))
+        })
+    };
+    assert!(has_highlight(&screen));
+    screen.state_mut().settings.line_numbers = crate::cli::LineNumbers::Off;
+    screen.state_mut().settings.highlight_current_line = false;
+    screen.run_steps(2);
+    assert!(numbers(&screen).is_empty());
+    assert!(!has_highlight(&screen));
+    assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
+    assert_eq!(screen.state().tab().unwrap().revision, 0);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 21);
+}
+
+#[test]
 fn settings_font_combo_preserves_mouse_selection_mode_and_document() {
     for vim in [true, false] {
         let mut app = fixture();
@@ -304,12 +386,19 @@ fn legacy_session_adds_bundled_font_without_resetting_existing_preferences() {
     assert_eq!(session.sidebar, Some(SidebarView::Search));
     let restored = session.settings.unwrap();
     assert_eq!(restored.editor_font, crate::cli::EditorFont::JetBrainsMono);
-    let mut updated = serde_json::to_value(&restored).unwrap();
-    assert_eq!(
-        updated.as_object_mut().unwrap().remove("editor_font"),
-        Some(serde_json::json!("jetbrains_mono"))
-    );
-    assert_eq!(updated, old_settings);
+    assert_eq!(restored.ui_scale, 1.0);
+    assert_eq!(restored.line_height, 1.35);
+    assert_eq!(restored.line_numbers, crate::cli::LineNumbers::Absolute);
+    assert!(restored.highlight_current_line);
+    assert!(!restored.show_ignored_files);
+    assert_eq!(restored.autosave_delay_ms, 850);
+    let updated = serde_json::to_value(&restored).unwrap();
+    for (key, value) in old_settings.as_object().unwrap() {
+        assert_eq!(
+            &updated[key], value,
+            "Existing preference {key} must survive migration"
+        );
+    }
 }
 
 #[test]

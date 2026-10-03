@@ -172,11 +172,33 @@ fn quick_open_distinguishes_indexing_failures_and_real_no_matches() {
 }
 
 #[test]
+fn quick_open_explains_that_a_limited_index_can_miss_files() {
+    let mut app = fixture(1);
+    app.sidebar_visible = false;
+    let mut index = workspace::WorkspaceIndex::empty(app.projects[0].root.clone());
+    index.truncated = true;
+    app.projects[0].index = Some(Arc::new(index));
+    app.open_palette(Palette::Files);
+    app.palette_query = "missing".into();
+    let screen = harness(app);
+    assert!(screen.query_by_label("No matches").is_none());
+    assert!(
+        screen
+            .query_by_label("No matches in the indexed files")
+            .is_some()
+    );
+    let note = screen
+        .get_by_label("Index limit reached. Some files may be missing.")
+        .rect();
+    assert!(note.top() > 0.0 && note.bottom() < 640.0, "{note:?}");
+}
+
+#[test]
 fn problems_distinguish_duplicate_basenames_and_reveal_full_paths_on_hover() {
     let mut app = fixture(1);
     app.output_visible = true;
     app.problems_visible = true;
-    app.projects[0].language_ready = true;
+    app.projects[0].rust_language_mut().ready = true;
     let root = app.projects[0].root.clone();
     for crate_name in ["crate-a", "crate-b"] {
         app.projects[0].diagnostics.insert(
@@ -201,7 +223,8 @@ fn problems_distinguish_duplicate_basenames_and_reveal_full_paths_on_hover() {
 #[test]
 fn review_distinguishes_identical_relative_paths_across_projects() {
     let mut app = fixture(2);
-    app.sidebar = SidebarView::Review;
+    app.set_sidebar_view_visible(SidebarView::Explorer, false);
+    app.show_sidebar(SidebarView::Review);
     app.review = Some(crate::cli::ReviewSummary {
         title: "Review".into(),
         note: String::new(),

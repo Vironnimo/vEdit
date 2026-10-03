@@ -881,7 +881,7 @@ fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
     screen.event(egui::Event::Text("u".into()));
     screen.run_steps(1);
     assert_eq!(screen.state().tab().unwrap().text, "defghij\n");
-    choose(&mut screen, "Undo u / Ctrl+Z");
+    choose(&mut screen, "Undo Ctrl+Z");
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, "abcdefghij\n");
     assert!(tab.saving);

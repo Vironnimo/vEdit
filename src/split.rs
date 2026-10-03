@@ -4,6 +4,7 @@ pub(super) use crate::cli::SplitOrientation;
 use crate::cli::{DocumentView, LayoutAction};
 use crate::vim::VimNavigation;
 use serde_json::{Value, json};
+pub(super) use spatial_navigation::output_command_id;
 
 const MAX_PANES: usize = 8;
 
@@ -15,6 +16,13 @@ pub(super) struct RegionFocusState {
     awaiting_mark_owner: bool,
     mark_destination_filter: bool,
     boundary_event: Option<egui::Event>,
+    awaiting_region: Option<spatial_navigation::Region>,
+    rendered_focus_widgets: std::collections::HashSet<egui::Id>,
+    spatial_anchor: Option<egui::Pos2>,
+    output_rect: Option<egui::Rect>,
+    output_widget: Option<egui::Id>,
+    output_widget_problems: Option<bool>,
+    output_focus_pending: bool,
 }
 
 #[derive(PartialEq)]
@@ -33,6 +41,8 @@ struct RegionInputOwner {
 enum RegionFocusAction {
     Explorer,
     Editor,
+    Git,
+    Output,
     Cycle(bool),
     Direction(&'static str),
     AgentMark(bool),
@@ -803,7 +813,7 @@ impl MorrowApp {
         tab_id: u64,
         index: usize,
     ) -> Result<(), String> {
-        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, true)
+        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, true, false)
     }
     pub(super) fn drop_pane_tab(
         &mut self,
@@ -812,7 +822,7 @@ impl MorrowApp {
         tab_id: u64,
         index: usize,
     ) -> Result<(), String> {
-        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, false)
+        self.move_pane_tab_inner(source_pane_id, pane_id, tab_id, index, false, false)
     }
     fn move_pane_tab_inner(
         &mut self,
@@ -821,6 +831,7 @@ impl MorrowApp {
         tab_id: u64,
         index: usize,
         request_focus: bool,
+        prefer_source_state: bool,
     ) -> Result<(), String> {
         let source = self
             .editor_layout
@@ -860,8 +871,13 @@ impl MorrowApp {
         }
         self.capture_pane_navigation();
         if source_pane_id != pane_id {
-            self.transfer_tab_preview(source_pane_id, pane_id, tab_id, existing);
-            if !existing
+            self.transfer_tab_preview(
+                source_pane_id,
+                pane_id,
+                tab_id,
+                existing && !prefer_source_state,
+            );
+            if (!existing || prefer_source_state)
                 && let Some(offset) = self
                     .find
                     .restore_scroll
@@ -923,6 +939,10 @@ impl MorrowApp {
             pane.documents.retain(|id| *id != tab_id);
             pane.documents.insert(index, tab_id);
             // A shared destination's cursor/view remains local; a newly moved view travels.
+            // Explicit directional moves take the active source view with them.
+            if prefer_source_state {
+                pane.states.insert(tab_id, source_state.clone());
+            }
             let state = pane.states.entry(tab_id).or_insert(source_state);
             pane.document = Some(tab_id);
             pane.empty_workspace = None;
@@ -1274,7 +1294,7 @@ impl MorrowApp {
                 .iter()
                 .find_map(|(id, rect)| rect.contains(position).then_some(*id));
             if let Some(id) = pane {
-                if self.explorer_keyboard_focused() {
+                if self.focused_sidebar().is_some() || self.output_keyboard_focused() {
                     self.focus_editor();
                 }
                 let _ = self.focus_editor_pane(id);
@@ -1598,34 +1618,29 @@ impl MorrowApp {
         }
         Ok(())
     }
-    pub(super) fn split_shortcuts(&mut self, ctx: &egui::Context) -> bool {
-        let ctrl = egui::Modifiers::COMMAND;
-        let alt = ctrl.plus(egui::Modifiers::ALT);
-        let action = if ctx
-            .input_mut(|i| i.consume_key(ctrl.plus(egui::Modifiers::SHIFT), Key::Backslash))
-        {
-            Some("down")
-        } else if ctx.input_mut(|i| i.consume_key(ctrl, Key::Backslash)) {
-            Some("right")
-        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowRight)) {
-            Some("focus_right")
-        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowLeft)) {
-            Some("focus_left")
-        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowUp)) {
-            Some("focus_up")
-        } else if ctx.input_mut(|i| i.consume_key(alt, Key::ArrowDown)) {
-            Some("focus_down")
-        } else if ctx.input_mut(|i| i.consume_key(alt, Key::W)) {
-            Some("close")
-        } else {
-            None
-        };
-        if let Some(action) = action {
-            self.split_command(action);
-            true
-        } else {
-            false
+    pub(super) fn split_shortcuts(&mut self, _ctx: &egui::Context) -> bool {
+        use keybindings::Action;
+        for (binding, action) in [
+            (Action::SplitRight, "right"),
+            (Action::SplitDown, "down"),
+            (Action::ClosePane, "close"),
+            (Action::FocusLeft, "focus_left"),
+            (Action::FocusRight, "focus_right"),
+            (Action::FocusUp, "focus_up"),
+            (Action::FocusDown, "focus_down"),
+            (Action::FocusNextPane, "next"),
+            (Action::FocusPreviousPane, "previous"),
+            (Action::MoveTabLeft, "move_left"),
+            (Action::MoveTabRight, "move_right"),
+            (Action::MoveTabUp, "move_up"),
+            (Action::MoveTabDown, "move_down"),
+        ] {
+            if self.take_shortcut(binding) {
+                self.split_command(action);
+                return true;
+            }
         }
+        false
     }
     pub(super) fn split_command(&mut self, action: &str) {
         let result = match action {
@@ -1644,96 +1659,84 @@ impl MorrowApp {
                 self.cycle_focus_region(true);
                 Ok(())
             }
-            "next" => {
+            "move_left" => self.move_tab_direction(Vec2::new(-1.0, 0.0)),
+            "move_right" => self.move_tab_direction(Vec2::new(1.0, 0.0)),
+            "move_up" => self.move_tab_direction(Vec2::new(0.0, -1.0)),
+            "move_down" => self.move_tab_direction(Vec2::new(0.0, 1.0)),
+            "next" | "previous" => {
                 let mut ids = Vec::new();
                 self.editor_layout.root.ids(&mut ids);
                 let index = ids
                     .iter()
                     .position(|id| *id == self.editor_layout.focused)
                     .unwrap_or(0);
-                self.focus_editor_pane(ids[(index + 1) % ids.len()])
+                self.focus_editor();
+                let next = if action == "previous" {
+                    (index + ids.len() - 1) % ids.len()
+                } else {
+                    (index + 1) % ids.len()
+                };
+                self.focus_editor_pane(ids[next])
             }
             _ => Ok(()),
         };
         if let Err(error) = result {
             self.status(error, true);
+        } else {
+            self.defer_region_focus_owner();
         }
     }
     pub(super) fn split_menu_ui(&mut self, ui: &mut egui::Ui) {
+        use keybindings::Action;
         ui.separator();
-        for (label, keys, action) in [
-            ("Split right", "Ctrl+\\", "right"),
-            ("Split down", "Ctrl+Shift+\\", "down"),
-            ("Next region", "F6", "region_next"),
-            ("Previous region", "Shift+F6", "region_previous"),
-            ("Close pane", "Ctrl+Alt+W", "close"),
+        for (binding, action) in [
+            (Action::SplitRight, "right"),
+            (Action::SplitDown, "down"),
+            (Action::FocusNextRegion, "region_next"),
+            (Action::FocusPreviousRegion, "region_previous"),
+            (Action::FocusLeft, "focus_left"),
+            (Action::FocusRight, "focus_right"),
+            (Action::FocusUp, "focus_up"),
+            (Action::FocusDown, "focus_down"),
+            (Action::ClosePane, "close"),
         ] {
-            if design::menu_item(ui, label, keys, "Arrange editor panes; documents stay open")
-                .clicked()
+            if design::menu_item(
+                ui,
+                binding.label(),
+                &self.shortcut_label(binding),
+                "Navigate visible regions and arrange editor panes; documents stay open",
+            )
+            .clicked()
             {
                 self.split_command(action);
                 ui.close();
             }
         }
+        ui.menu_button("Move tab to pane", |ui| {
+            for (binding, action) in [
+                (Action::MoveTabLeft, "move_left"),
+                (Action::MoveTabRight, "move_right"),
+                (Action::MoveTabUp, "move_up"),
+                (Action::MoveTabDown, "move_down"),
+            ] {
+                if design::menu_item(
+                    ui,
+                    binding.label(),
+                    &self.shortcut_label(binding),
+                    "Move this tab to the neighboring pane, keeping its unsaved text and cursor",
+                )
+                .clicked()
+                {
+                    self.split_command(action);
+                    ui.close();
+                }
+            }
+        });
     }
 
-    /// Follow the visible pane geometry, rather than cycling in a fixed direction.
+    /// Follow the visible workspace geometry, including both sidebars and Output.
     fn focus_directional_pane(&mut self, direction: Vec2) -> Result<(), String> {
-        if self.explorer_keyboard_focused() {
-            if direction.x > 0.0 {
-                self.focus_editor();
-            }
-            return Ok(());
-        }
-        let Some(origin) = self.editor_layout.rects.get(&self.editor_layout.focused) else {
-            return Ok(());
-        };
-        let horizontal = direction.x != 0.0;
-        let origin = *origin;
-        let candidate = self
-            .editor_layout
-            .rects
-            .iter()
-            .filter(|(id, _)| **id != self.editor_layout.focused)
-            .filter_map(|(id, rect)| {
-                let delta = rect.center() - origin.center();
-                let primary = if horizontal {
-                    delta.x * direction.x
-                } else {
-                    delta.y * direction.y
-                };
-                if primary <= 1.0 {
-                    return None;
-                }
-                let overlap = if horizontal {
-                    rect.top() < origin.bottom() && rect.bottom() > origin.top()
-                } else {
-                    rect.left() < origin.right() && rect.right() > origin.left()
-                };
-                if !overlap {
-                    return None;
-                }
-                let secondary = if horizontal {
-                    delta.y.abs()
-                } else {
-                    delta.x.abs()
-                };
-                Some((*id, !overlap, primary + secondary * 2.0))
-            })
-            .min_by(|a, b| {
-                a.1.cmp(&b.1)
-                    .then_with(|| a.2.total_cmp(&b.2))
-                    .then_with(|| a.0.cmp(&b.0))
-            })
-            .map(|candidate| candidate.0);
-        if let Some(id) = candidate {
-            self.focus_editor();
-            self.focus_editor_pane(id)?;
-        } else if direction.x < 0.0 && self.sidebar_visible && self.sidebar == SidebarView::Explorer
-        {
-            self.focus_explorer();
-        }
-        Ok(())
+        self.focus_spatial_region(direction)
     }
 
     fn region_focus_blocked(&self) -> bool {
@@ -1778,6 +1781,15 @@ impl MorrowApp {
         if self.region_focus.awaiting_mark_owner {
             return;
         }
+        if self.region_focus.awaiting_region.is_some() {
+            // A newly visible region must register its real widget before any
+            // queued input is handed to it, including fresh input this frame.
+            let events = self
+                .ctx
+                .input_mut(|input| std::mem::take(&mut input.events));
+            self.region_focus.trailing.extend(events);
+            return;
+        }
         if !self.region_focus.trailing.is_empty() {
             let mut events = std::mem::take(&mut self.region_focus.trailing);
             if self.region_focus.owner.take().as_ref() != Some(&self.region_input_owner()) {
@@ -1798,50 +1810,81 @@ impl MorrowApp {
         }
         let shortcut = ctx.input(|input| {
             input.events.iter().enumerate().find_map(|(index, event)| {
-                let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = event
-                else {
-                    return None;
-                };
-                let action = if modifiers.command
-                    && modifiers.shift
-                    && *key == Key::A
-                    && !self.vim_search_active()
-                    && !self.navigation_pending()
-                    && self.screen_jump.is_none()
-                {
-                    RegionFocusAction::AgentMark(modifiers.alt)
-                } else if modifiers.command && !modifiers.alt {
-                    match (key, modifiers.shift) {
-                        (Key::E, true) => RegionFocusAction::Explorer,
-                        (Key::Num1, false) => RegionFocusAction::Editor,
-                        _ => return None,
+                use keybindings::Action;
+                let action = [
+                    (Action::FocusExplorer, RegionFocusAction::Explorer),
+                    (Action::FocusEditor, RegionFocusAction::Editor),
+                    (Action::FocusGit, RegionFocusAction::Git),
+                    (Action::FocusOutput, RegionFocusAction::Output),
+                    (Action::FocusNextRegion, RegionFocusAction::Cycle(false)),
+                    (Action::FocusPreviousRegion, RegionFocusAction::Cycle(true)),
+                    (
+                        Action::FocusLeft,
+                        RegionFocusAction::Direction("focus_left"),
+                    ),
+                    (
+                        Action::FocusRight,
+                        RegionFocusAction::Direction("focus_right"),
+                    ),
+                    (Action::FocusUp, RegionFocusAction::Direction("focus_up")),
+                    (
+                        Action::FocusDown,
+                        RegionFocusAction::Direction("focus_down"),
+                    ),
+                    (Action::FocusNextPane, RegionFocusAction::Direction("next")),
+                    (
+                        Action::FocusPreviousPane,
+                        RegionFocusAction::Direction("previous"),
+                    ),
+                    (
+                        Action::MoveTabLeft,
+                        RegionFocusAction::Direction("move_left"),
+                    ),
+                    (
+                        Action::MoveTabRight,
+                        RegionFocusAction::Direction("move_right"),
+                    ),
+                    (Action::MoveTabUp, RegionFocusAction::Direction("move_up")),
+                    (
+                        Action::MoveTabDown,
+                        RegionFocusAction::Direction("move_down"),
+                    ),
+                    (Action::SplitRight, RegionFocusAction::Direction("right")),
+                    (Action::SplitDown, RegionFocusAction::Direction("down")),
+                    (Action::ClosePane, RegionFocusAction::Direction("close")),
+                    (Action::AgentMark, RegionFocusAction::AgentMark(false)),
+                    (Action::AgentMarks, RegionFocusAction::AgentMark(true)),
+                ]
+                .into_iter()
+                .find_map(|(binding, action)| {
+                    if matches!(action, RegionFocusAction::AgentMark(_))
+                        && (self.vim_search_active()
+                            || self.navigation_pending()
+                            || self.screen_jump.is_some())
+                    {
+                        return None;
                     }
-                } else if modifiers.command && modifiers.alt && !modifiers.shift {
-                    RegionFocusAction::Direction(match key {
-                        Key::ArrowLeft => "focus_left",
-                        Key::ArrowRight => "focus_right",
-                        Key::ArrowUp => "focus_up",
-                        Key::ArrowDown => "focus_down",
-                        _ => return None,
-                    })
-                } else if *key == Key::F6 && !modifiers.ctrl && !modifiers.command && !modifiers.alt
-                {
-                    RegionFocusAction::Cycle(modifiers.shift)
-                } else {
-                    return None;
-                };
+                    self.shortcut_matches(binding, event).then_some(action)
+                })?;
                 Some((index, action))
             })
         });
         if let Some((index, action)) = shortcut {
+            if self.earlier_shortcut_boundary(index) {
+                return false;
+            }
             self.region_focus.trailing = ctx.input_mut(|input| {
-                let trailing = input.events.split_off(index + 1);
+                let mut trailing = input.events.split_off(index + 1);
                 self.region_focus.boundary_event = input.events.pop();
+                if let Some(egui::Event::Key { key, modifiers, .. }) = &self.region_focus.boundary_event
+                    && modifiers.alt && !modifiers.ctrl && !modifiers.command
+                    && key.name().chars().count() == 1
+                    && matches!(trailing.first(), Some(egui::Event::Text(text)) if text.eq_ignore_ascii_case(key.name()))
+                {
+                    // Some platforms emit the printable Alt chord as text too.
+                    // Remove only that character, never the user's queued suffix.
+                    trailing.remove(0);
+                }
                 trailing
             });
             self.region_focus.pending = Some(action);
@@ -1854,6 +1897,7 @@ impl MorrowApp {
         if let Some(action) = self.region_focus.pending.take() {
             self.region_focus.boundary_event = None;
             self.find.break_escape_sequence();
+            self.remember_spatial_anchor();
             let mark_blocked = matches!(action, RegionFocusAction::AgentMark(_))
                 && (self.vim_search_active()
                     || self.navigation_pending()
@@ -1862,6 +1906,14 @@ impl MorrowApp {
                 match action {
                     RegionFocusAction::Explorer => self.focus_explorer(),
                     RegionFocusAction::Editor => self.focus_editor(),
+                    RegionFocusAction::Git => {
+                        self.show_sidebar(SidebarView::SourceControl);
+                        self.focus_sidebar_region(self.sidebar_side(SidebarView::SourceControl));
+                    }
+                    RegionFocusAction::Output => {
+                        self.output_visible = true;
+                        self.focus_output_region();
+                    }
                     RegionFocusAction::Cycle(backwards) => self.cycle_focus_region(backwards),
                     RegionFocusAction::Direction(action) => self.split_command(action),
                     RegionFocusAction::AgentMark(open) => {
@@ -1877,6 +1929,9 @@ impl MorrowApp {
                         self.region_focus.awaiting_mark_owner = true;
                         self.region_focus.mark_destination_filter = open;
                     }
+                }
+                if !matches!(action, RegionFocusAction::AgentMark(_)) {
+                    self.defer_region_focus_owner();
                 }
             }
             self.region_focus.owner = Some(self.region_input_owner());
@@ -1918,33 +1973,7 @@ impl MorrowApp {
     }
 
     pub(super) fn cycle_focus_region(&mut self, backwards: bool) {
-        let mut ids = Vec::new();
-        self.editor_layout.root.ids(&mut ids);
-        if ids.is_empty() {
-            self.focus_explorer();
-            return;
-        }
-        // Slot zero is the Explorer; remaining slots follow the visible split tree.
-        let slot = if self.explorer_keyboard_focused() {
-            0
-        } else {
-            ids.iter()
-                .position(|id| *id == self.editor_layout.focused)
-                .unwrap_or(0)
-                + 1
-        };
-        let count = ids.len() + 1;
-        let destination = if backwards {
-            (slot + count - 1) % count
-        } else {
-            (slot + 1) % count
-        };
-        if destination == 0 {
-            self.focus_explorer();
-        } else {
-            self.focus_editor();
-            let _ = self.focus_editor_pane(ids[destination - 1]);
-        }
+        self.cycle_spatial_region(backwards);
     }
     pub(super) fn editor_session_layout(&self) -> SessionLayout {
         self.serialize_project_layout(&self.editor_layout)
@@ -2462,7 +2491,11 @@ impl MorrowApp {
             self.editor_rect = metrics.1;
             self.editor_cursor_rect = metrics.2;
         }
-        if self.editor_layout.panes.len() > 1 && focused {
+        if self.editor_layout.panes.len() > 1
+            && focused
+            && self.focused_sidebar().is_none()
+            && !self.output_keyboard_focused()
+        {
             ui.painter().line_segment(
                 [rect.left_top(), rect.right_top()],
                 Stroke::new(1.0, ACCENT),
@@ -2484,3 +2517,6 @@ mod tab_drag_tests;
 #[cfg(test)]
 #[path = "split_tests.rs"]
 mod tests;
+
+#[path = "spatial_navigation.rs"]
+mod spatial_navigation;

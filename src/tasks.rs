@@ -3,6 +3,7 @@
 //! Commands run in their project directory, with piped output and no console
 //! window. Poll [`RunningTask::receiver`] from the UI; no UI code runs here.
 
+use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -52,15 +53,48 @@ impl Drop for RunningTask {
 /// command are passed as process arguments rather than interpolated into a
 /// second shell. Tasks stop after ten minutes. Output is bounded by both a
 /// one-MiB budget and a 10,000-line budget, shared by stdout and stderr.
+#[cfg(test)]
 pub fn spawn_task(root: PathBuf, command: String) -> RunningTask {
     spawn_with_timeout(root, command, DEFAULT_TIMEOUT)
+}
+
+/// A built-in task is passed as an executable and arguments, never assembled
+/// into shell source. Shell commands are reserved for explicitly edited tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandSpec {
+    Shell(String),
+    Program {
+        program: OsString,
+        args: Vec<OsString>,
+    },
+}
+
+impl CommandSpec {
+    pub fn display(&self) -> String {
+        match self {
+            Self::Shell(command) => command.clone(),
+            Self::Program { program, args } => std::iter::once(program)
+                .chain(args)
+                .map(|value| format!("{:?}", value.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+}
+
+pub fn spawn_configured(
+    root: PathBuf,
+    command: CommandSpec,
+    environment: Vec<(OsString, OsString)>,
+) -> RunningTask {
+    spawn_invocation(root, command, environment, DEFAULT_TIMEOUT)
 }
 
 /// Open an interactive terminal in a project directory.
 ///
 /// This is deliberately a visible, independent window. Unlike output-pane
 /// tasks, it remains open until the user closes the shell.
-pub fn open_terminal(root: &Path) -> Result<(), String> {
+pub fn open_terminal(root: &Path, environment: Vec<(OsString, OsString)>) -> Result<(), String> {
     let metadata = root.metadata().map_err(|error| {
         format!(
             "Could not open a terminal in {}: {error}",
@@ -80,6 +114,7 @@ pub fn open_terminal(root: &Path) -> Result<(), String> {
         command
             .args(["-NoLogo", "-NoExit", "-NoProfile"])
             .current_dir(root)
+            .envs(environment)
             .creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
         let mut child = command.spawn().map_err(|error| {
             format!(
@@ -98,11 +133,22 @@ pub fn open_terminal(root: &Path) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
+        let _ = environment;
         Err("Opening an interactive terminal is currently supported on Windows.".into())
     }
 }
 
+#[cfg(test)]
 fn spawn_with_timeout(root: PathBuf, command: String, timeout: Duration) -> RunningTask {
+    spawn_invocation(root, CommandSpec::Shell(command), Vec::new(), timeout)
+}
+
+fn spawn_invocation(
+    root: PathBuf,
+    command: CommandSpec,
+    environment: Vec<(OsString, OsString)>,
+    timeout: Duration,
+) -> RunningTask {
     // Bounded even if the UI is temporarily unable to poll. Readers use
     // cancellable sends so a full queue cannot prevent stopping a process.
     let (sender, receiver) = mpsc::sync_channel(128);
@@ -114,7 +160,16 @@ fn spawn_with_timeout(root: PathBuf, command: String, timeout: Duration) -> Runn
     let fallback_sender = sender.clone();
     if let Err(error) = thread::Builder::new()
         .name("morrow-task".into())
-        .spawn(move || run_task(root, command, timeout, sender, cancel_requested))
+        .spawn(move || {
+            run_task(
+                root,
+                command,
+                environment,
+                timeout,
+                sender,
+                cancel_requested,
+            )
+        })
     {
         let _ = fallback_sender.send(TaskEvent::Error(format!(
             "Could not start the command worker: {error}"
@@ -129,7 +184,8 @@ fn spawn_with_timeout(root: PathBuf, command: String, timeout: Duration) -> Runn
 
 fn run_task(
     root: PathBuf,
-    command: String,
+    command: CommandSpec,
+    environment: Vec<(OsString, OsString)>,
     timeout: Duration,
     sender: SyncSender<TaskEvent>,
     cancel_requested: Arc<AtomicBool>,
@@ -141,14 +197,29 @@ fn run_task(
         finish(None, true);
         return;
     }
-    if command.trim().is_empty() {
+    if matches!(&command, CommandSpec::Shell(command) if command.trim().is_empty()) {
         let _ = sender.send(TaskEvent::Error("Enter a command to run.".into()));
         finish(None, false);
         return;
     }
-    let mut process = shell_command(&command);
+    let mut process = match command {
+        CommandSpec::Shell(command) => shell_command(&command),
+        CommandSpec::Program { program, args } => {
+            let mut process = Command::new(program);
+            process.args(args);
+            #[cfg(windows)]
+            hide_window(&mut process);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                process.process_group(0);
+            }
+            process
+        }
+    };
     process
         .current_dir(&root)
+        .envs(environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -665,16 +736,79 @@ mod tests {
     }
 
     #[test]
+    fn direct_program_preserves_literal_arguments_environment_and_exit_code() {
+        let root = std::env::temp_dir().join(format!(
+            "morrow native task café & 'quoted' {} {}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let literal = "literal café & 'quote' $(must_not_execute)";
+        #[cfg(windows)]
+        let (program, script, text, mut args) = (
+            "powershell.exe",
+            root.join("native script.ps1"),
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.WriteLine($args[0]); [Console]::Out.WriteLine($env:MORROW_FILE); exit 13",
+            vec![
+                OsString::from("-NoProfile"),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, script, text, mut args) = (
+            "/bin/sh",
+            root.join("native script.sh"),
+            "printf '%s\\n' \"$1\" \"$MORROW_FILE\"; exit 13",
+            Vec::new(),
+        );
+        std::fs::write(&script, text).unwrap();
+        args.push(script.as_os_str().into());
+        args.push(literal.into());
+        let task = spawn_configured(
+            root.clone(),
+            CommandSpec::Program {
+                program: program.into(),
+                args,
+            },
+            vec![("MORROW_FILE".into(), literal.into())],
+        );
+        let events = collect(&task);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_dir(root);
+        let output: String = events
+            .iter()
+            .filter_map(|event| match event {
+                TaskEvent::Output(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(output.matches(literal).count(), 2, "{events:?}");
+        assert_eq!(
+            events.last(),
+            Some(&TaskEvent::Finished {
+                code: Some(13),
+                cancelled: false
+            })
+        );
+    }
+
+    #[test]
     fn interactive_terminal_rejects_missing_directories_and_files() {
         let missing = directory().join("this-directory-must-not-exist-morrow-terminal-test");
         assert!(
-            open_terminal(&missing)
+            open_terminal(&missing, Vec::new())
                 .unwrap_err()
                 .contains("Could not open a terminal")
         );
         let file = directory().join("Cargo.toml");
         assert!(
-            open_terminal(&file)
+            open_terminal(&file, Vec::new())
                 .unwrap_err()
                 .contains("not a project directory")
         );

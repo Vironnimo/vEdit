@@ -268,10 +268,18 @@ impl MorrowApp {
         }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(if preview {
-                "Edit Markdown source - Ctrl+Shift+V"
-            } else {
-                "Preview Markdown - Ctrl+Shift+V"
+            .on_hover_text({
+                let label = if preview {
+                    "Edit Markdown source"
+                } else {
+                    "Preview Markdown"
+                };
+                let binding = self.shortcut_label(keybindings::Action::MarkdownPreview);
+                if binding.is_empty() {
+                    label.to_owned()
+                } else {
+                    format!("{label} · {binding}")
+                }
             });
     }
     pub(super) fn finish_tab_drag_frame(&mut self, ui: &egui::Ui) {

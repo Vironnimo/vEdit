@@ -204,3 +204,272 @@ fn pending_native_suffix_is_cancelled_after_external_source_change() {
     settle(&mut screen);
     assert_eq!(text(&screen), "external");
 }
+
+#[test]
+fn global_new_file_keeps_earlier_text_in_original_document_and_later_save_targets_new_document() {
+    let mut screen = harness("tail", false);
+    let original_id = screen.state().tab().unwrap().id;
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert(keybindings::Action::NewFile.id().into(), Some("F8".into()));
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::F8, egui::Modifiers::NONE),
+            key(Key::S, egui::Modifiers::CTRL),
+        ],
+    );
+    let app = screen.state();
+    assert_eq!(
+        app.projects[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.id == original_id)
+            .unwrap()
+            .text,
+        "Xtail"
+    );
+    assert_ne!(app.tab().unwrap().id, original_id);
+    assert!(app.tab().unwrap().text.is_empty());
+    assert_eq!(app.save_as, Some(app.tab().unwrap().id));
+}
+
+#[test]
+fn remapped_save_writes_text_before_its_key_and_keeps_trailing_text_unsaved() {
+    let mut screen = harness("tail", false);
+    let id = screen.state().tab().unwrap().id;
+    let path = std::env::temp_dir().join(format!(
+        "morrow-shortcut-save-{}-{id}.txt",
+        std::process::id()
+    ));
+    fs::write(&path, "tail").unwrap();
+    {
+        let app = screen.state_mut();
+        app.settings
+            .keybindings
+            .insert(keybindings::Action::Save.id().into(), Some("F8".into()));
+        let tab = app.tab_mut().unwrap();
+        tab.path = Some(path.clone());
+        tab.fingerprint = Some(workspace::fingerprint(&path, MAX_DOCUMENT).unwrap());
+    }
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::F8, egui::Modifiers::NONE),
+            egui::Event::Text("Y".into()),
+        ],
+    );
+    let until = Instant::now() + Duration::from_secs(2);
+    while screen.state().tab().unwrap().saving && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+        screen.state_mut().poll();
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Xtail");
+    assert_eq!(text(&screen), "XYtail");
+    assert!(screen.state().tab().unwrap().dirty);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn remapped_native_history_preserves_text_order_and_disables_native_aliases() {
+    let mut screen = harness("tail", false);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::Undo.id().into(),
+        Some("Ctrl+Alt+U".into()),
+    );
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::Redo.id().into(),
+        Some("Ctrl+Alt+R".into()),
+    );
+    let chord = egui::Modifiers::CTRL.plus(egui::Modifiers::ALT);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::U, chord),
+            egui::Event::Text("Y".into()),
+        ],
+    );
+    assert_eq!(text(&screen), "Ytail");
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(
+        text(&screen),
+        "Ytail",
+        "retired Ctrl+Z must not reach TextEdit"
+    );
+    events(&mut screen, [key(Key::U, chord)]);
+    assert_eq!(text(&screen), "tail");
+    for retired in [
+        key(Key::Y, egui::Modifiers::CTRL),
+        key(Key::Z, egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT)),
+    ] {
+        events(&mut screen, [retired]);
+        assert_eq!(
+            text(&screen),
+            "tail",
+            "retired redo alias must not reach TextEdit"
+        );
+    }
+    events(&mut screen, [key(Key::R, chord)]);
+    assert_eq!(text(&screen), "Ytail");
+}
+
+#[test]
+fn remapped_duplicate_applies_after_native_prefix_and_keeps_undo() {
+    let mut screen = harness("tail", false);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::DuplicateLine.id().into(),
+        Some("F8".into()),
+    );
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::F8, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "Xtail\nXtail");
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), "Xtail");
+    events(
+        &mut screen,
+        [key(
+            Key::ArrowDown,
+            egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
+        )],
+    );
+    assert_eq!(
+        text(&screen),
+        "Xtail",
+        "retired duplicate binding must not edit text"
+    );
+}
+
+#[test]
+fn vim_insert_respects_remapped_history_without_native_alias_fallback() {
+    let mut screen = harness("tail", true);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::Undo.id().into(),
+        Some("Ctrl+Alt+U".into()),
+    );
+    events(&mut screen, [egui::Event::Text("iX".into())]);
+    assert_eq!(text(&screen), "Xtail");
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(
+        text(&screen),
+        "Xtail",
+        "retired Ctrl+Z must not reach native Insert history"
+    );
+    events(
+        &mut screen,
+        [key(
+            Key::U,
+            egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+        )],
+    );
+    assert_eq!(text(&screen), "tail");
+}
+
+#[test]
+fn alt_editing_chord_consumes_its_native_text_payload() {
+    let mut screen = harness("tail", false);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::DuplicateLine.id().into(),
+        Some("Alt+K".into()),
+    );
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::K, egui::Modifiers::ALT),
+            egui::Event::Text("k".into()),
+        ],
+    );
+    assert_eq!(text(&screen), "Xtail\nXtail");
+}
+
+#[test]
+fn editing_command_defers_following_workspace_command_until_after_edit() {
+    let mut screen = harness("tail", false);
+    let wrapped = screen.state().settings.word_wrap;
+    events(
+        &mut screen,
+        [
+            key(
+                Key::ArrowDown,
+                egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
+            ),
+            key(Key::Z, egui::Modifiers::ALT),
+            egui::Event::Text("z".into()),
+        ],
+    );
+    assert_eq!(text(&screen), "tail\ntail");
+    assert_eq!(screen.state().settings.word_wrap, !wrapped);
+}
+
+#[test]
+fn remapped_alt_edit_consumes_generated_letter_and_punctuation_but_keeps_real_text() {
+    for vim in [false, true] {
+        for (binding, key_code, generated) in
+            [("Alt+J", Key::J, "j"), ("Alt+Slash", Key::Slash, "/")]
+        {
+            let mut screen = harness("tail", vim);
+            screen.state_mut().settings.keybindings.insert(
+                keybindings::Action::DuplicateLine.id().into(),
+                Some(binding.into()),
+            );
+            if vim {
+                events(&mut screen, [egui::Event::Text("i".into())]);
+            }
+            events(
+                &mut screen,
+                [
+                    egui::Event::Text("X".into()),
+                    key(key_code, egui::Modifiers::ALT),
+                    egui::Event::Text(generated.into()),
+                    egui::Event::Text("Y".into()),
+                ],
+            );
+            assert_eq!(
+                text(&screen),
+                "Xtail\nXYtail",
+                "vim={vim}, binding={binding}"
+            );
+        }
+    }
+}
+
+#[test]
+fn vim_alt_edit_does_not_execute_its_generated_character_as_a_motion_or_search() {
+    for (binding, key_code, generated) in [("Alt+I", Key::I, "i"), ("Alt+Slash", Key::Slash, "/")] {
+        let mut batched = harness("tail", true);
+        let mut separate = harness("tail", true);
+        for screen in [&mut batched, &mut separate] {
+            screen.state_mut().settings.keybindings.insert(
+                keybindings::Action::DuplicateLine.id().into(),
+                Some(binding.into()),
+            );
+        }
+        events(
+            &mut batched,
+            [
+                key(key_code, egui::Modifiers::ALT),
+                egui::Event::Text(generated.into()),
+                egui::Event::Text("iY".into()),
+            ],
+        );
+        events(&mut separate, [key(key_code, egui::Modifiers::ALT)]);
+        events(&mut separate, [egui::Event::Text("iY".into())]);
+        assert!(!batched.state().vim_search_active(), "binding={binding}");
+        assert_eq!(text(&batched), text(&separate), "binding={binding}");
+        assert_eq!(
+            batched.state().tab().unwrap().vim.mode,
+            VimMode::Insert,
+            "binding={binding}"
+        );
+    }
+}

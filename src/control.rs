@@ -241,14 +241,20 @@ impl MorrowApp {
             }
             Request::Panel { panel, visible } => {
                 match panel {
+                    Panel::LeftSidebar => {
+                        self.set_sidebar_visible(sidebar_layout::Side::Left, visible)
+                    }
+                    Panel::RightSidebar => {
+                        self.set_sidebar_visible(sidebar_layout::Side::Right, visible)
+                    }
                     Panel::Explorer | Panel::Search | Panel::SourceControl | Panel::Review => {
-                        self.sidebar = match panel {
+                        let view = match panel {
                             Panel::Explorer => SidebarView::Explorer,
                             Panel::Search => SidebarView::Search,
                             Panel::SourceControl => SidebarView::SourceControl,
                             _ => SidebarView::Review,
                         };
-                        self.sidebar_visible = visible;
+                        self.set_sidebar_view_visible(view, visible);
                     }
                     Panel::Output => self.output_visible = visible,
                     Panel::Problems => {
@@ -506,8 +512,7 @@ impl MorrowApp {
                 note,
                 files: review_ids,
             });
-            self.sidebar = SidebarView::Review;
-            self.sidebar_visible = true;
+            self.show_sidebar(SidebarView::Review);
             if let Some((project, index)) = first {
                 self.set_active_project_context(project);
                 self.focus_existing_project_tab(project, index);
@@ -525,7 +530,7 @@ impl MorrowApp {
     }
 
     fn control_status(&self) -> Value {
-        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.language_ready,"rust_analysis_error":p.language_error})).take(100).collect::<Vec<_>>(),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":{"status":self.task_status,"running":self.task.is_some()},"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
+        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.languages.get("rust").is_some_and(|session|session.active()),"rust_analysis_error":p.languages.get("rust").and_then(|session|session.error.as_ref()),"languages":p.language_status_json()})).take(100).collect::<Vec<_>>(),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":{"status":self.task_status,"running":self.task.is_some()},"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"sidebars":self.sidebars_status(),"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
     }
     fn control_tabs(&self, limit: usize, offset: usize) -> Value {
         let total = self.projects.iter().map(|p| p.tabs.len()).sum::<usize>();
@@ -582,8 +587,8 @@ impl MorrowApp {
                 self.review = None;
             }
         }
-        if self.review.is_none() && self.sidebar == SidebarView::Review {
-            self.sidebar = SidebarView::Explorer;
+        if self.review.is_none() && self.sidebar_panel_open(SidebarView::Review) {
+            self.clear_review_sidebar();
             self.session_dirty = true;
         }
     }
@@ -861,7 +866,7 @@ mod tests {
             note: String::new(),
             files: vec![plan_id],
         });
-        app.sidebar = SidebarView::Review;
+        app.show_sidebar(SidebarView::Review);
         app.control_request(Request::Close {
             tab_ids: vec![extra_id],
         });

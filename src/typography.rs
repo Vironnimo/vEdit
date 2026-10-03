@@ -19,6 +19,10 @@ pub(crate) fn fonts(choice: EditorFont) -> FontDefinitions {
     fonts_from(Path::new(&windows).join("Fonts").as_path(), choice)
 }
 
+pub(crate) fn tab_family(width: usize) -> FontFamily {
+    FontFamily::Name(format!("morrow-tabs-{}", width.clamp(1, 8)).into())
+}
+
 fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let regular = FontData::from_static(include_bytes!(
@@ -50,6 +54,15 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "morrow-code".into());
+    // These families are only used for tab glyphs, so each document can have
+    // its own tab width without replacing text or rebuilding the font atlas.
+    for width in 1..=8 {
+        let name = format!("morrow-tabs-{width}");
+        let mut data = (*fonts.font_data["morrow-code"]).clone();
+        data.tweak.tab_size = width as f32;
+        fonts.font_data.insert(name.clone(), data.into());
+        fonts.families.insert(tab_family(width), vec![name]);
+    }
 
     for (name, file) in [
         ("morrow-ui", "segoeui.ttf"),

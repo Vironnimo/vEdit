@@ -27,6 +27,7 @@ struct Owner {
     vim: bool,
     swap_jk: bool,
     leader: String,
+    keybindings: keybindings::Bindings,
     view: crate::cli::DocumentView,
 }
 
@@ -54,7 +55,23 @@ pub(super) fn native_input(event: &egui::Event) -> bool {
     )
 }
 
-pub(super) fn command(event: &egui::Event, history: bool) -> Option<Command> {
+pub(super) fn command(
+    event: &egui::Event,
+    history: bool,
+    bindings: &std::collections::BTreeMap<String, Option<String>>,
+) -> Option<Command> {
+    for (action, command) in [
+        (keybindings::Action::Undo, Command::Undo),
+        (keybindings::Action::Redo, Command::Redo),
+        (keybindings::Action::ToggleComment, Command::Comment),
+        (keybindings::Action::DuplicateLine, Command::Duplicate),
+    ] {
+        if (!matches!(command, Command::Undo | Command::Redo) || history)
+            && keybindings::matches(bindings, action, event)
+        {
+            return Some(command);
+        }
+    }
     let egui::Event::Key {
         key,
         pressed: true,
@@ -65,21 +82,6 @@ pub(super) fn command(event: &egui::Event, history: bool) -> Option<Command> {
         return None;
     };
     let command = modifiers.command || modifiers.ctrl;
-    if command && !modifiers.alt {
-        return match key {
-            Key::Z if history => Some(if modifiers.shift {
-                Command::Redo
-            } else {
-                Command::Undo
-            }),
-            Key::Y if history => Some(Command::Redo),
-            Key::Slash => Some(Command::Comment),
-            _ => None,
-        };
-    }
-    if !command && modifiers.alt && modifiers.shift && *key == Key::ArrowDown {
-        return Some(Command::Duplicate);
-    }
     if !command && !modifiers.alt {
         return match key {
             Key::Tab => Some(Command::Indent(modifiers.shift)),
@@ -91,7 +93,16 @@ pub(super) fn command(event: &egui::Event, history: bool) -> Option<Command> {
 }
 
 /// Vim must finish native editing before any action that observes the buffer.
-pub(super) fn vim_barrier(event: &egui::Event) -> bool {
+pub(super) fn vim_barrier(
+    event: &egui::Event,
+    bindings: &std::collections::BTreeMap<String, Option<String>>,
+) -> bool {
+    if [keybindings::Action::Undo, keybindings::Action::Redo]
+        .into_iter()
+        .any(|action| keybindings::matches(bindings, action, event))
+    {
+        return true;
+    }
     match event {
         egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => true,
         egui::Event::Key {
@@ -103,7 +114,7 @@ pub(super) fn vim_barrier(event: &egui::Event) -> bool {
             *key == Key::Escape
                 || (modifiers.ctrl || modifiers.command)
                     && !modifiers.alt
-                    && matches!(key, Key::C | Key::X | Key::V | Key::Z | Key::Y)
+                    && matches!(key, Key::C | Key::X | Key::V)
         }
         _ => false,
     }
@@ -138,13 +149,22 @@ pub(super) fn defer(ctx: &egui::Context, document: u64, mut events: Vec<egui::Ev
 
 /// Return the first custom action only after TextEdit has seen its native
 /// prefix. Any following custom action waits behind the intervening input.
-pub(super) fn take_command(ctx: &egui::Context, document: u64, history: bool) -> Option<Command> {
+pub(super) fn take_command(
+    ctx: &egui::Context,
+    document: u64,
+    history: bool,
+    bindings: &std::collections::BTreeMap<String, Option<String>>,
+) -> Option<Command> {
     let mut events = ctx.input_mut(|input| std::mem::take(&mut input.events));
-    let Some((index, action)) = events
-        .iter()
-        .enumerate()
-        .find_map(|(index, event)| command(event, history).map(|command| (index, command)))
-    else {
+    // Native TextEdit also implements the platform history keys. Once the
+    // user changes a binding, those retired aliases must stop reaching it.
+    // With Vim enabled, active history commands have already been consumed by
+    // the Vim handler; retired aliases must not reach native Insert mode either.
+    events
+        .retain(|event| command(event, history, bindings).is_some() || !native_history_key(event));
+    let Some((index, action)) = events.iter().enumerate().find_map(|(index, event)| {
+        command(event, history, bindings).map(|command| (index, command))
+    }) else {
         ctx.input_mut(|input| input.events = events);
         return None;
     };
@@ -154,16 +174,33 @@ pub(super) fn take_command(ctx: &egui::Context, document: u64, history: bool) ->
         ctx.input_mut(|input| input.events = events);
         return None;
     }
-    events.remove(index);
-    if let Some(next) = events
-        .iter()
-        .position(|event| command(event, history).is_some())
+    let key_event = events.remove(index);
+    if events
+        .get(index)
+        .is_some_and(|event| keybindings::shortcut_text_event(event, &key_event))
     {
+        events.remove(index);
+    }
+    if let Some(next) = events.iter().position(|event| {
+        command(event, history, bindings).is_some()
+            || keybindings::Action::ALL
+                .iter()
+                .any(|&action| keybindings::matches(bindings, action, event))
+    }) {
         let suffix = events.split_off(next);
         defer(ctx, document, suffix);
     }
     ctx.input_mut(|input| input.events = events);
     Some(action)
+}
+
+fn native_history_key(event: &egui::Event) -> bool {
+    matches!(event, egui::Event::Key {
+        key: Key::Z | Key::Y,
+        pressed: true,
+        modifiers,
+        ..
+    } if (modifiers.command || modifiers.ctrl) && !modifiers.alt)
 }
 
 impl MorrowApp {
@@ -180,6 +217,7 @@ impl MorrowApp {
             vim: self.settings.vim,
             swap_jk: self.settings.swap_jk,
             leader: self.settings.leader_key.clone(),
+            keybindings: self.settings.keybindings.clone(),
             view: tab.agent_view,
         })
     }
@@ -247,5 +285,70 @@ impl MorrowApp {
     pub(super) fn editor_input_pending(&self) -> bool {
         self.ctx
             .data(|data| data.get_temp::<Continuation>(continuation_id()).is_some())
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn key(key: Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: modifiers.ctrl,
+                ..modifiers
+            },
+        }
+    }
+
+    #[test]
+    fn default_editing_bindings_use_exact_modifiers_and_both_redo_aliases() {
+        let bindings = std::collections::BTreeMap::new();
+        assert_eq!(
+            command(&key(Key::Z, egui::Modifiers::CTRL), true, &bindings),
+            Some(Command::Undo)
+        );
+        for (key_code, modifiers) in [
+            (Key::Y, egui::Modifiers::CTRL),
+            (Key::Z, egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT)),
+        ] {
+            assert_eq!(
+                command(&key(key_code, modifiers), true, &bindings),
+                Some(Command::Redo)
+            );
+            assert_eq!(command(&key(key_code, modifiers), false, &bindings), None);
+        }
+        assert_eq!(
+            command(&key(Key::Slash, egui::Modifiers::CTRL), false, &bindings),
+            Some(Command::Comment)
+        );
+        assert_eq!(
+            command(
+                &key(
+                    Key::Slash,
+                    egui::Modifiers::CTRL
+                        .plus(egui::Modifiers::SHIFT)
+                        .plus(egui::Modifiers::ALT)
+                ),
+                false,
+                &bindings
+            ),
+            None
+        );
+        assert_eq!(
+            command(
+                &key(
+                    Key::ArrowDown,
+                    egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT)
+                ),
+                false,
+                &bindings
+            ),
+            Some(Command::Duplicate)
+        );
     }
 }

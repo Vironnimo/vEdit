@@ -302,8 +302,7 @@ fn collect_moves(events: &mut Vec<egui::Event>, swap_jk: bool) -> Vec<Move> {
 
 impl MorrowApp {
     pub(super) fn explorer_keyboard_focused(&self) -> bool {
-        self.sidebar_visible
-            && self.sidebar == SidebarView::Explorer
+        self.sidebar_view_visible(SidebarView::Explorer)
             && self.project().is_some_and(|project| {
                 self.ctx
                     .memory(|memory| memory.has_focus(focus_id(&project.root)))
@@ -316,8 +315,7 @@ impl MorrowApp {
         let Some(root) = self.project().map(|project| project.root.clone()) else {
             return;
         };
-        self.sidebar = SidebarView::Explorer;
-        self.sidebar_visible = true;
+        self.show_sidebar(SidebarView::Explorer);
         self.completions = None;
         self.cancel_vim_search(false);
         self.cancel_navigation();
@@ -527,6 +525,7 @@ impl MorrowApp {
             id,
             egui::Sense::focusable_noninteractive(),
         );
+        self.register_region_focus_widget(id);
         if self.explorer_navigation.focus_requested.as_deref() == Some(root)
             && self.context_file_dialog.is_none()
             && ui.is_enabled()

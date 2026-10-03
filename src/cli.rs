@@ -119,6 +119,8 @@ pub struct ReviewSummary {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Panel {
+    LeftSidebar,
+    RightSidebar,
     Explorer,
     Search,
     SourceControl,
@@ -143,19 +145,60 @@ pub struct TextEdit {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineNumbers {
+    #[default]
+    Absolute,
+    Relative,
+    Off,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
+    /// Complete override map: absent actions retain defaults, null disables, {} resets all.
+    pub keybindings: Option<std::collections::BTreeMap<String, Option<String>>>,
     pub vim: Option<bool>,
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,
+    pub autosave_delay_ms: Option<u64>,
     pub font_size: Option<f32>,
+    pub ui_scale: Option<f32>,
+    pub line_height: Option<f32>,
+    pub line_numbers: Option<LineNumbers>,
+    pub highlight_current_line: Option<bool>,
+    pub show_ignored_files: Option<bool>,
     pub editor_font: Option<EditorFont>,
     pub tab_width: Option<usize>,
+    pub detect_indentation: Option<bool>,
+    pub indent_with_tabs: Option<bool>,
+    pub language_indent_widths: Option<std::collections::HashMap<String, usize>>,
+    pub language_indent_with_tabs: Option<std::collections::HashMap<String, bool>>,
     pub word_wrap: Option<bool>,
     pub smooth_scroll: Option<bool>,
     pub leader_key: Option<String>,
     pub search_excludes: Option<Vec<String>>,
+}
+
+fn validate_indent_languages<'a>(
+    languages: impl Iterator<Item = &'a str>,
+    count: usize,
+) -> Result<(), String> {
+    if count > 64 {
+        return Err("Indentation language maps support at most 64 entries".into());
+    }
+    for language in languages {
+        if language.is_empty()
+            || language.len() > 32
+            || !language
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err("Indentation language keys must be lowercase language IDs (1..32 ASCII letters, digits or underscores), for example python, dart, javascript or shellscript".into());
+        }
+    }
+    Ok(())
 }
 
 /// Session bookmarks use persistent IDs returned by the bookmark list.
@@ -323,6 +366,7 @@ pub enum TaskAction {
     Check,
     Test,
     Build,
+    RunFile,
     Stop,
 }
 
@@ -559,7 +603,7 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli close TAB_ID...
   morrow-cli clear-marks [TAB_ID...]
   morrow-cli workspace DIRECTORY
-  morrow-cli panel explorer|search|source_control|review|output|problems|settings [--hide]
+  morrow-cli panel explorer|search|source_control|review|left_sidebar|right_sidebar|output|problems|settings [--hide]
   morrow-cli read TAB_ID [--line N] [--count N]
   morrow-cli save TAB_ID...
   morrow-cli selection TAB_ID
@@ -591,7 +635,7 @@ pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running edit
   morrow-cli output [--line N] [--count N]
   morrow-cli git-status [WORKSPACE] [--limit N] [--offset N]
   morrow-cli new [TITLE]
-  morrow-cli task check|test|build|stop
+  morrow-cli task check|test|build|run_file|stop
   morrow-cli file ACTION.json
   morrow-cli file-job JOB_ID
   morrow-cli layout [CHANGE.json]
@@ -675,6 +719,9 @@ to 4096 Unicode characters; empty text clears a note. add captures the existing
 nonempty selection only; it never edits or saves the document.
 "#;
 
+// A single startup parse result; keeping Request inline avoids a heap indirection
+// on the normal command path. These values are never stored in a collection.
+#[allow(clippy::large_enum_variant)]
 pub enum Parsed {
     Help,
     Schema,
@@ -1053,7 +1100,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         "task" => Request::Task {
             action: serde_json::from_value(json!(one_argument(
                 &positional,
-                "task needs check, test, build or stop"
+                "task needs check, test, build, run_file or stop"
             )?))
             .map_err(|_| "Unknown task; use --help")?,
         },
@@ -1678,6 +1725,16 @@ pub fn validate(request: &Request) -> Result<(), String> {
             }
         }
         Request::Settings { patch: Some(patch) } => {
+            if let Some(bindings) = &patch.keybindings
+                && (bindings.len() > 128
+                    || bindings.iter().any(|(id, binding)| {
+                        id.is_empty()
+                            || id.len() > 80
+                            || binding.as_ref().is_some_and(|value| value.len() > 100)
+                    }))
+            {
+                return Err("keybindings supports at most 128 action IDs (1..80 bytes) and shortcut strings up to 100 bytes".into());
+            }
             if let Some(excludes) = &patch.search_excludes {
                 normalize_search_excludes(excludes)?;
             }
@@ -1686,12 +1743,39 @@ pub fn validate(request: &Request) -> Result<(), String> {
             }
             if patch
                 .font_size
-                .is_some_and(|n| !n.is_finite() || !(10.0..=24.0).contains(&n))
+                .is_some_and(|n| !n.is_finite() || !(10.0..=32.0).contains(&n))
             {
-                return Err("font_size must be 10..24".into());
+                return Err("font_size must be 10..32".into());
+            }
+            if patch
+                .ui_scale
+                .is_some_and(|n| !n.is_finite() || !(0.75..=2.0).contains(&n))
+            {
+                return Err("ui_scale must be 0.75..2.0".into());
+            }
+            if patch
+                .line_height
+                .is_some_and(|n| !n.is_finite() || !(1.0..=2.0).contains(&n))
+            {
+                return Err("line_height must be 1.0..2.0".into());
+            }
+            if patch
+                .autosave_delay_ms
+                .is_some_and(|n| !(300..=5000).contains(&n))
+            {
+                return Err("autosave_delay_ms must be 300..5000".into());
             }
             if patch.tab_width.is_some_and(|n| !(1..=8).contains(&n)) {
                 return Err("tab_width must be 1..8".into());
+            }
+            if let Some(widths) = &patch.language_indent_widths {
+                validate_indent_languages(widths.keys().map(String::as_str), widths.len())?;
+                if widths.values().any(|width| !(1..=8).contains(width)) {
+                    return Err("language_indent_widths values must be 1..8".into());
+                }
+            }
+            if let Some(styles) = &patch.language_indent_with_tabs {
+                validate_indent_languages(styles.keys().map(String::as_str), styles.len())?;
             }
         }
         Request::Command { tab_id, .. } => validate_id(*tab_id)?,

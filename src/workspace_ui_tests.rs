@@ -234,6 +234,86 @@ fn project_cycle_shortcuts_wrap_without_reloading_or_losing_selection() {
     }));
 }
 
+#[test]
+fn remapped_project_navigation_keeps_prefix_in_source_and_replaces_old_chords() {
+    let mut app = fixture(2);
+    app.settings.vim = false;
+    app.settings.keybindings.insert(
+        keybindings::Action::NextProject.id().into(),
+        Some("F8".into()),
+    );
+    app.settings.keybindings.insert(
+        keybindings::Action::SwitchProject.id().into(),
+        Some("F9".into()),
+    );
+    let mut screen = harness(app);
+    project_shortcut(&mut screen, Key::PageDown);
+    assert_eq!(screen.state().active_project, 0);
+    screen.input_mut().events.extend([
+        egui::Event::Text("prefix".into()),
+        egui::Event::Key {
+            key: Key::F8,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Text("suffix".into()),
+    ]);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 1);
+    assert_eq!(
+        screen.state().projects[0].tabs[0].text,
+        format!("prefix{DOCUMENT}")
+    );
+    assert_eq!(screen.state().projects[1].tabs[0].text, DOCUMENT);
+    project_shortcut(&mut screen, Key::P);
+    assert!(!screen.state().workspace_picker_open());
+    shortcut(&mut screen, Key::F9, egui::Modifiers::NONE);
+    assert!(screen.state().workspace_picker_open());
+    shortcut(&mut screen, Key::F9, egui::Modifiers::NONE);
+    assert!(!screen.state().workspace_picker_open());
+}
+
+#[test]
+fn project_cycle_waits_for_an_earlier_application_command() {
+    let mut app = fixture(2);
+    app.settings.vim = false;
+    let wrapped = app.settings.word_wrap;
+    let mut screen = harness(app);
+    screen.input_mut().events.extend([
+        egui::Event::Text("prefix".into()),
+        egui::Event::Key {
+            key: Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::ALT,
+        },
+        egui::Event::Text("z".into()),
+        egui::Event::Key {
+            key: Key::PageDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                command: true,
+                alt: true,
+                ..egui::Modifiers::NONE
+            },
+        },
+    ]);
+    screen.run_steps(8);
+    assert_eq!(screen.state().settings.word_wrap, !wrapped);
+    assert_eq!(screen.state().active_project, 1);
+    assert_eq!(
+        screen.state().projects[0].tabs[0].text,
+        format!("prefix{DOCUMENT}")
+    );
+    assert_eq!(screen.state().projects[1].tabs[0].text, DOCUMENT);
+}
+
 fn insert_then_project_chord(screen: &mut Harness<'_, MorrowApp>, key: Key) {
     let modifiers = egui::Modifiers {
         ctrl: true,

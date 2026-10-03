@@ -239,8 +239,12 @@ impl MorrowApp {
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
-                "For agent · {count} marked block{} across all projects\nSelect text, then Ctrl+Shift+A or Leader a to add it.\nOpen this collection to add notes, remove marks, or restore the most recently removed or agent-collected blocks.",
+                "For agent · {count} marked block{} across all projects\nSelect text, then use {} or Leader a to add it.\nOpen this collection to add notes, remove marks, or restore the most recently removed or agent-collected blocks.",
                 block_suffix(count),
+                {
+                    let binding = self.shortcut_label(keybindings::Action::AgentMark);
+                    if binding.is_empty() { "Mark selection for agent".to_owned() } else { binding }
+                },
             ));
     }
 
@@ -364,6 +368,12 @@ impl MorrowApp {
                 && tab.agent_view == crate::cli::DocumentView::Source
                 && !tab.selection.is_empty()
         });
+        let mark_binding = self.shortcut_label(keybindings::Action::AgentMark);
+        let mark = if mark_binding.is_empty() {
+            "Mark selection for agent"
+        } else {
+            &mark_binding
+        };
         let mut close = false;
         let mut add = false;
         let mut remove = None;
@@ -452,7 +462,7 @@ impl MorrowApp {
                 if rows.is_empty() {
                     ui.add_space(18.0);
                     ui.label(RichText::new("Choose the blocks you want an agent to see.").strong());
-                    ui.label(RichText::new("Select text in any file, then Ctrl+Shift+A or Leader a. Add as many blocks as you need, across files and projects.").color(MUTED));
+                    ui.label(RichText::new(format!("Select text in any file, then use {mark} or Leader a. Add as many blocks as you need, across files and projects.")).color(MUTED));
                     ui.add_space(22.0);
                 } else if matching.is_empty() {
                     ui.add_space(16.0);
@@ -522,7 +532,7 @@ impl MorrowApp {
                 } else {
                     ui.horizontal_wrapped(|ui| {
                         let response = ui.add_enabled_ui(can_add, |ui|
-                            design::ghost_button(ui, "Add selection", "Add the current source selection · Ctrl+Shift+A / Leader a. Preview text cannot be marked; switch to source first.")).inner;
+                            design::ghost_button(ui, "Add selection", &format!("Add the current source selection · {mark} / Leader a. Preview text cannot be marked; switch to source first."))).inner;
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_add, "Add selection"));
                         add = response.clicked();
                         restore = ui.add_enabled_ui(can_restore, |ui|

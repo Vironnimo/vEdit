@@ -15,7 +15,8 @@ fn commit(index: usize) -> git::CommitSummary {
 fn history_workspace(count: usize) -> MorrowApp {
     let mut app = MorrowApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
-    app.sidebar = SidebarView::SourceControl;
+    app.set_sidebar_view_visible(SidebarView::Explorer, false);
+    app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
     let project = &mut app.projects[0];
     project.git_root = Some(project.root.clone());
     project.last_git_refresh = Instant::now() + Duration::from_secs(3600);

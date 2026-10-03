@@ -79,7 +79,10 @@ fn popup(app: &mut MorrowApp, items: Vec<CompletionItem>) {
     let id = tab.id;
     let revision = tab.revision;
     let cursor = tab.vim.cursor;
-    app.projects[0].language_opened.insert(path, (revision, 7));
+    app.projects[0]
+        .rust_language_mut()
+        .opened
+        .insert(path, (revision, 7));
     app.completions = Some(CompletionPopup {
         tab_id: id,
         version: 7,
@@ -91,12 +94,15 @@ fn popup(app: &mut MorrowApp, items: Vec<CompletionItem>) {
 
 fn fake_language(app: &mut MorrowApp) -> mpsc::SyncSender<LspEvent> {
     let (server, sender) = crate::lsp::LanguageServer::test_channel();
-    app.projects[0].language = Some(server);
-    app.projects[0].language_ready = true;
+    app.projects[0].rust_language_mut().server = Some(server);
+    app.projects[0].rust_language_mut().ready = true;
     let tab = app.tab().unwrap();
     let path = tab.path.clone().unwrap();
     let revision = tab.revision;
-    app.projects[0].language_opened.insert(path, (revision, 7));
+    app.projects[0]
+        .rust_language_mut()
+        .opened
+        .insert(path, (revision, 7));
     app.completion_request = Some(41);
     sender
 }

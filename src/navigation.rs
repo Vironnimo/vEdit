@@ -45,6 +45,7 @@ enum NavigationAction {
     ScreenJump,
     MarkForAgent,
     OpenAgentMarks,
+    PasteYank,
 }
 
 impl MorrowApp {
@@ -189,6 +190,10 @@ impl MorrowApp {
                 {
                     rewritten = true;
                     consumed_keys.push(ch);
+                    if matches!(actions.last(), Some(NavigationAction::PasteYank)) {
+                        actions.pop();
+                        retained.push(egui::Event::Text("\"0p".into()));
+                    }
                     if let Some(
                         action
                         @ (NavigationAction::MarkForAgent | NavigationAction::OpenAgentMarks),
@@ -284,6 +289,7 @@ impl MorrowApp {
                 (LeaderStage::Actions, 'b') => Some(NavigationAction::OpenBookmarks),
                 (LeaderStage::Actions, 'a') => Some(NavigationAction::MarkForAgent),
                 (LeaderStage::Actions, 'A') => Some(NavigationAction::OpenAgentMarks),
+                (LeaderStage::Actions, 'p') => Some(NavigationAction::PasteYank),
                 (LeaderStage::Actions, ch) if ch == leader_key => {
                     leader.stage = LeaderStage::Jump;
                     leader.started = Instant::now();
@@ -325,6 +331,11 @@ impl MorrowApp {
                 self.navigation_restore_editor_focus();
             }
             NavigationAction::OpenAgentMarks => self.open_agent_marks(),
+            NavigationAction::PasteYank => {
+                self.ctx
+                    .input_mut(|input| input.events.insert(0, egui::Event::Text("\"0p".into())));
+                self.navigation_restore_editor_focus();
+            }
             NavigationAction::ScreenJump => {
                 self.start_screen_jump();
                 self.navigation_restore_editor_focus();
@@ -417,6 +428,16 @@ impl MorrowApp {
                             .clicked()
                             {
                                 action = Some(NavigationAction::OpenAgentMarks);
+                            }
+                            if design::menu_item(
+                                ui,
+                                "Paste last yank",
+                                "p",
+                                "Paste the last yanked text, even after deleting something else",
+                            )
+                            .clicked()
+                            {
+                                action = Some(NavigationAction::PasteYank);
                             }
                             more = design::menu_item(
                                 ui,
@@ -1046,6 +1067,32 @@ mod tests {
         screen.run_steps(2);
         assert!(!screen.state().navigation_pending());
         assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
+    }
+
+    #[test]
+    fn leader_p_pastes_the_last_yank_after_deletion_and_keeps_batched_motions_in_order() {
+        let mut screen = harness(fixture());
+        screen.event(egui::Event::Text("yiwwdiw p".into()));
+        screen.run_steps(3);
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            "alpha alpha\nbeta second\ngamma third\n"
+        );
+        assert_eq!(screen.state().yank_register.as_ref().unwrap().text, "alpha");
+        assert_eq!(screen.state().register.as_ref().unwrap().text, "first");
+        assert!(!screen.state().navigation_pending());
+        screen.event(egui::Event::Text("u".into()));
+        screen.run_steps(2);
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            "alpha \nbeta second\ngamma third\n"
+        );
+        screen.event(egui::Event::Text("w p".into()));
+        screen.run_steps(2);
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            "alpha \nbalphaeta second\ngamma third\n"
+        );
     }
 
     #[test]

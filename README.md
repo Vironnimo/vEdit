@@ -1,4 +1,4 @@
-# Morrow 0.4.10
+# Morrow 0.4.12
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Rust-Sprachunterstützung. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -34,7 +34,7 @@ Der Projektwechsel sitzt links oben neben dem Namen der App. **Ctrl+Alt+P** öff
 - Ein Klick setzt den Cursor. Ziehen und Doppelklick wählen Text aus, ein Dreifachklick ganze Zeilen. Beim Ziehen am sichtbaren Rand scrollt der Editor vertikal und horizontal mit, auch bei stillgehaltener Maus; bei Zeilenumbruch nur vertikal. Im Vim-Normalmodus wird daraus eine Visual-Auswahl; im Insert-Modus bleibt die Texteingabe aktiv.
 - Im Insert-Modus oder bei ausgeschaltetem Vim sucht **Ctrl+F** in der Datei; **Ctrl+H** öffnet Suchen und Ersetzen. Im Normalmodus startet `/` die Vim-Suche. Groß-/Kleinschreibung und ganze Wörter lassen sich in Find/Replace einstellen; dort wird nach wörtlichem Text gesucht.
 - **Ctrl+Shift+F** durchsucht das aktive Projekt. Ein Treffer öffnet die passende Datei, zeigt die Fundstelle mittig und hebt die Zielzeile kurz hervor.
-- **Settings** (**Ctrl+,**) bietet Vim an/aus, die Leader-Taste, automatisches Speichern, Schriftgröße, Einrückungsbreite, Zeilenumbruch und **Smooth scrolling**. Vim und automatisches Speichern sind standardmäßig eingeschaltet; weiches Scrollen ist standardmäßig ausgeschaltet und lässt sich für Editor und Markdown-Vorschau aktivieren.
+- **Settings** (**Ctrl+,**) gruppiert Lese-, Layout-, Speicher- und Vim-Einstellungen. **Interface zoom** vergrößert die gesamte Oberfläche einschließlich Explorer, Git und Vorschau (75–200 %); **Ctrl++ / Ctrl+−** ändern den Zoom, **Ctrl+0** stellt 100 % wieder her, auch im Einstellungsdialog. Unabhängig davon sind Codeschriftgröße (10–32), Zeilenabstand (1–2×), absolute/relative/ausgeschaltete Zeilennummern und die Hervorhebung der Cursorzeile einstellbar. Dazu kommen Einrückungsbreite, Zeilenumbruch, **Smooth scrolling**, Vim, Leader-Taste und Autosave samt Verzögerung. Änderungen wirken sofort und werden gespeichert. Vim und Autosave sind standardmäßig eingeschaltet, weiches Scrollen ist ausgeschaltet.
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
 - **Ctrl+Z** sowie **Ctrl+Y** / **Ctrl+Shift+Z** verwenden mit eingeschaltetem Vim dieselbe Undo-Historie wie `u` / **Ctrl+R**, auch im Insert- und Visual-Modus. Im Insert-Modus bleibt die Texteingabe aktiv; Vim-Register und System-Zwischenablage bleiben getrennt.
 - Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** rückt ein, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um und **Alt+Shift+↓** dupliziert Zeilen. Neue Zeilen übernehmen die Einrückung.
@@ -44,6 +44,14 @@ Dateiindex, Dateizugriffe, Projektsuche, Git und Rust-Analyse laufen im Hintergr
 Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Auf der freien Fläche im Explorer lassen sich neue Dateien und Ordner direkt im Projekt anlegen; dort sind auch Projektpfad, Windows-Explorer und Aktualisieren erreichbar. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
 
 Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffnet die Datei, **Home/End** und **Page Up/Down** bewegen sich durch längere Listen. **F2** startet Umbenennen mit ausgewähltem Dateinamen ohne Erweiterung; bei Ordnern wird der ganze Name ausgewählt. **Shift+F10** öffnet das Kontextmenü des ausgewählten Eintrags.
+
+**Show ignored files** im Explorer oder **Settings → Show ignored and generated files** blendet bei Bedarf auch ignorierte Dateien und generierte Ordner ein. Explorer und **Ctrl+P** verwenden dann denselben erweiterten Dateiindex; `.git` und andere VCS-Metadaten bleiben verborgen. Die Umstellung läuft für offene Projekte im Hintergrund. Projektsuchfilter bleiben separat. **Ctrl+O** öffnet Dateien unabhängig von den Explorer-Filtern.
+
+## Seitenleisten einrichten
+
+Explorer, Suche, Source control und Review lassen sich unabhängig links oder rechts anordnen. Mehrere Panels können auf derselben Seite gleichzeitig untereinander stehen, etwa Explorer und Git links und nur die Suche rechts. Beide Seiten können auch leer oder ausgeblendet bleiben. **Ctrl+Alt+B** blendet nur rechts aus oder ein; **Ctrl+Alt+E** tut dasselbe links. Beide Kürzel funktionieren auch im Vim-Normalmodus. Das **×** im Seitenleistenkopf blendet die ganze Seite aus, ohne Panels auf die andere Seite zu verschieben. Ziehen an der Innenkante ändert ihre Breite.
+
+Ziehe einen Paneltitel auf die andere Seitenleiste oder an den linken/rechten Rand, wenn diese Seite geschlossen ist. Auf derselben Seite lässt sich damit auch die Reihenfolge ändern; **Escape** bricht das Ziehen ab. Das **⋯**-Menü jedes Panels bietet **Move panel to left/right** und **Hide panel**. Der Pfeil vor dem Titel klappt nur dieses Panel ein. **＋** im Seitenleistenkopf fügt ein Panel hinzu, ohne andere zu ersetzen. **View → Arrange sidebar panels…** und **Settings → Layout** bieten dieselbe unabhängige Zuordnung und Sichtbarkeit. Belegung, Reihenfolge, eingeklappte Panels und Breiten werden gespeichert; bisherige Sitzungen werden übernommen. Bei schmalen Fenstern begrenzt Morrow die Breiten zugunsten des Editors. Reicht der Platz nicht für beide Seiten, erscheint ein Hinweis zum Wechseln der vorübergehend ausgeblendeten Seite; das gespeicherte Layout bleibt erhalten.
 
 ## Bereiche für Agenten markieren
 
@@ -67,8 +75,10 @@ Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` 
 | Befehlspalette | Ctrl+Shift+P |
 | Explorer fokussieren | Ctrl+Shift+E |
 | Aktiven Editorbereich fokussieren | Ctrl+1 |
-| Explorer und Editorbereiche vorwärts / rückwärts fokussieren | F6 / Shift+F6 |
-| Benachbarten Editorbereich fokussieren | Ctrl+Alt+← / → / ↑ / ↓ |
+| Sichtbare Seitenleisten, Editorbereiche und Output durchlaufen | F6 / Shift+F6 |
+| Räumlich links / rechts / oben / unten fokussieren | Ctrl+Alt+← / → / ↑ / ↓ |
+| Aktuellen Tab in einen benachbarten Split verschieben | Ctrl+Alt+Shift+← / → / ↑ / ↓ |
+| Git / Output fokussieren | Ctrl+Shift+G / Ctrl+Alt+O |
 | Neue Datei | Ctrl+N¹ |
 | Aktuelle Datei speichern | Ctrl+S |
 | Alle geänderten Dateien speichern | Ctrl+Shift+S |
@@ -78,24 +88,35 @@ Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` 
 | Nächster / vorheriger Treffer | F3 / Shift+F3 |
 | Projekt durchsuchen | Ctrl+Shift+F |
 | Zu einer Zeile springen | Ctrl+G |
-| Seitenleiste ein-/ausblenden | Ctrl+B² |
+| Linke Seitenleiste ein-/ausblenden | Ctrl+Alt+E oder Ctrl+B² |
+| Rechte Seitenleiste ein-/ausblenden | Ctrl+Alt+B |
+| Oberfläche vergrößern / verkleinern / zurücksetzen | Ctrl++ / Ctrl+− / Ctrl+0 |
 | Ausgabe öffnen | Ctrl+` oder View → Output |
 | Zeilenumbruch umschalten | Alt+Z |
 | Editor nach rechts / unten teilen | Ctrl+\ / Ctrl+Shift+\ |
 | Aktuellen Editorbereich schließen | Ctrl+Alt+W |
 | Einstellungen | Ctrl+, |
-| Rust-Vervollständigung anfordern | Ctrl+Space |
-| Zur Rust-Definition springen | F12 oder `gd` im Vim-Normalmodus |
+| Vervollständigung anfordern | Ctrl+Space |
+| Zur Definition springen | F12 oder `gd` im Vim-Normalmodus |
 | Fehler und Warnungen anzeigen | Ctrl+Shift+M |
 | Auswahl für einen Agenten markieren | Ctrl+Shift+A oder Leader a |
 | Agent-Markierungen öffnen | Ctrl+Alt+Shift+A oder Leader A |
 | Interaktives Terminal im Projekt öffnen | Run → Open terminal |
-| `cargo check` starten | F5 |
-| `cargo test` starten | Alt+F6 |
+| Aktives Projekt prüfen | F5 |
+| Aktive Datei ausführen | Ctrl+F5 |
+| Projekttests starten | Alt+F6 |
 
 ¹ Im Vim-Insert-Modus fordert **Ctrl+N** stattdessen Vervollständigung an. Neue Dateien sind auch über **File → New file** erreichbar.
 
 ² Wenn der Vim-Normal- oder Visualmodus im Editor aktiv ist, blättern **Ctrl+F** und **Ctrl+B** eine Seite weiter/zurück. Suche mit `/`, die Befehlspalette oder **View → Explorer** bleiben erreichbar.
+
+## Eigene Tastenkürzel und räumlicher Fokus
+
+**Settings → Keyboard** oder die Palettenaktion **Keyboard shortcuts** öffnet das durchsuchbare Befehlsverzeichnis. Auf eine Belegung klicken, die neue Kombination drücken; **Esc** bricht die Aufnahme ab. **Disable**, **Reset** und **Reset all** deaktivieren beziehungsweise restaurieren Belegungen. Konflikte werden mit dem betroffenen Befehl erklärt. Auch Aktionen ohne Standardkürzel sind belegbar. Änderungen gelten sofort und bleiben nach Neustarts erhalten; Menüs und Palette zeigen die aktuelle Belegung. Die hier genannten Kombinationen sind die Standardwerte. Textnavigation, Zwischenablage und einzelne Vim-Motions behalten ihre normale Eingabebedeutung.
+
+**Ctrl+Alt+Pfeiltasten** wechseln anhand der sichtbaren Anordnung zwischen beiden Seitenleisten, Editor-Splits und dem unteren Ausgabebereich. Die Rückkehr in den Editor berücksichtigt die vorherige Zeile beziehungsweise Spalte der Splits. **F6 / Shift+F6** durchlaufen sichtbare Bereiche; ausgeblendete Seitenleisten werden dabei nicht geöffnet. **Ctrl+Alt+Shift+Pfeiltasten** verschieben den aktiven Tab in einen benachbarten Editor-Split. **Ctrl+Tab / Ctrl+Shift+Tab** wechseln Tabs im aktiven Bereich. Alle diese Befehle sind neu belegbar.
+
+In Git bewegen **↑↓ / Home / End** den Fokus, **←→** öffnen und schließen Ordner, **Enter** öffnet Diff oder Commit. **Tab** erreicht Stage-/Unstage-Schaltflächen und Commit-Eingabe. Pfeile und Enter bleiben innerhalb der Commit-Nachricht normale Texteingaben. Der sichtbare Fokus kehrt nach dem Schließen eines Git-Diffs zurück.
 
 ## Vim
 
@@ -116,12 +137,13 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 | Bewegen | `h j k l`, `w b e`, `W B E` |
 | Zeilen- und Dateigrenzen | `0 ^ $`, `gg`, `G`, `42G` |
 | Klammern / Absätze | `%`, `{`, `}` |
-| Zeichen in der Zeile finden | `f` / `F`, `t` / `T`; `;` wiederholt, `,` kehrt die Richtung um |
+| Zeichen in der Datei finden | `f` / `F`, `t` / `T` suchen über Zeilengrenzen hinweg; `;` wiederholt, `,` sucht in Gegenrichtung |
 | Einfügen | `i a I A`, `o O` |
 | Löschen / Ändern | `x`, `dd`, `dw`, `cw`, `cc`, `D`, `C`, `r` + Zeichen |
 | Kopieren / Einfügen | `yy`, `yw`, `p`, `P` |
 | Anzahl voranstellen | `3w`, `2dd`, `d2w`, `2d3w` |
 | Textobjekte | `ciw`, `daw`, `di(`, `ca{`, `yi"`, `viw` |
+| Klammern und Anführungszeichen | `ysiw)` umschließt ein Wort, `yss"` eine Zeile; `ds"` entfernt, `cs"'` ersetzt; im Visual-Modus `S` + Zeichen |
 | Einrücken / Zeilen verbinden | `>>`, `<<`, `J` |
 | Letzte Änderung wiederholen | `.`; auch Insert-Änderungen werden erfasst |
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
@@ -131,6 +153,12 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 Das unbenannte Kopierregister wird zwischen Tabs geteilt: etwa in einer Datei `yy`, in einer anderen `p`. Es bleibt von der Systemzwischenablage getrennt. Jeder Tab hat seine eigene Undo-Historie; eine zusammenhängende Insert-Änderung wird als Schritt behandelt.
 
 Die Vim-Suche springt schon während der Eingabe zum Treffer und markiert alle sichtbaren Ergebnisse. **Enter** bestätigt und gibt den Editor frei, **Esc** bricht ab und stellt die Ausgangsposition wieder her. Eine leere bestätigte Eingabe wiederholt das letzte Suchmuster. Im Visual-Modus erweitert die Suche die Auswahl; `n` und `N` unterstützen Zählwerte wie `3n`. `:noh` blendet die Treffer-Markierungen aus und behält das Suchmuster für den nächsten Sprung.
+
+Die Zeichensuche `f` / `F` und `t` / `T` reicht bis zum Datei-Ende beziehungsweise Datei-Anfang und funktioniert auch mit Zählwerten, Auswahlen und Operatoren wie `dfx` oder `cfx`. `;` wiederholt die ursprüngliche Richtung, `,` sucht einmal in Gegenrichtung; die Zeichensuche bleibt unabhängig vom Suchmuster für `n` / `N`. `.` wiederholt Textänderungen. `p` / `P` fügen aus dem Vim-Register ein; im Visual-Modus behält `P` dessen Inhalt für weitere Einfügungen bei.
+
+**Space p** fügt das zuletzt mit `y` kopierte Stück ein, auch nachdem `d` oder `c` das unbenannte Register überschrieben haben. Dasselbe geht mit `"0p` beziehungsweise `"0P`, auch mit Zählwerten und im Visual-Modus. Das Yank-Register `0` wird wie das unbenannte Register zwischen Tabs geteilt und bleibt unabhängig von der Systemzwischenablage.
+
+Die grundlegenden Surround-Befehle unterstützen `()` / `[]` / `{}` / `<>` sowie einfache, doppelte und Backtick-Anführungszeichen. Ein schließendes Zeichen wie `)` umschließt direkt, ein öffnendes wie `(` fügt innen Leerzeichen hinzu. Bewegungen, Textobjekte, Auswahlen und `.` sind kombinierbar; jede abgeschlossene Änderung bildet einen Undo-Schritt. XML-Tag-Eingabe und benutzerdefinierte Surround-Vorlagen sind nicht enthalten.
 
 **Zweimal Esc kurz hintereinander** blendet Suchmarkierungen aus. Das Suchmuster bleibt erhalten; `n`, `N` oder eine neue Suche aktivieren die Markierungen wieder. Vim-Yanks heben den kopierten Bereich kurz hervor; `yy` markiert dabei die ganze Zeile.
 
@@ -144,11 +172,11 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 - `:e src/main.rs` eine Datei relativ zum Projekt öffnen.
 - `:42` zu Zeile 42 springen; `:noh` die Treffer-Markierungen ausblenden.
 
-Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Markdown lesen
 
-Markdown-Dateien bieten rechts in der Tab-Leiste ein Vorschau-Symbol. Es leuchtet, wenn die Vorschau aktiv ist; ein Klick oder **Ctrl+Shift+V** wechselt zwischen Quelltext und Vorschau. Der Quelltext bleibt ein normaler Vim-Editor; **Shift+V** wählt weiterhin ganze Zeilen aus.
+Markdown-Dateien bieten rechts in der Tab-Leiste ein Vorschau-Symbol. Es leuchtet, wenn die Vorschau aktiv ist; ein Klick oder **Ctrl+Alt+M** wechselt zwischen Quelltext und Vorschau. Der Quelltext bleibt ein normaler Vim-Editor; **Shift+V** wählt weiterhin ganze Zeilen aus.
 
 Bei langen Vorschauen bleibt die vertikale Scrollleiste sichtbar. Breite Tabellen zeigen auch ohne Mausbewegung eine horizontale Scrollleiste; kurze Dokumente und passende Tabellen benötigen keine zusätzliche Leiste.
 
@@ -158,7 +186,7 @@ Die Vorschau zeigt Überschriften, Listen, Aufgaben, Tabellen, Zitate, Codeblöc
 
 **View → Split right** oder **Split down** teilt den Editor. Der neue Bereich beginnt mit der aktuellen Datei und verwaltet seine eigene Tab-Leiste. Dateien öffnen, **Ctrl+Tab**, **Ctrl+W**, **Close others** und **Close saved tabs** wirken auf diesen Bereich. Wenn sein letzter Tab geschlossen wird, verschwindet der Split; der letzte Editorbereich bleibt als leere Arbeitsfläche bestehen.
 
-Jeder Bereich hat seine eigene Navigation und Scrollposition. Unterschiedliche Dateien können nebeneinander stehen; bei Markdown sind auch Quelltext und Vorschau derselben Datei möglich. Beide Ansichten bearbeiten denselben Text und teilen dessen Undo-Historie. Ein Tab schließt nur seine Ansicht: Ist die Datei noch in einem anderen Bereich offen, bleiben ungespeicherter Text und Undo erhalten. Die Trennlinie lässt sich ziehen. **Next region** und **Previous region** wechseln zwischen Explorer und Editorbereichen; **Ctrl+Alt** mit einer Pfeiltaste fokussiert den benachbarten Editorbereich in dieser Richtung. **Close pane** entfernt den Bereich und übernimmt seine sonst nirgends offenen Tabs in den verbleibenden Bereich.
+Jeder Bereich hat seine eigene Navigation und Scrollposition. Unterschiedliche Dateien können nebeneinander stehen; bei Markdown sind auch Quelltext und Vorschau derselben Datei möglich. Beide Ansichten bearbeiten denselben Text und teilen dessen Undo-Historie. Ein Tab schließt nur seine Ansicht: Ist die Datei noch in einem anderen Bereich offen, bleiben ungespeicherter Text und Undo erhalten. Die Trennlinie lässt sich ziehen. **Next region** und **Previous region** wechseln zwischen sichtbaren Seitenleisten, Editorbereichen und Output; **Ctrl+Alt** mit einer Pfeiltaste fokussiert den benachbarten Bereich in dieser Richtung. **Close pane** entfernt den Bereich und übernimmt seine sonst nirgends offenen Tabs in den verbleibenden Bereich.
 
 Tabs lassen sich mit der Maus innerhalb einer Tab-Leiste umsortieren oder in einen anderen Bereich verschieben. Ein Einfügemarker zeigt die Position; auch die Dokumentfläche des Zielbereichs nimmt Tabs an. Wird der letzte Tab aus einem Bereich verschoben, schließt sich dieser Bereich. Der Text, ungespeicherte Änderungen und Undo bleiben erhalten. **Esc** oder Loslassen außerhalb eines Zielbereichs bricht das Ziehen ab.
 
@@ -188,7 +216,7 @@ Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App
 | Dateien | Dateien und Ordner umbenennen, neue Ordner erstellen, Abschluss und Fehler der Hintergrundoperation abfragen |
 | Ansichten | Fokus, Cursorposition, Source/Preview, Splits erstellen, Tabs sortieren oder zwischen Bereichen verschieben, Dokumente zuweisen, Bereiche fokussieren, schließen und skalieren |
 | Editoraktionen | Einrücken, Kommentare umschalten, Zeilen duplizieren/löschen, Treffer wechseln, unveränderte Dateien neu laden |
-| Einstellungen | Vim, J/K-Richtung, Leader-Taste, Suchfilter, Autosave, Schriftgröße, Tab-Breite, Zeilenumbruch und weiches Scrollen lesen oder gezielt ändern |
+| Einstellungen | Vim, Leader, Such- und Explorer-Filter, Autosave samt Verzögerung, UI-Zoom, Schrift, Zeilenabstand/-nummern, Cursorzeile, Einrückung, Umbruch und Scrollen lesen oder gezielt ändern |
 | Bookmarks | Gespeicherte Stellen auflisten, setzen, benennen, entfernen und anspringen |
 | Projektarbeit | Inhaltsuche, Git-Status, Diagnosen, Diff zum gespeicherten Text, Build/Test/Check starten oder stoppen, Ausgabe lesen |
 | Präsentation | Mehrere Dateien mit Hinweisen öffnen, Review-Seitenleiste, Markierungen entfernen, Panels zeigen oder ausblenden |
@@ -231,25 +259,27 @@ Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/morrow/
 
 **Ctrl+S** speichert die aktive Datei, **Ctrl+Shift+S** alle geänderten Dateien. Neue Dateien und **File → Save as…** öffnen den Windows-Speicherdialog, auch außerhalb des Projekts. Eine vorhandene Zieldatei wird erst nach der Windows-Bestätigung ersetzt; spätere Änderungen auf dem Datenträger bleiben durch die Konfliktprüfung geschützt. Eine Datei, die bereits in einem anderen Tab offen ist, lässt sich nicht als Ziel überschreiben. Abbrechen erhält den ungespeicherten Text.
 
-Automatisches Speichern schreibt benannte Dateien nach etwa **850 ms Schreibpause**. Es lässt sich in den Einstellungen ausschalten. Wiederherstellungskopien werden nach dieser Pause unabhängig davon für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\Morrow\recovery` und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt Morrow nach ungespeicherten Änderungen.
+Automatisches Speichern schreibt benannte Dateien standardmäßig nach **850 ms Schreibpause**. In Settings lässt sich die Verzögerung auf **300–5000 ms** ändern oder Autosave ausschalten. Wiederherstellungskopien werden unabhängig davon weiterhin nach 850 ms für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\Morrow\recovery` und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt Morrow nach ungespeicherten Änderungen.
 
 Dateien werden über eine temporäre Datei im selben Ordner atomar gespeichert. Änderungen auf dem Datenträger werden vor dem Ersetzen geprüft; ein Konflikt überschreibt die externe Version nicht. Unveränderte offene Dateien werden bei externen Änderungen aktualisiert. Bei eigenen Änderungen den Inhalt mit **Save as…** sichern, bevor die externe Fassung erneut geöffnet wird. **Reload file from disk** in der Befehlspalette lädt eine unveränderte Datei neu.
 
 Unterstützt werden **UTF-8-Textdateien bis 8 MiB**, einschließlich UTF-8-BOM und LF-, CRLF-, CR- sowie gemischter Zeilenenden. Binärdateien und andere Textkodierungen werden mit einer Meldung abgelehnt. Wiederherstellungskopien ergänzen das Speichern und ersetzen keine Projekt-Backups.
 
-## Rust-Unterstützung
+## Sprachen und Projektbefehle
 
-Für Projekte mit `Cargo.toml` startet Morrow **rust-analyzer** im Hintergrund. Rust-Dateien erhalten Fehlermeldungen und Warnungen, Vervollständigung und Navigation zur Definition. Diagnosen sind im Editor und im Reiter **Problems** des Ausgabebereichs sichtbar. **Ctrl+Shift+M** öffnet diese Liste; ein Klick springt zur betreffenden Stelle. Die Aktion ist auch als **Show problems** in der Befehlspalette erreichbar.
+**Python, Dart und Rust** haben Diagnosen, Vervollständigung und Navigation zur Definition. Jede Sprache erhält im Projekt ihre eigene Analysesitzung; auch gemischte Projekte funktionieren. **Ctrl+Space** fordert Vorschläge an, **F12** beziehungsweise Vim `gd` springt zur Definition. Die Statusleiste zeigt den Zustand der aktiven Sprache. **Problems** (**Ctrl+Shift+M**) enthält Fehler, Warnungen und Serverzustände. **Restart language analysis** verbindet die aktuelle Sprache neu, ohne eigene Änderungen zu verwerfen.
 
-Die benötigten Komponenten installieren:
+Die portable Ausgabe bringt **basedpyright und Node** für Python mit. Ein vorhandener Projekt- oder PATH-Sprachserver wird bevorzugt. Unter **Settings → Tasks** lässt sich der Python-Interpreter wählen; automatisch werden `.venv`, `venv`, `env` und anschließend PATH berücksichtigt. Derselbe Interpreter gilt für Ausführung und Analyse. Dart verwendet das installierte Dart- oder Flutter-SDK. Rust verwendet `rust-analyzer` (`rustup component add rust-analyzer rust-src`).
 
-```powershell
-rustup component add rust-analyzer rust-src
-```
+**Settings → Languages** bietet aktivierbare Vorgaben und zusätzliche eigene Sprachserver: Dateiendungen, Sprache, Programm, separate Argumente und bei Bedarf JSON-Einstellungen. Serveränderungen werden mit **Apply and restart language** übernommen. Dateien bleiben auch ohne Server normal editierbar. Syntaxfarben, Dateityperkennung und Kommentare erkennen insbesondere auch `.pyi`, `.pyw` und Großschreibung; Dart besitzt eine eigene Syntaxgrammatik.
 
-`rust-analyzer` muss im `PATH` erreichbar sein. Nach der Installation Morrow neu starten. Die erste Projektanalyse kann etwas dauern; der Ladezustand wird angezeigt. Mit **Ctrl+Space** Vorschläge anfordern, mit den Pfeiltasten auswählen und mit **Enter** oder **Tab** übernehmen. **F12** beziehungsweise `gd` springt zur Definition. Andere Sprachen haben Syntaxfarben, aber derzeit keinen angebundenen Sprachserver.
+**Settings → Editing** steuert Einrückung. Neue Python-Dateien verwenden vier, Dart-Dateien zwei Leerzeichen. Vorhandene Einrückung wird automatisch erkannt; diese Erkennung lässt sich ausschalten. Breite und Tab-Verwendung sind je Sprache überschreibbar. Die Statusleiste zeigt die tatsächlich verwendete Einstellung und öffnet sie per Klick. Einstellungen ändern zukünftige Eingaben; vorhandener Text wird nicht automatisch umformatiert.
+
+**Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; Morrow zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben.
 
 ## Git und Befehle
+
+Git betrachtet den gespeicherten Dateistand. Bei ungespeicherten Dokumenten zeigt Source control deren Anzahl und **Save all files**; auch offene Ordner desselben Repositorys werden berücksichtigt. Nach dem Speichern müssen die gewünschten Änderungen weiterhin gestaged werden. Speichern löst keinen Commit aus.
 
 **View → Source control** bietet **Changes** und **History**. Änderungen stehen als Ordnerbaum getrennt nach **Staged**, **Changes** und **Untracked**, mit hinzugefügten und entfernten Zeilen pro Datei. Eine teilweise gestagte Datei erscheint in beiden passenden Gruppen mit den jeweiligen Zahlen. Binärdateien werden als solche angezeigt; für große unversionierte Dateien können die Zahlen fehlen.
 
@@ -257,7 +287,7 @@ Ein Klick auf eine Änderung öffnet ihren Diff mit alten und neuen Zeilennummer
 
 **History** zeigt einen Commit-Graphen mit Verzweigungen, Zusammenführungen und Branch-Bezeichnungen. Lokale und Remote-Branches sowie HEAD helfen bei der Orientierung; ein Klick auf einen Commit öffnet Autor, Datum, vollständige Nachricht, Hash, Eltern und einen Dateibaum mit Zeilenzahlen. Beim Scrollen werden ältere Einträge automatisch nachgeladen. Die Historie bleibt beim Lesen stabil; bei neuen Commits oder verschobenen Branches bietet **History changed · Refresh** den Wechsel zum neuen Stand an. Die Dateien in den Commit-Details öffnen den historischen Diff dieses Commits; bei Merge-Commits wird mit dem ersten Eltern-Commit verglichen. Ein Klick außerhalb oder **Esc** schließt jeweils die oberste Ansicht. Alle Git-Abfragen laufen im Hintergrund. Commit-Details werden zwischengespeichert und große Diffs rendern nur ihre sichtbaren Zeilen.
 
-**Run** bietet `cargo check`, `cargo test`, `cargo build`, `cargo clippy` und `cargo run`. Im Bereich **Output** lassen sich außerdem eigene Befehle im aktiven Projektordner starten. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Vor einem Build oder Test Änderungen speichern und den Abschluss des Speicherns abwarten: die Werkzeuge lesen die Dateien auf dem Datenträger.
+Im Bereich **Output** lassen sich zusätzlich eigene Befehle im aktiven Projektordner starten. Sie verwenden die ausgewählte Python-Umgebung. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Eigene Befehle können `MORROW_ROOT`, `MORROW_FILE` und `MORROW_PYTHON` als Umgebungsvariablen verwenden; Dateipfade werden nicht in Shellcode interpoliert.
 
 Der Ausgabebereich ist ein Befehlsstarter mit Ausgabeanzeige. Interaktive Eingabe, Terminal-Anwendungen und Passwortabfragen sind dort nicht unterstützt. Befehle haben ein Zeitlimit von zehn Minuten; die Ausgabe wird begrenzt. **Run → Open terminal** öffnet für interaktive Arbeit ein separates PowerShell-Fenster im aktiven Projektordner. **Open terminal** ist ebenfalls in der Befehlspalette verfügbar.
 

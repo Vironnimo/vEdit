@@ -238,8 +238,8 @@ impl MorrowApp {
         }
         let next = offset.saturating_add(items.len());
         Response::success(json!({
-            "tab_id":id,"revision":tab.revision,"analysis_ready":project.language_ready,
-            "analysis_error":project.language_error,"column_encoding":"unicode_scalar","end_exclusive":true,
+            "tab_id":id,"revision":tab.revision,"analysis_ready":tab.path.as_deref().and_then(|path|project.language_for(path)).is_some_and(|session|session.active()),
+            "analysis_error":tab.path.as_deref().and_then(|path|project.language_for(path)).and_then(|session|session.error.as_ref()),"column_encoding":"unicode_scalar","end_exclusive":true,
             "items":items,"total":total,"offset":offset,"has_more":next<total,
             "next_offset":if next<total{Some(next)}else{None}
         }))

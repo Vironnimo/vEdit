@@ -93,35 +93,35 @@ impl MorrowApp {
         }
         let shortcut = self.ctx.input(|input| {
             input.events.iter().enumerate().find_map(|(index, event)| {
-                let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = event
-                else {
+                let action = if self.shortcut_matches(keybindings::Action::SwitchProject, event) {
+                    WorkspaceAction::TogglePicker
+                } else if self.shortcut_matches(keybindings::Action::NextProject, event) {
+                    WorkspaceAction::Cycle { next: true }
+                } else if self.shortcut_matches(keybindings::Action::PreviousProject, event) {
+                    WorkspaceAction::Cycle { next: false }
+                } else {
                     return None;
-                };
-                if !modifiers.ctrl || !modifiers.alt || modifiers.shift {
-                    return None;
-                }
-                let action = match key {
-                    Key::P => WorkspaceAction::TogglePicker,
-                    Key::PageDown => WorkspaceAction::Cycle { next: true },
-                    Key::PageUp => WorkspaceAction::Cycle { next: false },
-                    _ => return None,
                 };
                 Some((index, action))
             })
         });
         if let Some((index, action)) = shortcut {
+            if !self.workspace_picker_open() && self.earlier_shortcut_boundary(index) {
+                return false;
+            }
             if self.workspace_picker_open() {
                 // Prefix input belongs to the query being dismissed, never
                 // to the source that regains focus afterwards.
                 self.ctx.input_mut(|input| {
-                    input.events.retain(|event| !matches!(event,
-                        egui::Event::Key { key: Key::P | Key::PageUp | Key::PageDown, modifiers, .. }
-                        if modifiers.ctrl && modifiers.alt && !modifiers.shift));
+                    input.events.retain(|event| {
+                        ![
+                            keybindings::Action::SwitchProject,
+                            keybindings::Action::NextProject,
+                            keybindings::Action::PreviousProject,
+                        ]
+                        .into_iter()
+                        .any(|action| self.shortcut_matches(action, event))
+                    });
                 });
                 self.workspace_discard_trailing_text();
                 self.apply_workspace_action(action);
@@ -200,8 +200,15 @@ impl MorrowApp {
 
     pub(super) fn workspace_header_button(&mut self, ui: &mut egui::Ui) {
         let Some(project) = self.project() else {
-            if design::ghost_button(ui, "Add project", "Open a project folder · Ctrl+Shift+O")
-                .clicked()
+            if design::ghost_button(
+                ui,
+                "Add project",
+                &format!(
+                    "Open a project folder · {}",
+                    self.shortcut_label(keybindings::Action::OpenProject)
+                ),
+            )
+            .clicked()
             {
                 self.pick_project();
             }
@@ -222,8 +229,11 @@ impl MorrowApp {
         let path = crate::paths::display(&project.root);
         let dirty = project.tabs.iter().filter(|tab| tab.dirty).count();
         let tooltip = format!(
-            "{path}\n{} open files · {dirty} unsaved\nSwitch project: Ctrl+Alt+P\nPrevious / next: Ctrl+Alt+PageUp / PageDown",
-            project.tabs.len()
+            "{path}\n{} open files · {dirty} unsaved\nSwitch project: {}\nPrevious / next: {} / {}",
+            project.tabs.len(),
+            self.shortcut_label(keybindings::Action::SwitchProject),
+            self.shortcut_label(keybindings::Action::PreviousProject),
+            self.shortcut_label(keybindings::Action::NextProject),
         );
         let max_width = (ui.ctx().content_rect().width() - 530.0).clamp(100.0, 245.0);
         let width = (ui
@@ -293,7 +303,11 @@ impl MorrowApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Projects").size(14.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new("Ctrl+Alt+P").size(10.5).color(MUTED));
+                        ui.label(
+                            RichText::new(self.shortcut_label(keybindings::Action::SwitchProject))
+                                .size(10.5)
+                                .color(MUTED),
+                        );
                     });
                 });
                 ui.add_space(6.0);
@@ -399,7 +413,10 @@ impl MorrowApp {
                     add = design::ghost_button(
                         ui,
                         "Add project…",
-                        "Choose project folders with the Windows picker · Ctrl+Shift+O",
+                        &format!(
+                            "Choose project folders with the Windows picker · {}",
+                            self.shortcut_label(keybindings::Action::OpenProject)
+                        ),
                     )
                     .clicked();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

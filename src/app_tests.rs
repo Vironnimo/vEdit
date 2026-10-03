@@ -489,6 +489,41 @@ fn recovery_runs_for_named_files_when_autosave_is_disabled() {
 }
 
 #[test]
+fn slow_autosave_preserves_recovery_and_fast_autosave_uses_its_own_delay() {
+    for (delay_ms, elapsed_ms, should_save) in [(5000, 1200, false), (300, 600, true)] {
+        let fixture = Fixture::new("configurable-autosave");
+        let path = fixture.write("notes.txt", "on disk");
+        let mut app = fixture.app();
+        fixture.open(&mut app, path.clone());
+        app.settings.autosave = true;
+        app.settings.autosave_delay_ms = delay_ms;
+        change_tab(&mut app, "new draft");
+        app.tab_mut().unwrap().last_edit = Instant::now() - Duration::from_millis(elapsed_ms);
+        app.autosave();
+        assert_eq!(app.tab().unwrap().saving, should_save);
+        wait_until(&mut app, |app| {
+            !app.tab().unwrap().saving && !app.tab().unwrap().recovery_pending
+        });
+        if should_save {
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new draft");
+        } else {
+            assert_eq!(fs::read_to_string(&path).unwrap(), "on disk");
+            assert_eq!(
+                crate::recovery::read_document(&app.tab().unwrap().recovery_path, MAX_DOCUMENT)
+                    .unwrap()
+                    .text,
+                "new draft"
+            );
+            app.tab_mut().unwrap().last_edit = Instant::now() - Duration::from_secs(6);
+            app.autosave();
+            assert!(app.tab().unwrap().saving);
+            wait_until(&mut app, |app| !app.tab().unwrap().saving);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new draft");
+        }
+    }
+}
+
+#[test]
 fn shutdown_recovery_keeps_latest_named_and_untitled_edits_before_debounce() {
     let fixture = Fixture::new("shutdown-recovery");
     let path = fixture.write("notes.txt", "saved version");

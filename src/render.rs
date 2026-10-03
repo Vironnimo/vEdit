@@ -461,6 +461,7 @@ impl SyntaxCache {
     /// Retains shaped glyphs across inactive tabs as well as syntax sections.
     /// A constant probe detects recreation of egui's font atlas: cached galleys
     /// contain atlas UVs and must be discarded when that atlas is recreated.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn galley(
         &self,
@@ -473,8 +474,56 @@ impl SyntaxCache {
         fallback: Color32,
         wrap_width: f32,
     ) -> Arc<egui::Galley> {
+        self.galley_with_line_height(
+            ui, document, revision, text, language, font, fallback, wrap_width, 1.35,
+        )
+    }
+
+    /// Line spacing changes geometry without requiring syntax to be parsed again.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn galley_with_line_height(
+        &self,
+        ui: &egui::Ui,
+        document: u64,
+        revision: u64,
+        text: &str,
+        language: &str,
+        font: f32,
+        fallback: Color32,
+        wrap_width: f32,
+        line_height: f32,
+    ) -> Arc<egui::Galley> {
+        self.galley_with_preferences(
+            ui,
+            document,
+            revision,
+            text,
+            language,
+            font,
+            fallback,
+            wrap_width,
+            line_height,
+            4,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn galley_with_preferences(
+        &self,
+        ui: &egui::Ui,
+        document: u64,
+        revision: u64,
+        text: &str,
+        language: &str,
+        font: f32,
+        fallback: Color32,
+        wrap_width: f32,
+        line_height: f32,
+        tab_width: usize,
+    ) -> Arc<egui::Galley> {
         self.begin_frame(ui);
-        let job = self.layout(
+        let mut job = self.layout(
             ui.ctx(),
             document,
             revision,
@@ -484,6 +533,36 @@ impl SyntaxCache {
             fallback,
             wrap_width,
         );
+        for section in &mut job.sections {
+            section.format.line_height = Some(font * line_height);
+        }
+        if tab_width != 4 && job.text.contains('\t') {
+            let mut sections = Vec::with_capacity(job.sections.len());
+            for section in std::mem::take(&mut job.sections) {
+                let mut start = section.byte_range.start;
+                for (offset, _) in job.text[section.byte_range.start.0..section.byte_range.end.0]
+                    .match_indices('\t')
+                {
+                    let at = section.byte_range.start + offset;
+                    if start < at {
+                        let mut before = section.clone();
+                        before.byte_range = start..at;
+                        sections.push(before);
+                    }
+                    let mut tab = section.clone();
+                    tab.byte_range = at..at + 1;
+                    tab.format.font_id.family = crate::typography::tab_family(tab_width);
+                    sections.push(tab);
+                    start = at + 1;
+                }
+                if start < section.byte_range.end {
+                    let mut after = section;
+                    after.byte_range.start = start;
+                    sections.push(after);
+                }
+            }
+            job.sections = sections;
+        }
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.serial = state.serial.wrapping_add(1);
         let serial = state.serial;
@@ -764,7 +843,7 @@ fn next_request(shared: &Weak<Shared>) -> Option<Request> {
 fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
     // Both the expensive grammar initialization and parser own a private egui
     // Context. They never lock the UI's memory or font caches.
-    let settings = SyntectSettings::default();
+    let settings = syntax_settings();
     let parser_ctx = egui::Context::default();
     while receiver.recv().is_ok() {
         while let Some(request) = next_request(&shared) {
@@ -820,10 +899,150 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
     }
 }
 
+fn syntax_settings() -> SyntectSettings {
+    let mut settings = SyntectSettings::default();
+    let mut builder = settings.ps.into_builder();
+    builder.add(
+        syntect::parsing::SyntaxDefinition::load_from_str(
+            include_str!("../assets/syntaxes/Dart.sublime-syntax"),
+            true,
+            Some("Dart"),
+        )
+        .expect("the bundled Dart syntax must parse"),
+    );
+    settings.ps = builder.build();
+    settings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    fn dart_scopes_at(source: &str, needle: &str) -> Vec<String> {
+        use syntect::easy::ScopeRegionIterator;
+        use syntect::parsing::{ParseState, ScopeStack};
+        let settings = syntax_settings();
+        let syntax = settings.ps.find_syntax_by_extension("dart").unwrap();
+        let mut parser = ParseState::new(syntax);
+        let mut stack = ScopeStack::new();
+        let wanted = source.find(needle).expect("sample token exists");
+        let mut offset = 0;
+        for line in syntect::util::LinesWithEndings::from(source) {
+            let operations = parser.parse_line(line, &settings.ps).unwrap();
+            for (region, operation) in ScopeRegionIterator::new(&operations, line) {
+                stack.apply(operation).unwrap();
+                if (offset..offset + region.len()).contains(&wanted) {
+                    return stack.as_slice().iter().map(ToString::to_string).collect();
+                }
+                offset += region.len();
+            }
+        }
+        panic!("token {needle:?} has no parsed region");
+    }
+
+    #[test]
+    fn dart_grammar_handles_keywords_strings_interpolation_and_nested_comments() {
+        let source = concat!(
+            "sealed class Animal {}\n",
+            "String greet(String name) {\n",
+            "  // return 'not code';\n",
+            "  final value = 'hello $name ${1 + 2}';\n",
+            "  final raw = r'raw $name';\n",
+            "  /* outer /* nested */ still comment */\n",
+            "  return value;\n",
+            "}\n",
+        );
+        for (needle, scope) in [
+            ("sealed", "keyword.declaration.dart"),
+            ("class", "keyword.declaration.dart"),
+            ("return 'not code'", "comment.line.double-slash.dart"),
+            ("hello", "string.interpolated.single.dart"),
+            ("$name", "meta.embedded.expression.dart"),
+            ("1 + 2", "constant.numeric.dart"),
+            ("raw $name", "string.quoted.single.dart"),
+            ("nested", "comment.block.dart"),
+            ("still comment", "comment.block.dart"),
+            ("return value", "keyword.control.return.dart"),
+        ] {
+            let scopes = dart_scopes_at(source, needle);
+            assert!(
+                scopes.iter().any(|value| value == scope),
+                "{needle:?}: {scopes:?}"
+            );
+        }
+        assert!(
+            !dart_scopes_at(source, "raw $name")
+                .iter()
+                .any(|value| value.starts_with("meta.embedded"))
+        );
+    }
+
+    #[test]
+    fn dart_multiline_strings_and_documentation_fences_end_before_following_code() {
+        let source = concat!(
+            "final text = \"\"\"first\n",
+            "  $name\n",
+            "last\"\"\";\n",
+            "/// ```dart\n",
+            "/// final inside = 1;\n",
+            "/// ```\n",
+            "final outside = true;\n",
+        );
+        assert!(
+            dart_scopes_at(source, "last")
+                .contains(&"string.interpolated.triple.double.dart".into())
+        );
+        assert!(
+            dart_scopes_at(source, "inside").contains(&"comment.block.documentation.dart".into())
+        );
+        let outside = dart_scopes_at(source, "final outside");
+        assert!(
+            outside.contains(&"storage.modifier.dart".into()),
+            "{outside:?}"
+        );
+        assert!(
+            !outside
+                .iter()
+                .any(|value| value.starts_with("comment.") || value.starts_with("string."))
+        );
+    }
+
+    #[test]
+    fn dart_worker_renders_distinct_keyword_string_and_comment_colors() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let source = "final greeting = 'hello'; // a comment\n";
+        let request = || {
+            cache.layout(
+                &ctx,
+                711,
+                1,
+                source,
+                "dart",
+                14.0,
+                Color32::WHITE,
+                f32::INFINITY,
+            )
+        };
+        let _ = request();
+        settle(&cache, 711, source, "dart", 14.0);
+        let job = request();
+        let color_at = |needle: &str| {
+            let offset = source.find(needle).unwrap();
+            job.sections
+                .iter()
+                .find(|section| {
+                    section.byte_range.start.0 <= offset && offset < section.byte_range.end.0
+                })
+                .unwrap()
+                .format
+                .color
+        };
+        assert_ne!(color_at("final"), color_at("hello"));
+        assert_ne!(color_at("hello"), color_at("a comment"));
+        assert_ne!(color_at("final"), color_at("a comment"));
+    }
 
     fn settle(cache: &SyntaxCache, document: u64, text: &str, language: &str, font: f32) {
         let started = Instant::now();
@@ -939,6 +1158,45 @@ mod tests {
                 assert!(ready.rows.len() > numbered.len());
             }
         }
+    }
+
+    #[test]
+    fn document_tab_width_changes_geometry_without_changing_character_offsets() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::typography::fonts(crate::cli::EditorFont::default()));
+        let cache = SyntaxCache::new();
+        let text = "\tvalue\n\t\tsecond\n";
+        let pass = |width| {
+            let mut result = None;
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                result = Some(cache.galley_with_preferences(
+                    ui,
+                    801,
+                    0,
+                    text,
+                    "txt",
+                    14.0,
+                    Color32::WHITE,
+                    f32::INFINITY,
+                    1.35,
+                    width,
+                ));
+            });
+            output.drop_without_applying_deltas();
+            result.unwrap()
+        };
+        let narrow = pass(2);
+        let wide = pass(8);
+        assert_eq!(narrow.job.text, text);
+        assert_eq!(wide.job.text, text);
+        let cursor = egui::text::CCursor::new(1);
+        assert!(wide.pos_from_cursor(cursor).left() > narrow.pos_from_cursor(cursor).left() * 3.0);
+        assert_eq!(
+            visual_rows(&narrow)
+                .map(|row| row.start)
+                .collect::<Vec<_>>(),
+            visual_rows(&wide).map(|row| row.start).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct IndexOptions {
+    pub show_ignored_files: bool,
     pub max_entries: usize,
     pub max_depth: usize,
     pub max_duration: Duration,
@@ -32,6 +33,7 @@ pub struct IndexOptions {
 impl Default for IndexOptions {
     fn default() -> Self {
         Self {
+            show_ignored_files: false,
             max_entries: 100_000,
             max_depth: 64,
             max_duration: Duration::from_secs(15),
@@ -53,6 +55,9 @@ pub struct WorkspaceIndex {
     pub root: PathBuf,
     pub entries: Vec<WorkspaceEntry>,
     pub files: Vec<PathBuf>,
+    /// A Cargo manifest admitted by the default index policy, independent of
+    /// the Explorer's option to display ignored and generated files.
+    pub has_rust_manifest: bool,
     pub truncated: bool,
     pub warnings: Vec<String>,
     children: BTreeMap<PathBuf, Vec<usize>>,
@@ -73,6 +78,7 @@ impl WorkspaceIndex {
             root,
             entries: Vec::new(),
             files: Vec::new(),
+            has_rust_manifest: false,
             truncated: false,
             warnings: Vec::new(),
             children: BTreeMap::new(),
@@ -186,6 +192,26 @@ fn path_score(path: &str, query: &str) -> Option<i64> {
     None
 }
 
+fn generated_index_name(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            "target"
+                | "node_modules"
+                | ".next"
+                | ".nuxt"
+                | ".venv"
+                | "venv"
+                | ".cache"
+                | ".vs"
+                | "dist"
+                | "build"
+                | "coverage"
+                | "__pycache__"
+        )
+    )
+}
+
 pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex, String> {
     if !root.is_dir() {
         return Err(format!(
@@ -195,38 +221,44 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
     }
     let started = Instant::now();
     let mut index = WorkspaceIndex::empty(root.to_path_buf());
+    let show_ignored_files = options.show_ignored_files;
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
         .follow_links(false)
+        .ignore(true)
         .git_ignore(true)
         .git_exclude(true)
         .git_global(false)
         .require_git(false)
         .max_depth(Some(options.max_depth))
-        .filter_entry(|entry| {
-            entry.depth() == 0
-                || !matches!(
-                    entry.file_name().to_str(),
-                    Some(
-                        ".git"
-                            | ".hg"
-                            | ".svn"
-                            | "target"
-                            | "node_modules"
-                            | ".next"
-                            | ".nuxt"
-                            | ".venv"
-                            | "venv"
-                            | ".cache"
-                            | ".vs"
-                            | "dist"
-                            | "build"
-                            | "coverage"
-                            | "__pycache__"
-                    )
-                )
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
+                return false;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if [".git", ".hg", ".svn"]
+                .iter()
+                .any(|metadata| name.eq_ignore_ascii_case(metadata))
+            {
+                return false;
+            }
+            show_ignored_files || !generated_index_name(entry.file_name())
         });
+    // Showing dependency caches must not give their Cargo manifests authority
+    // to start Rust analysis. Match just the encountered manifest candidates
+    // against the normal rules; directory matchers are lazy and cached, so no
+    // second filesystem walk is necessary.
+    let mut rust_matcher = if show_ignored_files {
+        let matcher = builder.build_matchers().pop();
+        builder.ignore(false).git_ignore(false).git_exclude(false);
+        matcher
+    } else {
+        None
+    };
     for result in builder.build() {
         if cancelled(&options.cancel)
             || started.elapsed() >= options.max_duration
@@ -256,6 +288,27 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
         }
         if file_type.is_dir() && entry.depth() == options.max_depth {
             index.truncated = true;
+        }
+        if !index.has_rust_manifest
+            && file_type.is_file()
+            && entry.file_name() == "Cargo.toml"
+            && let Ok(relative) = entry.path().strip_prefix(root)
+            && !relative
+                .components()
+                .any(|part| generated_index_name(part.as_os_str()))
+        {
+            let ignored = if let Some(matcher) = &mut rust_matcher {
+                let (matched, error) = matcher.matched_with_errors(relative, false);
+                if let Some(error) = error
+                    && index.warnings.len() < MAX_WARNINGS
+                {
+                    index.warnings.push(error.to_string());
+                }
+                matched.is_ignore()
+            } else {
+                false
+            };
+            index.has_rust_manifest = !ignored;
         }
         index.entries.push(WorkspaceEntry {
             path: entry.path().to_path_buf(),
@@ -1143,6 +1196,150 @@ mod tests {
     }
 
     #[test]
+    fn showing_ignored_files_includes_nested_rules_and_generated_files_in_quick_open() {
+        let fixture = Fixture::new("show-ignored");
+        fixture.write(".gitignore", "ignored/\n*.log\n");
+        fixture.write(".ignore", "local-only.txt\n");
+        fixture.write(".git/info/exclude", "from-exclude.txt\n");
+        fixture.write("src/.gitignore", "generated.rs\n");
+        let ignored = [
+            fixture.write("ignored/secret.txt", "ignored"),
+            fixture.write("src/generated.rs", "generated"),
+            fixture.write("target/debug/cache", "cache"),
+            fixture.write("node_modules/package/index.js", "dependency"),
+            fixture.write("dist/bundle.js", "bundle"),
+            fixture.write("local-only.txt", "local"),
+            fixture.write("from-exclude.txt", "local repository exclude"),
+            fixture.write("output.log", "log"),
+        ];
+        let hidden = build_index(&fixture.0, IndexOptions::default()).unwrap();
+        let shown = build_index(
+            &fixture.0,
+            IndexOptions {
+                show_ignored_files: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for path in ignored {
+            let query = path.file_name().unwrap().to_string_lossy();
+            assert!(!hidden.files.contains(&path), "{path:?}");
+            assert!(hidden.quick_open(&query, 40).is_empty(), "{path:?}");
+            assert!(shown.files.contains(&path), "{path:?}");
+            assert!(shown.quick_open(&query, 40).contains(&path), "{path:?}");
+            assert!(
+                shown
+                    .children(path.parent().unwrap())
+                    .any(|entry| entry.path == path)
+            );
+        }
+        assert!(!shown.truncated);
+    }
+
+    #[test]
+    fn vcs_metadata_stays_hidden_when_showing_ignored_files() {
+        let fixture = Fixture::new("metadata");
+        for path in [
+            ".git/config",
+            ".hg/store/data",
+            ".svn/entries",
+            "nested/.GIT/HEAD",
+            "worktree/.git",
+        ] {
+            fixture.write(path, "metadata");
+        }
+        let workflow = fixture.write(".github/workflow.yml", "workflow");
+        for show_ignored_files in [false, true] {
+            let index = build_index(
+                &fixture.0,
+                IndexOptions {
+                    show_ignored_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(index.files, vec![workflow.clone()]);
+            assert!(index.entries.iter().all(|entry| {
+                ![".git", ".hg", ".svn"]
+                    .iter()
+                    .any(|metadata| entry.name.eq_ignore_ascii_case(metadata))
+            }));
+        }
+    }
+
+    #[test]
+    fn rust_detection_ignores_dependency_and_ignored_manifests_but_keeps_nested_projects() {
+        let fixture = Fixture::new("rust-detection");
+        fixture.write("package.json", "{}");
+        fixture.write(".gitignore", "ignored/\n");
+        fixture.write(".ignore", "local/\n");
+        fixture.write(".git/info/exclude", "private/\n");
+        for manifest in [
+            "node_modules/native/Cargo.toml",
+            "target/nested/Cargo.toml",
+            "ignored/Cargo.toml",
+            "local/Cargo.toml",
+            "private/Cargo.toml",
+        ] {
+            fixture.write(manifest, "[package]\nname = 'dependency'\n");
+        }
+        for show_ignored_files in [false, true] {
+            let index = build_index(
+                &fixture.0,
+                IndexOptions {
+                    show_ignored_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                index.quick_open("Cargo.toml", 40).len(),
+                if show_ignored_files { 5 } else { 0 }
+            );
+            assert!(!index.has_rust_manifest);
+        }
+        // Monorepos without a manifest at their root were already supported.
+        let manifest = fixture.write(
+            "crates/application/Cargo.toml",
+            "[package]\nname = 'application'\n",
+        );
+        for show_ignored_files in [false, true] {
+            let index = build_index(
+                &fixture.0,
+                IndexOptions {
+                    show_ignored_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(index.has_rust_manifest);
+            assert!(index.files.contains(&manifest));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn showing_ignored_files_never_follows_or_lists_symbolic_links() {
+        let fixture = Fixture::new("links");
+        let outside = Fixture::new("links-outside");
+        let secret = outside.write("secret.txt", "outside");
+        std::os::unix::fs::symlink(&outside.0, fixture.0.join("external")).unwrap();
+        std::os::unix::fs::symlink(&secret, fixture.0.join("linked.txt")).unwrap();
+        for show_ignored_files in [false, true] {
+            let index = build_index(
+                &fixture.0,
+                IndexOptions {
+                    show_ignored_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(index.entries.is_empty());
+            assert!(index.quick_open("secret", 40).is_empty());
+        }
+    }
+
+    #[test]
     fn index_is_bounded_and_can_be_cancelled() {
         let fixture = Fixture::new("bounded");
         for index in 0..30 {
@@ -1151,6 +1348,7 @@ mod tests {
         let index = build_index(
             &fixture.0,
             IndexOptions {
+                show_ignored_files: true,
                 max_entries: 5,
                 ..Default::default()
             },
@@ -1161,6 +1359,7 @@ mod tests {
         let cancelled = build_index(
             &fixture.0,
             IndexOptions {
+                show_ignored_files: true,
                 cancel: Some(Arc::new(AtomicBool::new(true))),
                 ..Default::default()
             },

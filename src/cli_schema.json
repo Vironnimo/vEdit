@@ -184,8 +184,16 @@
         "swap_jk": false,
         "autosave": true,
         "font_size": 14.0,
+        "ui_scale": 1.0,
+        "line_height": 1.35,
+        "line_numbers": "absolute",
+        "highlight_current_line": true,
+        "autosave_delay_ms": 850,
+        "show_ignored_files": false,
         "editor_font": "jetbrains_mono",
         "tab_width": 4,
+        "detect_indentation": true,
+        "indent_with_tabs": false,
         "word_wrap": true,
         "smooth_scroll": false,
         "leader_key": " ",
@@ -485,13 +493,24 @@
   "settings": {
     "get": "omit patch",
     "patch": "only supplied fields change; null leaves a field unchanged. Applied settings are returned, persistence is queued.",
-    "font_size": "10..24",
+    "font_size": "10..32; source editor font size in logical points",
+    "ui_scale": "0.75..2.0; default 1.0. Persisted global interface zoom including Git and previews; Ctrl+Plus/Minus changes zoom, Ctrl+0 resets to 1.0 even in Settings.",
+    "line_height": "1.0..2.0; default 1.35. Source row height as a multiple of editor font size.",
+    "line_numbers": {"enum": ["absolute", "relative", "off"], "default": "absolute", "description": "Source gutter numbers; relative shows distances from the current logical line, which retains its absolute number. Wrapped continuations stay unnumbered; diagnostics/bookmarks remain visible when off."},
+    "highlight_current_line": "true by default; subtle highlight behind the active source cursor row",
+    "autosave_delay_ms": "300..5000; default 850 milliseconds after the last edit. Only applies when autosave is true; recovery copies keep their independent 850 ms delay.",
+    "keybindings": "Complete override object from stable action IDs to shortcut strings or null (disabled); missing IDs use defaults, {} resets all. Example {\"save\":\"F8\",\"toggle_left_sidebar\":null}. Settings responses include keybinding_actions with IDs, effective shortcuts and defaults. Ctrl/Alt/Shift plus egui key name; duplicate, unknown, typing-only and native clipboard/editing conflicts reject the entire patch before any preference changes. User overrides replace all default aliases. Vim motions and native text/clipboard navigation remain contextual.",
+    "show_ignored_files": "false by default. Include gitignored and generated files in Explorer and its file picker; .git and other VCS metadata stay hidden. Changing this reindexes open projects in the background. Project-search exclusions are separate.",
     "editor_font": {
       "enum": ["jetbrains_mono", "consolas", "cascadia_mono"],
       "default": "jetbrains_mono",
       "description": "Regular editor font. JetBrains Mono is bundled; unavailable Windows fonts fall back to it. CLI shortcut: settings font jetbrains-mono|consolas|cascadia-mono; equivalent hyphen spellings are accepted in JSON. Omitted/null preserves the current choice."
     },
     "tab_width": "1..8",
+    "detect_indentation": "true by default. Bounded existing-file detection takes priority over language and global preferences. Disable to force configured indentation. Changes affect subsequent edits only, never reformat existing text.",
+    "indent_with_tabs": "false by default. Global indentation character style; language overrides and detected style take priority.",
+    "language_indent_widths": "Map of lowercase language IDs to widths 1..8, e.g. {\"python\":4,\"dart\":2}. Supplied map replaces all width overrides; {} clears them. Omitted/null preserves them. Defaults: Python4; Dart/JavaScript/TypeScript/JSON/YAML/HTML/CSS2; Go4. Other languages inherit tab_width. Up to64 IDs, each1..32 ASCII lowercase letters/digits/underscores.",
+    "language_indent_with_tabs": "Map of language IDs to booleans, true for tabs and false for spaces. Supplied map replaces all style overrides; {} clears them. Omitted/null preserves them. Defaults: Go tabs, explicit space style for languages with built-in width defaults. Same ID limits as language_indent_widths.",
     "smooth_scroll": "false by default; input key scrolling works with either setting",
     "swap_jk": "false by default. true exchanges physical j/k navigation in Normal/Visual Vim commands (including counts/operators), Explorer navigation and Markdown scrolling. Inserted text, literal f/t/r targets, arrows and page motions remain unchanged. CLI shortcut: settings swap-jk true|false.",
     "search_excludes": "Persistent list of gitignore-style folder/glob rules, shared by GUI and CLI project search. Trimmed, blank entries removed, duplicates collapsed and Windows separators normalized to /. Literal leading # is supported; ! negation and malformed globs are refused before any patch field changes. Maximum 128 input rules, 1024 bytes per rule, 16 KiB total. [] removes optional filters; omitted/null preserves the current list. Changing filters cancels stale GUI search results and reruns its current query.",
@@ -523,7 +542,7 @@
     "search": "Completes on a bounded background filesystem walk without requiring an Explorer index. Active workspace default; explicit workspace queries stay in the background. Reads saved files, excluding unsaved buffer changes. Omitted/null excludes inherits settings.search_excludes; [] removes optional exclusions; a supplied list replaces them for that request only. CLI repeated --exclude PATTERN replaces the list, --no-excludes sets []; the two flags conflict. Gitignore rules, structural VCS-directory guards, symlink guards and time/byte/result limits still apply. Results report scope:workspace_files_on_disk, actual excludes and excludes_source:settings|request. Never changes persisted settings, GUI query or active project. On invalid_search_excludes correct the saved filters or supply a valid override; on search_busy wait for running searches before retrying.",
     "git_status": "Cached branch and changed files with age/loading/error; does not trigger refresh.",
     "output": "Bounded task output text page with actual task status; long-line byte truncation is explicit.",
-    "task": "check/test/build run Cargo against the active workspace's saved files. Require Cargo.toml; never auto-save or replace a running task. stop requests cancellation; inspect output/status for completion."
+    "task": "check/test/build/run_file use the active project's configured commands, otherwise defaults for the active source language then project markers (Python, Dart, Rust). Python shares the project interpreter with analysis. Custom commands use the project's shell with MORROW_ROOT/MORROW_FILE/MORROW_PYTHON environment variables. Tasks require saved buffers and never auto-save or replace a running task. Missing command/profile returns task_unavailable; configure it in Settings → Tasks. stop requests cancellation; inspect output/status for completion."
   },
   "batch": {
     "semantics": "Ordered actions, stop_on_error:true default. Reports each completed response, stopping index and remaining count. No rollback. A per-item partial failure stops just like an error. Retry remaining actions only after inspecting state, never replay successful edits.",
@@ -543,6 +562,8 @@
     "relative_paths": "CLI open/request use current directory; review manifest paths use manifest directory"
   },
   "panels": [
+    "left_sidebar",
+    "right_sidebar",
     "explorer",
     "search",
     "source_control",
@@ -551,6 +572,7 @@
     "problems",
     "settings"
   ],
+  "sidebar_layout": "status.panels.sidebars reports left/right selected panel, requested visibility, effective_visible after compact-window collapse, preferred width, and right_panels (all other panels are assigned left). panel left_sidebar/right_sidebar shows or hides that side; explorer/search/source_control/review use their persistent side assignment. Hiding a panel that is not selected does not hide another panel. Arrange panel positions via View > Explorer left, Git right or the sidebar title menu; positions, visibility and widths persist. A compact-window hint can reveal the temporarily hidden side without losing preferences.",
   "strictness": "Unknown/duplicate fields and contradictory constraints fail before effects. A user dialog blocks mutation, but read-only observations remain available.",
   "file_actions": {
     "rename": "Renames in the same parent directory without replacing an existing file/folder. Preserves open buffer contents, dirty state, cursor and attached panes; paths update after actual completion. Busy documents/jobs are refused.",

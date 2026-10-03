@@ -22,8 +22,10 @@ pub(super) fn editor_menu(
     response: &egui::Response,
     can_edit: bool,
     can_copy: bool,
+    settings: &Settings,
 ) -> Option<EditorAction> {
     let mut action = None;
+    let shortcut = |action| keybindings::label(&settings.keybindings, action);
     response.context_menu(|ui| {
         for (label, shortcut, tooltip, enabled, command) in [
             (
@@ -61,12 +63,12 @@ pub(super) fn editor_menu(
         }
         ui.separator();
         if ui.add_enabled_ui(can_edit && can_copy, |ui| design::menu_item(ui,
-            "Mark for agent", "Ctrl+Shift+A", "Keep this selected block for an agent, without changing the selection"))
+            "Mark for agent", &shortcut(keybindings::Action::AgentMark), "Keep this selected block for an agent, without changing the selection"))
             .inner.clicked() {
             action = Some(EditorAction::MarkForAgent);
             ui.close();
         }
-        if design::menu_item(ui, "Agent marks", "Ctrl+Alt+Shift+A", "Review selected blocks across your projects").clicked() {
+        if design::menu_item(ui, "Agent marks", &shortcut(keybindings::Action::AgentMarks), "Review selected blocks across your projects").clicked() {
             action = Some(EditorAction::AgentMarks);
             ui.close();
         }
@@ -74,26 +76,26 @@ pub(super) fn editor_menu(
         for (label, shortcut, tooltip, command) in [
             (
                 "Select all",
-                "Ctrl+A",
+                "Ctrl+A".into(),
                 "Select the entire document",
                 EditorAction::SelectAll,
             ),
             (
                 "Undo",
-                "u / Ctrl+Z",
+                shortcut(keybindings::Action::Undo),
                 "Undo the most recent edit",
                 EditorAction::Undo,
             ),
             (
                 "Redo",
-                "Ctrl+R / Ctrl+Y",
+                shortcut(keybindings::Action::Redo),
                 "Restore an undone edit",
                 EditorAction::Redo,
             ),
         ] {
             if ui
                 .add_enabled_ui(can_edit || command == EditorAction::SelectAll, |ui| {
-                    design::menu_item(ui, label, shortcut, tooltip)
+                    design::menu_item(ui, label, &shortcut, tooltip)
                 })
                 .inner
                 .clicked()
@@ -106,8 +108,8 @@ pub(super) fn editor_menu(
         if design::menu_item(
             ui,
             "Find in file",
-            "Ctrl+F in Insert",
-            "Find literal text. Vim Normal: / searches and Ctrl+F scrolls a page. Insert: Ctrl+F opens Find.",
+            &shortcut(keybindings::Action::Find),
+            "Find literal text. With Vim enabled, the default Ctrl+F opens Find only in Insert mode; a custom binding works in all modes.",
         ).clicked() {
             action = Some(EditorAction::Find);
             ui.close();
@@ -115,7 +117,7 @@ pub(super) fn editor_menu(
         if design::menu_item(
             ui,
             "Command palette",
-            "Ctrl+Shift+P",
+            &shortcut(keybindings::Action::CommandPalette),
             "Show editing, navigation and workspace commands",
         )
         .clicked()
@@ -353,41 +355,42 @@ pub(super) fn tab_menu(
     response: &egui::Response,
     has_path: bool,
     can_save: bool,
+    bindings: &keybindings::Bindings,
 ) -> Option<TabAction> {
     let mut action = None;
     response.context_menu(|ui| {
         for (label, shortcut, tooltip, enabled, command) in [
             (
                 "Close",
-                "Ctrl+W",
+                keybindings::label(bindings, keybindings::Action::CloseTab),
                 "Close this tab; unsaved changes ask for a decision",
                 true,
                 TabAction::Close,
             ),
             (
                 "Close other saved tabs",
-                "",
+                String::new(),
                 "Keep this tab and every document with unsaved changes",
                 true,
                 TabAction::CloseOthers,
             ),
             (
                 "Close saved tabs",
-                "",
+                String::new(),
                 "Close documents that have no unsaved changes",
                 true,
                 TabAction::CloseSaved,
             ),
             (
                 "Save",
-                "Ctrl+S",
+                keybindings::label(bindings, keybindings::Action::Save),
                 "Save this document",
                 can_save,
                 TabAction::Save,
             ),
             (
                 "Save as…",
-                "",
+                keybindings::label(bindings, keybindings::Action::SaveAs),
                 "Choose a new location with the Windows file dialog",
                 can_save,
                 TabAction::SaveAs,
@@ -395,7 +398,7 @@ pub(super) fn tab_menu(
         ] {
             if ui
                 .add_enabled_ui(enabled, |ui| {
-                    design::menu_item(ui, label, shortcut, tooltip)
+                    design::menu_item(ui, label, &shortcut, tooltip)
                 })
                 .inner
                 .clicked()
@@ -405,19 +408,28 @@ pub(super) fn tab_menu(
             }
         }
         ui.separator();
-        for (label, tooltip, command) in [
+        for (label, tooltip, shortcut_action, command) in [
             (
                 "Split right",
                 "Show this document in a pane beside the current one",
+                keybindings::Action::SplitRight,
                 TabAction::SplitVertical,
             ),
             (
                 "Split below",
                 "Show this document in a pane below the current one",
+                keybindings::Action::SplitDown,
                 TabAction::SplitHorizontal,
             ),
         ] {
-            if design::menu_item(ui, label, "", tooltip).clicked() {
+            if design::menu_item(
+                ui,
+                label,
+                &keybindings::label(bindings, shortcut_action),
+                tooltip,
+            )
+            .clicked()
+            {
                 action = Some(command);
                 ui.close();
             }
@@ -1532,19 +1544,7 @@ impl MorrowApp {
                 .rename_prefix(&result.old_path, &result.new_path);
             self.bookmark_lines.clear();
             for project in &mut self.projects {
-                let old_open: Vec<_> = project
-                    .language_opened
-                    .keys()
-                    .filter(|path| path.starts_with(&result.old_path))
-                    .cloned()
-                    .collect();
-                for old_path in old_open {
-                    if let Some(language) = &project.language {
-                        language.close(&old_path);
-                    }
-                    project.language_opened.remove(&old_path);
-                    project.diagnostics.remove(&old_path);
-                }
+                project.close_language_paths(&result.old_path);
                 for tab in &mut project.tabs {
                     if let Some(path) = &tab.path
                         && let Ok(relative) = path.strip_prefix(&result.old_path)
@@ -1728,7 +1728,7 @@ fn prepare_file_operation(
     }
 }
 
-fn path_contains(base: &Path, candidate: &Path) -> bool {
+pub(super) fn path_contains(base: &Path, candidate: &Path) -> bool {
     fn key(path: &Path) -> String {
         let display = crate::paths::display(path);
         let mut normalized = PathBuf::new();

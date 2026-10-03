@@ -333,7 +333,8 @@ fn yank_feedback_rects(screen: &Harness<'_, MorrowApp>) -> Vec<egui::Rect> {
                 return None;
             };
             let [red, green, blue, alpha] = rect.fill.to_srgba_unmultiplied();
-            (alpha > 0
+            (rect.corner_radius == egui::CornerRadius::same(2)
+                && alpha > 0
                 && alpha <= 48
                 && red.abs_diff(ACCENT.r()) < 10
                 && green.abs_diff(ACCENT.g()) < 10

@@ -28,6 +28,225 @@ pub(super) struct GitViewState {
     pub(super) selected_file: Option<String>,
     working_cache: Option<WorkingTreeCache>,
     detail_tree: Option<(String, FileTree)>,
+    keyboard_rows: Vec<egui::Id>,
+    keyboard_last_focus: Option<egui::Id>,
+    keyboard_header: Option<egui::Id>,
+    keyboard_focus_pending: bool,
+    keyboard_controls: Vec<egui::Id>,
+    detail_keyboard_focus: Option<egui::Id>,
+    detail_keyboard_focus_pending: bool,
+}
+
+fn git_row_id(root: &Path, key: &str) -> egui::Id {
+    egui::Id::new(("git-content", root, key))
+}
+
+fn tree_keyboard_rows(
+    tree: &FileTree,
+    prefix: &str,
+    namespace: &str,
+    root: &Path,
+    expanded: &HashMap<String, bool>,
+    rows: &mut Vec<egui::Id>,
+) {
+    for (name, folder) in &tree.folders {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let key = format!("{namespace}:folder:{path}");
+        rows.push(git_row_id(root, &key));
+        if expanded.get(&key).copied().unwrap_or(true) {
+            tree_keyboard_rows(folder, &path, namespace, root, expanded, rows);
+        }
+    }
+    rows.extend(
+        tree.files
+            .iter()
+            .map(|file| git_row_id(root, &format!("{namespace}:file:{}", file.path))),
+    );
+}
+
+fn git_keyboard_target(rows: &[egui::Id], focused: egui::Id, key: Key) -> Option<egui::Id> {
+    let index = rows
+        .iter()
+        .position(|id| *id == focused || id.with("action") == focused)?;
+    let index = match key {
+        Key::ArrowUp => index.saturating_sub(1),
+        Key::ArrowDown => (index + 1).min(rows.len().saturating_sub(1)),
+        Key::Home => 0,
+        Key::End => rows.len().saturating_sub(1),
+        _ => return None,
+    };
+    rows.get(index).copied()
+}
+
+fn request_git_row_focus(ctx: &egui::Context, id: egui::Id) {
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    ctx.data_mut(|data| data.insert_temp(id.with("reveal"), true));
+}
+
+fn git_row_keyboard(ui: &egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            )
+        });
+        if response.gained_focus()
+            || ui
+                .data_mut(|data| data.remove_temp::<bool>(response.id.with("reveal")))
+                .unwrap_or(false)
+        {
+            response.scroll_to_me(Some(Align::Center));
+        }
+        ui.painter().rect_stroke(
+            response.rect.shrink(1.0),
+            3.0,
+            Stroke::new(1.0, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+fn git_folder_key(ui: &egui::Ui, row: &egui::Response, open: &mut bool) {
+    if row.has_focus() {
+        ui.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft) {
+                *open = false;
+            }
+            if input.consume_key(egui::Modifiers::NONE, Key::ArrowRight) {
+                *open = true;
+            }
+        });
+    }
+}
+
+fn git_popup_focus(response: &egui::Response, popup_id: egui::Id) {
+    let ctx = &response.ctx;
+    let remembered = popup_id.with("git-was-open");
+    if egui::Popup::is_id_open(ctx, popup_id) {
+        ctx.data_mut(|data| data.insert_temp(remembered, true));
+    } else if ctx
+        .data_mut(|data| data.remove_temp::<bool>(remembered))
+        .unwrap_or(false)
+    {
+        let escape = ctx.input(|input| input.key_pressed(Key::Escape));
+        if escape {
+            ctx.data_mut(|data| data.insert_temp(egui::Id::new("git-popup-return"), response.id));
+        }
+        if escape
+            || ctx.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space))
+        {
+            request_git_row_focus(ctx, response.id);
+        }
+    }
+}
+
+fn take_git_popup_return(ctx: &egui::Context) -> Option<egui::Id> {
+    ctx.data_mut(|data| {
+        let key = egui::Id::new("git-popup-return");
+        let id = data.get_temp::<egui::Id>(key);
+        data.remove::<egui::Id>(key);
+        id
+    })
+}
+
+fn git_context_menu(response: &egui::Response, contents: impl FnOnce(&mut egui::Ui, bool)) {
+    let keyboard = response.has_focus()
+        && response
+            .ctx
+            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+    let id = response.id.with("git-context-menu");
+    if keyboard {
+        egui::Popup::open_id(&response.ctx, id);
+        response.ctx.data_mut(|data| {
+            data.insert_temp(id.with("keyboard-position"), response.rect.left_bottom())
+        });
+        response
+            .ctx
+            .data_mut(|data| data.insert_temp(id.with("focus-first"), true));
+    } else if response.secondary_clicked() {
+        response
+            .ctx
+            .data_mut(|data| data.remove::<egui::Pos2>(id.with("keyboard-position")));
+    }
+    let mut popup = egui::Popup::context_menu(response).id(id);
+    if let Some(position) = response
+        .ctx
+        .data(|data| data.get_temp::<egui::Pos2>(id.with("keyboard-position")))
+    {
+        popup = popup.at_position(position);
+    }
+    popup.show(|ui| {
+        let items_id = id.with("git-menu-items");
+        let items = ui
+            .data(|data| data.get_temp::<Vec<egui::Id>>(items_id))
+            .unwrap_or_default();
+        if let Some(focused) = ui.memory(|memory| memory.focused()) {
+            for key in [Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End] {
+                if let Some(target) = git_keyboard_target(&items, focused, key)
+                    && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+                {
+                    ui.memory_mut(|memory| memory.request_focus(target));
+                    break;
+                }
+            }
+        }
+        ui.data_mut(|data| {
+            data.insert_temp(egui::Id::new("git-active-menu"), items_id);
+            data.insert_temp(items_id, Vec::<egui::Id>::new());
+        });
+        let focus = !ui.is_sizing_pass()
+            && ui
+                .data(|data| data.get_temp::<bool>(id.with("focus-first")))
+                .unwrap_or(false);
+        contents(ui, focus);
+        ui.data_mut(|data| data.remove::<egui::Id>(egui::Id::new("git-active-menu")));
+        if focus {
+            ui.data_mut(|data| data.remove::<bool>(id.with("focus-first")));
+        }
+    });
+    git_popup_focus(response, id);
+}
+
+fn git_menu_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    shortcut: &str,
+    tooltip: &str,
+    focus: bool,
+) -> egui::Response {
+    let response = design::menu_item(ui, label, shortcut, tooltip);
+    if response.enabled() {
+        ui.data_mut(|data| {
+            if let Some(id) = data.get_temp::<egui::Id>(egui::Id::new("git-active-menu")) {
+                data.get_temp_mut_or_default::<Vec<egui::Id>>(id)
+                    .push(response.id);
+            }
+        });
+        if response.has_focus() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
+        }
+    }
+    if focus && response.enabled() {
+        response.request_focus();
+    }
+    response
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +416,7 @@ impl WorkingTreeCache {
 }
 
 enum GitUiAction {
+    SaveAll,
     Open(PathBuf),
     Diff {
         path: PathBuf,
@@ -223,8 +443,102 @@ enum GitUiAction {
 }
 
 impl MorrowApp {
+    pub(super) fn git_content_has_focus(&self) -> bool {
+        let Some(focused) = self.ctx.memory(|memory| memory.focused()) else {
+            return false;
+        };
+        self.project().is_some_and(|project| {
+            let state = &project.git_view;
+            state
+                .keyboard_rows
+                .iter()
+                .any(|id| *id == focused || id.with("action") == focused)
+                || state.keyboard_controls.contains(&focused)
+        })
+    }
+
+    pub(super) fn restore_git_detail_content_focus(&mut self) -> bool {
+        let Some(project) = self
+            .projects
+            .get_mut(self.active_project)
+            .filter(|project| {
+                project.git_view.detail_open && project.git_view.detail_keyboard_focus.is_some()
+            })
+        else {
+            return false;
+        };
+        project.git_view.detail_keyboard_focus_pending = true;
+        self.ctx.request_repaint();
+        true
+    }
+
+    pub(super) fn restore_git_popup_focus(&mut self) -> bool {
+        let Some(id) = take_git_popup_return(&self.ctx) else {
+            return false;
+        };
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = false;
+        }
+        request_git_row_focus(&self.ctx, id);
+        self.ctx.request_repaint();
+        true
+    }
+
+    /// Enter Git without activating a row or stealing arrows from the composer.
+    pub(super) fn focus_git_content(&mut self) {
+        if let Some(tab) = self.tab() {
+            let id = self.document_widget_id(tab.id);
+            self.ctx.memory_mut(|memory| {
+                if memory.focused() == Some(id) {
+                    memory.surrender_focus(id);
+                }
+            });
+        }
+        if let Some(tab) = self.tab_mut() {
+            tab.focus = false;
+        }
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.git_view.keyboard_focus_pending = true;
+        }
+        self.ctx.request_repaint();
+    }
+
+    fn git_unsaved_document_count(&self) -> usize {
+        let Some(active) = self.project() else {
+            return 0;
+        };
+        let root = active.git_root.as_deref().unwrap_or(&active.root);
+        self.projects
+            .iter()
+            .enumerate()
+            .flat_map(|(index, project)| {
+                project.tabs.iter().filter(move |tab| {
+                    (tab.dirty || tab.saving)
+                        && tab
+                            .path
+                            .as_ref()
+                            .map_or(index == self.active_project, |path| {
+                                context_actions::path_contains(root, path)
+                            })
+                })
+            })
+            .count()
+    }
+
     pub(super) fn git_ui(&mut self, ui: &mut egui::Ui) {
+        let height = ui.available_height();
+        egui::ScrollArea::vertical()
+            .id_salt(("git-panel-content", self.active_project))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_height(height.max(330.0));
+                self.git_ui_contents(ui);
+            });
+    }
+
+    fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
         let project_index = self.active_project;
+        let unsaved_count = self.git_unsaved_document_count();
         let busy = self.git_busy.is_some();
         let Some(project) = self.projects.get_mut(project_index) else {
             return;
@@ -237,6 +551,99 @@ impl MorrowApp {
         let loading = project.git_loading;
         let mut state = std::mem::take(&mut project.git_view);
         let mut actions = Vec::new();
+        let focus_requested = state.keyboard_focus_pending;
+        let commit_message_id = git_row_id(&root, "commit-message");
+        state.keyboard_controls.clear();
+        if repo && state.section == GitSection::Changes {
+            state.keyboard_controls.push(commit_message_id);
+        }
+        let focused = ui.memory(|memory| memory.focused());
+        let previous_row_index = focused.and_then(|focused| {
+            state
+                .keyboard_rows
+                .iter()
+                .position(|id| *id == focused || id.with("action") == focused)
+        });
+        if state.working_cache.as_ref().is_none_or(|cache| {
+            cache.files != project.git_changes || cache.stats != project.git_stats
+        }) {
+            state.working_cache = Some(WorkingTreeCache::new(
+                &project.git_changes,
+                &project.git_stats,
+            ));
+        }
+        state.keyboard_rows.clear();
+        if repo {
+            match state.section {
+                GitSection::Changes => {
+                    if let Some(cache) = &state.working_cache {
+                        for (group, tree) in &cache.groups {
+                            if tree.summary.total == 0 {
+                                continue;
+                            }
+                            let key = format!("working:{}", group.key());
+                            state.keyboard_rows.push(git_row_id(&root, &key));
+                            if state.expanded.get(&key).copied().unwrap_or(true) {
+                                tree_keyboard_rows(
+                                    tree,
+                                    "",
+                                    &key,
+                                    &root,
+                                    &state.expanded,
+                                    &mut state.keyboard_rows,
+                                );
+                            }
+                        }
+                    }
+                }
+                GitSection::History => state.keyboard_rows.extend(
+                    project
+                        .recent_commits
+                        .iter()
+                        .map(|commit| git_row_id(&root, &commit.hash)),
+                ),
+            }
+        } else {
+            state.keyboard_header = None;
+        }
+        let mut keyboard_target = None;
+        if state.keyboard_focus_pending {
+            state.keyboard_focus_pending = false;
+            keyboard_target = state
+                .keyboard_last_focus
+                .filter(|id| {
+                    (state.section == GitSection::Changes && *id == commit_message_id)
+                        || state
+                            .keyboard_rows
+                            .iter()
+                            .any(|row| row == id || row.with("action") == *id)
+                })
+                .or_else(|| state.keyboard_rows.first().copied());
+        } else if let Some(index) = previous_row_index
+            && focused.is_some_and(|focused| {
+                !state
+                    .keyboard_rows
+                    .iter()
+                    .any(|id| *id == focused || id.with("action") == focused)
+            })
+        {
+            keyboard_target = state
+                .keyboard_rows
+                .get(index.min(state.keyboard_rows.len().saturating_sub(1)))
+                .copied();
+        } else if let Some(focused) = focused {
+            for key in [Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End] {
+                if let Some(target) = git_keyboard_target(&state.keyboard_rows, focused, key)
+                    && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+                {
+                    keyboard_target = Some(target);
+                    break;
+                }
+            }
+        }
+        if let Some(id) = keyboard_target {
+            request_git_row_focus(ui.ctx(), id);
+        }
 
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal(|ui| {
@@ -267,7 +674,7 @@ impl MorrowApp {
             .on_hover_text(crate::paths::display(&root));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if repo {
-                    design::menu(ui, "···", "Repository actions", |ui| {
+                    let menu = design::menu(ui, "···", "Repository actions", |ui| {
                         ui.add_enabled_ui(!busy, |ui| {
                             if design::menu_item(
                                 ui,
@@ -324,6 +731,8 @@ impl MorrowApp {
                             ui.close();
                         }
                     });
+                    state.keyboard_controls.push(menu.id);
+                    git_popup_focus(&menu, egui::Popup::default_response_id(&menu));
                 }
             });
         });
@@ -359,16 +768,17 @@ impl MorrowApp {
                 .size(12.0)
                 .color(MUTED),
             );
-            if !loading
-                && !busy
-                && design::ghost_button(
+            if !loading && !busy {
+                let initialize = design::ghost_button(
                     ui,
                     "Initialize repository",
                     "Create a local Git repository in this project",
-                )
-                .clicked()
-            {
-                actions.push(GitUiAction::Initialize);
+                );
+                state.keyboard_header = Some(initialize.id);
+                state.keyboard_controls.push(initialize.id);
+                if initialize.clicked() {
+                    actions.push(GitUiAction::Initialize);
+                }
             }
         } else {
             ui.add_space(7.0);
@@ -376,40 +786,52 @@ impl MorrowApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(1.0);
-                if section_button(
+                let changes = section_button(
                     ui,
                     &format!("Changes  {changed_count}"),
                     state.section == GitSection::Changes,
                     width,
                     "Browse staged, unstaged, and new files",
-                )
-                .clicked()
-                {
+                );
+                state.keyboard_header = Some(changes.id);
+                state.keyboard_controls.push(changes.id);
+                if changes.clicked() {
                     state.section = GitSection::Changes;
                 }
-                if section_button(
+                let history = section_button(
                     ui,
                     "History",
                     state.section == GitSection::History,
                     width,
                     "Browse commits and their historical patches",
-                )
-                .clicked()
-                {
+                );
+                state.keyboard_controls.push(history.id);
+                if history.clicked() {
                     state.section = GitSection::History;
                 }
             });
             ui.add_space(6.0);
             ui.separator();
+            ui.add(egui::Label::new(RichText::new("↑↓ Navigate · Enter Open · Tab Actions").size(10.0).color(MUTED)).truncate())
+                .on_hover_text("Arrow keys move between rows. Left/Right collapse or expand folders. Home/End jump to the first/last row. Enter opens a diff or commit. Shift+F10 opens a row's context menu. Tab reaches Stage/Unstage, Changes/History, the commit message and Commit button; Shift+Tab moves back. Repository actions are available from the ··· menu.");
             match state.section {
                 GitSection::Changes => {
-                    if state.working_cache.as_ref().is_none_or(|cache| {
-                        cache.files != project.git_changes || cache.stats != project.git_stats
-                    }) {
-                        state.working_cache = Some(WorkingTreeCache::new(
-                            &project.git_changes,
-                            &project.git_stats,
-                        ));
+                    if unsaved_count > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "{unsaved_count} unsaved {}. Git uses files on disk.",
+                                if unsaved_count == 1 {
+                                    "document"
+                                } else {
+                                    "documents"
+                                }
+                            ))
+                            .size(11.0)
+                            .color(ORANGE),
+                        );
+                        if design::ghost_button(ui, "Save all files", "Save changed documents in all open projects, including agent drafts. Wait for saving to finish, then stage the saved changes.").clicked() {
+                            actions.push(GitUiAction::SaveAll);
+                        }
                     }
                     let staged_count = project
                         .git_changes
@@ -432,14 +854,20 @@ impl MorrowApp {
                             if project.git_changes.is_empty() {
                                 ui.add_space(20.0);
                                 ui.label(
-                                    RichText::new("Working tree is clean")
-                                        .size(12.5)
-                                        .color(TEXT),
+                                    RichText::new(if unsaved_count > 0 {
+                                        "No changes on disk"
+                                    } else {
+                                        "Working tree is clean"
+                                    })
+                                    .size(12.5)
+                                    .color(TEXT),
                                 );
                                 ui.label(
-                                    RichText::new("Your changes will appear here.")
-                                        .size(11.0)
-                                        .color(MUTED),
+                                    RichText::new(
+                                        "Saved changes appear here. Stage them before committing.",
+                                    )
+                                    .size(11.0)
+                                    .color(MUTED),
                                 );
                             }
                             if let Some(cache) = &state.working_cache {
@@ -464,8 +892,9 @@ impl MorrowApp {
                     ui.add_space(5.0);
                     ui.separator();
                     ui.add_space(5.0);
-                    ui.add(
+                    let composer = ui.add(
                         egui::TextEdit::multiline(&mut project.commit_message)
+                            .id(commit_message_id)
                             .hint_text("Commit message")
                             .desired_width(f32::INFINITY)
                             .desired_rows(2)
@@ -474,6 +903,12 @@ impl MorrowApp {
                     .on_hover_text(
                         "Describe the staged changes. Unstaged changes stay in the working tree.",
                     );
+                    if composer.gained_focus()
+                        || (composer.has_focus()
+                            && !ui.clip_rect().contains(composer.rect.center()))
+                    {
+                        composer.scroll_to_me(Some(Align::Center));
+                    }
                     if conflicted {
                         ui.label(
                             RichText::new("Resolve conflicts before committing.")
@@ -489,7 +924,7 @@ impl MorrowApp {
                             if staged_count == 1 { "file" } else { "files" }
                         )
                     };
-                    if ui
+                    let commit = ui
                         .add_enabled_ui(
                             !busy
                                 && staged_count > 0
@@ -504,9 +939,12 @@ impl MorrowApp {
                             },
                         )
                         .inner
-                        .on_hover_text("Create a local commit from the staged files")
-                        .clicked()
-                    {
+                        .on_hover_text("Create a local commit from the staged files");
+                    state.keyboard_controls.push(commit.id);
+                    if commit.gained_focus() {
+                        commit.scroll_to_me(None);
+                    }
+                    if commit.clicked() {
                         actions.push(GitUiAction::Commit(project.commit_message.clone()));
                     }
                 }
@@ -556,63 +994,72 @@ impl MorrowApp {
                     let mut near_end = false;
                     ui.scope(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        egui::ScrollArea::vertical()
+                        let mut scroll = egui::ScrollArea::vertical()
                             .id_salt(("git-history", project_index, project.git_history_generation))
                             .auto_shrink([false, false])
-                            .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT))
-                            .show_rows(
-                                ui,
-                                HISTORY_ROW_HEIGHT,
-                                project.recent_commits.len(),
-                                |ui, range| {
-                                    near_end =
-                                        history_near_end(range.end, project.recent_commits.len());
-                                    for index in range {
-                                        let commit = &project.recent_commits[index];
-                                        ui.push_id(&commit.hash, |ui| {
-                                            let response = history_row(
+                            .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT));
+                        if let Some(target) = keyboard_target
+                            && let Some(index) =
+                                state.keyboard_rows.iter().position(|id| *id == target)
+                        {
+                            scroll =
+                                scroll.vertical_scroll_offset(index as f32 * HISTORY_ROW_HEIGHT);
+                        }
+                        scroll.show_rows(
+                            ui,
+                            HISTORY_ROW_HEIGHT,
+                            project.recent_commits.len(),
+                            |ui, range| {
+                                near_end =
+                                    history_near_end(range.end, project.recent_commits.len());
+                                for index in range {
+                                    let commit = &project.recent_commits[index];
+                                    ui.push_id(&commit.hash, |ui| {
+                                        let response = history_row(
+                                            ui,
+                                            git_row_id(&root, &commit.hash),
+                                            commit,
+                                            state.selected_commit.as_deref() == Some(&commit.hash),
+                                            &state.graph.rows[index],
+                                            state.graph.lane_count,
+                                        );
+                                        if response.clicked() {
+                                            actions.push(GitUiAction::SelectCommit(
+                                                commit.hash.clone(),
+                                            ));
+                                        }
+                                        git_context_menu(&response, |ui, focus| {
+                                            if git_menu_item(
                                                 ui,
-                                                commit,
-                                                state.selected_commit.as_deref()
-                                                    == Some(&commit.hash),
-                                                &state.graph.rows[index],
-                                                state.graph.lane_count,
-                                            );
-                                            if response.clicked() {
+                                                "Open commit",
+                                                "",
+                                                "Show metadata, message, and changed files",
+                                                focus,
+                                            )
+                                            .clicked()
+                                            {
                                                 actions.push(GitUiAction::SelectCommit(
                                                     commit.hash.clone(),
                                                 ));
+                                                ui.close();
                                             }
-                                            response.context_menu(|ui| {
-                                                if design::menu_item(
-                                                    ui,
-                                                    "Open commit",
-                                                    "",
-                                                    "Show metadata, message, and changed files",
-                                                )
-                                                .clicked()
-                                                {
-                                                    actions.push(GitUiAction::SelectCommit(
-                                                        commit.hash.clone(),
-                                                    ));
-                                                    ui.close();
-                                                }
-                                                if design::menu_item(
-                                                    ui,
-                                                    "Copy commit hash",
-                                                    "",
-                                                    "Copy the full commit identifier",
-                                                )
-                                                .clicked()
-                                                {
-                                                    ui.ctx().copy_text(commit.hash.clone());
-                                                    ui.close();
-                                                }
-                                            });
+                                            if git_menu_item(
+                                                ui,
+                                                "Copy commit hash",
+                                                "",
+                                                "Copy the full commit identifier",
+                                                false,
+                                            )
+                                            .clicked()
+                                            {
+                                                ui.ctx().copy_text(commit.hash.clone());
+                                                ui.close();
+                                            }
                                         });
-                                    }
-                                },
-                            );
+                                    });
+                                }
+                            },
+                        );
                     });
                     ui.add_space(7.0);
                     if project.git_history_loading || (project.recent_commits.is_empty() && loading)
@@ -655,6 +1102,21 @@ impl MorrowApp {
                 });
             }
         }
+        if (focus_requested || (previous_row_index.is_some() && state.keyboard_rows.is_empty()))
+            && keyboard_target.is_none()
+            && let Some(id) = state.keyboard_header
+        {
+            request_git_row_focus(ui.ctx(), id);
+        }
+        if let Some(focused) = ui.memory(|memory| memory.focused())
+            && (focused == commit_message_id
+                || state
+                    .keyboard_rows
+                    .iter()
+                    .any(|id| *id == focused || id.with("action") == focused))
+        {
+            state.keyboard_last_focus = Some(focused);
+        }
         project.git_view = state;
         self.perform_git_ui_actions(project_index, &root, actions);
     }
@@ -688,6 +1150,7 @@ impl MorrowApp {
                 .as_ref()
                 .is_none_or(|(cached_hash, _)| *cached_hash != hash)
         {
+            state.detail_keyboard_focus = None;
             state.detail_tree = Some((
                 hash.clone(),
                 FileTree::from_files(detail.files.iter().map(|file| TreeFile {
@@ -698,6 +1161,30 @@ impl MorrowApp {
                     conflicted: false,
                 })),
             ));
+        }
+        if !child_open
+            && let Some((_, tree)) = &state.detail_tree
+            && let Some(focused) = self.ctx.memory(|memory| memory.focused())
+        {
+            let mut rows = Vec::new();
+            tree_keyboard_rows(
+                tree,
+                "",
+                &TreeContext::Commit(&hash).key(),
+                &root,
+                &state.expanded,
+                &mut rows,
+            );
+            for key in [Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End] {
+                if let Some(target) = git_keyboard_target(&rows, focused, key)
+                    && self
+                        .ctx
+                        .input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+                {
+                    request_git_row_focus(&self.ctx, target);
+                    break;
+                }
+            }
         }
         let modal = crate::git_diff_view::dialog(
             &self.ctx,
@@ -784,6 +1271,35 @@ impl MorrowApp {
         if !child_open && (modal.inner || modal.should_close()) {
             open = false;
         }
+        if !child_open {
+            if state.detail_keyboard_focus_pending
+                && let Some(id) = state.detail_keyboard_focus
+                && self
+                    .ctx
+                    .read_response(id)
+                    .is_some_and(|response| response.enabled())
+            {
+                request_git_row_focus(&self.ctx, id);
+                state.detail_keyboard_focus_pending = false;
+            }
+            for action in &actions {
+                if let GitUiAction::HistoricalDiff { hash, path } = action {
+                    state.detail_keyboard_focus = Some(git_row_id(
+                        &root,
+                        &format!(
+                            "commit:{hash}:file:{}",
+                            path.to_string_lossy().replace('\\', "/")
+                        ),
+                    ));
+                }
+            }
+            if self.ctx.input(|input| input.key_pressed(Key::Escape))
+                && !egui::Popup::is_any_open(&self.ctx)
+                && let Some(id) = take_git_popup_return(&self.ctx)
+            {
+                request_git_row_focus(&self.ctx, id);
+            }
+        }
         state.detail_open = open;
         project.git_view = state;
         if open {
@@ -801,6 +1317,7 @@ impl MorrowApp {
     ) {
         for action in actions {
             match action {
+                GitUiAction::SaveAll => self.save_all(),
                 GitUiAction::Open(path) => self.open_file(path),
                 GitUiAction::Diff {
                     path,
@@ -948,6 +1465,7 @@ fn working_group(
         let label = format!("{}  {}", group.label(), tree.summary.total);
         let response = tree_row(
             ui,
+            git_row_id(root, &key),
             &label,
             0,
             Some(open),
@@ -966,6 +1484,7 @@ fn working_group(
         if response.row.clicked() {
             open = !open;
         }
+        git_folder_key(ui, &response.row, &mut open);
         let tooltip = if group.staged() {
             "Unstage every file in this group"
         } else {
@@ -974,12 +1493,13 @@ fn working_group(
         if let Some(button) = response.action {
             let button = button.on_hover_text(tooltip);
             if button.clicked() {
+                response.row.request_focus();
                 queue_tree_stage(tree, group, actions);
             }
         }
-        response.row.context_menu(|ui| {
+        git_context_menu(&response.row, |ui, focus| {
             ui.add_enabled_ui(!busy, |ui| {
-                if design::menu_item(
+                if git_menu_item(
                     ui,
                     if group.staged() {
                         "Unstage group"
@@ -988,6 +1508,7 @@ fn working_group(
                     },
                     "",
                     tooltip,
+                    focus,
                 )
                 .clicked()
                 {
@@ -1053,6 +1574,7 @@ fn draw_file_tree(
         ui.push_id(&key, |ui| {
             let response = tree_row(
                 ui,
+                git_row_id(root, &key),
                 name,
                 depth + 1,
                 Some(open),
@@ -1070,6 +1592,7 @@ fn draw_file_tree(
             if response.row.clicked() {
                 open = !open;
             }
+            git_folder_key(ui, &response.row, &mut open);
             if let (Some(button), TreeContext::Working(group)) = (response.action, context)
                 && button
                     .on_hover_text(if group.staged() {
@@ -1079,12 +1602,13 @@ fn draw_file_tree(
                     })
                     .clicked()
             {
+                response.row.request_focus();
                 queue_tree_stage(folder, group, actions);
             }
-            response.row.context_menu(|ui| {
+            git_context_menu(&response.row, |ui, focus| {
                 if let TreeContext::Working(group) = context {
                     ui.add_enabled_ui(!busy, |ui| {
-                        if design::menu_item(
+                        if git_menu_item(
                             ui,
                             if group.staged() {
                                 "Unstage folder"
@@ -1093,6 +1617,7 @@ fn draw_file_tree(
                             },
                             "",
                             "Apply to the changed files in this folder, including nested folders",
+                            focus,
                         )
                         .clicked()
                         {
@@ -1101,8 +1626,14 @@ fn draw_file_tree(
                         }
                     });
                 }
-                if design::menu_item(ui, "Copy folder path", "", "Copy the full folder path")
-                    .clicked()
+                if git_menu_item(
+                    ui,
+                    "Copy folder path",
+                    "",
+                    "Copy the full folder path",
+                    focus && (busy || matches!(context, TreeContext::Commit(_))),
+                )
+                .clicked()
                 {
                     ui.ctx().copy_text(crate::paths::display(&root.join(&path)));
                     ui.close();
@@ -1134,6 +1665,7 @@ fn draw_file_tree(
         ui.push_id(&key, |ui| {
             let response = tree_row(
                 ui,
+                git_row_id(root, &key),
                 name,
                 depth + 1,
                 None,
@@ -1189,6 +1721,7 @@ fn draw_file_tree(
                     })
                     .clicked()
             {
+                row.request_focus();
                 let paths = file.action_paths();
                 actions.push(if group.staged() {
                     GitUiAction::Unstage(paths)
@@ -1196,12 +1729,13 @@ fn draw_file_tree(
                     GitUiAction::Stage(paths)
                 });
             }
-            row.context_menu(|ui| {
-                if design::menu_item(
+            git_context_menu(&row, |ui, focus| {
+                if git_menu_item(
                     ui,
                     "View diff",
                     "",
                     "Show the patch for this version of the file",
+                    focus,
                 )
                 .clicked()
                 {
@@ -1212,11 +1746,12 @@ fn draw_file_tree(
                 if let TreeContext::Working(group) = context {
                     if ui
                         .add_enabled_ui(file.status != git::FileChange::Deleted, |ui| {
-                            design::menu_item(
+                            git_menu_item(
                                 ui,
                                 "Open file",
                                 "",
                                 "Open the current working file in the editor",
+                                false,
                             )
                         })
                         .inner
@@ -1226,7 +1761,7 @@ fn draw_file_tree(
                         ui.close();
                     }
                     ui.add_enabled_ui(!busy, |ui| {
-                        if design::menu_item(
+                        if git_menu_item(
                             ui,
                             if group.staged() {
                                 "Unstage file"
@@ -1235,6 +1770,7 @@ fn draw_file_tree(
                             },
                             "",
                             "Apply only to this file",
+                            false,
                         )
                         .clicked()
                         {
@@ -1249,18 +1785,19 @@ fn draw_file_tree(
                     });
                 }
                 ui.separator();
-                if design::menu_item(
+                if git_menu_item(
                     ui,
                     "Copy relative path",
                     "",
                     "Copy the path within the repository",
+                    false,
                 )
                 .clicked()
                 {
                     ui.ctx().copy_text(file.path.clone());
                     ui.close();
                 }
-                if design::menu_item(ui, "Copy full path", "", "Copy the full path").clicked() {
+                if git_menu_item(ui, "Copy full path", "", "Copy the full path", false).clicked() {
                     ui.ctx()
                         .copy_text(crate::paths::display(&root.join(&file.path)));
                     ui.close();
@@ -1292,6 +1829,7 @@ struct TreeResponse {
 #[allow(clippy::too_many_arguments)]
 fn tree_row(
     ui: &mut egui::Ui,
+    row_id: egui::Id,
     name: &str,
     depth: usize,
     folder: Option<bool>,
@@ -1315,7 +1853,7 @@ fn tree_row(
         rect.left_top(),
         egui::pos2(action_rect.left(), rect.bottom()),
     );
-    let row = ui.interact(content_rect, ui.id().with("row"), egui::Sense::click());
+    let row = ui.interact(content_rect, row_id, egui::Sense::click());
     row.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -1330,7 +1868,7 @@ fn tree_row(
             builder = builder.disabled();
         }
         let child = ui.new_child(builder);
-        let response = child.interact(action_rect, ui.id().with("action"), egui::Sense::click());
+        let response = child.interact(action_rect, row_id.with("action"), egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
@@ -1437,7 +1975,7 @@ fn tree_row(
             color,
         );
         if let (Some(label), Some(response)) = (action, &button) {
-            if response.hovered() && action_enabled {
+            if (response.hovered() || response.has_focus()) && action_enabled {
                 painter.rect_filled(action_rect.shrink(2.0), 4.0, SURFACE);
             }
             painter.text(
@@ -1452,6 +1990,10 @@ fn tree_row(
                 },
             );
         }
+    }
+    git_row_keyboard(ui, &row);
+    if let Some(button) = &button {
+        git_row_keyboard(ui, button);
     }
     let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
     let button = button.map(|response| response.on_hover_cursor(egui::CursorIcon::PointingHand));
@@ -1593,15 +2135,17 @@ fn graph_color(index: usize) -> Color32 {
 
 fn history_row(
     ui: &mut egui::Ui,
+    row_id: egui::Id,
     commit: &git::CommitSummary,
     selected: bool,
     graph: &crate::git_graph::GraphRow,
     lanes: usize,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
+    let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(1.0), HISTORY_ROW_HEIGHT),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
+    let response = ui.interact(rect, row_id, egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -1779,6 +2323,7 @@ fn history_row(
             painter.galley(egui::pos2(badge_x, rect.top() + 26.0), detail, MUTED);
         }
     }
+    git_row_keyboard(ui, &response);
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!(

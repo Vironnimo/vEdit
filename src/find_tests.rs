@@ -122,6 +122,72 @@ fn question_mark_establishes_direction_and_empty_search_reuses_pattern() {
 }
 
 #[test]
+fn literal_character_finds_and_repeats_leave_n_and_n_uppercase_search_intact() {
+    let document = "start\nn N . , / ? * #\nfoo\nn N . , / ? * #\nfoo\n";
+    let mut screen = harness(fixture(document));
+    let words = matches(document, "foo");
+    input(&mut screen, "/foo");
+    key(&mut screen, Key::Enter);
+    for character in ['n', 'N', '.', ',', '/', '?', '*', '#'] {
+        screen
+            .state_mut()
+            .tab_mut()
+            .unwrap()
+            .set_cursor(words[0].start..words[0].start);
+        screen.run_steps(2);
+        let hits = matches(document, &character.to_string());
+        input(&mut screen, &format!("f{character}"));
+        assert!(!screen.state().vim_search_active(), "f{character}");
+        assert_eq!(
+            screen.state().tab().unwrap().vim.cursor,
+            hits[1].start,
+            "f{character}"
+        );
+        input(&mut screen, ",");
+        assert_eq!(
+            screen.state().tab().unwrap().vim.cursor,
+            hits[0].start,
+            "f{character},"
+        );
+        input(&mut screen, ";");
+        assert_eq!(
+            screen.state().tab().unwrap().vim.cursor,
+            hits[1].start,
+            "f{character},;"
+        );
+        input(&mut screen, "n");
+        assert_eq!(screen.state().tab().unwrap().vim.cursor, words[1].start);
+        input(&mut screen, "N");
+        assert_eq!(screen.state().tab().unwrap().vim.cursor, words[0].start);
+    }
+    input(&mut screen, "N");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, words[1].start);
+    input(&mut screen, "n");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, words[0].start);
+    assert_unedited(&screen, document);
+}
+
+#[test]
+fn counted_search_repeats_extend_visual_selection_in_both_directions() {
+    let mut screen = harness(fixture(TEXT_DOCUMENT));
+    let hits = matches(TEXT_DOCUMENT, "foo");
+    input(&mut screen, "/foo");
+    key(&mut screen, Key::Enter);
+    for (command, target) in [("v2n", 2), ("N", 1), ("n", 2), ("2N", 0)] {
+        input(&mut screen, command);
+        let tab = screen.state().tab().unwrap();
+        assert_eq!(tab.vim.cursor, hits[target].start, "{command}");
+        assert_eq!(
+            tab.selection,
+            hits[0].start..hits[target].start + 1,
+            "{command}"
+        );
+        assert_eq!(tab.vim.mode, VimMode::Visual);
+    }
+    assert_unedited(&screen, TEXT_DOCUMENT);
+}
+
+#[test]
 fn search_enter_and_next_in_one_frame_preserve_event_order() {
     let mut screen = harness(fixture(TEXT_DOCUMENT));
     screen.input_mut().events.extend([

@@ -11,6 +11,7 @@ try {
     $executable = Join-Path $releaseDirectory 'morrow.exe'
     Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/morrow.exe') -Destination $executable -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/morrow-cli.exe') -Destination $releaseDirectory -Force
+    & (Join-Path $PSScriptRoot 'package-language-tools.ps1') -ReleaseDirectory $releaseDirectory
     $packagedReadme = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'README.md')).Replace('(.agents/skills/morrow/SKILL.md)', '(skills/morrow/SKILL.md)')
     [System.IO.File]::WriteAllText((Join-Path $releaseDirectory 'README.md'), $packagedReadme, [System.Text.UTF8Encoding]::new($false))
     $previewDirectory = Join-Path $releaseDirectory 'tests/snapshots'
@@ -28,10 +29,17 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/user-review-0.4.9.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/code-review-0.4.10.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/usability-review-0.4.11.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/polyglot-keyboard-review-0.4.12.md') -Destination $documentationDirectory -Force
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
     New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
     foreach ($fontDocumentation in @('OFL.txt', 'README.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "assets/fonts/$fontDocumentation") -Destination $fontLicenseDirectory -Force
+    }
+    $syntaxLicenseDirectory = Join-Path $releaseDirectory 'assets/syntaxes'
+    New-Item -ItemType Directory -Path $syntaxLicenseDirectory -Force | Out-Null
+    foreach ($syntaxDocumentation in @('DART-LICENSE.txt', 'README.md')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "assets/syntaxes/$syntaxDocumentation") -Destination $syntaxLicenseDirectory -Force
     }
     if ($env:OS -eq 'Windows_NT') {
         $shell = New-Object -ComObject WScript.Shell

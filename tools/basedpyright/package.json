@@ -1,0 +1,9 @@
+{
+  "name": "morrow-python-language-support",
+  "version": "0.4.12",
+  "private": true,
+  "description": "Pinned Python language server for the portable Morrow editor",
+  "dependencies": {
+    "basedpyright": "1.40.1"
+  }
+}

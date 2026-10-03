@@ -1,4 +1,4 @@
-//! A small asynchronous rust-analyzer client. The UI only queues document
+//! A small asynchronous Language Server Protocol client. The UI only queues document
 //! updates and polls events; process I/O, initialization and timeouts stay on
 //! background threads. Positions use the LSP's negotiated UTF-16 encoding.
 
@@ -14,6 +14,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 const MESSAGE_LIMIT: usize = 16 * 1024 * 1024;
 const HEADER_LIMIT: usize = 8 * 1024;
@@ -83,6 +85,12 @@ pub enum LspEvent {
     DefinitionNotFound {
         request_id: u64,
     },
+    /// The request ended without a successful response. Cancelled or stale
+    /// requests carry no user-facing error, but still clear pending UI state.
+    RequestFailed {
+        request_id: u64,
+        error: Option<String>,
+    },
     Error(String),
 }
 
@@ -111,11 +119,40 @@ enum ClientCommand {
     },
 }
 
+/// Process and protocol settings for one language server. Arguments are passed
+/// directly to the executable, never interpolated into a shell command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerConfig {
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub language_id: String,
+    pub initialization_options: Value,
+    /// Workspace settings including section names, e.g. {"python": {...}}.
+    pub settings: Value,
+    pub install_hint: String,
+}
+
+impl ServerConfig {
+    #[cfg(test)]
+    pub fn rust() -> Self {
+        Self {
+            name: "Rust analysis".into(),
+            program: "rust-analyzer".into(),
+            args: Vec::new(),
+            language_id: "rust".into(),
+            initialization_options: configuration(),
+            settings: json!({"rust-analyzer": configuration()}),
+            install_hint: "Install rust-analyzer with rustup component add rust-analyzer.".into(),
+        }
+    }
+}
+
 pub struct LanguageServer {
     pub receiver: Receiver<LspEvent>,
     commands: SyncSender<ClientCommand>,
     stopped: Arc<AtomicBool>,
-    next_request: AtomicU64,
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 impl LanguageServer {
@@ -130,7 +167,7 @@ impl LanguageServer {
                 receiver,
                 commands,
                 stopped: Arc::new(AtomicBool::new(false)),
-                next_request: AtomicU64::new(1),
+                shutdown_requested: Arc::new(AtomicBool::new(false)),
             },
             events,
         )
@@ -138,20 +175,28 @@ impl LanguageServer {
 
     /// Start without waiting for rust-analyzer or its project index. A missing
     /// server is reported as an Error event; ordinary editing remains usable.
+    #[cfg(test)]
     pub fn start(root: PathBuf, ctx: Option<egui::Context>) -> Self {
+        Self::start_configured(root, ServerConfig::rust(), ctx)
+    }
+
+    pub fn start_configured(
+        root: PathBuf,
+        config: ServerConfig,
+        ctx: Option<egui::Context>,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::sync_channel(128);
         let (event_tx, receiver) = mpsc::sync_channel(128);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
-        let emitter = EventEmitter {
-            sender: event_tx,
-            ctx,
-        };
+        let emitter = EventEmitter::new(event_tx, ctx);
+        let shutdown_requested = Arc::clone(&emitter.shutdown_requested);
         let fallback = emitter.clone();
+        let server_name = config.name.clone();
         if let Err(error) = thread::Builder::new()
-            .name("morrow-rust-analyzer".into())
+            .name("morrow-language-server".into())
             .spawn(move || {
-                let result = run_server(root, command_rx, &emitter, &worker_stopped);
+                let result = run_server(root, config, command_rx, &emitter, &worker_stopped);
                 let manually_stopped = worker_stopped.swap(true, Ordering::AcqRel);
                 if let Err(error) = result
                     && !manually_stopped
@@ -162,14 +207,14 @@ impl LanguageServer {
         {
             stopped.store(true, Ordering::Release);
             fallback.emit(LspEvent::Error(format!(
-                "Could not start Rust analysis: {error}"
+                "Could not start {server_name}: {error}"
             )));
         }
         Self {
             receiver,
             commands: command_tx,
             stopped,
-            next_request: AtomicU64::new(1),
+            shutdown_requested,
         }
     }
 
@@ -201,7 +246,7 @@ impl LanguageServer {
     /// A zero request ID means the queue was unavailable. Match both this ID
     /// and document version before applying a completion received later.
     pub fn completion(&self, path: &Path, position: Position, version: i32) -> u64 {
-        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         if self.send(ClientCommand::Completion {
             id,
             path: path.to_path_buf(),
@@ -215,7 +260,7 @@ impl LanguageServer {
     }
 
     pub fn definition(&self, path: &Path, position: Position) -> u64 {
-        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         if self.send(ClientCommand::Definition {
             id,
             path: path.to_path_buf(),
@@ -231,6 +276,7 @@ impl LanguageServer {
         self.stopped.load(Ordering::Acquire)
     }
     pub fn shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Release);
         self.stopped.store(true, Ordering::Release);
     }
 
@@ -249,9 +295,26 @@ impl Drop for LanguageServer {
 struct EventEmitter {
     sender: SyncSender<LspEvent>,
     ctx: Option<egui::Context>,
+    /// Distinct from worker termination: a fatal Error must survive until the
+    /// UI reads it, even after the worker has marked the server stopped.
+    shutdown_requested: Arc<AtomicBool>,
+    backpressure_nanos: Arc<AtomicU64>,
 }
 
 impl EventEmitter {
+    fn new(sender: SyncSender<LspEvent>, ctx: Option<egui::Context>) -> Self {
+        Self {
+            sender,
+            ctx,
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            backpressure_nanos: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn take_backpressure(&self) -> Duration {
+        Duration::from_nanos(self.backpressure_nanos.swap(0, Ordering::AcqRel))
+    }
+
     fn emit(&self, mut event: LspEvent) {
         // Match canonical workspace/tab keys without doing filesystem work in
         // the UI's event polling path. All normal emitters run on this worker.
@@ -263,8 +326,34 @@ impl EventEmitter {
             }
             _ => {}
         }
-        // Never let an unattended/minimized UI block the process supervisor.
-        let _ = self.sender.try_send(event);
+        if let Some(ctx) = &self.ctx {
+            ctx.request_repaint();
+        }
+        // A native dialog can stop UI polling for minutes. Keep every lifecycle,
+        // request and diagnostic event instead of silently losing Ready/errors or
+        // leaving old diagnostics on screen. Bounded backpressure also limits the
+        // reader queue and subprocess pipe. Shutdown remains cancellable and never
+        // waits for the UI to drain the channel before ProcessGuard can run.
+        let mut blocked_since = None;
+        loop {
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                break;
+            }
+            match self.sender.try_send(event) {
+                Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => break,
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    event = returned;
+                    blocked_since.get_or_insert_with(Instant::now);
+                    thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+        if let Some(started) = blocked_since {
+            let nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            self.backpressure_nanos.fetch_add(nanos, Ordering::AcqRel);
+        }
+        // Wake after enqueue as well: the first wake may have been rendered
+        // before try_send made a previously empty queue observable to the UI.
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint();
         }
@@ -286,6 +375,7 @@ struct Document {
     opened: bool,
     dirty: bool,
     saved: bool,
+    synced_end: Position,
 }
 enum RequestKind {
     Initialize,
@@ -301,7 +391,53 @@ struct PendingRequest {
     deadline: Instant,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SyncOptions {
+    open_close: bool,
+    change: u64,
+    save: bool,
+    save_include_text: bool,
+}
+
+impl SyncOptions {
+    fn from_capabilities(capabilities: &Value) -> Self {
+        let value = &capabilities["textDocumentSync"];
+        if let Some(change) = value.as_u64() {
+            return Self {
+                open_close: change != 0,
+                change,
+                ..Self::default()
+            };
+        }
+        let save = &value["save"];
+        Self {
+            open_close: value["openClose"].as_bool().unwrap_or(false),
+            change: value["change"].as_u64().unwrap_or(0),
+            save: save == &Value::Bool(true) || save.is_object(),
+            save_include_text: save["includeText"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
+fn configuration_section(settings: &Value, section: &str) -> Value {
+    if section.is_empty() {
+        return settings.clone();
+    }
+    if let Some(value) = settings.get(section) {
+        return value.clone();
+    }
+    if let Some((first, rest)) = section.split_once('.') {
+        return configuration_section(&settings[first], rest);
+    }
+    Value::Null
+}
+
 struct Protocol {
+    config: ServerConfig,
+    sync: SyncOptions,
+    supports_completion: bool,
+    supports_definition: bool,
+    failed_requests: VecDeque<LspEvent>,
     root: PathBuf,
     root_uri: String,
     writer: SyncSender<Outbound>,
@@ -316,6 +452,7 @@ struct Protocol {
 
 fn run_server(
     root: PathBuf,
+    config: ServerConfig,
     commands: Receiver<ClientCommand>,
     events: &EventEmitter,
     stopped: &AtomicBool,
@@ -325,10 +462,24 @@ fn run_server(
     }
     let root = root
         .canonicalize()
-        .map_err(|error| format!("Could not open the Rust workspace: {error}"))?;
+        .map_err(|error| format!("Could not open the language server workspace: {error}"))?;
     let root_uri = path_to_uri(&root)?;
-    let mut command = Command::new("rust-analyzer");
+    #[cfg(windows)]
+    if Path::new(&config.program)
+        .extension()
+        .is_some_and(|extension| {
+            extension.to_string_lossy().eq_ignore_ascii_case("cmd")
+                || extension.to_string_lossy().eq_ignore_ascii_case("bat")
+        })
+    {
+        return Err(format!(
+            "{} requires an executable, not a shell script. Use node.exe with the server JavaScript file as an argument, or the SDK executable. {}",
+            config.name, config.install_hint
+        ));
+    }
+    let mut command = Command::new(&config.program);
     command
+        .args(&config.args)
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -343,23 +494,28 @@ fn run_server(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command.spawn().map_err(|error| format!("Rust analysis could not start. Install rust-analyzer with rustup component add rust-analyzer. {error}"))?;
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "{} could not start. {} {error}",
+            config.name, config.install_hint
+        )
+    })?;
     let mut process = ProcessGuard::new(child);
     let stdin = process
         .child
         .stdin
         .take()
-        .ok_or("Rust analysis has no input pipe")?;
+        .ok_or("Language server has no input pipe")?;
     let stdout = process
         .child
         .stdout
         .take()
-        .ok_or("Rust analysis has no output pipe")?;
+        .ok_or("Language server has no output pipe")?;
     let stderr = process
         .child
         .stderr
         .take()
-        .ok_or("Rust analysis has no error pipe")?;
+        .ok_or("Language server has no error pipe")?;
     let (inbound_tx, inbound_rx) = mpsc::sync_channel(32);
     let (writer_tx, writer_rx) = mpsc::sync_channel::<Outbound>(32);
     let reader_tx = inbound_tx.clone();
@@ -377,14 +533,14 @@ fn run_server(
                     Ok(None) => break,
                     Err(error) => {
                         let _ = reader_tx.send(Inbound::Error(format!(
-                            "Invalid Rust analysis response: {error}"
+                            "Invalid language server response: {error}"
                         )));
                         break;
                     }
                 }
             }
         })
-        .map_err(|error| format!("Could not read Rust analysis: {error}"))?;
+        .map_err(|error| format!("Could not read language server: {error}"))?;
     let write_tx = inbound_tx.clone();
     thread::Builder::new()
         .name("morrow-lsp-writer".into())
@@ -393,7 +549,7 @@ fn run_server(
             for outbound in writer_rx {
                 if let Err(error) = write_message(&mut writer, &outbound.message) {
                     let _ = write_tx.send(Inbound::Error(format!(
-                        "Could not update Rust analysis: {error}"
+                        "Could not update language server: {error}"
                     )));
                     break;
                 }
@@ -402,7 +558,7 @@ fn run_server(
                 }
             }
         })
-        .map_err(|error| format!("Could not write Rust analysis: {error}"))?;
+        .map_err(|error| format!("Could not write language server: {error}"))?;
     drop(inbound_tx);
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
     let tail = Arc::clone(&stderr_tail);
@@ -424,9 +580,14 @@ fn run_server(
                 }
             }
         })
-        .map_err(|error| format!("Could not read Rust analysis logs: {error}"))?;
+        .map_err(|error| format!("Could not read language server logs: {error}"))?;
 
     let mut protocol = Protocol {
+        config,
+        sync: SyncOptions::default(),
+        supports_completion: false,
+        supports_definition: false,
+        failed_requests: VecDeque::new(),
         root,
         root_uri,
         writer: writer_tx,
@@ -459,14 +620,15 @@ fn run_server(
                 "completion":{"contextSupport":true,"completionItem":{"snippetSupport":false,"insertReplaceSupport":true}},
                 "definition":{"linkSupport":true}
             }
-        }, "initializationOptions":configuration()
+        }, "initializationOptions":protocol.config.initialization_options
     }}))?;
 
     while !stopped.load(Ordering::Acquire) {
+        protocol.extend_deadlines(events.take_backpressure());
         if let Some(status) = process
             .child
             .try_wait()
-            .map_err(|error| format!("Could not monitor Rust analysis: {error}"))?
+            .map_err(|error| format!("Could not monitor language server: {error}"))?
         {
             let tail = stderr_tail
                 .lock()
@@ -474,10 +636,11 @@ fn run_server(
                 .unwrap_or_default();
             return Err(if tail.is_empty() {
                 format!(
-                    "Rust analysis stopped ({status}). Check that the rust-analyzer component is installed."
+                    "{} stopped ({status}). {}",
+                    protocol.config.name, protocol.config.install_hint
                 )
             } else {
-                format!("Rust analysis stopped: {tail}")
+                format!("{} stopped: {tail}", protocol.config.name)
             });
         }
         for _ in 0..128 {
@@ -499,12 +662,22 @@ fn run_server(
             Ok(Inbound::Error(error)) => return Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("Rust analysis disconnected unexpectedly.".into());
+                return Err(format!(
+                    "{} disconnected unexpectedly.",
+                    protocol.config.name
+                ));
             }
         }
+        while let Some(event) = protocol.failed_requests.pop_front() {
+            events.emit(event);
+        }
+        protocol.extend_deadlines(events.take_backpressure());
         let now = Instant::now();
         if protocol.writes.values().any(|deadline| *deadline <= now) {
-            return Err("Rust analysis stopped accepting document updates and was shut down. Editing is still available.".into());
+            return Err(format!(
+                "{} stopped accepting document updates and was shut down. Editing is still available.",
+                protocol.config.name
+            ));
         }
         let expired = protocol
             .pending
@@ -514,45 +687,50 @@ fn run_server(
         for id in expired {
             let request = protocol.pending.remove(&id).unwrap();
             if matches!(request.kind, RequestKind::Initialize) {
-                return Err("Rust analysis initialization timed out. Check the Rust toolchain and workspace configuration.".into());
+                return Err(format!(
+                    "{} initialization timed out. Check the language server and workspace configuration.",
+                    protocol.config.name
+                ));
             }
             protocol.notify("$/cancelRequest", json!({"id":id}))?;
-            match request.kind {
-                RequestKind::Completion {
-                    path,
-                    position,
-                    version,
-                } => events.emit(LspEvent::Completions {
-                    request_id: id,
-                    path,
-                    position,
-                    version,
-                    items: Vec::new(),
-                }),
-                RequestKind::Definition => {
-                    events.emit(LspEvent::DefinitionNotFound { request_id: id })
-                }
-                RequestKind::Initialize => {}
-            }
-            events.emit(LspEvent::Error(
-                "Rust analysis request timed out; the project may still be indexing.".into(),
-            ));
+            events.emit(LspEvent::RequestFailed {
+                request_id: id,
+                error: Some(format!(
+                    "{} request timed out; the project may still be indexing.",
+                    protocol.config.name
+                )),
+            });
         }
     }
-    // Dropping the guard stops the entire rust-analyzer process tree. Waiting
+    // Dropping the guard stops the entire language server process tree. Waiting
     // for an LSP shutdown response here would make closing the editor fragile.
     Ok(())
 }
 
+#[cfg(test)]
 fn configuration() -> Value {
     json!({"checkOnSave":true,"cargo":{"targetDir":true},"procMacro":{"enable":true},"cachePriming":{"numThreads":2}})
 }
 
 impl Protocol {
+    fn extend_deadlines(&mut self, paused: Duration) {
+        // Time spent waiting for the editor to consume events is not a server
+        // timeout. The reader/writer acknowledgements are backpressured too.
+        if paused.is_zero() {
+            return;
+        }
+        for deadline in self.writes.values_mut() {
+            *deadline += paused;
+        }
+        for request in self.pending.values_mut() {
+            request.deadline += paused;
+        }
+    }
+
     fn queue(&mut self, message: Value) -> Result<(), String> {
         if self.queued_writes.len() >= 128 {
             return Err(
-                "Rust analysis input is overloaded; restart the workspace analysis.".into(),
+                "Language server input is overloaded; restart the workspace analysis.".into(),
             );
         }
         let token = self.next_write;
@@ -565,7 +743,7 @@ impl Protocol {
                 }
                 Err(mpsc::TrySendError::Full(outbound)) => self.queued_writes.push_back(outbound),
                 Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err("Rust analysis input disconnected.".into());
+                    return Err("Language server input disconnected.".into());
                 }
             }
         } else {
@@ -586,7 +764,7 @@ impl Protocol {
                     break;
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err("Rust analysis input disconnected.".into());
+                    return Err("Language server input disconnected.".into());
                 }
             }
         }
@@ -614,7 +792,7 @@ impl Protocol {
             ClientCommand::Open { path, text } => {
                 let path = self.absolute_path(&path);
                 if text.len() > MESSAGE_LIMIT / 2 {
-                    return Err("This document is too large for Rust analysis.".into());
+                    return Err("This document is too large for language analysis.".into());
                 }
                 match self.documents.get_mut(&path) {
                     Some(document) => {
@@ -631,6 +809,7 @@ impl Protocol {
                                 opened: false,
                                 dirty: true,
                                 saved: false,
+                                synced_end: Position::default(),
                             },
                         );
                     }
@@ -643,7 +822,7 @@ impl Protocol {
             } => {
                 let path = self.absolute_path(&path);
                 if text.len() > MESSAGE_LIMIT / 2 {
-                    return Err("This document is too large for Rust analysis.".into());
+                    return Err("This document is too large for language analysis.".into());
                 }
                 if let Some(document) = self.documents.get_mut(&path) {
                     if version > document.version {
@@ -660,6 +839,7 @@ impl Protocol {
                             opened: false,
                             dirty: true,
                             saved: false,
+                            synced_end: Position::default(),
                         },
                     );
                 }
@@ -669,7 +849,7 @@ impl Protocol {
                 if self
                     .documents
                     .remove(&path)
-                    .is_some_and(|document| document.opened)
+                    .is_some_and(|document| document.opened && self.sync.open_close)
                 {
                     self.notify(
                         "textDocument/didClose",
@@ -703,15 +883,31 @@ impl Protocol {
             let uri = match path_to_uri(path) { Ok(uri) => uri, Err(error) => return Some(Err(error)) };
             let mut messages = Vec::new();
             if !document.opened {
-                document.opened = true; document.dirty = false;
-                messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"rust","version":document.version,"text":document.text}}}));
+                document.opened = true;
+                document.dirty = false;
+                if self.sync.open_close {
+                    messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":self.config.language_id,"version":document.version,"text":document.text}}}));
+                }
+                document.synced_end = char_to_position(&document.text, document.text.chars().count());
             } else if document.dirty {
                 document.dirty = false;
-                messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":document.version},"contentChanges":[{"text":document.text}]}}));
+                if self.sync.change != 0 {
+                    // Replace the last transmitted version, measured in UTF-16.
+                    // Intermediate edits coalesced before sending are irrelevant.
+                    let change = if self.sync.change == 2 {
+                        json!({"range":{"start":Position::default(),"end":document.synced_end},"text":document.text})
+                    } else { json!({"text":document.text}) };
+                    messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":document.version},"contentChanges":[change]}}));
+                }
+                document.synced_end = char_to_position(&document.text, document.text.chars().count());
             }
             if document.saved {
                 document.saved = false;
-                messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":uri}}}));
+                if self.sync.save {
+                    let mut params = json!({"textDocument":{"uri":uri}});
+                    if self.sync.save_include_text { params["text"] = json!(document.text); }
+                    messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didSave","params":params}));
+                }
             }
             if messages.is_empty() { None } else { Some(Ok(messages)) }
         }).collect::<Result<Vec<_>, String>>()?;
@@ -752,6 +948,23 @@ impl Protocol {
             ),
             _ => return Ok(()),
         };
+        let supported = match kind {
+            RequestKind::Completion { .. } => self.supports_completion,
+            RequestKind::Definition => self.supports_definition,
+            RequestKind::Initialize => true,
+        };
+        if !supported {
+            let feature = if matches!(kind, RequestKind::Completion { .. }) {
+                "completion"
+            } else {
+                "go to definition"
+            };
+            self.failed_requests.push_back(LspEvent::RequestFailed {
+                request_id: id,
+                error: Some(format!("{} does not provide {feature}.", self.config.name)),
+            });
+            return Ok(());
+        }
         self.pending.insert(
             id,
             PendingRequest {
@@ -776,22 +989,9 @@ impl Protocol {
                             items
                                 .iter()
                                 .map(|item| {
-                                    let section = item
-                                        .get("section")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("rust-analyzer");
-                                    if section.is_empty() || section == "rust-analyzer" {
-                                        return configuration();
-                                    }
-                                    let mut value = configuration();
-                                    if let Some(section) = section.strip_prefix("rust-analyzer.") {
-                                        for key in section.split('.') {
-                                            value = value.get(key).cloned().unwrap_or(Value::Null);
-                                        }
-                                        value
-                                    } else {
-                                        Value::Null
-                                    }
+                                    let section =
+                                        item.get("section").and_then(Value::as_str).unwrap_or("");
+                                    configuration_section(&self.config.settings, section)
                                 })
                                 .collect(),
                         )
@@ -848,16 +1048,18 @@ impl Protocol {
                 .and_then(Value::as_str)
                 .unwrap_or("Unknown language server error");
             if matches!(request.kind, RequestKind::Initialize) {
-                return Err(format!("Rust analysis could not initialize: {text}"));
+                return Err(format!("{} could not initialize: {text}", self.config.name));
             }
             // Cancelled or stale requests are normal when typing or indexing.
             let cancelled = matches!(
                 error.get("code").and_then(Value::as_i64),
                 Some(-32802..=-32800)
             );
-            if !cancelled {
-                events.emit(LspEvent::Error(format!("Rust analysis: {text}")));
-            }
+            events.emit(LspEvent::RequestFailed {
+                request_id: id,
+                error: (!cancelled).then(|| format!("{}: {text}", self.config.name)),
+            });
+            return Ok(());
         }
         let result = message.get("result").unwrap_or(&Value::Null);
         match request.kind {
@@ -868,10 +1070,20 @@ impl Protocol {
                     && encoding != "utf-16"
                 {
                     return Err(format!(
-                        "Rust analysis selected an unsupported position encoding: {encoding}"
+                        "{} selected an unsupported position encoding: {encoding}",
+                        self.config.name
                     ));
                 }
+                let capabilities = &result["capabilities"];
+                self.sync = SyncOptions::from_capabilities(capabilities);
+                self.supports_completion = capabilities["completionProvider"].is_object();
+                self.supports_definition = capabilities["definitionProvider"] == Value::Bool(true)
+                    || capabilities["definitionProvider"].is_object();
                 self.notify("initialized", json!({}))?;
+                self.notify(
+                    "workspace/didChangeConfiguration",
+                    json!({"settings":self.config.settings}),
+                )?;
                 self.ready = true;
                 self.flush_documents()?;
                 while let Some(command) = self.queued_requests.pop_front() {
@@ -1220,7 +1432,7 @@ fn path_to_uri(path: &Path) -> Result<String, String> {
     let path = normalize_path(path);
     let text = path
         .to_str()
-        .ok_or("Rust analysis cannot represent this file path as Unicode")?
+        .ok_or("Language server cannot represent this file path as Unicode")?
         .replace('\\', "/");
     let windows_drive =
         text.as_bytes().get(1) == Some(&b':') && text.as_bytes().get(2) == Some(&b'/');
@@ -1231,7 +1443,7 @@ fn path_to_uri(path: &Path) -> Result<String, String> {
     } else if text.starts_with('/') {
         ("file://", text.as_str())
     } else {
-        return Err("Rust analysis requires an absolute file path".into());
+        return Err("Language server requires an absolute file path".into());
     };
     let mut uri = String::from(prefix);
     for byte in path.bytes() {
@@ -1629,6 +1841,16 @@ mod tests {
         let root_uri = path_to_uri(&root).unwrap();
         (
             Protocol {
+                config: ServerConfig::rust(),
+                sync: SyncOptions {
+                    open_close: true,
+                    change: 1,
+                    save: true,
+                    save_include_text: false,
+                },
+                supports_completion: true,
+                supports_definition: true,
+                failed_requests: VecDeque::new(),
                 root,
                 root_uri,
                 writer,
@@ -1642,6 +1864,322 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    #[test]
+    fn full_event_queue_preserves_lifecycle_requests_and_diagnostics_until_ui_resumes() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(LspEvent::Ready).unwrap();
+        let emitter = EventEmitter::new(sender, None);
+        let worker_emitter = emitter.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            worker_emitter.emit(LspEvent::RequestFailed {
+                request_id: 87,
+                error: Some("A request failed while a dialog was open".into()),
+            });
+            worker_emitter.emit(LspEvent::Diagnostics {
+                path: std::env::temp_dir().join("queue.py"),
+                version: Some(3),
+                diagnostics: Vec::new(),
+            });
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(40)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            LspEvent::Ready
+        ));
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            LspEvent::RequestFailed {
+                request_id: 87,
+                error: Some(_)
+            }
+        ));
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), LspEvent::Diagnostics { version:Some(3), diagnostics, .. } if diagnostics.is_empty())
+        );
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert!(!emitter.take_backpressure().is_zero());
+    }
+
+    #[test]
+    fn stopped_server_preserves_its_fatal_error_until_consumed() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(LspEvent::Ready).unwrap();
+        let emitter = EventEmitter::new(sender, None);
+        let (commands, _commands_rx) = mpsc::sync_channel(1);
+        let server = LanguageServer {
+            receiver,
+            commands,
+            stopped: Arc::new(AtomicBool::new(true)),
+            shutdown_requested: Arc::clone(&emitter.shutdown_requested),
+        };
+        let worker = thread::spawn(move || emitter.emit(LspEvent::Error("server exited".into())));
+        assert!(server.is_stopped());
+        assert!(matches!(
+            server
+                .receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            LspEvent::Ready
+        ));
+        assert!(
+            matches!(server.receiver.recv_timeout(Duration::from_secs(1)).unwrap(), LspEvent::Error(error) if error == "server exited")
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_releases_a_worker_blocked_on_full_events_without_ui_drain() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(LspEvent::Ready).unwrap();
+        let emitter = EventEmitter::new(sender, None);
+        let (commands, _commands_rx) = mpsc::sync_channel(1);
+        let server = LanguageServer {
+            receiver,
+            commands,
+            stopped: Arc::new(AtomicBool::new(false)),
+            shutdown_requested: Arc::clone(&emitter.shutdown_requested),
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            emitter.emit(LspEvent::Error("pending error".into()));
+            done_tx.send(()).unwrap();
+        });
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(40)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        server.shutdown();
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown must release event backpressure without reading the queue");
+        worker.join().unwrap();
+        assert!(server.is_stopped());
+        assert!(matches!(
+            server.receiver.try_recv().unwrap(),
+            LspEvent::Ready
+        ));
+        assert!(server.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn event_backpressure_extends_request_and_write_deadlines() {
+        let (mut protocol, _outgoing) = protocol();
+        let deadline = Instant::now();
+        protocol.writes.insert(1, deadline);
+        protocol.pending.insert(
+            2,
+            PendingRequest {
+                kind: RequestKind::Definition,
+                deadline,
+            },
+        );
+        let paused = Duration::from_secs(120);
+        protocol.extend_deadlines(paused);
+        assert_eq!(protocol.writes[&1], deadline + paused);
+        assert_eq!(protocol.pending[&2].deadline, deadline + paused);
+    }
+
+    fn initialize_protocol(protocol: &mut Protocol, capabilities: Value) {
+        protocol.pending.insert(
+            0,
+            PendingRequest {
+                kind: RequestKind::Initialize,
+                deadline: Instant::now() + INITIALIZE_TIMEOUT,
+            },
+        );
+        let (sender, _receiver) = mpsc::sync_channel(8);
+        protocol
+            .message(
+                json!({"id":0,"result":{"capabilities":capabilities}}),
+                &EventEmitter::new(sender, None),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn python_and_dart_open_documents_with_the_configured_language_id_and_settings() {
+        for language in ["python", "dart"] {
+            let (mut protocol, outgoing) = protocol();
+            protocol.config.language_id = language.into();
+            protocol.config.settings = json!({language: {"configured": true}});
+            let path = protocol.root.join(format!("language.{language}"));
+            protocol
+                .command(ClientCommand::Open {
+                    path,
+                    text: "example".into(),
+                })
+                .unwrap();
+            initialize_protocol(
+                &mut protocol,
+                json!({"textDocumentSync":{"openClose":true,"change":1}}),
+            );
+            let messages = outgoing
+                .try_iter()
+                .map(|out| out.message)
+                .collect::<Vec<_>>();
+            assert_eq!(messages[0]["method"], "initialized");
+            assert_eq!(messages[1]["method"], "workspace/didChangeConfiguration");
+            assert_eq!(
+                messages[1]["params"]["settings"][language]["configured"],
+                true
+            );
+            assert_eq!(messages[2]["method"], "textDocument/didOpen");
+            assert_eq!(
+                messages[2]["params"]["textDocument"]["languageId"],
+                language
+            );
+        }
+    }
+
+    #[test]
+    fn generic_configuration_supports_whole_nested_and_dotted_sections() {
+        let settings = json!({"python":{"pythonPath":"/venv/python", "analysis":{"typeCheckingMode":"basic"}}, "dart":{"lineLength":100}, "custom.flat":{"enabled":true}});
+        assert_eq!(configuration_section(&settings, ""), settings);
+        assert_eq!(
+            configuration_section(&settings, "python.pythonPath"),
+            "/venv/python"
+        );
+        assert_eq!(
+            configuration_section(&settings, "python.analysis.typeCheckingMode"),
+            "basic"
+        );
+        assert_eq!(
+            configuration_section(&settings, "custom.flat")["enabled"],
+            true
+        );
+        assert_eq!(configuration_section(&settings, "missing"), Value::Null);
+    }
+
+    #[test]
+    fn incremental_changes_use_previous_sent_utf16_range_and_save_includes_text_when_requested() {
+        let (mut protocol, outgoing) = protocol();
+        protocol.config.language_id = "python".into();
+        let path = protocol.root.join("unicode.py");
+        protocol
+            .command(ClientCommand::Open {
+                path: path.clone(),
+                text: "a\u{1f600}\r\nz\u{1f600}".into(),
+            })
+            .unwrap();
+        initialize_protocol(
+            &mut protocol,
+            json!({"textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":true}}}),
+        );
+        outgoing.try_iter().for_each(drop);
+        protocol
+            .command(ClientCommand::Change {
+                path: path.clone(),
+                text: "intermediate".into(),
+                version: 2,
+            })
+            .unwrap();
+        protocol
+            .command(ClientCommand::Change {
+                path: path.clone(),
+                text: "new\u{1f600}".into(),
+                version: 3,
+            })
+            .unwrap();
+        protocol.command(ClientCommand::Save(path.clone())).unwrap();
+        protocol.flush_documents().unwrap();
+        let change = outgoing.try_recv().unwrap().message;
+        assert_eq!(change["method"], "textDocument/didChange");
+        assert_eq!(change["params"]["textDocument"]["version"], 3);
+        assert_eq!(
+            change["params"]["contentChanges"][0]["range"],
+            json!({"start":{"line":0,"character":0},"end":{"line":1,"character":3}})
+        );
+        assert_eq!(
+            change["params"]["contentChanges"][0]["text"],
+            "new\u{1f600}"
+        );
+        let save = outgoing.try_recv().unwrap().message;
+        assert_eq!(save["method"], "textDocument/didSave");
+        assert_eq!(save["params"]["text"], "new\u{1f600}");
+        protocol
+            .command(ClientCommand::Change {
+                path,
+                text: "last".into(),
+                version: 4,
+            })
+            .unwrap();
+        protocol.flush_documents().unwrap();
+        assert_eq!(
+            outgoing.try_recv().unwrap().message["params"]["contentChanges"][0]["range"]["end"],
+            json!({"line":0,"character":5})
+        );
+    }
+
+    #[test]
+    fn absent_features_report_unavailable_without_sending_requests_or_fake_success() {
+        let (mut protocol, outgoing) = protocol();
+        protocol.config.name = "Python analysis".into();
+        initialize_protocol(&mut protocol, json!({}));
+        outgoing.try_iter().for_each(drop);
+        let path = protocol.root.join("features.py");
+        protocol
+            .command(ClientCommand::Completion {
+                id: 71,
+                path: path.clone(),
+                position: Position::default(),
+                version: 1,
+            })
+            .unwrap();
+        protocol
+            .command(ClientCommand::Definition {
+                id: 72,
+                path,
+                position: Position::default(),
+            })
+            .unwrap();
+        assert!(outgoing.try_recv().is_err());
+        assert!(protocol.pending.is_empty());
+        assert!(
+            matches!(protocol.failed_requests.pop_front(), Some(LspEvent::RequestFailed { request_id:71,error:Some(error) }) if error.contains("Python analysis") && error.contains("completion"))
+        );
+        assert!(
+            matches!(protocol.failed_requests.pop_front(), Some(LspEvent::RequestFailed { request_id:72,error:Some(error) }) if error.contains("go to definition"))
+        );
+    }
+
+    #[test]
+    fn disabled_sync_and_save_capabilities_produce_no_notifications() {
+        let (mut protocol, outgoing) = protocol();
+        initialize_protocol(
+            &mut protocol,
+            json!({"textDocumentSync":{"openClose":false,"change":0,"save":false}}),
+        );
+        outgoing.try_iter().for_each(drop);
+        let path = protocol.root.join("no-sync.py");
+        protocol
+            .command(ClientCommand::Open {
+                path: path.clone(),
+                text: "first".into(),
+            })
+            .unwrap();
+        protocol.flush_documents().unwrap();
+        protocol
+            .command(ClientCommand::Change {
+                path: path.clone(),
+                text: "second".into(),
+                version: 2,
+            })
+            .unwrap();
+        protocol.command(ClientCommand::Save(path.clone())).unwrap();
+        protocol.flush_documents().unwrap();
+        protocol.command(ClientCommand::Close(path)).unwrap();
+        assert!(outgoing.try_recv().is_err());
     }
 
     #[test]
@@ -1701,10 +2239,96 @@ mod tests {
     }
 
     #[test]
+    fn rpc_request_errors_emit_failure_only_and_later_success_still_works() {
+        for completion in [false, true] {
+            let (mut protocol, _outgoing) = protocol();
+            protocol.ready = true;
+            let path = protocol.root.join("morrow-lsp-error.rs");
+            let (sender, events) = mpsc::sync_channel(8);
+            let emitter = EventEmitter::new(sender, None);
+            let request = |id| {
+                if completion {
+                    ClientCommand::Completion {
+                        id,
+                        path: path.clone(),
+                        position: Position::default(),
+                        version: 1,
+                    }
+                } else {
+                    ClientCommand::Definition {
+                        id,
+                        path: path.clone(),
+                        position: Position::default(),
+                    }
+                }
+            };
+            protocol.command(request(41)).unwrap();
+            protocol.message(json!({"jsonrpc":"2.0","id":41,"error":{"code":-32603,"message":"temporary server failure"}}), &emitter).unwrap();
+            assert!(
+                matches!(events.try_recv().unwrap(), LspEvent::RequestFailed { request_id: 41, error: Some(error) } if error.contains("temporary server failure"))
+            );
+            assert!(
+                events.try_recv().is_err(),
+                "an RPC error must not synthesize a successful empty response"
+            );
+            assert!(!protocol.pending.contains_key(&41));
+
+            protocol.command(request(42)).unwrap();
+            let result = if completion {
+                json!([{ "label": "recovered" }])
+            } else {
+                Value::Null
+            };
+            protocol
+                .message(json!({"jsonrpc":"2.0","id":42,"result":result}), &emitter)
+                .unwrap();
+            let event = events.try_recv().unwrap();
+            if completion {
+                assert!(
+                    matches!(event, LspEvent::Completions { request_id: 42, items, .. } if items.len() == 1 && items[0].label == "recovered")
+                );
+            } else {
+                assert!(matches!(
+                    event,
+                    LspEvent::DefinitionNotFound { request_id: 42 }
+                ));
+            }
+            assert!(events.try_recv().is_err());
+            assert!(!protocol.pending.contains_key(&42));
+        }
+    }
+
+    #[test]
+    fn rpc_cancellation_clears_the_request_without_success_or_a_warning() {
+        let (mut protocol, _outgoing) = protocol();
+        protocol.ready = true;
+        let path = protocol.root.join("morrow-lsp-cancel.rs");
+        let (sender, events) = mpsc::sync_channel(8);
+        let emitter = EventEmitter::new(sender, None);
+        protocol
+            .command(ClientCommand::Definition {
+                id: 51,
+                path,
+                position: Position::default(),
+            })
+            .unwrap();
+        protocol.message(json!({"jsonrpc":"2.0","id":51,"error":{"code":-32800,"message":"Request cancelled"}}), &emitter).unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            LspEvent::RequestFailed {
+                request_id: 51,
+                error: None
+            }
+        ));
+        assert!(events.try_recv().is_err());
+        assert!(!protocol.pending.contains_key(&51));
+    }
+
+    #[test]
     fn configuration_and_registration_requests_receive_responses() {
         let (mut protocol, outgoing) = protocol();
         let (sender, _events) = mpsc::sync_channel(8);
-        let emitter = EventEmitter { sender, ctx: None };
+        let emitter = EventEmitter::new(sender, None);
         protocol.message(json!({"jsonrpc":"2.0","id":"config","method":"workspace/configuration","params":{"items":[{"section":"rust-analyzer"},{"section":"rust-analyzer.cargo"},{"section":"other"}]}}), &emitter).unwrap();
         let response = outgoing.try_recv().unwrap().message;
         assert_eq!(response["id"], "config");
@@ -1764,7 +2388,7 @@ mod tests {
             })
             .unwrap();
         let (sender, events) = mpsc::sync_channel(8);
-        let emitter = EventEmitter { sender, ctx: None };
+        let emitter = EventEmitter::new(sender, None);
         let notification = |version| json!({"method":"textDocument/publishDiagnostics","params":{"uri":path_to_uri(&path).unwrap(),"version":version,"diagnostics":[{"range":range(0,0,1),"severity":2,"source":"rust-analyzer","message":"example warning"}]}});
         protocol.message(notification(4), &emitter).unwrap();
         assert!(events.try_recv().is_err());
@@ -1914,3 +2538,7 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
     }
 }
+
+#[cfg(test)]
+#[path = "polyglot_live_tests.rs"]
+mod polyglot_live_tests;
