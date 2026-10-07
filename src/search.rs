@@ -72,6 +72,7 @@ fn search_inner(
     let pattern = regex::RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
         .multi_line(true)
+        .crlf(true)
         .size_limit(REGEX_SIZE_LIMIT)
         .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
@@ -374,6 +375,24 @@ mod tests {
         assert!(search("one", "[", true, false, true).is_err());
         assert!(search("one", r"(a)\1", true, false, true).is_err());
         assert!(search("one", r"a{1000000}", true, false, true).is_err());
+    }
+
+    #[test]
+    fn regex_line_anchors_and_dot_respect_windows_line_endings() {
+        let text = "α\r\nβ\n\r\n";
+        assert_eq!(search(text, "α$", true, false, true).unwrap(), vec![0..1]);
+        assert_eq!(
+            search(text, ".", true, false, true).unwrap(),
+            vec![0..1, 3..4]
+        );
+        assert_eq!(
+            search(text, "$", true, false, true).unwrap(),
+            vec![1..1, 4..4, 5..5, 7..7]
+        );
+        assert_eq!(
+            search(text, "^$", true, false, true).unwrap(),
+            vec![5..5, 7..7]
+        );
     }
 
     #[test]

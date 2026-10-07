@@ -600,8 +600,10 @@ impl VimState {
             } else {
                 line.start
             };
-            let limit = if visual.includes_newline && line.newline.is_some() {
-                line.end
+            let limit = if visual.includes_newline
+                && let Some(newline) = line.newline
+            {
+                newline
             } else {
                 line.end.saturating_sub(1).max(line.start)
             };
@@ -1158,15 +1160,20 @@ impl VimState {
                 self.insert_text(text, &ch.to_string()).text_changed,
                 None,
             ),
-            VimKey::Enter => (true, self.insert_text(text, "\n").text_changed, None),
+            VimKey::Enter => {
+                let ending = line_ending(text);
+                (true, self.insert_text(text, ending).text_changed, None)
+            }
             VimKey::Tab => (true, self.insert_text(text, "\t").text_changed, None),
             VimKey::Backspace => {
                 if self.cursor == 0 {
                     return (true, false, None);
                 }
-                let range = char_to_byte(text, self.cursor - 1)..char_to_byte(text, self.cursor);
+                let end = char_to_byte(text, self.cursor);
+                let count = if text[..end].ends_with("\r\n") { 2 } else { 1 };
+                let range = char_to_byte(text, self.cursor - count)..end;
                 text.replace_range(range, "");
-                self.cursor -= 1;
+                self.cursor -= count;
                 (true, true, None)
             }
             VimKey::Redo => (false, false, None),
@@ -1792,15 +1799,13 @@ impl VimState {
                 .copied()
                 .take_while(|ch| *ch == ' ' || *ch == '\t')
                 .collect();
-            let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+            let ending = line_ending(text);
             text.insert_str(char_to_byte(text, line.start), &format!("{indent}{ending}"));
             self.cursor = line.start + indent.chars().count();
         } else {
-            // Vim's line boundary includes CR; insert before it so o preserves
-            // CRLF. Use exactly the same smart indentation as normal Enter.
-            let at = line.end.saturating_sub(usize::from(
-                line.end > line.start && chars.get(line.end - 1) == Some(&'\r'),
-            ));
+            // Insert before the complete line break, using the same smart
+            // indentation as normal Enter.
+            let at = line.end;
             let unit = if self.indent_with_tabs {
                 "\t".into()
             } else {
@@ -2021,8 +2026,13 @@ impl VimState {
                     .count();
             return self.apply_range(text, op, start..last_line.end);
         }
-        let mut register: String = chars[first_line.start..last_line.end].iter().collect();
-        register.push('\n');
+        let mut register: String = chars
+            [first_line.start..last_line.newline.map_or(last_line.end, |index| index + 1)]
+            .iter()
+            .collect();
+        if last_line.newline.is_none() {
+            register.push_str(line_ending(text));
+        }
         let yank = Yank {
             text: register,
             linewise: true,
@@ -2042,7 +2052,7 @@ impl VimState {
         } else if let Some(newline) = last_line.newline {
             newline + 1
         } else {
-            start = start.saturating_sub(1);
+            start = if first > 0 { rows[first - 1].end } else { 0 };
             last_line.end
         };
         let indentation: String = if op == Operator::Change {
@@ -2288,7 +2298,7 @@ impl VimState {
         let bytes = char_to_byte(text, range.start)..char_to_byte(text, range.end);
         let mut removed = text[bytes.clone()].to_owned();
         if linewise && !removed.ends_with('\n') {
-            removed.push('\n');
+            removed.push_str(line_ending(text));
         }
         let deleted = Yank {
             text: removed,
@@ -2299,19 +2309,19 @@ impl VimState {
         };
         if !linewise && register.linewise {
             if !pasted.ends_with('\n') {
-                pasted.push('\n');
+                pasted.push_str(line_ending(text));
             }
-            pasted.insert(0, '\n');
+            pasted.insert_str(0, line_ending(text));
             if range.end == text.chars().count() && !text.ends_with('\n') {
-                pasted.pop();
+                remove_last_line_ending(&mut pasted);
             }
         }
         if linewise {
             if !pasted.ends_with('\n') {
-                pasted.push('\n');
+                pasted.push_str(line_ending(text));
             }
             if range.end == text.chars().count() && !text.ends_with('\n') {
-                pasted.pop();
+                remove_last_line_ending(&mut pasted);
             }
         }
         let changed = text[bytes.clone()] != pasted;
@@ -2420,19 +2430,20 @@ impl VimState {
         };
         let (at, cursor) = if yank.linewise {
             if !pasted.ends_with('\n') {
-                pasted.push('\n');
+                pasted.push_str(line_ending(text));
             }
             if text.is_empty() {
-                pasted.pop();
+                remove_last_line_ending(&mut pasted);
                 (0, 0)
             } else if before_cursor {
                 (line.start, line.start)
             } else if let Some(newline) = line.newline {
                 (newline + 1, newline + 1)
             } else {
-                pasted.pop();
-                pasted.insert(0, '\n');
-                (line.end, line.end + 1)
+                remove_last_line_ending(&mut pasted);
+                let ending = line_ending(text);
+                pasted.insert_str(0, ending);
+                (line.end, line.end + ending.chars().count())
             }
         } else {
             let at = if before_cursor {
@@ -2480,17 +2491,27 @@ impl VimState {
             self.cursor..self.cursor + count
         };
         let mut incoming = String::new();
-        for ch in &chars[selection.clone()] {
-            incoming.push(if *ch == '\n' { '\n' } else { replacement });
+        for index in selection.clone() {
+            let ch = chars[index];
+            incoming.push(
+                if ch == '\n' || (ch == '\r' && chars.get(index + 1) == Some(&'\n')) {
+                    ch
+                } else {
+                    replacement
+                },
+            );
         }
-        if self.mode == VimMode::Normal && replacement == '\n' {
-            incoming = "\n".to_owned();
+        let replacing_with_line_break = self.mode == VimMode::Normal && replacement == '\n';
+        if replacing_with_line_break {
+            incoming = line_ending(text).to_owned();
         }
         let range = char_to_byte(text, selection.start)..char_to_byte(text, selection.end);
         let changed = text[range.clone()] != incoming;
         let snapshot = self.snapshot(text);
         text.replace_range(range, &incoming);
-        self.cursor = if replacement == '\n' {
+        self.cursor = if replacing_with_line_break {
+            selection.start + incoming.chars().count()
+        } else if replacement == '\n' {
             selection.start + 1
         } else {
             selection.start + incoming.chars().count().saturating_sub(1)
@@ -2526,10 +2547,7 @@ impl VimState {
                 // is a line ending. Operator ranges still use the exact span.
                 if find.forward {
                     let line = rows[row_for_cursor(&rows, target)];
-                    let end = line.end.saturating_sub(usize::from(
-                        line.end > line.start && chars.get(line.end - 1) == Some(&'\r'),
-                    ));
-                    target = target.min(end.saturating_sub(1).max(line.start));
+                    target = target.min(line.end.saturating_sub(1).max(line.start));
                 } else {
                     if chars.get(target) == Some(&'\r') && chars.get(target + 1) == Some(&'\n') {
                         target += 1;
@@ -2606,17 +2624,11 @@ impl VimState {
         }
         let snapshot = self.snapshot(text);
         let first = rows[row];
-        // CR is part of a CRLF line break, not content to retain inside the
-        // joined line. Keep the final row's break in the original document.
-        let content_end = |line: Line| {
-            line.end.saturating_sub(usize::from(
-                line.newline.is_some() && line.end > line.start && chars[line.end - 1] == '\r',
-            ))
-        };
-        let mut joined: String = chars[first.start..content_end(first)].iter().collect();
-        let cursor = content_end(first);
+        // Keep the final row's complete line break in the original document.
+        let mut joined: String = chars[first.start..first.end].iter().collect();
+        let cursor = first.end;
         for line in &rows[row + 1..=last] {
-            let content: String = chars[line.start..content_end(*line)].iter().collect();
+            let content: String = chars[line.start..line.end].iter().collect();
             let content = if spaces {
                 content.trim_start_matches([' ', '\t'])
             } else {
@@ -2629,7 +2641,7 @@ impl VimState {
             joined.push_str(content);
         }
         text.replace_range(
-            char_to_byte(text, first.start)..char_to_byte(text, content_end(rows[last])),
+            char_to_byte(text, first.start)..char_to_byte(text, rows[last].end),
             &joined,
         );
         self.cursor = cursor;
@@ -3181,6 +3193,18 @@ fn text_object(
         pair.0 + 1..pair.1
     })
 }
+fn line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
+fn remove_last_line_ending(text: &mut String) {
+    if text.ends_with("\r\n") {
+        text.truncate(text.len() - 2);
+    } else if text.ends_with('\n') {
+        text.pop();
+    }
+}
+
 fn lines(chars: &[char]) -> Vec<Line> {
     let mut result = Vec::new();
     let mut start = 0;
@@ -3188,7 +3212,7 @@ fn lines(chars: &[char]) -> Vec<Line> {
         if *ch == '\n' {
             result.push(Line {
                 start,
-                end: index,
+                end: index - usize::from(index > start && chars[index - 1] == '\r'),
                 newline: Some(index),
             });
             start = index + 1;
@@ -3841,6 +3865,90 @@ mod tests {
         assert_eq!(state.cursor, 1);
         state.handle_key(&mut text, VimKey::Redo);
         assert_eq!(text, "ä中\nß");
+    }
+    #[test]
+    fn crlf_line_motions_and_edits_never_treat_the_break_as_content() {
+        for command in ["$", "99l", "99|"] {
+            let mut state = VimState::new();
+            let mut text = "α🙂\r\nβ\r\n".to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(state.cursor, 1, "{command}");
+        }
+        for (initial, command, expected) in [
+            ("α🙂\r\nβ", "$x", "α\r\nβ"),
+            ("α🙂\r\nβ", "D", "\r\nβ"),
+            ("αβ\r\nγ", "dw", "\r\nγ"),
+            ("\r\nβ", "x", "\r\nβ"),
+            ("α\r\nβ", "Gdd", "α"),
+            ("α\r\nβ\r\nγ", "Gdk", "α"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+            if text != initial {
+                keys(&mut state, &mut text, "u");
+                assert_eq!(text, initial, "undo {command}");
+            }
+        }
+        let mut state = VimState::new();
+        let mut text = "α\r\nβ".to_owned();
+        keys(&mut state, &mut text, "A!");
+        state.finish_insert(&mut text);
+        assert_eq!(text, "α!\r\nβ");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "α\r\nβ");
+    }
+
+    #[test]
+    fn crlf_linewise_registers_and_pastes_preserve_complete_breaks() {
+        for (initial, command, expected) in [
+            ("α\r\nβ", "yyp", "α\r\nα\r\nβ"),
+            ("α\r\nβ", "yyGp", "α\r\nβ\r\nα"),
+            ("α\r\nβ", "GyyP", "α\r\nβ\r\nβ"),
+            ("α\r\nβ", "yyGVP", "α\r\nα"),
+        ] {
+            let mut state = VimState::new();
+            let mut text = initial.to_owned();
+            keys(&mut state, &mut text, command);
+            assert_eq!(text, expected, "{command}");
+            keys(&mut state, &mut text, "u");
+            assert_eq!(text, initial, "undo {command}");
+        }
+        let mut state = VimState::new();
+        let mut text = "α\r\nβ".to_owned();
+        keys(&mut state, &mut text, "yy");
+        assert_eq!(state.register().unwrap().text, "α\r\n");
+    }
+
+    #[test]
+    fn crlf_visual_replace_keeps_line_breaks_and_paragraphs_see_empty_lines() {
+        let mut state = VimState::new();
+        let mut text = "α\r\n\r\nβ\r\n".to_owned();
+        keys(&mut state, &mut text, "}");
+        assert_eq!(state.cursor, 3);
+        keys(&mut state, &mut text, "ggVjrx");
+        assert_eq!(text, "x\r\n\r\nβ\r\n");
+    }
+
+    #[test]
+    fn crlf_insert_and_character_replacement_use_complete_line_breaks() {
+        let mut state = VimState::new();
+        let mut text = "αβ\r\nγ".to_owned();
+        keys(&mut state, &mut text, "i");
+        state.handle_key(&mut text, VimKey::Enter);
+        assert_eq!(text, "\r\nαβ\r\nγ");
+        assert_eq!(state.cursor, 2);
+        state.handle_key(&mut text, VimKey::Backspace);
+        assert_eq!(text, "αβ\r\nγ");
+        assert_eq!(state.cursor, 0);
+        state.finish_insert(&mut text);
+        keys(&mut state, &mut text, "r");
+        state.handle_key(&mut text, VimKey::Enter);
+        assert_eq!(text, "\r\nβ\r\nγ");
+        assert_eq!(state.cursor, 2);
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, "αβ\r\nγ");
     }
     #[test]
     fn counts_multiply_and_line_boundaries_work() {

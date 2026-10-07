@@ -4,6 +4,54 @@ use egui_kittest::kittest::Queryable;
 
 const TEXT_DOCUMENT: &str = "intro 🦀\nfoo first\nbar FOO\nfoo second\nfood is a word\nfoo last\n";
 
+#[test]
+fn reusing_whole_word_find_in_substitute_keeps_punctuation_boundaries() {
+    for query in ["foo.", "*", "🦀", "foo"] {
+        let text = format!("{query} {query}x x{query} ({query})");
+        let state = FindState {
+            last: Some(Pattern::literal(
+                query.into(),
+                editor::SearchOptions {
+                    case_sensitive: true,
+                    whole_word: true,
+                },
+            )),
+            ..Default::default()
+        };
+        let pattern = state.last_substitute_pattern().unwrap();
+        assert_eq!(
+            crate::search::search(&text, &pattern, true, false, true).unwrap(),
+            crate::search::search(&text, query, true, true, false).unwrap(),
+            "query {query:?}"
+        );
+    }
+}
+
+#[test]
+fn agent_inserted_crlf_supports_vim_line_end_search_and_editing() {
+    let original = "α🙂\r\nβ\r\n";
+    let mut app = fixture("");
+    let tab = app.tab().unwrap();
+    let response = app.control_request(crate::cli::Request::Edit {
+        tab_id: tab.id,
+        expected_revision: tab.revision,
+        edits: Vec::new(),
+        set_text: Some(original.into()),
+    });
+    assert!(response.ok, "{response:?}");
+    assert_eq!(app.tab().unwrap().text, original);
+    let mut screen = harness(app);
+    input(&mut screen, "gg$");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 1);
+    input(&mut screen, "/β$");
+    key(&mut screen, Key::Enter);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 4);
+    input(&mut screen, "x");
+    assert_eq!(screen.state().tab().unwrap().text, "α🙂\r\n\r\n");
+    input(&mut screen, "u");
+    assert_eq!(screen.state().tab().unwrap().text, original);
+}
+
 fn fixture(text: &str) -> MorrowApp {
     let mut app = MorrowApp::empty(egui::Context::default());
     app.settings.autosave = false;

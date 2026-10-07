@@ -125,7 +125,10 @@ impl FindState {
             regex::escape(&pattern.query)
         };
         if pattern.whole_word {
-            query = format!(r"\b(?:{query})\b");
+            // Find checks the characters outside the match, even when the
+            // literal itself begins or ends in punctuation. Full word
+            // boundaries would invert that behavior for e.g. `foo.` or `*`.
+            query = format!(r"\b{{start-half}}(?:{query})\b{{end-half}}");
         }
         if !pattern.case_sensitive {
             query = format!("(?i:{query})");
