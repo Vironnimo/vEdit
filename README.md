@@ -47,6 +47,8 @@ Dateiindex, Dateizugriffe, Projektsuche, Git und Sprachanalyse laufen im Hinterg
 
 Rechtsklick auf Dateien und Ordner bietet Öffnen, seitliches Öffnen, neue Dateien oder Ordner, Umbenennen, Pfade kopieren und Anzeigen im Windows-Explorer. Auf der freien Fläche im Explorer lassen sich neue Dateien und Ordner direkt im Projekt anlegen; dort sind auch Projektpfad, Windows-Explorer und Aktualisieren erreichbar. Tab-Menüs bieten Speichern, Save as, Splits und Schließen; **Close saved tabs** erhält geänderte Dokumente. Im Editor stehen Ausschneiden, Kopieren, Einfügen, Auswahl und Undo/Redo im Kontextmenü bereit.
 
+**Ctrl+Shift+T**, **File → Reopen closed tab** oder die gleichnamige Palettenaktion öffnet zuletzt geschlossene Dateien des aktiven Projekts im aktuellen Editorbereich. Cursorposition und Markdown-Ansicht kommen zurück. Jedes Projekt merkt sich bis zu 20 Dateien bis zum Schließen des Projekts oder der Anwendung. Bereits anderweitig offene Dateien behalten ihren aktuellen, auch ungespeicherten Text; sonst wird die aktuelle Datei vom Datenträger geladen. Bewusst verworfene Änderungen und nie gespeicherte Entwürfe werden nicht wiederhergestellt.
+
 Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffnet die Datei, **Home/End** und **Page Up/Down** bewegen sich durch längere Listen. **F2** startet Umbenennen mit ausgewähltem Dateinamen ohne Erweiterung; bei Ordnern wird der ganze Name ausgewählt. **Shift+F10** öffnet das Kontextmenü des ausgewählten Eintrags.
 
 Der Explorer sortiert Ordner vor Dateien und macht die Hierarchie mit dezenten Verbindungslinien sichtbar. Dateinamen stehen in einheitlichen Spalten; Auswahl und aktive Datei bleiben über die gesamte Zeilenbreite lesbar. Ignorierte Dateien benötigen keinen Sichtbarkeitsschalter. **Ctrl+O** öffnet Dateien direkt; **Ctrl+P** verwendet einen eigenen Suchindex.
@@ -87,6 +89,7 @@ Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` 
 | Aktuelle Datei speichern | Ctrl+S |
 | Alle geänderten Dateien speichern | Ctrl+Shift+S |
 | Tab schließen | Ctrl+W |
+| Geschlossenen Tab wieder öffnen | Ctrl+Shift+T |
 | Nächster / vorheriger Tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Suchen / Ersetzen in der Datei | Ctrl+F² / Ctrl+H |
 | Nächster / vorheriger Treffer | F3 / Shift+F3 |

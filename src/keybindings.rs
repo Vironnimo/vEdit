@@ -32,6 +32,7 @@ actions! {
     SaveAll, "save_all", "Save all files", "Files", ["Ctrl+Shift+S"];
     SaveAs, "save_as", "Save as...", "Files", [];
     CloseTab, "close_tab", "Close current tab", "Files", ["Ctrl+W"];
+    ReopenTab, "reopen_tab", "Reopen closed tab", "Files", ["Ctrl+Shift+T"];
     PreviousTab, "previous_tab", "Previous tab", "Navigation", ["Ctrl+Shift+Tab"];
     NextTab, "next_tab", "Next tab", "Navigation", ["Ctrl+Tab"];
     Find, "find", "Find in file", "Search", ["Ctrl+F"];
@@ -358,6 +359,28 @@ fn strokes(bindings: &Bindings, action: Action) -> Vec<Stroke> {
     }
 }
 
+/// The Reopen default was added after users could assign Ctrl+Shift+T elsewhere.
+/// Preserve those saved choices when upgrading, without changing conflict rules
+/// for new assignments or an explicitly configured Reopen action.
+pub(super) fn migrate_reopen_shortcut(bindings: &mut Bindings) {
+    if bindings.contains_key(Action::ReopenTab.id()) {
+        return;
+    }
+    let defaults = strokes(bindings, Action::ReopenTab);
+    let occupied = bindings.iter().any(|(id, value)| {
+        let Some(action) = Action::from_id(id) else {
+            return false;
+        };
+        value
+            .as_deref()
+            .and_then(|value| Stroke::parse(value).ok())
+            .is_some_and(|stroke| stroke.safe(action).is_ok() && defaults.contains(&stroke))
+    });
+    if occupied {
+        bindings.insert(Action::ReopenTab.id().into(), None);
+    }
+}
+
 pub(super) fn matches(bindings: &Bindings, action: Action, event: &egui::Event) -> bool {
     let Some(stroke) = Stroke::event(event) else {
         return false;
@@ -574,6 +597,7 @@ impl MorrowApp {
                     });
                 }
             }
+            Action::ReopenTab => self.reopen_closed_tab(),
             Action::NextTab | Action::PreviousTab => {
                 self.bind_current_pane();
                 let ids = self.current_pane_tab_ids();

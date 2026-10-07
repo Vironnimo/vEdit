@@ -30,6 +30,52 @@ fn defaults_are_valid_unique_and_use_native_safe_clipboard_keys() {
 }
 
 #[test]
+fn reopen_upgrade_preserves_an_existing_custom_shortcut() {
+    for value in ["Ctrl+Shift+T", " shift + ctrl + t "] {
+        let mut bindings = Bindings::from([(Action::ToggleWrap.id().into(), Some(value.into()))]);
+        migrate_reopen_shortcut(&mut bindings);
+        assert_eq!(bindings.get(Action::ReopenTab.id()), Some(&None));
+        assert_eq!(bindings[Action::ToggleWrap.id()].as_deref(), Some(value));
+        assert!(validate(&bindings).is_ok());
+        let key = event(Key::T, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
+        assert!(matches(&bindings, Action::ToggleWrap, &key));
+        assert!(!matches(&bindings, Action::ReopenTab, &key));
+        let persisted = serde_json::to_string(&bindings).unwrap();
+        let mut restored: Bindings = serde_json::from_str(&persisted).unwrap();
+        migrate_reopen_shortcut(&mut restored);
+        assert_eq!(restored, bindings);
+    }
+}
+
+#[test]
+fn reopen_upgrade_leaves_explicit_choices_and_unrelated_bindings_unchanged() {
+    let existing = (Action::ToggleWrap.id().into(), Some("Ctrl+Shift+T".into()));
+    for reopen in [None, Some("Ctrl+Shift+T".into()), Some("Ctrl+Alt+T".into())] {
+        let mut bindings =
+            Bindings::from([existing.clone(), (Action::ReopenTab.id().into(), reopen)]);
+        let original = bindings.clone();
+        migrate_reopen_shortcut(&mut bindings);
+        assert_eq!(bindings, original);
+    }
+    for mut bindings in [
+        Bindings::new(),
+        Bindings::from([("unknown_action".into(), Some("Ctrl+Shift+T".into()))]),
+        Bindings::from([(Action::ToggleWrap.id().into(), None)]),
+        Bindings::from([(Action::ToggleWrap.id().into(), Some("Ctrl+Alt+T".into()))]),
+        Bindings::from([(Action::ToggleWrap.id().into(), Some("invalid".into()))]),
+    ] {
+        let original = bindings.clone();
+        migrate_reopen_shortcut(&mut bindings);
+        assert_eq!(bindings, original);
+        assert!(matches(
+            &bindings,
+            Action::ReopenTab,
+            &event(Key::T, egui::Modifiers::CTRL | egui::Modifiers::SHIFT)
+        ));
+    }
+}
+
+#[test]
 fn shortcut_parser_accepts_case_insensitive_names_and_literal_plus() {
     for (value, expected) in [
         (" ctrl + shift + f8 ", "Ctrl+Shift+F8"),

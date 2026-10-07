@@ -55,6 +55,17 @@ impl MorrowApp {
                 self.new_file();
                 ui.close();
             }
+            if ui.add_enabled_ui(self.can_reopen_closed_tab(), |ui| {
+                design::menu_item(
+                    ui,
+                    "Reopen closed tab",
+                    &self.shortcut_label(keybindings::Action::ReopenTab),
+                    "Reopen the last closed file in this project at its previous cursor position",
+                )
+            }).inner.clicked() {
+                self.reopen_closed_tab();
+                ui.close();
+            }
             ui.separator();
             if design::menu_item(
                 ui,

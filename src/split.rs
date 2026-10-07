@@ -798,6 +798,19 @@ impl MorrowApp {
             .iter()
             .any(|pane| pane.id == pane_id && pane.documents.contains(&id))
     }
+    pub(super) fn closed_pane_position(
+        &self,
+        pane_id: u64,
+        id: u64,
+    ) -> Option<(usize, DocumentView)> {
+        self.editor_layout
+            .panes
+            .iter()
+            .find(|pane| pane.id == pane_id)?
+            .states
+            .get(&id)
+            .map(|state| (state.navigation.cursor, state.view))
+    }
     pub(super) fn pane_tab_is_shared(&self, pane_id: u64, id: u64) -> bool {
         self.editor_layout
             .panes

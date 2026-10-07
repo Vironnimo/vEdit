@@ -61,6 +61,8 @@ mod navigation;
 mod project_status;
 #[path = "project_tasks.rs"]
 mod project_tasks;
+#[path = "reopen.rs"]
+mod reopen;
 #[path = "save_state.rs"]
 mod save_state;
 #[path = "settings_navigation.rs"]
@@ -193,6 +195,7 @@ struct Project {
     root: PathBuf,
     tasks: project_tasks::TaskConfiguration,
     tabs: Vec<EditorTab>,
+    closed_tabs: Vec<reopen::ClosedTab>,
     active_tab: usize,
     /// Parked while another project is active; buffers always stay in this project.
     layout: Option<split::EditorLayout>,
@@ -236,6 +239,7 @@ impl Project {
             root,
             tasks: project_tasks::TaskConfiguration::default(),
             tabs: Vec::new(),
+            closed_tabs: Vec::new(),
             active_tab: 0,
             layout: None,
             index: None,
@@ -709,6 +713,7 @@ impl MorrowApp {
         app.settings = session.settings.unwrap_or_default();
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
+        keybindings::migrate_reopen_shortcut(&mut app.settings.keybindings);
         app.ctx.set_zoom_factor(app.settings.ui_scale);
         app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
@@ -1306,6 +1311,8 @@ impl MorrowApp {
     }
     fn perform_close(&mut self, action: CloseAction) {
         self.sync_agent_marks();
+        self.capture_pane_navigation();
+        let closed_tab = self.closed_tab_for_action(action);
         match action {
             CloseAction::PaneTab { pane_id, id } => {
                 if self.current_pane_id() == pane_id
@@ -1368,6 +1375,7 @@ impl MorrowApp {
         }
         self.close_action = None;
         self.close_after_save = false;
+        self.remember_closed_tab(closed_tab);
         self.control_prune_review();
         if !matches!(action, CloseAction::Exit) {
             self.reconcile_layout_after_close();
@@ -6121,6 +6129,7 @@ impl MorrowApp {
             "Go to file" => self.open_palette(Palette::Files),
             "Save as..."
             | "Close current tab"
+            | "Reopen closed tab"
             | "Previous tab"
             | "Next tab"
             | "Find next"
