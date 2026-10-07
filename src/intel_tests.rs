@@ -381,7 +381,11 @@ fn an_old_disk_scan_cannot_replace_a_document_after_a_newer_save_completed() {
             id,
             path,
             text: current.text,
-            result: Ok(current.fingerprint),
+            result: Ok(workspace::SavedDocument {
+                fingerprint: current.fingerprint,
+                line_ending: current.line_ending,
+                format_fallback: false,
+            }),
         })
         .unwrap();
     app.sender

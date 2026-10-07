@@ -444,7 +444,7 @@ enum WorkerResult {
         id: u64,
         text: String,
         path: PathBuf,
-        result: Result<workspace::FileFingerprint, String>,
+        result: Result<workspace::SavedDocument, String>,
     },
     Recovered {
         id: u64,
@@ -1218,6 +1218,7 @@ impl MorrowApp {
         let text = tab.text.clone();
         let ending = tab.line_ending;
         let bom = tab.bom;
+        let format_source = tab.path.clone().zip(tab.fingerprint.clone());
         tab.saving = true;
         tab.error = None;
         self.worker(move || {
@@ -1227,8 +1228,17 @@ impl MorrowApp {
                 {
                     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                workspace::save_document(&path, &text, ending, bom, expected.as_ref())
-                    .map_err(|e| e.to_string())
+                workspace::save_document(
+                    &path,
+                    &text,
+                    ending,
+                    bom,
+                    expected.as_ref(),
+                    format_source
+                        .as_ref()
+                        .map(|(path, baseline)| (path.as_path(), baseline)),
+                )
+                .map_err(|e| e.to_string())
             })();
             let path = if result.is_ok() {
                 fs::canonicalize(&path).unwrap_or(path)
@@ -1570,12 +1580,13 @@ impl MorrowApp {
                     if let Some(tab) = self.tab_by_id_mut(id) {
                         tab.saving = false;
                         match result {
-                            Ok(fingerprint) => {
+                            Ok(saved) => {
                                 new_document = tab.path.as_ref() != Some(&path);
                                 tab.path = Some(path.clone());
                                 tab.title = file_title(&path);
                                 tab.saved_text = text;
-                                tab.fingerprint = Some(fingerprint);
+                                tab.fingerprint = Some(saved.fingerprint);
+                                tab.line_ending = saved.line_ending;
                                 tab.dirty = tab.text != tab.saved_text;
                                 if tab.dirty {
                                     // A completed save changes the baseline of
@@ -1594,7 +1605,17 @@ impl MorrowApp {
                                     let _ = recovery_writer
                                         .remove(&tab.recovery_path, recovery_writer.stamp());
                                 }
-                                message = Some((format!("Saved {}", tab.title), false));
+                                message = Some((
+                                    if saved.format_fallback {
+                                        format!(
+                                            "Saved {} with LF line endings; the original mixed line endings could not be verified",
+                                            tab.title
+                                        )
+                                    } else {
+                                        format!("Saved {}", tab.title)
+                                    },
+                                    false,
+                                ));
                             }
                             Err(error) => {
                                 tab.error = Some(error.clone());

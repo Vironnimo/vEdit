@@ -276,7 +276,7 @@ Automatisches Speichern schreibt benannte Dateien standardmäßig nach **850 ms 
 
 Dateien werden über eine temporäre Datei im selben Ordner atomar gespeichert. Änderungen auf dem Datenträger werden vor dem Ersetzen geprüft; ein Konflikt überschreibt die externe Version nicht. Unveränderte offene Dateien werden bei externen Änderungen aktualisiert. Bei eigenen Änderungen den Inhalt mit **Save as…** sichern, bevor die externe Fassung erneut geöffnet wird. **Reload file from disk** in der Befehlspalette lädt eine unveränderte Datei neu.
 
-Unterstützt werden **UTF-8-Textdateien bis 8 MiB**, einschließlich UTF-8-BOM und LF-, CRLF-, CR- sowie gemischter Zeilenenden. Binärdateien und andere Textkodierungen werden mit einer Meldung abgelehnt. Wiederherstellungskopien ergänzen das Speichern und ersetzen keine Projekt-Backups.
+Unterstützt werden **UTF-8-Textdateien bis 8 MiB**, einschließlich UTF-8-BOM und LF-, CRLF-, CR- sowie gemischter Zeilenenden. **Save as…** erhält gemischte Zeilenenden anhand der unveränderten Originaldatei, unabhängig vom bisherigen Inhalt des Ziels. Ist das Original inzwischen geändert oder nicht mehr verfügbar, wird die Kopie mit LF gespeichert; ein Statushinweis erklärt den Wechsel. Binärdateien und andere Textkodierungen werden beim Öffnen mit einer Meldung abgelehnt. Wiederherstellungskopien ergänzen das Speichern und ersetzen keine Projekt-Backups.
 
 ## Sprachen und Projektbefehle
 

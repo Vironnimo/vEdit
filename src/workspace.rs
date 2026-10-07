@@ -1134,16 +1134,27 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
+#[derive(Debug)]
+pub struct SavedDocument {
+    pub fingerprint: FileFingerprint,
+    pub line_ending: LineEnding,
+    pub format_fallback: bool,
+}
+
 /// Atomically replace a document using a temporary file in the same directory.
 /// `expected = None` creates a new file and refuses to overwrite an existing one.
 /// Existing files must match the last loaded/saved content fingerprint.
+/// Mixed line endings come only from a verified original document, never from a
+/// different Save As destination. If that original is unavailable or changed,
+/// saving the user's buffer remains possible, with an explicit LF fallback.
 pub fn save_document(
     path: &Path,
     text: &str,
     line_ending: LineEnding,
     bom: bool,
     expected: Option<&FileFingerprint>,
-) -> Result<FileFingerprint, SaveError> {
+    source: Option<(&Path, &FileFingerprint)>,
+) -> Result<SavedDocument, SaveError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1173,11 +1184,31 @@ pub fn save_document(
     }
     check_expected(path, expected)?;
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut format_fallback = false;
     let encoded = match line_ending {
         LineEnding::Lf => normalized,
         LineEnding::CrLf => normalized.replace('\n', "\r\n"),
         LineEnding::Cr => normalized.replace('\n', "\r"),
-        LineEnding::Mixed => encode_mixed_endings(path, &normalized, expected)?,
+        LineEnding::Mixed => match verified_format_source(source) {
+            Some(source) => encode_mixed_endings(&source, &normalized),
+            None => {
+                format_fallback = true;
+                normalized
+            }
+        },
+    };
+    let line_ending = if line_ending == LineEnding::Mixed {
+        let crlf = encoded.matches("\r\n").count();
+        let cr = encoded.matches('\r').count() - crlf;
+        let lf = encoded.matches('\n').count() - crlf;
+        match (crlf > 0, cr > 0, lf > 0) {
+            (true, false, false) => LineEnding::CrLf,
+            (false, true, false) => LineEnding::Cr,
+            (false, false, _) => LineEnding::Lf,
+            _ => LineEnding::Mixed,
+        }
+    } else {
+        line_ending
     };
     let mut bytes = Vec::with_capacity(encoded.len() + usize::from(bom) * 3);
     if bom {
@@ -1192,7 +1223,7 @@ pub fn save_document(
     }
     let (temp_path, mut temporary) = create_temporary(parent)
         .map_err(|error| SaveError::Io(format!("Could not create save file: {error}")))?;
-    let result = (|| -> Result<FileFingerprint, SaveError> {
+    let result = (|| -> Result<SavedDocument, SaveError> {
         temporary
             .write_all(&bytes)
             .and_then(|_| temporary.sync_all())
@@ -1234,10 +1265,14 @@ pub fn save_document(
         }
         let metadata = fs::metadata(path)
             .map_err(|error| SaveError::Io(format!("Saved file is unavailable: {error}")))?;
-        Ok(FileFingerprint {
-            len: bytes.len() as u64,
-            modified: metadata.modified().ok(),
-            hash: content_hash(&bytes),
+        Ok(SavedDocument {
+            fingerprint: FileFingerprint {
+                len: bytes.len() as u64,
+                modified: metadata.modified().ok(),
+                hash: content_hash(&bytes),
+            },
+            line_ending,
+            format_fallback,
         })
     })();
     let _ = fs::remove_file(&temp_path);
@@ -1299,21 +1334,7 @@ fn create_temporary(parent: &Path) -> io::Result<(PathBuf, File)> {
 
 /// Preserve existing mixed separators around edits. Unchanged prefix/suffix lines keep
 /// their exact separators; newly inserted lines adopt the most common existing ending.
-fn encode_mixed_endings(
-    path: &Path,
-    normalized: &str,
-    expected: Option<&FileFingerprint>,
-) -> Result<String, SaveError> {
-    let Some(expected) = expected else {
-        return Ok(normalized.to_owned());
-    };
-    let (bytes, fingerprint) = read_bytes(path, expected.len.saturating_add(1))
-        .map_err(|error| SaveError::Io(format!("Could not preserve line endings: {error}")))?;
-    if !fingerprint.same_content(expected) {
-        return Err(SaveError::Conflict(path.to_path_buf()));
-    }
-    let source = std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
-        .map_err(|_| SaveError::Io("Existing file is no longer UTF-8 text".into()))?;
+fn encode_mixed_endings(source: &str, normalized: &str) -> String {
     let old_lines = line_records(source);
     let new_lines = line_records(normalized);
     let mut counts = [0usize; 3];
@@ -1365,7 +1386,18 @@ fn encode_mixed_endings(
                 .unwrap_or(common),
         );
     }
-    Ok(encoded)
+    encoded
+}
+
+fn verified_format_source(source: Option<(&Path, &FileFingerprint)>) -> Option<String> {
+    let (path, expected) = source?;
+    let (bytes, current) = read_bytes(path, MAX_DOCUMENT_BYTES).ok()?;
+    if !current.same_content(expected) {
+        return None;
+    }
+    std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
+        .ok()
+        .map(str::to_owned)
 }
 
 fn line_records(text: &str) -> Vec<(&str, &str)> {
@@ -1426,6 +1458,24 @@ mod project_search_backend_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn save_document(
+        path: &Path,
+        text: &str,
+        line_ending: LineEnding,
+        bom: bool,
+        expected: Option<&FileFingerprint>,
+    ) -> Result<FileFingerprint, SaveError> {
+        super::save_document(
+            path,
+            text,
+            line_ending,
+            bom,
+            expected,
+            expected.map(|baseline| (path, baseline)),
+        )
+        .map(|saved| saved.fingerprint)
+    }
 
     struct Fixture(PathBuf);
 

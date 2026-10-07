@@ -128,6 +128,131 @@ fn hold_save_completion(app: &mut MorrowApp) -> WorkerResult {
 }
 
 #[test]
+fn mixed_line_endings_follow_the_source_when_saving_as_new_text_or_binary_targets() {
+    for (label, destination_bytes) in [
+        ("new", None),
+        ("text", Some(b"unrelated\nexisting\ncontent\n".as_slice())),
+        ("binary", Some(b"\xff\x00\xfe".as_slice())),
+    ] {
+        let fixture = RecoveryFixture::new(&format!("mixed-save-as-{label}"));
+        let original = "\u{feff}one\r\ntwo\nthree\r\nfour\r";
+        let source = fixture.write("source.txt", original);
+        let destination = fixture.root.join("copy.txt");
+        let overwrite = destination_bytes.map(|bytes| {
+            fs::write(&destination, bytes).unwrap();
+            workspace::fingerprint(&destination, MAX_DOCUMENT).unwrap()
+        });
+        let mut app = fixture.app();
+        let id = fixture.open(&mut app, source.clone());
+        edit(&mut app, "one\ntwo edited\nthree\nfour\n");
+        app.request_save_as(id);
+        let request = app.picker.unwrap();
+        app.finish_native_dialog(
+            request,
+            Ok(Some(DialogSelection {
+                paths: vec![destination.clone()],
+                overwrite,
+            })),
+        );
+        settle_document_writes(&mut app);
+
+        assert_eq!(fs::read_to_string(&source).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "\u{feff}one\r\ntwo edited\nthree\r\nfour\r",
+            "the {label} destination must not supply the source's line endings"
+        );
+        let tab = app.tab().unwrap();
+        assert!(!tab.dirty && !tab.saving);
+        assert!(tab.error.is_none());
+        assert_eq!(tab.line_ending, workspace::LineEnding::Mixed);
+        assert!(tab.bom);
+    }
+}
+
+#[test]
+fn mixed_save_as_with_unavailable_original_preserves_the_draft_and_reports_lf() {
+    for deleted in [false, true] {
+        let fixture = RecoveryFixture::new(if deleted {
+            "mixed-save-as-missing-source"
+        } else {
+            "mixed-save-as-changed-source"
+        });
+        let source = fixture.write("source.txt", "one\r\ntwo\n");
+        let destination = fixture.write("copy.txt", "destination\r\n");
+        let overwrite = workspace::fingerprint(&destination, MAX_DOCUMENT).unwrap();
+        let mut app = fixture.app();
+        let id = fixture.open(&mut app, source.clone());
+        edit(&mut app, "My draft 🦀\nsecond line\n");
+        if deleted {
+            fs::remove_file(&source).unwrap();
+        } else {
+            fs::write(&source, "external\rchange\r").unwrap();
+        }
+        app.save_tab_expected(id, Some(destination.clone()), Some(overwrite));
+        settle_document_writes(&mut app);
+
+        assert_eq!(
+            fs::read_to_string(destination).unwrap(),
+            "My draft 🦀\nsecond line\n"
+        );
+        assert_eq!(app.tab().unwrap().line_ending, workspace::LineEnding::Lf);
+        assert!(!app.tab().unwrap().dirty);
+        assert!(app.tab().unwrap().error.is_none());
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("with LF line endings")
+        );
+        if deleted {
+            assert!(!source.exists());
+        } else {
+            assert_eq!(fs::read_to_string(source).unwrap(), "external\rchange\r");
+        }
+    }
+}
+
+#[test]
+fn mixed_save_as_keeps_the_destination_conflict_guard_separate_from_its_format_source() {
+    let fixture = RecoveryFixture::new("mixed-save-as-conflicting-target");
+    let source = fixture.write("source.txt", "one\r\ntwo\n");
+    let destination = fixture.write("copy.txt", "confirmed destination\n");
+    let overwrite = workspace::fingerprint(&destination, MAX_DOCUMENT).unwrap();
+    let mut app = fixture.app();
+    let id = fixture.open(&mut app, source.clone());
+    edit(&mut app, "one\nlocal edit\n");
+    fs::write(&destination, "external change after confirmation\n").unwrap();
+    app.save_tab_expected(id, Some(destination.clone()), Some(overwrite));
+    settle_document_writes(&mut app);
+
+    assert_eq!(fs::read_to_string(source).unwrap(), "one\r\ntwo\n");
+    assert_eq!(
+        fs::read_to_string(destination).unwrap(),
+        "external change after confirmation\n"
+    );
+    assert_eq!(app.tab().unwrap().text, "one\nlocal edit\n");
+    assert!(app.tab().unwrap().dirty);
+    assert!(app.tab().unwrap().error.is_some());
+}
+
+#[test]
+fn saving_a_mixed_document_updates_its_format_when_only_one_ending_remains() {
+    let fixture = RecoveryFixture::new("mixed-save-format-status");
+    let path = fixture.write("source.txt", "one\r\ntwo\n");
+    let mut app = fixture.app();
+    fixture.open(&mut app, path.clone());
+    edit(&mut app, "one\n");
+    app.save_current();
+    settle_document_writes(&mut app);
+
+    assert_eq!(fs::read_to_string(path).unwrap(), "one\r\n");
+    assert_eq!(app.tab().unwrap().line_ending, workspace::LineEnding::CrLf);
+    assert!(!app.tab().unwrap().dirty);
+}
+
+#[test]
 fn recovery_restore_never_adopts_an_external_edit_as_its_save_baseline() {
     let fixture = RecoveryFixture::new("external-baseline");
     let path = fixture.write("notes.txt", "\u{feff}Gespeichert ü\r\nzweite Zeile\r\n");
