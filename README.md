@@ -312,11 +312,13 @@ Morrow bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt, Mehrfachcursor
 ## Prüfen
 
 ```powershell
-cargo test
+cargo test --all-targets -- --test-threads=8
 ```
 
-Die Tests decken Bearbeitung, Vim, Dateizugriffe, Wiederherstellung, Git, Befehlsausführung und die Oberfläche ab. Der zusätzliche Test mit einem echten rust-analyzer ist standardmäßig übersprungen und lässt sich nach Installation der Rust-Komponenten explizit ausführen:
+Die Tests decken Bearbeitung, Vim, Dateizugriffe, Wiederherstellung, Git, CLI, Befehlsausführung und die Oberfläche ab. SDK-abhängige Integrationstests und manuelle Benchmarks sind standardmäßig übersprungen. Beispielsweise lässt sich der Test mit einem echten rust-analyzer nach Installation der Rust-Komponenten explizit ausführen:
 
 ```powershell
 cargo test live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
 ```
+
+Build, gezielte Tests, Bildreferenzen und portable Pakete beschreibt die [Entwicklungsanleitung](docs/development.md). Repository-Agenten beginnen mit [AGENTS.md](AGENTS.md); die Bedienung einer laufenden Morrow-Instanz erklärt der separate [Morrow-Skill](.agents/skills/morrow/SKILL.md).
