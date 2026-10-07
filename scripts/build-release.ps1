@@ -55,6 +55,9 @@ try {
     $documentationDirectory = Join-Path $releaseDirectory 'docs'
     New-Item -ItemType Directory -Path $documentationDirectory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/development.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/maintenance-0.4.16.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'AGENTS.md') -Destination $releaseDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/user-review-0.4.9.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/code-review-0.4.10.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/usability-review-0.4.11.md') -Destination $documentationDirectory -Force

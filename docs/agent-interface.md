@@ -6,6 +6,13 @@ The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinar
 
 ## Observable contract
 
+Version 0.4.16 adds `reopen_tab` to the effective keybinding catalog (default
+Ctrl+Shift+T). Existing saved custom bindings keep precedence during startup
+migration. The CLI request schema and command help are unchanged. Local transport
+now waits for complete frames on accepted Windows sockets, including requests
+split across TCP packets; existing size limits and application-result semantics
+remain in force. See [the maintenance report](maintenance-0.4.16.md).
+
 Version 0.4.12 adds a complete `keybindings` override map and an effective action catalog in Settings responses. Read the current map before changing individual bindings: a supplied map replaces all overrides, missing IDs use their defaults, and `null` disables an action. Unknown IDs, ambiguous shortcuts, reserved native input and collisions reject the entire settings patch. This validation also protects unrelated fields in the same patch.
 
 Indentation settings add `detect_indentation`, `indent_with_tabs`, `language_indent_widths` and `language_indent_with_tabs`. The two maps replace their respective overrides; `{}` clears that map. Detected file style takes priority when enabled. Preferences affect subsequent edits, not existing content. Native edits, Vim and CLI indentation use the same effective document setting.

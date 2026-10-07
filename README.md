@@ -1,8 +1,8 @@
-# Morrow 0.4.15
+# Morrow 0.4.16
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
-Version 0.4.15 verwendet eine eigene Windows-Titelleiste mit Projekt-Tabs und Git-Statuspunkten sowie ein Hauptmenü über den Navigationssymbolen. Die doppelte Explorer-/Git-/Search-Navigation entfällt. Details stehen in den [Fenster- und Navigationsnotizen](docs/window-chrome-0.4.15.md). Die bisherigen [UX-Korrekturen](docs/ux-fixes-0.4.14.md) und [Polish-Notizen](docs/interaction-polish-0.4.13.md) bleiben dokumentiert.
+Version 0.4.16 bringt **Ctrl+Shift+T** zum Wiederöffnen geschlossener Tabs und korrigiert Fehler bei CRLF-Bearbeitung, Suche, Speichern unter und der lokalen CLI-Verbindung. Details und Prüfgrenzen stehen im [Wartungsbericht](docs/maintenance-0.4.16.md). Die eigene Windows-Titelleiste und Projekt-Tabs sind in den [Fenster- und Navigationsnotizen](docs/window-chrome-0.4.15.md) beschrieben.
 
 ![Morrow mit geöffnetem Projekt](tests/snapshots/morrow_workspace.png)
 
