@@ -456,6 +456,10 @@ fn wait_for_application(receiver: mpsc::Receiver<Response>, stop: &AtomicBool) -
 }
 
 fn configure_stream(stream: &TcpStream) -> io::Result<()> {
+    // On Windows an accepted socket inherits the listener's nonblocking mode.
+    // A JSON frame may span several packets; wait for the next packet instead
+    // of treating WouldBlock as an invalid (or partially delivered) request.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_nodelay(true)
@@ -850,6 +854,35 @@ mod tests {
         let fixture = Fixture::new();
         let bytes = vec![b'x'; MAX_REQUEST_BYTES + 1];
         assert_eq!(error_code(fixture.raw_request(&bytes)), "request_too_large");
+        assert!(fixture.server().try_recv().is_none());
+    }
+
+    #[test]
+    fn fragmented_request_waits_for_the_complete_frame_before_dispatch() {
+        let fixture = Fixture::new();
+        let endpoint = fixture.endpoint();
+        let mut socket = TcpStream::connect(endpoint_address(&endpoint)).unwrap();
+        configure_stream(&socket).unwrap();
+        let packet = serde_json::to_vec(&Outgoing {
+            version: PROTOCOL_VERSION,
+            token: &endpoint.token,
+            request: &Request::Status {},
+        })
+        .unwrap();
+        socket.write_all(&packet[..12]).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(fixture.server().try_recv().is_none());
+        socket.write_all(&packet[12..]).unwrap();
+        socket.write_all(b"\n").unwrap();
+        let envelope = fixture.receive();
+        assert!(matches!(envelope.request, Request::Status {}));
+        envelope
+            .reply
+            .send(Response::success(serde_json::json!({"complete": true})))
+            .unwrap();
+        let response: Response =
+            serde_json::from_slice(&read_frame(&mut socket, MAX_RESPONSE_BYTES).unwrap()).unwrap();
+        assert!(response.ok);
         assert!(fixture.server().try_recv().is_none());
     }
 
