@@ -1,31 +1,3 @@
-# Working style
-
-- The user's words point at a goal; they are not the spec. Before investigating,
-  work out what the user is trying to achieve and what a good result looks like
-  from their side. Answer that, not only the literal question.
-- Think from the problem first, then read code. Ask what the thing is for and how
-  it is actually used; then read the code and docs that test your idea. Existing
-  code and docs show what exists, not what must stay - especially when the user
-  asks to rethink something.
-- When the user questions whether a system should exist or be rebuilt, start from
-  what it is for and who uses it, and treat the current concepts and their
-  boundaries as candidates to remove, not as givens.
-- Read with a question in mind. Stop investigating once further reading would not
-  change your answer. Reading more "to be safe" is not thoroughness; name what you
-  did not check instead.
-- Deliver the whole outcome the user asked for, not its first slice. Before you
-  stop, compare what you delivered with what the user wanted; if in-scope work
-  remains and nothing blocks it, continue.
-- Write for a quick overview. Lead with your recommendation and what it means for
-  the user. Describe the current state in two or three plain sentences, not as
-  tables or inventories of how things work today. Add a detail only where it
-  changes the user's decision or makes the picture clearer; leave out file
-  references, field names and mechanisms unless the user needs them. Use a table
-  only to compare options. When an answer grows long, cut the description of the
-  present first, never the reasoning behind your recommendation.
-- Project instructions describe good behavior for situations that call for it.
-  Apply them in proportion to the task, not as a checklist to complete every time.
-
 # Working in Morrow
 
 Morrow is a native Windows code editor written in Rust (edition 2024), using
