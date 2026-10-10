@@ -162,6 +162,8 @@ mod tests {
             hash: hash.into(),
             author: "Author".into(),
             date: "2026-09-26".into(),
+            timestamp: 0,
+            on_remote: false,
             subject: hash.into(),
             parents: parents.iter().map(|hash| (*hash).into()).collect(),
             refs: Vec::new(),

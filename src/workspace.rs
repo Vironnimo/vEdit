@@ -93,6 +93,28 @@ impl WorkspaceIndex {
         }
     }
 
+    /// Give an eager rendering fixture a stable logical location, without
+    /// reading or modifying that location on disk.
+    #[cfg(test)]
+    pub fn at_fixture_root(mut self, root: PathBuf) -> Self {
+        assert!(!self.explorer_snapshot);
+        let relocate = |path: &Path| root.join(path.strip_prefix(&self.root).unwrap());
+        for entry in &mut self.entries {
+            entry.path = relocate(&entry.path);
+        }
+        for path in &mut self.files {
+            *path = relocate(path);
+        }
+        self.children = self
+            .children
+            .into_iter()
+            .map(|(path, children)| (relocate(&path), children))
+            .collect();
+        self.root = root;
+        self.quick_open_cache = Arc::new(Mutex::new(VecDeque::new()));
+        self
+    }
+
     /// A cached directory listing, sorted with folders first. Does not touch the disk.
     pub fn children<'a>(&'a self, parent: &Path) -> impl Iterator<Item = &'a WorkspaceEntry> {
         self.explorer_directories

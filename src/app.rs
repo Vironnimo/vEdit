@@ -171,6 +171,7 @@ struct SessionProject {
     tabs: Vec<SessionTab>,
     active_tab_index: Option<usize>,
     layout: Option<split::SessionLayout>,
+    git_split_ratio: Option<f32>,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -200,6 +201,7 @@ struct Project {
     rust_project: bool,
     git_root: Option<PathBuf>,
     git_branch: Option<String>,
+    git_branches: Vec<git::CommitRef>,
     git_tracking: Option<git::BranchInfo>,
     git_changes: Vec<git::FileStatus>,
     git_stats: git::WorkingTreeStats,
@@ -243,6 +245,7 @@ impl Project {
             rust_project: false,
             git_root: None,
             git_branch: None,
+            git_branches: Vec::new(),
             git_tracking: None,
             git_changes: Vec::new(),
             git_stats: git::WorkingTreeStats::default(),
@@ -483,6 +486,7 @@ enum WorkerResult {
         result: Result<git::HistoryPage, String>,
     },
     GitAction {
+        reply: Option<Sender<crate::cli::Response>>,
         root: PathBuf,
         message: String,
         result: Result<String, String>,
@@ -524,6 +528,7 @@ enum GitAction {
     Fetch,
     Pull,
     Push,
+    SwitchBranch(String),
 }
 impl GitAction {
     fn label(&self) -> &'static str {
@@ -535,6 +540,7 @@ impl GitAction {
             Self::Fetch => "Fetch",
             Self::Pull => "Pull",
             Self::Push => "Push",
+            Self::SwitchBranch(_) => "Switch branch",
         }
     }
     fn run(&self, root: &Path) -> Result<String, String> {
@@ -550,6 +556,7 @@ impl GitAction {
             Self::Fetch => git::fetch(root),
             Self::Pull => git::pull(root),
             Self::Push => git::push(root),
+            Self::SwitchBranch(target) => git::switch_branch(root, target),
         }
         .map_err(|e| e.to_string())
     }
@@ -773,6 +780,10 @@ impl VEditApp {
             }
             let mut project = Project::new(root.clone());
             project.tasks = entry.tasks;
+            project.git_view.split_ratio = entry
+                .git_split_ratio
+                .filter(|ratio| ratio.is_finite())
+                .map(|ratio| ratio.clamp(0.25, 0.75));
             let saved_tabs = if entry.tabs.is_empty() {
                 entry
                     .open_files
@@ -1741,6 +1752,7 @@ impl VEditApp {
                                 p.git_stats_error = s.stats_error;
                                 match s.history {
                                     Ok(history) => {
+                                        p.git_branches = history.snapshot.refs.clone();
                                         if let Some(page) = history.page {
                                             static NEXT_HISTORY: AtomicU64 = AtomicU64::new(1);
                                             p.git_history_generation =
@@ -1864,11 +1876,23 @@ impl VEditApp {
                     }
                 }
                 WorkerResult::GitAction {
+                    reply,
                     root,
                     message,
                     result,
                 } => {
                     self.git_busy = None;
+                    if let Some(reply) = reply {
+                        let response = match &result {
+                            Ok(branch) => crate::cli::Response::success(
+                                serde_json::json!({"repository":crate::paths::display(&root),"branch":branch,"completed":true}),
+                            ),
+                            Err(error) => {
+                                crate::cli::Response::failure("git_switch_failed", error.clone())
+                            }
+                        };
+                        let _ = reply.send(response);
+                    }
                     match result {
                         Ok(_) => {
                             self.status(format!("{message} completed"), false);
@@ -1884,6 +1908,9 @@ impl VEditApp {
                             for i in indices {
                                 if message == "Create commit" {
                                     self.projects[i].commit_message.clear();
+                                }
+                                if message == "Switch branch" {
+                                    self.projects[i].git_history_refresh_requested = true;
                                 }
                                 self.refresh_git(i, true);
                                 self.index_project(i);
@@ -2084,7 +2111,8 @@ impl VEditApp {
                             return Err(error);
                         }
                         let snapshot =
-                            git::history_snapshot(&repo).map_err(|error| error.to_string())?;
+                            git::history_snapshot_cached(&repo, previous_history.as_ref())
+                                .map_err(|error| error.to_string())?;
                         let page = if refresh_history
                             || previous_history
                                 .as_ref()
@@ -2131,8 +2159,38 @@ impl VEditApp {
         });
     }
     fn git_action(&mut self, root: PathBuf, action: GitAction) {
+        if let Err(error) = self.start_git_action(root, action, None) {
+            self.status(error, true);
+        }
+    }
+
+    fn start_git_action(
+        &mut self,
+        root: PathBuf,
+        action: GitAction,
+        reply: Option<Sender<crate::cli::Response>>,
+    ) -> Result<(), String> {
         if self.git_busy.is_some() {
-            return;
+            return Err("A Git operation is still running. No new operation was started.".into());
+        }
+        if matches!(action, GitAction::SwitchBranch(_)) {
+            if self.projects.iter().any(|project| {
+                project.tabs.iter().any(|tab| {
+                    (tab.dirty || tab.saving || tab.loading || tab.agent_unsaved)
+                        && tab.path.as_ref().map_or(
+                            project.git_root.as_ref() == Some(&root) || project.root == root,
+                            |path| context_actions::path_contains(&root, path),
+                        )
+                })
+            }) {
+                return Err("Save or close unsaved documents and wait for file operations before switching branches. No branch was switched.".into());
+            }
+            if self.control_dialog().is_some() {
+                return Err(
+                    "Finish the open dialog before switching branches. No branch was switched."
+                        .into(),
+                );
+            }
         }
         self.git_busy = Some(root.clone());
         let message = action.label().to_owned();
@@ -2141,7 +2199,9 @@ impl VEditApp {
             result: action.run(&root),
             root,
             message,
+            reply,
         });
+        Ok(())
     }
     fn request_git_commit(&mut self, index: usize, hash: String) {
         let Some(project) = self.projects.get_mut(index) else {
@@ -2765,6 +2825,7 @@ impl VEditApp {
                 .map(|p| SessionProject {
                     root: p.root.clone(),
                     tasks: p.tasks.clone(),
+                    git_split_ratio: p.git_view.split_ratio,
                     open_files: Vec::new(),
                     active_file: p.tabs.get(p.active_tab).and_then(|t| t.path.clone()),
                     tabs: p
@@ -4134,30 +4195,35 @@ impl VEditApp {
 
 impl VEditApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").exact_size(27.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 2)))
+        egui::Panel::bottom("status").exact_size(34.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 4)))
             .show(ui, |ui| {
-                let compact = ui.available_width() < 600.0;
+                let compact = ui.available_width() < 820.0;
                 let narrow = ui.available_width() < 360.0;
-                ui.horizontal(|ui| {
+                let status_error = self.status.as_ref().is_some_and(|(_, error, _)| *error);
+                let right_budget = if narrow { 125.0 } else if compact { 300.0 } else { 650.0 };
+                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.spacing_mut().interact_size.y = 24.0;
+                ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
+                ui.horizontal_centered(|ui| {
                     let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", BLUE) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", ACCENT), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                         }
                     } else { ("EDIT", BLUE) };
-                    ui.label(RichText::new(format!(" {mode} ")).monospace().size(10.5).strong().color(color))
+                    ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
                         .on_hover_text("Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
                     if let Some(tab) = self.tab() {
                         let pending = tab.vim.pending_command();
-                        if !pending.is_empty() { ui.label(RichText::new(pending).monospace().size(10.5).color(ORANGE)); }
+                        if !pending.is_empty() { ui.label(RichText::new(pending).monospace().size(11.0).color(ORANGE)); }
                     }
-                    if !narrow && let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
+                    if !narrow && !(compact && status_error) && let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
                         let tracking = self.project().and_then(|p| p.git_tracking.as_ref());
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
-                        let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(10.5), TEXT)).size().x + 16.0;
-                        let budget = (ui.available_width() - if compact { 290.0 } else { 540.0 }).clamp(30.0, 180.0);
-                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(10.5)).truncate().frame_when_inactive(false)).on_hover_text(&hint).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                        let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
+                        let budget = (ui.available_width() - if compact { 290.0 } else { 650.0 }).clamp(30.0, 180.0);
+                        if ui.add_sized([width.min(budget), 24.0], egui::Button::new(RichText::new(&branch).size(11.0)).truncate().frame_when_inactive(false)).on_hover_text(&hint).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if let Some(jump) = &self.screen_jump {
                         let hint = if jump.state.query.is_empty() {
@@ -4166,23 +4232,23 @@ impl VEditApp {
                             let digits = jump.state.targets.first().map_or(1, |target| target.label.len());
                             format!("{} · {} matches · type a {digits}-digit label · Esc cancels", jump.state.query, jump.state.targets.len())
                         };
-                        ui.add(egui::Label::new(RichText::new(&hint).size(10.5).color(ORANGE)).truncate())
+                        ui.add(egui::Label::new(RichText::new(&hint).size(11.0).color(ORANGE)).truncate())
                             .on_hover_text("Type up to three characters to find visible matches. Digits choose a jump label. For numeric search text, press Enter before selecting a label. Backspace refines the query; Esc cancels.");
                     } else if let Some((message, error, time)) = &self.status
-                        && (*error || time.elapsed() < Duration::from_secs(6)) {
-                        let width = (ui.available_width() - 530.0).clamp(40.0, 440.0);
-                        ui.add_sized([width, 20.0], egui::Label::new(RichText::new(message).size(10.5).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
+                        && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
+                        let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);
+                        ui.add_sized([width, 24.0], egui::Label::new(RichText::new(message).size(11.0).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(t) = self.tab() {
                             let (line, col) = t.lines.line_col(&t.text, t.revision, t.vim.cursor);
                             let total = t.lines.line_count(&t.text, t.revision);
                             let position = if narrow { format!("{line}:{col}") } else { format!("Ln {line}/{total}, Col {col}") };
-                            ui.label(RichText::new(position).size(10.5).color(MUTED)).on_hover_text(format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
+                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
                             let selected = t.selection.end.saturating_sub(t.selection.start);
-                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(10.5).color(ORANGE)).on_hover_text("Selected characters"); }
+                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(11.0).color(ORANGE)).on_hover_text("Selected characters"); }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            if !compact { ui.label(RichText::new(language_name(t.path.as_deref())).size(10.5).color(MUTED)).on_hover_text(details); }
+                            if !compact { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
                         }
                         if !compact { self.indentation_status_ui(ui); }
                         self.save_status_ui(ui, !narrow);

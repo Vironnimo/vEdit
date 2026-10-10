@@ -112,8 +112,11 @@ pub struct CommitSummary {
     pub parents: Vec<String>,
     pub refs: Vec<CommitRef>,
     pub author: String,
-    /// Date formatted by Git as `YYYY-MM-DD`.
+    /// Author timestamp in ISO 8601, including its original time zone.
     pub date: String,
+    pub timestamp: i64,
+    /// Reachable from a remote-tracking ref in the frozen history snapshot.
+    pub on_remote: bool,
     pub subject: String,
 }
 
@@ -139,6 +142,7 @@ pub struct CommitRef {
 pub struct HistorySnapshot {
     pub tips: Vec<String>,
     pub refs: Vec<CommitRef>,
+    pub local_only: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -724,6 +728,13 @@ pub fn recent_log(root: &Path, limit: usize) -> GitResult<Vec<CommitSummary>> {
 }
 
 pub fn history_snapshot(root: &Path) -> GitResult<HistorySnapshot> {
+    history_snapshot_cached(root, None)
+}
+
+pub fn history_snapshot_cached(
+    root: &Path,
+    previous: Option<&HistorySnapshot>,
+) -> GitResult<HistorySnapshot> {
     let branch = current_branch(root)?;
     let head = if has_head(root)? {
         let output = checked_git(
@@ -812,6 +823,42 @@ pub fn history_snapshot(root: &Path) -> GitResult<HistorySnapshot> {
         .collect();
     snapshot.tips.sort();
     snapshot.tips.dedup();
+    if let Some(previous) = previous
+        && snapshot.tips == previous.tips
+        && snapshot.refs == previous.refs
+    {
+        snapshot.local_only = previous.local_only.clone();
+        return Ok(snapshot);
+    }
+    let remote_tips: Vec<_> = snapshot
+        .refs
+        .iter()
+        .filter(|reference| reference.kind == RefKind::Remote)
+        .map(|reference| reference.hash.as_str())
+        .collect();
+    if !remote_tips.is_empty() {
+        let mut input = snapshot.tips.join("\n") + "\n";
+        for hash in remote_tips {
+            input.push('^');
+            input.push_str(hash);
+            input.push('\n');
+        }
+        let output = raw_git_with_input(
+            root,
+            &string_args(&["rev-list", "--stdin"]),
+            "compare local and remote history",
+            Some(input.into_bytes()),
+        )?;
+        if !output.status.success() {
+            return Err(command_error("compare local and remote history", &output));
+        }
+        snapshot.local_only = std::sync::Arc::new(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
     Ok(snapshot)
 }
 
@@ -832,7 +879,7 @@ pub fn history_page(
         "--topo-order",
         "--date=short",
         "--no-show-signature",
-        "--format=%H%x00%P%x00%an%x00%ad%x00%s%x00",
+        "--format=%H%x00%P%x00%an%x00%aI%x00%at%x00%s%x00",
         "--stdin",
     ]);
     args.push(OsString::from(format!("--skip={offset}")));
@@ -851,6 +898,8 @@ pub fn history_page(
     let has_more = commits.len() > limit;
     commits.truncate(limit);
     for commit in &mut commits {
+        commit.on_remote = snapshot.refs.iter().any(|r| r.kind == RefKind::Remote)
+            && !snapshot.local_only.contains(&commit.hash);
         commit.refs = snapshot
             .refs
             .iter()
@@ -859,6 +908,36 @@ pub fn history_page(
             .collect();
     }
     Ok(HistoryPage { commits, has_more })
+}
+
+/// Switch a named local branch or create a tracking branch from an exact remote ref.
+/// Git itself refuses worktree conflicts; never discard, force, stash or reset.
+pub fn switch_branch(root: &Path, target: &str) -> GitResult<String> {
+    let snapshot = history_snapshot(root)?;
+    let reference = snapshot
+        .refs
+        .iter()
+        .find(|reference| {
+            let prefix = match reference.kind {
+                RefKind::Local => "refs/heads/",
+                RefKind::Remote => "refs/remotes/",
+                _ => return false,
+            };
+            target == format!("{prefix}{}", reference.name)
+        })
+        .ok_or_else(|| {
+            GitError::new(
+                "switch branch",
+                "branch no longer exists; refresh the branch list",
+            )
+        })?;
+    let args = match reference.kind {
+        RefKind::Local => string_args(&["switch", "--no-guess", "--", &reference.name]),
+        RefKind::Remote => string_args(&["switch", "--track", "--", target]),
+        _ => unreachable!(),
+    };
+    checked_git(root, &args, "switch branch")?;
+    Ok(current_branch(root)?.unwrap_or_default())
 }
 
 fn unstage(root: &Path, paths: &[PathBuf]) -> GitResult<()> {
@@ -1485,9 +1564,13 @@ fn parse_log(bytes: &[u8]) -> GitResult<Vec<CommitSummary>> {
         if hash.is_empty() {
             continue;
         }
-        let (Some(parents), Some(author), Some(date), Some(subject)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        let (Some(parents), Some(author), Some(date), Some(timestamp), Some(subject)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             return Err(GitError::new(
                 "parse recent history",
                 "Git returned an unexpected log record",
@@ -1507,6 +1590,10 @@ fn parse_log(bytes: &[u8]) -> GitResult<Vec<CommitSummary>> {
             refs: Vec::new(),
             author: String::from_utf8_lossy(author).into_owned(),
             date: String::from_utf8_lossy(date).into_owned(),
+            timestamp: String::from_utf8_lossy(timestamp)
+                .parse()
+                .map_err(|_| GitError::new("parse recent history", "invalid author timestamp"))?,
+            on_remote: false,
             subject: String::from_utf8_lossy(subject).into_owned(),
         });
     }
@@ -1965,7 +2052,8 @@ mod tests {
         assert_eq!(log[1].subject, "Initial subject with spaces and ü");
         assert_eq!(log[0].author, "vEdit Git Test");
         assert_eq!(log[0].hash.len(), 40);
-        assert_eq!(log[0].date.len(), 10);
+        assert!(log[0].date.contains('T') && log[0].date.len() >= 20);
+        assert!(log[0].timestamp > 0);
         repository.git(&["checkout", "--detach"]);
         assert_eq!(branch_info(&repository.0).unwrap().name, None);
     }
@@ -2479,5 +2567,98 @@ mod tests {
             "the timed-out hook must not continue running"
         );
         assert!(recent_log(&repository.0, 1).unwrap().is_empty());
+    }
+    #[test]
+    fn remote_reachability_is_frozen_and_includes_ancestors_and_local_merges() {
+        let repo = TestRepository::new();
+        repo.write("file.txt", "base");
+        repo.commit_all("base");
+        let base = repo.head_hash();
+        repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+        repo.git(&["checkout", "-b", "topic"]);
+        repo.write("topic.txt", "topic");
+        repo.commit_all("topic");
+        let topic = repo.head_hash();
+        repo.git(&["checkout", "main"]);
+        repo.write("file.txt", "local");
+        repo.commit_all("local");
+        repo.git(&["merge", "--no-ff", "--no-edit", "topic"]);
+        let merge = repo.head_hash();
+        let snapshot = history_snapshot(&repo.0).unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/main", &merge]);
+        let page = history_page(&repo.0, &snapshot, 0, 50).unwrap();
+        assert!(
+            page.commits
+                .iter()
+                .find(|c| c.hash == base)
+                .unwrap()
+                .on_remote
+        );
+        assert!(
+            !page
+                .commits
+                .iter()
+                .find(|c| c.hash == topic)
+                .unwrap()
+                .on_remote
+        );
+        assert!(
+            !page
+                .commits
+                .iter()
+                .find(|c| c.hash == merge)
+                .unwrap()
+                .on_remote
+        );
+        let refreshed = history_snapshot(&repo.0).unwrap();
+        assert!(
+            history_page(&repo.0, &refreshed, 0, 50)
+                .unwrap()
+                .commits
+                .iter()
+                .all(|c| c.on_remote)
+        );
+        repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert!(
+            recent_log(&repo.0, 50)
+                .unwrap()
+                .iter()
+                .all(|c| !c.on_remote)
+        );
+    }
+
+    #[test]
+    fn named_branch_switches_preserve_conflicting_files_and_track_remote_branches() {
+        let repo = TestRepository::new();
+        repo.write("file.txt", "base");
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "topic"]);
+        repo.write("file.txt", "topic");
+        repo.commit_all("topic");
+        assert_eq!(switch_branch(&repo.0, "refs/heads/main").unwrap(), "main");
+        repo.write("file.txt", "unsaved on disk");
+        assert!(switch_branch(&repo.0, "refs/heads/topic").is_err());
+        assert_eq!(
+            fs::read_to_string(repo.0.join("file.txt")).unwrap(),
+            "unsaved on disk"
+        );
+        assert_eq!(current_branch(&repo.0).unwrap().as_deref(), Some("main"));
+        assert!(switch_branch(&repo.0, "--discard-changes").is_err());
+        assert!(switch_branch(&repo.0, "refs/heads/missing").is_err());
+        repo.git(&["restore", "file.txt"]);
+        repo.git(&["remote", "add", "origin", "."]);
+        repo.git(&[
+            "update-ref",
+            "refs/remotes/origin/review",
+            &repo.head_hash(),
+        ]);
+        assert_eq!(
+            switch_branch(&repo.0, "refs/remotes/origin/review").unwrap(),
+            "review"
+        );
+        assert_eq!(
+            branch_info(&repo.0).unwrap().upstream.as_deref(),
+            Some("origin/review")
+        );
     }
 }

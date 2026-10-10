@@ -137,6 +137,10 @@ pub struct Server {
 }
 
 impl Server {
+    #[cfg(test)]
+    pub fn start_test(ctx: egui::Context, directory: PathBuf) -> Result<Self, String> {
+        Self::start_in(ctx, directory)
+    }
     pub fn start(ctx: egui::Context) -> Result<Self, String> {
         Self::start_in(ctx, endpoint_directory())
     }
@@ -302,7 +306,7 @@ fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
             "The connection failed while sending the request: {error}. Its outcome is unknown. Inspect vEdit's status before retrying a change."
         )
     })?;
-    let response = read_frame(&mut stream, MAX_RESPONSE_BYTES).map_err(|error| {
+    let response = read_frame_with_timeout(&mut stream, MAX_RESPONSE_BYTES, request_timeout(request) + Duration::from_secs(1)).map_err(|error| {
         format!(
             "vEdit did not return a complete result: {error}. The request may have been applied. Inspect vEdit's status before retrying a change."
         )
@@ -363,11 +367,12 @@ fn serve_connection(
     let response = match read_frame(&mut stream, MAX_REQUEST_BYTES) {
         Ok(frame) => match decode_request(&frame, token) {
             Ok(request) => {
+                let timeout = request_timeout(&request);
                 let (reply, receiver) = mpsc::channel();
                 match sender.try_send(Envelope { request, reply }) {
                     Ok(()) => {
                         ctx.request_repaint();
-                        wait_for_application(receiver, stop)
+                        wait_for_application(receiver, stop, timeout)
                     }
                     Err(mpsc::TrySendError::Full(_)) => Response::failure(
                         "busy",
@@ -422,8 +427,23 @@ fn decode_request(frame: &[u8], token: &str) -> Result<Request, Response> {
     })
 }
 
-fn wait_for_application(receiver: mpsc::Receiver<Response>, stop: &AtomicBool) -> Response {
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
+fn request_timeout(request: &Request) -> Duration {
+    if matches!(
+        request,
+        Request::GitBranches { .. } | Request::GitHistory { .. } | Request::GitSwitchBranch { .. }
+    ) {
+        Duration::from_secs(50)
+    } else {
+        REQUEST_TIMEOUT
+    }
+}
+
+fn wait_for_application(
+    receiver: mpsc::Receiver<Response>,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Response {
+    let deadline = Instant::now() + timeout;
     loop {
         if stop.load(Ordering::Acquire) {
             return Response::failure(
@@ -442,7 +462,10 @@ fn wait_for_application(receiver: mpsc::Receiver<Response>, stop: &AtomicBool) -
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
                 return Response::failure(
                     "timeout",
-                    "vEdit did not return a result within ten seconds. Its outcome is unknown. Inspect status before retrying a change.",
+                    format!(
+                        "vEdit did not return a result within {} seconds. Its outcome is unknown. Inspect git-status/status before retrying a change.",
+                        timeout.as_secs()
+                    ),
                 );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -461,7 +484,15 @@ fn configure_stream(stream: &TcpStream) -> io::Result<()> {
 }
 
 fn read_frame(stream: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> {
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    read_frame_with_timeout(stream, limit, REQUEST_TIMEOUT)
+}
+
+fn read_frame_with_timeout(
+    stream: &mut TcpStream,
+    limit: usize,
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
     let mut frame = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {

@@ -278,7 +278,7 @@ impl VEditApp {
         };
         if ui
             .add(
-                egui::Button::new(RichText::new(status.label).size(10.5).color(status.color))
+                egui::Button::new(RichText::new(status.label).size(11.0).color(status.color))
                     .frame_when_inactive(false)
                     .corner_radius(3.0),
             )

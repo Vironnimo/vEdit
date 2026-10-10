@@ -55,6 +55,8 @@ fn fixture() -> VEditApp {
                 .collect(),
             author: "Alex Überarbeitung".into(),
             date: "2026-09-26".into(),
+            timestamp: 0,
+            on_remote: false,
             subject: format!(
                 "Commit {index}: readable history with a long Unicode subject Überarbeitung"
             ),
@@ -103,7 +105,8 @@ fn row_rects(screen: &Harness<'static, VEditApp>) -> Vec<egui::Rect> {
     screen.state().projects[0]
         .recent_commits
         .iter()
-        .map(|commit| screen.get_by_label(&commit.subject).rect())
+        .filter(|commit| screen.output().shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with(&commit.subject))))
+        .filter_map(|commit| screen.query_by_label(&commit.subject).map(|row| row.rect()))
         .collect()
 }
 
@@ -158,13 +161,13 @@ fn git_unsaved_count_includes_other_open_folders_of_the_repository() {
 }
 
 #[test]
-fn compact_history_uses_one_subject_author_line_without_inline_metadata() {
+fn history_keeps_subject_author_and_colored_branch_metadata_on_separate_lines() {
     for width in [220.0, 360.0] {
         let mut screen = harness(fixture(), width, false);
         screen.run_steps(3);
         let rows = row_rects(&screen);
         for (row, commit) in rows.iter().zip(&screen.state().projects[0].recent_commits) {
-            assert_eq!(row.height(), 28.0);
+            assert_eq!(row.height(), 44.0);
             let texts: Vec<_> = screen
                 .output()
                 .shapes
@@ -178,7 +181,15 @@ fn compact_history_uses_one_subject_author_line_without_inline_metadata() {
                         .then_some((text, shape.clip_rect))
                 })
                 .collect();
-            assert_eq!(texts.len(), 1, "only subject and author belong in the row");
+            assert_eq!(
+                texts.len(),
+                2,
+                "subject and branch metadata have separate lines"
+            );
+            assert!(texts[1].0.galley.text().starts_with("Local  "));
+            for reference in &commit.refs {
+                assert!(texts[1].0.galley.text().contains(&reference.name));
+            }
             let (text, clip) = texts[0];
             assert_eq!(
                 text.galley.text(),
@@ -307,7 +318,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     screen.run_steps(3);
     let idle = [
         screen.get_by_label("Source control panel title").rect(),
-        screen.get_by_label(branch).rect(),
+        screen.get_by_label(&format!("{branch} ▾")).rect(),
         screen.get_by_label("···").rect(),
     ];
     screen.state_mut().projects[0].git_loading = true;
@@ -316,7 +327,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
         idle,
         [
             screen.get_by_label("Source control panel title").rect(),
-            screen.get_by_label(branch).rect(),
+            screen.get_by_label(&format!("{branch} ▾")).rect(),
             screen.get_by_label("···").rect()
         ]
     );
@@ -329,7 +340,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
         idle,
         [
             screen.get_by_label("Source control panel title").rect(),
-            screen.get_by_label(branch).rect(),
+            screen.get_by_label(&format!("{branch} ▾")).rect(),
             screen.get_by_label("···").rect()
         ]
     );
@@ -337,28 +348,46 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
 }
 
 #[test]
-fn segmented_sections_have_a_visible_active_marker_and_support_keyboard_switching() {
+fn stacked_git_regions_resize_and_keep_both_contents_visible() {
     let mut app = fixture();
     app.projects[0].git_view.section = GitSection::Changes;
     let mut screen = harness(app, 360.0, false);
     screen.run_steps(3);
-    let changes = screen.get_by_label("Changes  0").rect();
-    let history = screen.get_by_label("History").rect();
-    assert_eq!(changes.size(), history.size());
-    let active_marker = |screen: &Harness<'static, VEditApp>, rect: egui::Rect| {
-        screen.output().shapes.iter().any(|shape| {
-            matches!(&shape.shape,
-            egui::Shape::LineSegment { points, stroke }
-                if stroke.color == ACCENT && rect.contains(points[0]) && rect.contains(points[1]))
-        })
-    };
-    assert!(active_marker(&screen, changes));
-    assert!(!active_marker(&screen, history));
-    screen.get_by_label("History").hover();
+    assert!(
+        screen.get_by_label("Changes  0").rect().bottom()
+            < screen.get_by_label("History").rect().top()
+    );
+    assert!(screen.query_by_label("Working tree is clean").is_some());
+    assert!(screen.query_by_label_contains("Commit 0:").is_some());
+    let before = screen.get_by_label("History").rect().top();
+    let start = screen
+        .get_by_label("Resize Changes and History")
+        .rect()
+        .center();
+    screen.event(egui::Event::PointerMoved(start));
+    screen.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
     screen.run_steps(1);
-    assert_eq!(
-        screen.output().platform_output.cursor_icon,
-        egui::CursorIcon::PointingHand
+    let end = start - egui::vec2(0.0, 80.0);
+    screen.event(egui::Event::PointerMoved(end));
+    screen.run_steps(2);
+    screen.event(egui::Event::PointerButton {
+        pos: end,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    screen.run_steps(3);
+    assert!(screen.get_by_label("History").rect().top() < before - 40.0);
+    assert!(
+        screen.state().session().projects[0]
+            .git_split_ratio
+            .unwrap()
+            < 0.5
     );
     screen.get_by_label("History").focus();
     screen.run_steps(1);
@@ -368,14 +397,14 @@ fn segmented_sections_have_a_visible_active_marker_and_support_keyboard_switchin
         screen.state().projects[0].git_view.section,
         GitSection::History
     );
-    assert!(active_marker(&screen, history));
-    assert!(!active_marker(&screen, changes));
+    assert!(screen.query_by_label("Working tree is clean").is_some());
     screen.get_by_label("Changes  0").click();
     screen.run_steps(2);
     assert_eq!(
         screen.state().projects[0].git_view.section,
         GitSection::Changes
     );
+    assert!(screen.query_by_label_contains("Commit 0:").is_some());
 }
 
 fn keyboard_changes_fixture() -> VEditApp {

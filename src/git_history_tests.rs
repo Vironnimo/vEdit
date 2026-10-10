@@ -8,6 +8,8 @@ fn commit(index: usize) -> git::CommitSummary {
         refs: Vec::new(),
         author: "History Author".into(),
         date: "2026-09-26".into(),
+        timestamp: 0,
+        on_remote: false,
         subject: format!("Commit {index:02}"),
     }
 }
@@ -274,7 +276,8 @@ fn older_merge_commit_hover_keeps_metadata_and_shows_its_cached_change_summary()
         "−4",
         "Includes binary changes",
         "topic/older-merge",
-        "History Author · 2026-09-26",
+        "History Author",
+        "2026-09-26 · time unavailable",
         &hash,
     ] {
         assert!(
@@ -523,6 +526,7 @@ fn only_the_expected_history_page_extends_the_existing_graph() {
 fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
     let mut app = history_workspace(git::HISTORY_PAGE_SIZE * 2);
     let snapshot = git::HistorySnapshot {
+        local_only: Default::default(),
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
             hash: commit(0).hash,
@@ -552,6 +556,7 @@ fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
 fn moved_refs_leave_the_original_graph_and_snapshot_pageable() {
     let mut app = history_workspace(2);
     let original = git::HistorySnapshot {
+        local_only: Default::default(),
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
             hash: commit(0).hash,
@@ -566,6 +571,7 @@ fn moved_refs_leave_the_original_graph_and_snapshot_pageable() {
     let prefix = app.projects[0].recent_commits.clone();
     let graph = app.projects[0].git_view.graph.clone();
     let changed = git::HistorySnapshot {
+        local_only: Default::default(),
         tips: vec![commit(99).hash],
         refs: vec![git::CommitRef {
             hash: commit(99).hash,
@@ -613,6 +619,7 @@ fn replacing_history_invalidates_a_pending_page_even_at_the_same_offset() {
     let old_generation = app.projects[0].git_history_generation;
     let replacement = vec![commit(100), commit(101)];
     let snapshot = git::HistorySnapshot {
+        local_only: Default::default(),
         tips: vec![replacement[0].hash.clone()],
         refs: Vec::new(),
     };
@@ -729,4 +736,199 @@ fn a_history_error_stops_automatic_requests_until_explicit_retry() {
     assert!(screen.state().projects[0].git_history_error.is_none());
     assert!(screen.state().projects[0].git_history_loading);
     assert_eq!(screen.state().projects[0].git_view.graph, graph);
+}
+
+fn git_cli_reply(app: &mut VEditApp, request: crate::cli::Request) -> crate::cli::Response {
+    let (reply, receiver) = mpsc::channel();
+    assert!(app.control_git_async(&request, reply));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(response) = receiver.try_recv() {
+            return response;
+        }
+        assert!(Instant::now() < deadline, "Git CLI response timed out");
+        app.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn git_cli_pages_branches_and_history_and_waits_for_safe_switch_completion() {
+    use crate::cli::Request;
+    let repo = HoverRepository::new();
+    let result = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo.0)
+        .args(["branch", "feature/Überarbeitung"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let mut app = repo.app();
+    let first = git_cli_reply(
+        &mut app,
+        Request::GitBranches {
+            workspace: None,
+            limit: 1,
+            offset: 0,
+        },
+    );
+    assert!(first.ok, "{first:?}");
+    assert_eq!(first.result["total"], 2);
+    assert_eq!(first.result["next_offset"], 1);
+    let second = git_cli_reply(
+        &mut app,
+        Request::GitBranches {
+            workspace: None,
+            limit: 1,
+            offset: 1,
+        },
+    );
+    assert!(second.ok && second.result["has_more"] == false);
+    assert_ne!(
+        first.result["items"][0]["ref"],
+        second.result["items"][0]["ref"]
+    );
+    let target = "refs/heads/feature/Überarbeitung".to_owned();
+    let history = git_cli_reply(
+        &mut app,
+        Request::GitHistory {
+            workspace: None,
+            limit: 1,
+            offset: 0,
+        },
+    );
+    assert!(history.ok && history.result["has_more"] == true);
+    assert!(
+        history.result["items"][0]["date"]
+            .as_str()
+            .unwrap()
+            .contains('T')
+    );
+    assert_eq!(history.result["items"][0]["on_remote"], false);
+    let rest = git_cli_reply(
+        &mut app,
+        Request::GitHistory {
+            workspace: None,
+            limit: 1,
+            offset: 1,
+        },
+    );
+    assert!(rest.ok && rest.result["has_more"] == false);
+    let mut draft = EditorTab::new(None, "Draft".into());
+    draft.text = "keep agent work".into();
+    draft.changed();
+    draft.agent_unsaved = true;
+    app.projects[0].tabs.push(draft);
+    let blocked = git_cli_reply(
+        &mut app,
+        Request::GitSwitchBranch {
+            workspace: None,
+            target: target.clone(),
+        },
+    );
+    assert!(!blocked.ok);
+    assert_eq!(blocked.error.unwrap().code, "git_switch_blocked");
+    assert_eq!(app.projects[0].tabs.last().unwrap().text, "keep agent work");
+    app.projects[0].tabs.pop();
+    let switched = git_cli_reply(
+        &mut app,
+        Request::GitSwitchBranch {
+            workspace: None,
+            target,
+        },
+    );
+    assert!(switched.ok, "{switched:?}");
+    assert_eq!(switched.result["completed"], true);
+    assert_eq!(switched.result["branch"], "feature/Überarbeitung");
+    assert_eq!(
+        git::status(&repo.0).unwrap().branch.as_deref(),
+        Some("feature/Überarbeitung")
+    );
+    let missing = git_cli_reply(
+        &mut app,
+        Request::GitSwitchBranch {
+            workspace: None,
+            target: "refs/heads/missing".into(),
+        },
+    );
+    assert!(!missing.ok);
+    let invalid = git_cli_reply(
+        &mut app,
+        Request::GitSwitchBranch {
+            workspace: None,
+            target: "--force".into(),
+        },
+    );
+    assert_eq!(invalid.error.unwrap().code, "invalid_request");
+}
+
+#[test]
+fn history_tooltip_shows_exact_zoned_time_and_relative_age() {
+    let mut app = history_workspace(1);
+    let commit = &mut app.projects[0].recent_commits[0];
+    commit.date = "2026-10-10T21:05:12+02:00".into();
+    commit.timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 720;
+    let mut screen = history_screen(app);
+    immediate_history_tooltips(&mut screen);
+    screen.run_steps(3);
+    screen.hover_at(screen.get_by_label("Commit 00").rect().center());
+    screen.run_steps(4);
+    assert!(
+        screen
+            .query_by_label("2026-10-10 21:05:12+02:00 · 12 minutes ago")
+            .is_some()
+    );
+}
+
+#[test]
+#[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
+fn git_cli_executable_round_trip_in_isolated_editor() {
+    let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
+    let repo = HoverRepository::new();
+    let control_directory = repo.0.join("isolated-control");
+    let mut app = repo.app();
+    app.control =
+        Some(crate::cli::Server::start_test(app.ctx.clone(), control_directory.clone()).unwrap());
+    let mut run = |args: &[&str]| {
+        let mut child = std::process::Command::new(&binary)
+            .args(args)
+            .env("VEDIT_CONTROL_DIR", &control_directory)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(55);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "CLI process timed out");
+            app.poll_control();
+            app.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.stderr.is_empty());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        println!(
+            "{}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+        (output.status.success(), result)
+    };
+    let (ok, branches) = run(&["git-branches", "--limit", "1"]);
+    assert!(ok);
+    let target = branches["result"]["items"][0]["ref"].as_str().unwrap();
+    let (ok, switched) = run(&["git-switch-branch", target]);
+    assert!(ok && switched["result"]["completed"] == true);
+    let (ok, first) = run(&["git-history", "--limit", "1"]);
+    assert!(ok && first["result"]["has_more"] == true);
+    let (ok, last) = run(&["git-history", "--limit", "1", "--offset", "1"]);
+    assert!(ok && last["result"]["has_more"] == false);
+    let (ok, missing) = run(&["git-switch-branch", "refs/heads/missing"]);
+    assert!(!ok && missing["error"]["code"] == "git_switch_failed");
+    let (ok, invalid) = run(&["git-switch-branch"]);
+    assert!(!ok && invalid["error"]["code"] == "invalid_arguments");
 }

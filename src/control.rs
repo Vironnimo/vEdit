@@ -27,6 +27,9 @@ impl VEditApp {
                     .send(Response::failure("invalid_request", error));
                 continue;
             }
+            if self.control_git_async(&envelope.request, envelope.reply.clone()) {
+                continue;
+            }
             if self.control_query_async(&envelope.request, envelope.reply.clone()) {
                 continue;
             }
@@ -597,7 +600,7 @@ impl VEditApp {
             .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
-    fn control_dialog(&self) -> Option<&'static str> {
+    pub(super) fn control_dialog(&self) -> Option<&'static str> {
         if self.close_action.is_some() {
             Some("confirm_close")
         } else if self.save_as.is_some() {

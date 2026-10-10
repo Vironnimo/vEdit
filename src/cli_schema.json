@@ -338,6 +338,23 @@
       "offset": 0
     },
     {
+      "op": "git_branches",
+      "workspace": "C:/project",
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "git_history",
+      "workspace": "C:/project",
+      "limit": 100,
+      "offset": 0
+    },
+    {
+      "op": "git_switch_branch",
+      "target": "refs/heads/main",
+      "workspace": "C:/project"
+    },
+    {
       "op": "task",
       "action": "check"
     },

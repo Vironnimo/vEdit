@@ -26,7 +26,7 @@ Substitute the actual absolute path. `--preview` displays Markdown for reading; 
 
 ## Work in the application
 
-For editing open buffers, selections, settings, split views, file operations, search, diagnostics, Git status, or tasks, read [references/editor-control.md](references/editor-control.md). Use `read` when existing text matters. Guard buffer changes with `expected_revision` from the latest read, tab, or mutation response; on a mismatch, read the current buffer and reconsider the change. Text edits are undoable and remain unsaved until explicitly saved.
+For editing open buffers, selections, settings, split views, file operations, search, diagnostics, Git status/branches/history, branch switching, or tasks, read [references/editor-control.md](references/editor-control.md). Use `read` when existing text matters. Guard buffer changes with `expected_revision` from the latest read, tab, or mutation response; on a mismatch, read the current buffer and reconsider the change. Text edits are undoable and remain unsaved until explicitly saved.
 
 Use ordinary file tools for repository changes that do not need vEdit's in-memory state. Use editor control when the user wants to inspect an unsaved proposal, work with an existing buffer, or arrange their window. Change persistent settings only when they are part of the user's task; retain Vim by default.
 

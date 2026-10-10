@@ -148,3 +148,9 @@ To create a folder, use `action:{"action":"create_folder","parent":"C:/project",
 An open/review can be partially successful; retry failed opens only, or send a deliberate complete replacement review. Files stay with their existing open buffer's project, otherwise the deepest registered project containing the path; an unmatched path opens a project for its parent directory. Successful files appear in that project's tab group. `open` leaves the last successful file's project visible; `review` reveals the first successful file's project. A review can span projects: it retains all successful buffers and marks, and `focus TAB_ID` reveals an item from another project in its saved layout. Inspect `tabs` for ownership and `status`/`layout` for the final visible views; an item's success does not mean every reviewed file is visible at once.
 
 A review replaces earlier annotations across projects, so preserve items that should remain. After an edit, old annotations become stale; submit updated ranges against the current buffer if marks are still needed. An active user dialog, Vim search, or tab drag can block mutation; inspect the reported interaction and wait for the user to finish.
+
+## Git branches and history
+
+`git-branches [WORKSPACE]` lists local and fetched remote branches; `git-history [WORKSPACE]` reads the history shown by the editor, including `on_remote`, author date/time and Unix timestamp. Both accept `--limit` and `--offset`; continue with `next_offset` while `has_more` is true. Remote status reflects the last fetch.
+
+`git-switch-branch REF [WORKSPACE]` takes the exact `ref` from `git-branches`, waits for Git, and returns the resulting branch. A remote ref creates a local tracking branch. Unsaved buffers and Git conflicts refuse the switch without discarding changes. Omit WORKSPACE for the active project. Run these commands separately from batches.

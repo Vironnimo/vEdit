@@ -60,7 +60,10 @@ fn status_persistently_explains_save_state_and_controls_autosave_without_editing
     let original = screen.state().tab().unwrap().text.clone();
     let saved = painted_text(&screen, "Saved").expect("save state visible without a tooltip");
     let off = screen.get_by_label("Auto save off").rect();
-    assert!(saved.top() > 610.0 && !saved.intersects(off));
+    assert!(
+        saved.top() > screen.ctx.content_rect().bottom() - 48.0 && !saved.intersects(off),
+        "save text={saved:?}, autosave={off:?}"
+    );
     assert!(off.right() < 960.0);
 
     screen.get_by_label("Auto save off").click();

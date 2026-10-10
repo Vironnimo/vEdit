@@ -535,6 +535,27 @@ pub enum Request {
         #[serde(default)]
         offset: usize,
     },
+    GitBranches {
+        #[serde(default)]
+        workspace: Option<PathBuf>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    GitHistory {
+        #[serde(default)]
+        workspace: Option<PathBuf>,
+        #[serde(default = "default_limit")]
+        limit: usize,
+        #[serde(default)]
+        offset: usize,
+    },
+    GitSwitchBranch {
+        target: String,
+        #[serde(default)]
+        workspace: Option<PathBuf>,
+    },
     Task {
         action: TaskAction,
     },
@@ -634,6 +655,9 @@ pub const HELP: &str = r#"vEdit CLI — read, edit and arrange the running edito
                     [--exclude PATTERN ...|--no-excludes]
   vedit-cli output [--line N] [--count N]
   vedit-cli git-status [WORKSPACE] [--limit N] [--offset N]
+  vedit-cli git-branches [WORKSPACE] [--limit N] [--offset N]
+  vedit-cli git-history [WORKSPACE] [--limit N] [--offset N]
+  vedit-cli git-switch-branch REF [WORKSPACE]
   vedit-cli new [TITLE]
   vedit-cli task check|test|build|run_file|stop
   vedit-cli file ACTION.json
@@ -653,6 +677,15 @@ tabs. Batches report per-item results; retry only failed items.
 Each project keeps its own tab groups, splits and views. workspace selects its
 saved layout; focus selects the named tab's project. Buffer read/edit/save do not
 switch projects. status.layout includes workspace and only its current panes.
+
+Git branches/history are read-only and include local and fetched remote refs.
+Omit WORKSPACE for the active project, --limit for 100 rows, --offset for the
+first row. Follow next_offset while has_more is true. History uses the visible
+snapshot when available and includes on_remote, exact date/time and Unix timestamp.
+Git switch-branch takes the exact ref from git-branches (refs/heads/... or
+refs/remotes/...). It waits for completion and returns the resulting branch.
+Remote refs create a tracking branch. Unsaved documents and Git conflicts refuse
+the switch; no force, reset or automatic stash. These commands do not fetch.
 
 Review example:
 {"title":"Plan","files":[{"path":"plan.md","view":"preview"},
@@ -1077,16 +1110,41 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 line_count: options.count.unwrap_or(100),
             }
         }
-        "git-status" => {
+        "git-status" | "git-branches" | "git-history" => {
             if positional.len() > 1 {
-                return Err("git-status takes an optional WORKSPACE".into());
+                return Err(format!("{command} takes an optional WORKSPACE"));
             }
-            Request::GitStatus {
-                workspace: positional.first().map(|p| absolute(p.into())),
-                limit: options.limit.unwrap_or(100),
-                offset: options.offset.unwrap_or(0),
+            let workspace = positional.first().map(|p| absolute(p.into()));
+            let limit = options.limit.unwrap_or(100);
+            let offset = options.offset.unwrap_or(0);
+            match command.as_str() {
+                "git-branches" => Request::GitBranches {
+                    workspace,
+                    limit,
+                    offset,
+                },
+                "git-history" => Request::GitHistory {
+                    workspace,
+                    limit,
+                    offset,
+                },
+                _ => Request::GitStatus {
+                    workspace,
+                    limit,
+                    offset,
+                },
             }
         }
+        "git-switch-branch" => {
+            if !(1..=2).contains(&positional.len()) {
+                return Err("git-switch-branch needs REF and an optional WORKSPACE; use an exact ref from git-branches".into());
+            }
+            Request::GitSwitchBranch {
+                target: positional[0].clone(),
+                workspace: positional.get(1).map(|p| absolute(p.into())),
+            }
+        }
+
         "new" => {
             if positional.len() > 1 {
                 return Err("new takes an optional TITLE; use request for path/text".into());
@@ -1207,6 +1265,8 @@ impl Options {
                         | "search"
                         | "diagnostics"
                         | "git-status"
+                        | "git-branches"
+                        | "git-history"
                         | "bookmarks"
                         | "agent-marks"
                 ),
@@ -1216,7 +1276,14 @@ impl Options {
                 self.offset.is_some(),
                 matches!(
                     command,
-                    "tabs" | "find" | "diagnostics" | "git-status" | "bookmarks" | "agent-marks"
+                    "tabs"
+                        | "find"
+                        | "diagnostics"
+                        | "git-status"
+                        | "git-branches"
+                        | "git-history"
+                        | "bookmarks"
+                        | "agent-marks"
                 ),
                 "--offset",
             ),
@@ -1566,6 +1633,18 @@ fn resolve_paths(request: &mut Request) {
             workspace: Some(path),
             ..
         }
+        | Request::GitBranches {
+            workspace: Some(path),
+            ..
+        }
+        | Request::GitHistory {
+            workspace: Some(path),
+            ..
+        }
+        | Request::GitSwitchBranch {
+            workspace: Some(path),
+            ..
+        }
         | Request::GitStatus {
             workspace: Some(path),
             ..
@@ -1844,8 +1923,31 @@ pub fn validate(request: &Request) -> Result<(), String> {
             workspace,
             limit,
             offset,
+        }
+        | Request::GitBranches {
+            workspace,
+            limit,
+            offset,
+        }
+        | Request::GitHistory {
+            workspace,
+            limit,
+            offset,
         } => {
             validate_page(*limit, *offset)?;
+            if let Some(path) = workspace {
+                validate_path(path)?;
+            }
+        }
+        Request::GitSwitchBranch { target, workspace } => {
+            if !target.starts_with("refs/heads/") && !target.starts_with("refs/remotes/")
+                || target.contains(['\n', '\r', '\0'])
+                || target.len() > 4096
+            {
+                return Err(
+                    "Use an exact refs/heads/... or refs/remotes/... ref from git-branches".into(),
+                );
+            }
             if let Some(path) = workspace {
                 validate_path(path)?;
             }
@@ -1995,9 +2097,14 @@ pub fn validate(request: &Request) -> Result<(), String> {
             for action in actions {
                 if matches!(
                     action,
-                    Request::Batch { .. } | Request::Search { .. } | Request::File { .. }
+                    Request::Batch { .. }
+                        | Request::Search { .. }
+                        | Request::File { .. }
+                        | Request::GitBranches { .. }
+                        | Request::GitHistory { .. }
+                        | Request::GitSwitchBranch { .. }
                 ) {
-                    return Err("Nested batches, background disk search and asynchronous file actions cannot be inside batch; run search/file separately".into());
+                    return Err("Nested batches, background disk search and asynchronous file actions cannot be inside batch; run search/file/git-branches/git-history/git-switch-branch separately".into());
                 }
                 validate(action)?;
             }
@@ -3351,5 +3458,34 @@ mod tests {
         };
         assert!(files[0].path.ends_with("--no-start"));
         assert!(files[1].path.ends_with("--help"));
+    }
+    #[test]
+    fn git_commands_parse_exact_refs_and_bounded_pages() {
+        for command in ["git-branches", "git-history"] {
+            let Parsed::Command { request, .. } =
+                parse(&[command, "--limit", "1", "--offset", "2"]).unwrap()
+            else {
+                panic!()
+            };
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["limit"], 1);
+            assert_eq!(value["offset"], 2);
+        }
+        let Parsed::Command { request, .. } =
+            parse(&["git-switch-branch", "refs/heads/feature/Überarbeitung"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["target"],
+            "refs/heads/feature/Überarbeitung"
+        );
+        for args in [
+            vec!["git-switch-branch"],
+            vec!["git-switch-branch", "main"],
+            vec!["git-branches", "--limit", "0"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
     }
 }

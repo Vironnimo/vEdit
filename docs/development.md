@@ -35,8 +35,10 @@ Behavioral UI tests also live in feature-specific `*_tests.rs` files. WGPU rende
 requires a usable graphics backend even though it does not open a native window.
 
 On this Windows setup, a parallel headless test run produced a native crash in
-the NVIDIA OpenGL driver (`nvoglv64.dll`). The full suite passes both serially and
-with Direct3D 12 selected explicitly, without changing the references or assertions:
+the NVIDIA OpenGL driver (`nvoglv64.dll`). An earlier suite passed serially and
+with Direct3D 12 requested explicitly. The 0.4.18 run reproduced that driver crash
+even with this environment variable, so use the serial fallback below if the
+headless renderer still selects OpenGL:
 
 ```powershell
 $previousGpuBackend = $env:WGPU_BACKEND
@@ -137,3 +139,19 @@ working instructions. `.agents/skills/vedit/` teaches control of a live editor;
 update its references, CLI help and schema together when that interface changes.
 `docs/agent-interface.md` separates the current observable contract from historical
 evaluations. Versioned review notes retain their original results and scope.
+
+## Git CLI integration fixture
+
+The Git CLI round trip uses its own temporary repository and private control endpoint,
+without opening or restarting a real editor. Build the CLI, then run just this check:
+
+```powershell
+cargo build --bin vedit-cli
+$env:VEDIT_CLI_TEST_BINARY = (Resolve-Path 'target/debug/vedit-cli.exe').Path
+cargo test --bin vedit git_cli_executable_round_trip_in_isolated_editor -- --ignored --nocapture
+```
+
+Git history freezes traversal roots and remote reachability for paging. The branch
+picker uses the latest refreshed refs; a switch runs without force or automatic stash
+and returns to the CLI after completion. The Changes/History divider is saved per
+project. Hover timestamps use the author time zone and a relative age.

@@ -153,6 +153,20 @@ mod tests {
     fn settings_categories_are_reachable_and_zoomed_pages_fit() {
         let mut app = VEditApp::empty(egui::Context::default());
         visual_tests::workspace(&mut app);
+        // This test only renders settings; no task runs. Show stable project
+        // metadata rather than the visual fixture's unique temporary path.
+        let project = &mut app.projects[0];
+        let stable_root = PathBuf::from("C:/Development/projects/tiny-project");
+        let index = project.index.take().unwrap();
+        project.index = Some(Arc::new(
+            (*index).clone().at_fixture_root(stable_root.clone()),
+        ));
+        for tab in &mut project.tabs {
+            if let Some(path) = &mut tab.path {
+                *path = stable_root.join(path.strip_prefix(&project.root).unwrap());
+            }
+        }
+        project.root = stable_root;
         let mut screen = visual_tests::harness(app);
         screen.run_steps(3);
         screen.state_mut().open_settings_section("Languages");

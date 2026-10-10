@@ -205,3 +205,34 @@ fn main_menu_and_nested_file_menu_screenshots() {
         screen.snapshot("vedit_file_menu");
     }
 }
+
+#[test]
+fn status_bar_aligns_mode_branch_and_save_text_with_room_for_labels() {
+    for width in [500.0, 960.0, 1440.0] {
+        let screen = harness(fixture(), width, 640.0);
+        let text_rect = |label: &str| {
+            screen
+                .output()
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing status text {label}"))
+        };
+        let mode = text_rect(" NORMAL ");
+        let branch = text_rect("main");
+        let saved = text_rect("Saved");
+        for (label, rect) in [("branch", branch), ("save state", saved)] {
+            assert!(
+                (mode.center().y - rect.center().y).abs() <= 1.0,
+                "{label} does not align at {width}: mode={mode:?}, text={rect:?}"
+            );
+        }
+        assert!(branch.left() - mode.right() >= 8.0);
+        assert!(screen.ctx.content_rect().bottom() - mode.bottom() >= 6.0);
+    }
+}

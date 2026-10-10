@@ -8,6 +8,104 @@ const MAX_SEARCH_WORKERS: usize = 4;
 static SEARCH_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 impl VEditApp {
+    /// Read Git in a worker, and acknowledge a switch only once Git completed.
+    pub(in crate::app) fn control_git_async(
+        &mut self,
+        request: &Request,
+        reply: Sender<Response>,
+    ) -> bool {
+        let (path, limit, offset) = match request {
+            Request::GitBranches {
+                workspace,
+                limit,
+                offset,
+            }
+            | Request::GitHistory {
+                workspace,
+                limit,
+                offset,
+            } => (workspace.as_deref(), *limit, *offset),
+            Request::GitSwitchBranch { workspace, .. } => (workspace.as_deref(), 0, 0),
+            _ => return false,
+        };
+        if let Err(error) = cli::validate(request) {
+            let _ = reply.send(Response::failure("invalid_request", error));
+            return true;
+        }
+        let project = match self.control_query_project(path) {
+            Ok(project) => project,
+            Err(response) => {
+                let _ = reply.send(response);
+                return true;
+            }
+        };
+        let Some(root) = project.git_root.clone() else {
+            let _ = reply.send(Response::failure("no_repository", "This workspace has no loaded repository. Inspect git-status for loading or errors."));
+            return true;
+        };
+        if let Request::GitSwitchBranch { target, .. } = request {
+            if let Err(error) = self.start_git_action(
+                root,
+                GitAction::SwitchBranch(target.clone()),
+                Some(reply.clone()),
+            ) {
+                let _ = reply.send(Response::failure("git_switch_blocked", error));
+            }
+            return true;
+        }
+        let snapshot = project.git_history_snapshot.clone();
+        let history = matches!(request, Request::GitHistory { .. });
+        let permit = match SearchPermit::acquire() {
+            Some(permit) => permit,
+            None => {
+                let _ = reply.send(Response::failure(
+                    "query_busy",
+                    "Background queries are busy; retry after they finish.",
+                ));
+                return true;
+            }
+        };
+        let worker_reply = reply.clone();
+        let spawn = std::thread::Builder::new().name("vedit-cli-git".into()).spawn(move || {
+            let _permit = permit;
+            let result = (|| -> Result<Value, String> {
+                let snapshot = if history { snapshot.map(Ok).unwrap_or_else(|| git::history_snapshot(&root)).map_err(|error| error.to_string())? }
+                    else { git::history_snapshot(&root).map_err(|error| error.to_string())? };
+                let (items, has_more, total): (Vec<Value>, bool, Option<usize>) = if history {
+                    let page = git::history_page(&root, &snapshot, offset, limit).map_err(|error| error.to_string())?;
+                    let items = page.commits.iter().map(git_commit_json).collect();
+                    (items, page.has_more, None)
+                } else {
+                    let refs: Vec<_> = snapshot.refs.iter().filter(|reference| matches!(reference.kind, git::RefKind::Local | git::RefKind::Remote)).collect();
+                    let items = refs.iter().skip(offset).take(limit).map(|reference| git_ref_json(reference)).collect();
+                    let total = refs.len();
+                    (items, offset.saturating_add(limit) < total, Some(total))
+                };
+                let mut bounded = Vec::new();
+                let mut bytes = 0;
+                let count = items.len();
+                for item in items {
+                    let size = serde_json::to_vec(&item).map_or(QUERY_PAYLOAD_BYTES, |bytes| bytes.len());
+                    if size > QUERY_PAYLOAD_BYTES && bounded.is_empty() {
+                        return Err("A Git record exceeds the response byte limit; use Git directly to inspect this record.".into());
+                    }
+                    if bytes + size > QUERY_PAYLOAD_BYTES { break; }
+                    bytes += size;
+                    bounded.push(item);
+                }
+                let more = has_more || bounded.len() < count;
+                let next = offset.saturating_add(bounded.len());
+                Ok(json!({"repository":crate::paths::display(&root),"items":bounded,"offset":offset,"total":total,"has_more":more,"next_offset":if more { Some(next) } else { None },"remote_state":"last_fetch"}))
+            })();
+            let response = match result { Ok(value) => Response::success(value), Err(error) => Response::failure("git_query_failed", error.to_string()) };
+            let _ = worker_reply.send(response);
+        });
+        if let Err(error) = spawn {
+            let _ = reply.send(Response::failure("git_query_failed", error.to_string()));
+        }
+        true
+    }
+
     pub(super) fn control_query(&self, request: &Request) -> Option<Response> {
         if !matches!(
             request,
@@ -533,6 +631,27 @@ impl Drop for SearchPermit {
     fn drop(&mut self) {
         SEARCH_WORKERS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+fn git_ref_json(reference: &git::CommitRef) -> Value {
+    let (kind, prefix) = match reference.kind {
+        git::RefKind::Local => ("local", "refs/heads/"),
+        git::RefKind::Remote => ("remote", "refs/remotes/"),
+        git::RefKind::Tag => ("tag", "refs/tags/"),
+        git::RefKind::Head => ("head", ""),
+    };
+    json!({"ref":format!("{prefix}{}",reference.name),"name":reference.name,"kind":kind,"current":reference.current,"hash":reference.hash})
+}
+
+fn git_commit_json(commit: &git::CommitSummary) -> Value {
+    let mut subject = commit.subject.clone();
+    let mut author = commit.author.clone();
+    truncate_utf8(&mut subject, 4096);
+    truncate_utf8(&mut author, 1024);
+    json!({"hash":commit.hash,"parents":commit.parents,"subject":subject,"subject_truncated":subject != commit.subject,
+        "author":author,"author_truncated":author != commit.author,"date":commit.date,"timestamp":commit.timestamp,
+        "on_remote":commit.on_remote,"refs":commit.refs.iter().take(20).map(git_ref_json).collect::<Vec<_>>(),
+        "refs_total":commit.refs.len(),"refs_truncated":commit.refs.len() > 20})
 }
 
 #[cfg(test)]

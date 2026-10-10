@@ -73,7 +73,7 @@ impl VEditApp {
                     "The buffer matches the last saved document.".to_owned(),
                 )
             };
-            ui.label(RichText::new(label).size(10.5).color(color))
+            ui.label(RichText::new(label).size(11.0).color(color))
                 .on_hover_text(hint);
         }
         if !show_autosave {
@@ -91,7 +91,7 @@ impl VEditApp {
         );
         let response = ui
             .add(
-                egui::Button::new(RichText::new(label).size(10.5).color(if autosave {
+                egui::Button::new(RichText::new(label).size(11.0).color(if autosave {
                     ACCENT
                 } else {
                     MUTED

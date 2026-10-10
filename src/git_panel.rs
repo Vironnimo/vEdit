@@ -17,7 +17,11 @@ pub(super) enum GitSection {
 #[derive(Default)]
 pub(super) struct GitViewState {
     pub graph: crate::git_graph::Graph,
+    // Active keyboard region; both regions are always rendered.
     pub(super) section: GitSection,
+    pub(super) split_ratio: Option<f32>,
+    changes_rect: Option<egui::Rect>,
+    history_rect: Option<egui::Rect>,
     pub(super) selected_commit: Option<String>,
     pub(super) detail: Option<git::CommitDetails>,
     pub(super) detail_loading: bool,
@@ -580,6 +584,7 @@ enum GitUiAction {
     Pull,
     Push,
     Initialize,
+    SwitchBranch(String),
 }
 
 impl VEditApp {
@@ -671,7 +676,7 @@ impl VEditApp {
             .id_salt(("git-panel-content", self.active_project))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_max_height(height.max(330.0));
+                ui.set_max_height(height.max(480.0));
                 self.git_ui_contents(ui);
             });
     }
@@ -690,11 +695,24 @@ impl VEditApp {
         let repo = project.git_root.is_some();
         let loading = project.git_loading;
         let mut state = std::mem::take(&mut project.git_view);
+        let previous_split_ratio = state.split_ratio;
         let mut actions = Vec::new();
+        if let Some(pos) = ui.input(|input| {
+            input
+                .pointer
+                .press_origin()
+                .filter(|_| input.pointer.any_pressed())
+        }) {
+            if state.history_rect.is_some_and(|rect| rect.contains(pos)) {
+                state.section = GitSection::History;
+            } else if state.changes_rect.is_some_and(|rect| rect.contains(pos)) {
+                state.section = GitSection::Changes;
+            }
+        }
         let focus_requested = state.keyboard_focus_pending;
         let commit_message_id = git_row_id(&root, "commit-message");
         state.keyboard_controls.clear();
-        if repo && state.section == GitSection::Changes {
+        if repo {
             state.keyboard_controls.push(commit_message_id);
         }
         let focused = ui.memory(|memory| memory.focused());
@@ -795,21 +813,79 @@ impl VEditApp {
                 Vec2::new(width, 28.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(project.git_branch.as_deref().unwrap_or(if repo {
-                                "Detached HEAD"
-                            } else if loading {
-                                "Finding repository…"
-                            } else {
-                                "No repository"
-                            }))
-                            .size(13.0)
-                            .strong()
-                            .color(ACCENT),
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let label = project.git_branch.as_deref().unwrap_or(if repo {
+                        "Detached HEAD"
+                    } else if loading {
+                        "Finding repository…"
+                    } else {
+                        "No repository"
+                    });
+                    let response = ui
+                        .menu_button(
+                            RichText::new(format!("{label} ▾")).strong().color(ACCENT),
+                            |ui| {
+                                ui.set_max_width(360.0);
+                                ui.label(RichText::new("Switch branch").strong());
+                                if unsaved_count > 0 {
+                                    ui.label(
+                                        RichText::new(
+                                            "Save or close unsaved documents before switching.",
+                                        )
+                                        .color(ORANGE),
+                                    );
+                                }
+                                egui::ScrollArea::vertical()
+                                    .max_height(320.0)
+                                    .show(ui, |ui| {
+                                        for (kind, heading, prefix) in [
+                                            (git::RefKind::Local, "Local branches", "refs/heads/"),
+                                            (
+                                                git::RefKind::Remote,
+                                                "Remote branches",
+                                                "refs/remotes/",
+                                            ),
+                                        ] {
+                                            ui.label(RichText::new(heading).small().color(MUTED));
+                                            for reference in project
+                                                .git_branches
+                                                .iter()
+                                                .filter(|r| r.kind == kind)
+                                            {
+                                                let current = kind == git::RefKind::Local
+                                                    && project.git_branch.as_deref()
+                                                        == Some(&reference.name);
+                                                let response = ui.add_enabled(
+                                                    !busy && unsaved_count == 0 && !current,
+                                                    egui::Button::new(format!(
+                                                        "{}{}",
+                                                        if current { "✓ " } else { "" },
+                                                        reference.name
+                                                    ))
+                                                    .wrap(),
+                                                );
+                                                if response.clicked() {
+                                                    actions.push(GitUiAction::SwitchBranch(
+                                                        format!("{prefix}{}", reference.name),
+                                                    ));
+                                                    ui.close();
+                                                }
+                                            }
+                                        }
+                                    });
+                                ui.label(
+                                    RichText::new(
+                                        "Remote branches create a local tracking branch.",
+                                    )
+                                    .small()
+                                    .color(MUTED),
+                                );
+                            },
                         )
-                        .truncate(),
-                    )
+                        .response;
+                    state.keyboard_controls.push(response.id);
+                    git_popup_focus(&response, egui::Popup::default_response_id(&response));
+                    response
                 },
             )
             .inner
@@ -925,39 +1001,27 @@ impl VEditApp {
         } else {
             ui.add_space(7.0);
             let changed_count = project.git_changes.len();
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(1.0);
-                let changes = section_button(
-                    ui,
-                    &format!("Changes  {changed_count}"),
-                    state.section == GitSection::Changes,
-                    width,
-                    "Browse staged, unstaged, and new files",
-                );
-                state.keyboard_header = Some(changes.id);
-                state.keyboard_controls.push(changes.id);
-                if changes.clicked() {
+            let total_height = ui.available_height().max(360.0);
+            let ratio = state.split_ratio.unwrap_or(0.5).clamp(0.25, 0.75);
+            let changes_height =
+                (total_height * ratio).clamp(185.0, (total_height - 140.0).max(185.0));
+            let (changes_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), changes_height),
+                egui::Sense::hover(),
+            );
+            state.changes_rect = Some(changes_rect);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(changes_rect), |ui| {
+                ui.set_clip_rect(changes_rect.intersect(ui.clip_rect()));
+                let header = region_header(ui, &format!("Changes  {changed_count}"));
+                state.keyboard_header = Some(header.id);
+                state.keyboard_controls.push(header.id);
+                if header.clicked() {
                     state.section = GitSection::Changes;
+                    state.keyboard_focus_pending = true;
                 }
-                let history = section_button(
-                    ui,
-                    "History",
-                    state.section == GitSection::History,
-                    width,
-                    "Browse commits and their historical patches",
-                );
-                state.keyboard_controls.push(history.id);
-                if history.clicked() {
-                    state.section = GitSection::History;
-                }
-            });
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add(egui::Label::new(RichText::new("↑↓ Navigate · Enter Open · Tab Actions").size(10.0).color(MUTED)).truncate())
-                .on_hover_text("Arrow keys move between rows. Left/Right collapse or expand folders. Home/End jump to the first/last row. Enter opens a diff or commit. Shift+F10 opens a row's context menu. Tab reaches Stage/Unstage, Changes/History, the commit message and Commit button; Shift+Tab moves back. Repository actions are available from the ··· menu.");
-            match state.section {
-                GitSection::Changes => {
+                let height = ui.available_height();
+                egui::ScrollArea::vertical().id_salt(("git-changes-region", project_index)).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_max_height(height);
                     if unsaved_count > 0 {
                         ui.label(
                             RichText::new(format!(
@@ -991,7 +1055,7 @@ impl VEditApp {
                     let tree_scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-working-tree", project_index))
                         .auto_shrink([false, false])
-                        .max_height((ui.available_height() - composer_height).max(65.0))
+                        .max_height((ui.available_height() - composer_height).max(24.0))
                         .show(ui, |ui| {
                             if project.git_changes.is_empty() {
                                 ui.add_space(20.0);
@@ -1031,10 +1095,12 @@ impl VEditApp {
                                 }
                             }
                         });
+                    if state.section == GitSection::Changes {
                     state.keyboard_page_rows =
                         (tree_scroll.inner_rect.intersect(ui.clip_rect()).height() / 31.0)
                             .floor()
                             .max(1.0) as usize;
+                    }
                     ui.add_space(5.0);
                     ui.separator();
                     ui.add_space(5.0);
@@ -1093,163 +1159,218 @@ impl VEditApp {
                     if commit.clicked() {
                         actions.push(GitUiAction::Commit(project.commit_message.clone()));
                     }
+                });
+            });
+            let (divider_rect, divider) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), 9.0),
+                egui::Sense::click_and_drag(),
+            );
+            divider.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Slider,
+                    ui.is_enabled(),
+                    "Resize Changes and History",
+                )
+            });
+            let divider = divider.on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                .on_hover_text("Drag to resize Changes and History. Double-click to reset. Arrow keys resize when focused.");
+            if divider.dragged()
+                && let Some(pointer) = divider.interact_pointer_pos()
+            {
+                state.split_ratio =
+                    Some(((pointer.y - changes_rect.top()) / total_height).clamp(0.25, 0.75));
+            }
+            if divider.double_clicked() {
+                state.split_ratio = None;
+            }
+            if divider.has_focus() {
+                let step = ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
+                        -0.05
+                    } else if input.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
+                        0.05
+                    } else {
+                        0.0
+                    }
+                });
+                if step != 0.0 {
+                    state.split_ratio = Some((ratio + step).clamp(0.25, 0.75));
                 }
-                GitSection::History => {
-                    // The graph grows once per received page, never per painted
-                    // row. This also initializes synthetic screenshot fixtures.
-                    if state.graph.rows.len() > project.recent_commits.len() {
-                        state.graph.clear();
-                    }
-                    state
-                        .graph
-                        .append(&project.recent_commits[state.graph.rows.len()..]);
-                    if project.git_history_update_available
-                        && design::ghost_button(
-                            ui,
-                            "History changed · Refresh",
-                            "Show the latest branches and commits",
-                        )
+            }
+            state.keyboard_controls.push(divider.id);
+            ui.painter().line_segment(
+                [divider_rect.left_center(), divider_rect.right_center()],
+                Stroke::new(
+                    1.0,
+                    if divider.hovered() || divider.dragged() || divider.has_focus() {
+                        ACCENT
+                    } else {
+                        crate::palette::BORDER_STRONG
+                    },
+                ),
+            );
+            let history_rect = ui.available_rect_before_wrap();
+            state.history_rect = Some(history_rect);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(history_rect), |ui| {
+                ui.set_clip_rect(history_rect.intersect(ui.clip_rect()));
+                let header = region_header(ui, "History");
+                state.keyboard_controls.push(header.id);
+                if header.clicked() {
+                    state.section = GitSection::History;
+                    state.keyboard_focus_pending = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("● Local only").small().color(ACCENT));
+                    ui.label(RichText::new("● On remote").small().color(BLUE))
+                        .on_hover_text("Reachable from a remote branch, based on the last fetch");
+                });
+
+                // The graph grows once per received page, never per painted
+                // row. This also initializes synthetic screenshot fixtures.
+                if state.graph.rows.len() > project.recent_commits.len() {
+                    state.graph.clear();
+                }
+                state
+                    .graph
+                    .append(&project.recent_commits[state.graph.rows.len()..]);
+                if project.git_history_update_available
+                    && design::ghost_button(
+                        ui,
+                        "History changed · Refresh",
+                        "Show the latest branches and commits",
+                    )
+                    .clicked()
+                {
+                    actions.push(GitUiAction::RefreshHistory);
+                }
+                if let Some(error) = &project.git_history_error {
+                    error_note(ui, error);
+                    if design::ghost_button(ui, "Retry history", "Retry the failed history request")
                         .clicked()
                     {
-                        actions.push(GitUiAction::RefreshHistory);
+                        actions.push(GitUiAction::RetryHistory);
                     }
-                    if let Some(error) = &project.git_history_error {
-                        error_note(ui, error);
-                        if design::ghost_button(
-                            ui,
-                            "Retry history",
-                            "Retry the failed history request",
-                        )
-                        .clicked()
-                        {
-                            actions.push(GitUiAction::RetryHistory);
-                        }
-                    }
-                    if project.recent_commits.is_empty()
-                        && !loading
-                        && project.git_history_error.is_none()
+                }
+                if project.recent_commits.is_empty()
+                    && !loading
+                    && project.git_history_error.is_none()
+                {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("No commits yet").size(12.5).color(TEXT));
+                    ui.label(
+                        RichText::new("Stage changes and create your first commit.")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                }
+                let mut near_end = false;
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.spacing_mut().scroll.floating = false;
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .id_salt(("git-history", project_index, project.git_history_generation))
+                        .auto_shrink([false, false])
+                        .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT));
+                    if state.section == GitSection::History
+                        && let Some(target) = keyboard_target
+                        && let Some(index) = state.keyboard_rows.iter().position(|id| *id == target)
                     {
-                        ui.add_space(20.0);
-                        ui.label(RichText::new("No commits yet").size(12.5).color(TEXT));
-                        ui.label(
-                            RichText::new("Stage changes and create your first commit.")
-                                .size(11.0)
-                                .color(MUTED),
-                        );
+                        scroll = scroll.vertical_scroll_offset(index as f32 * HISTORY_ROW_HEIGHT);
                     }
-                    let mut near_end = false;
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        let mut scroll = egui::ScrollArea::vertical()
-                            .id_salt(("git-history", project_index, project.git_history_generation))
-                            .auto_shrink([false, false])
-                            .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT));
-                        if let Some(target) = keyboard_target
-                            && let Some(index) =
-                                state.keyboard_rows.iter().position(|id| *id == target)
-                        {
-                            scroll =
-                                scroll.vertical_scroll_offset(index as f32 * HISTORY_ROW_HEIGHT);
-                        }
-                        let history_scroll = scroll.show_rows(
-                            ui,
-                            HISTORY_ROW_HEIGHT,
-                            project.recent_commits.len(),
-                            |ui, range| {
-                                near_end =
-                                    history_near_end(range.end, project.recent_commits.len());
-                                for index in range {
-                                    let commit = &project.recent_commits[index];
-                                    ui.push_id(&commit.hash, |ui| {
-                                        let response = history_row(
+                    let history_scroll = scroll.show_rows(
+                        ui,
+                        HISTORY_ROW_HEIGHT,
+                        project.recent_commits.len(),
+                        |ui, range| {
+                            near_end = history_near_end(range.end, project.recent_commits.len());
+                            for index in range {
+                                let commit = &project.recent_commits[index];
+                                ui.push_id(&commit.hash, |ui| {
+                                    let response = history_row(
+                                        ui,
+                                        git_row_id(&root, &commit.hash),
+                                        commit,
+                                        state.selected_commit.as_deref() == Some(&commit.hash),
+                                        &state.graph.rows[index],
+                                        state.graph.lane_count,
+                                    );
+                                    history_hover(
+                                        &response,
+                                        commit,
+                                        state.hover_stats.get(&(root.clone(), commit.hash.clone())),
+                                        &mut actions,
+                                    );
+                                    if response.clicked() {
+                                        actions
+                                            .push(GitUiAction::SelectCommit(commit.hash.clone()));
+                                    }
+                                    git_context_menu(&response, |ui, focus| {
+                                        if git_menu_item(
                                             ui,
-                                            git_row_id(&root, &commit.hash),
-                                            commit,
-                                            state.selected_commit.as_deref() == Some(&commit.hash),
-                                            &state.graph.rows[index],
-                                            state.graph.lane_count,
-                                        );
-                                        history_hover(
-                                            &response,
-                                            commit,
-                                            state
-                                                .hover_stats
-                                                .get(&(root.clone(), commit.hash.clone())),
-                                            &mut actions,
-                                        );
-                                        if response.clicked() {
+                                            "Open commit",
+                                            "",
+                                            "Show metadata, message, and changed files",
+                                            focus,
+                                        )
+                                        .clicked()
+                                        {
                                             actions.push(GitUiAction::SelectCommit(
                                                 commit.hash.clone(),
                                             ));
+                                            ui.close();
                                         }
-                                        git_context_menu(&response, |ui, focus| {
-                                            if git_menu_item(
-                                                ui,
-                                                "Open commit",
-                                                "",
-                                                "Show metadata, message, and changed files",
-                                                focus,
-                                            )
-                                            .clicked()
-                                            {
-                                                actions.push(GitUiAction::SelectCommit(
-                                                    commit.hash.clone(),
-                                                ));
-                                                ui.close();
-                                            }
-                                            if git_menu_item(
-                                                ui,
-                                                "Copy commit hash",
-                                                "",
-                                                "Copy the full commit identifier",
-                                                false,
-                                            )
-                                            .clicked()
-                                            {
-                                                ui.ctx().copy_text(commit.hash.clone());
-                                                ui.close();
-                                            }
-                                        });
+                                        if git_menu_item(
+                                            ui,
+                                            "Copy commit hash",
+                                            "",
+                                            "Copy the full commit identifier",
+                                            false,
+                                        )
+                                        .clicked()
+                                        {
+                                            ui.ctx().copy_text(commit.hash.clone());
+                                            ui.close();
+                                        }
                                     });
-                                }
-                            },
-                        );
+                                });
+                            }
+                        },
+                    );
+                    if state.section == GitSection::History {
                         state.keyboard_page_rows =
                             (history_scroll.inner_rect.intersect(ui.clip_rect()).height()
                                 / HISTORY_ROW_HEIGHT)
                                 .floor()
                                 .max(1.0) as usize;
+                    }
+                });
+                ui.add_space(7.0);
+                if project.git_history_loading || (project.recent_commits.is_empty() && loading) {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0).color(MUTED));
+                        ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                     });
-                    ui.add_space(7.0);
-                    if project.git_history_loading || (project.recent_commits.is_empty() && loading)
-                    {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(14.0).color(MUTED));
-                            ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
-                        });
-                    } else if project.git_history_error.is_none()
-                        && !project.recent_commits.is_empty()
-                    {
-                        ui.label(
-                            RichText::new(if project.git_history_has_more {
-                                "Scroll for earlier commits"
-                            } else {
-                                "End of available history"
-                            })
-                            .size(10.5)
-                            .color(MUTED),
-                        );
-                    }
-                    if near_end
-                        && project.git_history_has_more
-                        && !project.git_history_loading
-                        && project.git_history_error.is_none()
-                        && !busy
-                    {
-                        actions.push(GitUiAction::LoadMore);
-                    }
+                } else if project.git_history_error.is_none() && !project.recent_commits.is_empty()
+                {
+                    ui.label(
+                        RichText::new(if project.git_history_has_more {
+                            "Scroll for earlier commits"
+                        } else {
+                            "End of available history"
+                        })
+                        .size(10.5)
+                        .color(MUTED),
+                    );
                 }
-            }
+                if near_end
+                    && project.git_history_has_more
+                    && !project.git_history_loading
+                    && project.git_history_error.is_none()
+                    && !busy
+                {
+                    actions.push(GitUiAction::LoadMore);
+                }
+            });
             if busy {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0).color(MUTED));
@@ -1276,6 +1397,7 @@ impl VEditApp {
         {
             state.keyboard_last_focus = Some(focused);
         }
+        self.session_dirty |= previous_split_ratio != state.split_ratio;
         project.git_view = state;
         self.perform_git_ui_actions(project_index, &root, actions);
     }
@@ -1520,6 +1642,9 @@ impl VEditApp {
                 GitUiAction::Fetch => self.git_action(root.to_path_buf(), GitAction::Fetch),
                 GitUiAction::Pull => self.git_action(root.to_path_buf(), GitAction::Pull),
                 GitUiAction::Push => self.git_action(root.to_path_buf(), GitAction::Push),
+                GitUiAction::SwitchBranch(target) => {
+                    self.git_action(root.to_path_buf(), GitAction::SwitchBranch(target))
+                }
                 GitUiAction::Initialize => {
                     self.git_action(root.to_path_buf(), GitAction::Initialize)
                 }
@@ -1554,48 +1679,14 @@ pub(super) fn refresh_indicator(ui: &mut egui::Ui, running: bool) -> egui::Respo
     }
 }
 
-fn section_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    selected: bool,
-    width: f32,
-    tooltip: &str,
-) -> egui::Response {
-    let response = ui.add_sized(
-        [width, 29.0],
-        egui::Button::new(RichText::new(label).size(12.0).color(if selected {
-            ACCENT
-        } else {
-            TEXT
-        }))
-        .selected(selected)
-        .fill(if selected {
-            ACCENT.gamma_multiply(0.16)
-        } else {
-            SURFACE
-        })
-        .stroke(Stroke::new(
-            1.0,
-            if selected {
-                ACCENT.gamma_multiply(0.45)
-            } else {
-                BORDER
-            },
-        ))
-        .corner_radius(5.0),
-    );
-    if selected {
-        ui.painter().line_segment(
-            [
-                egui::pos2(response.rect.left() + 8.0, response.rect.bottom() - 2.0),
-                egui::pos2(response.rect.right() - 8.0, response.rect.bottom() - 2.0),
-            ],
-            Stroke::new(1.5, ACCENT),
-        );
-    }
-    response
-        .on_hover_text(tooltip)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+fn region_header(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add_sized(
+        [ui.available_width(), 25.0],
+        egui::Button::new(RichText::new(label).strong().size(12.0).color(TEXT))
+            .fill(SURFACE)
+            .stroke(Stroke::NONE)
+            .corner_radius(2.0),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -2281,7 +2372,7 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-const HISTORY_ROW_HEIGHT: f32 = 28.0;
+const HISTORY_ROW_HEIGHT: f32 = 44.0;
 
 fn history_near_end(visible_end: usize, loaded: usize) -> bool {
     loaded > 0 && visible_end.saturating_add(4) >= loaded
@@ -2359,7 +2450,7 @@ fn history_row(
             }
         }
         let node = egui::pos2(lane_x(graph.node_lane), middle);
-        let color = graph_color(graph.node_color);
+        let color = if commit.on_remote { BLUE } else { ACCENT };
         painter.circle_filled(
             node,
             5.0,
@@ -2399,8 +2490,43 @@ fn history_row(
         // Lay out the whole line without an author reservation. Long subjects
         // keep their space and naturally push the author beyond the row clip.
         let line = ui.fonts_mut(|fonts| fonts.layout_job(line));
-        let top = rect.center().y - line.size().y * 0.5;
-        painter.galley(egui::pos2(left, top), line, TEXT);
+        painter.galley(egui::pos2(left, rect.top() + 4.0), line, TEXT);
+        let mut detail = egui::text::LayoutJob::default();
+        detail.wrap.max_rows = 1;
+        detail.append(
+            if commit.on_remote {
+                "Remote  "
+            } else {
+                "Local  "
+            },
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::proportional(10.5),
+                color,
+                ..Default::default()
+            },
+        );
+        for reference in &commit.refs {
+            detail.append(
+                &format!(
+                    "{}{}  ",
+                    if reference.current { "HEAD → " } else { "" },
+                    reference.name
+                ),
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::proportional(10.5),
+                    color: if reference.kind == git::RefKind::Remote {
+                        BLUE
+                    } else {
+                        ACCENT
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        let detail = ui.fonts_mut(|fonts| fonts.layout_job(detail));
+        painter.galley(egui::pos2(left, rect.top() + 23.0), detail, MUTED);
     }
     git_row_keyboard(ui, &response);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2413,9 +2539,35 @@ fn history_hover(
     actions: &mut Vec<GitUiAction>,
 ) {
     response.clone().on_hover_ui(|ui| {
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
         ui.set_max_width(460.0);
         ui.label(RichText::new(&commit.subject).strong());
-        ui.label(RichText::new(format!("{} · {}", commit.author, commit.date)).color(MUTED));
+        ui.label(RichText::new(&commit.author).color(MUTED));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        // Snapshot tests inject a fixed clock; production uses wall-clock time.
+        #[cfg(test)]
+        let now = ui
+            .data(|data| data.get_temp::<i64>(egui::Id::new("git-history-test-clock")))
+            .unwrap_or(now);
+        ui.label(
+            RichText::new(format!(
+                "{} · {}",
+                commit.date.replace('T', " "),
+                relative_time(commit.timestamp, now)
+            ))
+            .color(MUTED),
+        );
+        ui.label(
+            RichText::new(if commit.on_remote {
+                "On remote · based on the last fetch"
+            } else {
+                "Local only · not on a fetched remote branch"
+            })
+            .color(if commit.on_remote { BLUE } else { ACCENT }),
+        );
         ui.label(
             RichText::new(&commit.hash)
                 .monospace()
@@ -2757,5 +2909,51 @@ mod tests {
                 .stats,
             Some(counts(0, 0))
         );
+    }
+}
+
+fn relative_time(timestamp: i64, now: i64) -> String {
+    if timestamp <= 0 {
+        return "time unavailable".into();
+    }
+    let seconds = now.saturating_sub(timestamp).unsigned_abs();
+    if seconds < 60 {
+        return if timestamp > now {
+            "in less than a minute"
+        } else {
+            "just now"
+        }
+        .into();
+    }
+    let (count, unit) = if seconds < 3600 {
+        (seconds / 60, "minute")
+    } else if seconds < 86400 {
+        (seconds / 3600, "hour")
+    } else if seconds < 2_592_000 {
+        (seconds / 86400, "day")
+    } else if seconds < 31_536_000 {
+        (seconds / 2_592_000, "month")
+    } else {
+        (seconds / 31_536_000, "year")
+    };
+    let quantity = format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+    if timestamp > now {
+        format!("in {quantity}")
+    } else {
+        format!("{quantity} ago")
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+    #[test]
+    fn git_relative_time_handles_singular_plural_and_future_dates() {
+        let now = 2_000_000_000;
+        assert_eq!(relative_time(now - 720, now), "12 minutes ago");
+        assert_eq!(relative_time(now - 3600, now), "1 hour ago");
+        assert_eq!(relative_time(now - 172800, now), "2 days ago");
+        assert_eq!(relative_time(now + 120, now), "in 2 minutes");
+        assert_eq!(relative_time(now, now), "just now");
     }
 }

@@ -197,10 +197,17 @@ fn git_workspace() -> VEditApp {
                 _ => Vec::new(),
             },
             author: "Alex Taylor".into(),
-            date: date.into(),
+            date: format!("{date}T14:35:20+02:00"),
+            timestamp: 1790426120,
+            on_remote: hash != 'a',
             subject: subject.into(),
         });
     }
+    project.git_branches = project
+        .recent_commits
+        .iter()
+        .flat_map(|commit| commit.refs.clone())
+        .collect();
     let details = git::CommitDetails {
         hash: "a".repeat(40), parents: vec!["b".repeat(40), "c".repeat(40)], author: "Alex Taylor".into(), author_email: "alex@example.test".into(), date: "2026-09-26T14:32:18+02:00".into(),
         message: "Improve repository navigation\n\nGroup changed files by folder and keep staged changes separate.\nCommit details now show the complete message and historical patches.\n\nReviewed with the editor's Vim navigation enabled.\n".into(),
@@ -250,6 +257,9 @@ fn git_changes_history_commit_and_diff_snapshots() {
         git_panel::GitSection::History
     );
     visual_tests::snapshot(&mut screen, "vedit_git_history");
+    screen
+        .ctx
+        .data_mut(|data| data.insert_temp(egui::Id::new("git-history-test-clock"), 1790426840_i64));
     screen.ctx.all_styles_mut(|style| {
         style.interaction.tooltip_delay = 0.0;
         style.interaction.tooltip_grace_time = 0.0;
@@ -413,4 +423,26 @@ fn bookmarks_and_visible_jump_snapshots() {
         screen.state().tab().unwrap().saved_text
     );
     assert!(!screen.state().tab().unwrap().dirty);
+}
+
+#[test]
+fn git_branch_picker_shows_local_and_remote_branches() {
+    let mut screen = visual_tests::harness(git_workspace());
+    screen.run_steps(3);
+    screen.get_by_label("main ▾").click();
+    screen.run_steps(3);
+    for label in [
+        "Switch branch",
+        "Local branches",
+        "Remote branches",
+        "✓ main",
+        "origin/main",
+        "feature/split-views",
+    ] {
+        assert!(
+            screen.query_by_label(label).is_some(),
+            "missing branch picker item {label}"
+        );
+    }
+    visual_tests::snapshot(&mut screen, "vedit_git_branches");
 }

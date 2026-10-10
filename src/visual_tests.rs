@@ -142,10 +142,25 @@ fn document(root: &Path, relative: &str, text: &str) -> EditorTab {
 }
 
 pub(super) fn workspace(app: &mut VEditApp) {
-    let root = fs::canonicalize(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-project"),
-    )
-    .expect("visual review fixture");
+    // A user can open the example checkout in the live editor. Render fixtures
+    // must not pick up folders or edits made there during a test run.
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let root = ROOT
+        .get_or_init(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir()
+                .join(format!("vedit-visual-{}-{unique}", std::process::id()))
+                // Keep the displayed three-component suffix deterministic.
+                .join("tests/fixtures/tiny-project");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src/main.rs"), RUST_DOCUMENT).unwrap();
+            fs::write(root.join("README.md"), MARKDOWN_DOCUMENT).unwrap();
+            fs::canonicalize(root).expect("isolated visual review fixture")
+        })
+        .clone();
     let index = workspace::build_index(&root, workspace::IndexOptions::default())
         .expect("read-only fixture index");
     let mut project = Project::new(root.clone());
