@@ -99,6 +99,47 @@ fn stopped_server_is_visible_and_waits_for_explicit_restart() {
 }
 
 #[test]
+fn stopped_server_does_not_rebuild_other_languages_diagnostics_on_idle_frames() {
+    let mut app = rust_app();
+    let (server, _events) = LanguageServer::test_channel();
+    server.shutdown();
+    app.projects[0].rust_language_mut().server = Some(server);
+    app.projects[0].rust_language_mut().ready = true;
+    let python_path = app.projects[0].root.join("example.py");
+    let (python_server, _events) = LanguageServer::test_channel();
+    let mut python = LanguageSession::new(language_settings::defaults().remove(1));
+    python.server = Some(python_server);
+    python.ready = true;
+    python
+        .diagnostics
+        .insert(python_path.clone(), vec![diagnostic()]);
+    app.projects[0].languages.insert("python".into(), python);
+
+    app.sync_languages(false);
+    let diagnostics = app.projects[0].diagnostics[&python_path].as_ptr();
+    let message = app.projects[0].diagnostics[&python_path][0]
+        .message
+        .as_ptr();
+    for _ in 0..10 {
+        app.sync_languages(false);
+        assert_eq!(
+            app.projects[0].diagnostics[&python_path].as_ptr(),
+            diagnostics
+        );
+        assert_eq!(
+            app.projects[0].diagnostics[&python_path][0]
+                .message
+                .as_ptr(),
+            message
+        );
+        assert_eq!(
+            app.projects[0].diagnostics[&python_path],
+            vec![diagnostic()]
+        );
+    }
+}
+
+#[test]
 fn analysis_error_is_visible_even_without_a_server_handle() {
     let mut app = rust_app();
     app.projects[0].rust_language_mut().error = Some("rust-analyzer could not start".into());

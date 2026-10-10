@@ -945,7 +945,9 @@ impl Protocol {
                 if self.sync.open_close {
                     messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":self.config.language_id,"version":document.version,"text":document.text}}}));
                 }
-                document.synced_end = char_to_position(&document.text, document.text.chars().count());
+                if self.sync.change == 2 {
+                    document.synced_end = document_end_position(&document.text);
+                }
             } else if document.dirty {
                 document.dirty = false;
                 if self.sync.change != 0 {
@@ -956,7 +958,9 @@ impl Protocol {
                     } else { json!({"text":document.text}) };
                     messages.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":document.version},"contentChanges":[change]}}));
                 }
-                document.synced_end = char_to_position(&document.text, document.text.chars().count());
+                if self.sync.change == 2 {
+                    document.synced_end = document_end_position(&document.text);
+                }
             }
             if document.saved {
                 document.saved = false;
@@ -1414,6 +1418,20 @@ fn plain_snippet(snippet: &str) -> String {
         }
     }
     output
+}
+
+/// The replacement range for incremental sync only needs the last line's UTF-16
+/// width. Earlier lines can be counted as bytes without decoding every scalar.
+fn document_end_position(text: &str) -> Position {
+    Position {
+        line: text.bytes().filter(|byte| *byte == b'\n').count() as u32,
+        character: text
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .encode_utf16()
+            .count() as u32,
+    }
 }
 
 /// Convert egui's Unicode scalar offset to a zero-based UTF-16 LSP position.
@@ -2200,6 +2218,57 @@ mod tests {
             true
         );
         assert_eq!(configuration_section(&settings, "missing"), Value::Null);
+    }
+
+    #[test]
+    fn document_end_matches_scalar_positions_for_unicode_and_mixed_line_endings() {
+        for text in [
+            "",
+            "plain",
+            "a\r\nb\n",
+            "\r",
+            "🦀\r\nGrüße🦀\r",
+            "a\r\r\nb\r🦀",
+            "\n\n🦀",
+        ] {
+            assert_eq!(
+                document_end_position(text),
+                char_to_position(text, text.chars().count()),
+                "{text:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn full_sync_sends_unicode_text_without_calculating_incremental_ranges() {
+        let (mut protocol, outgoing) = protocol();
+        let path = protocol.root.join("full-sync.py");
+        protocol
+            .command(ClientCommand::Open {
+                path: path.clone(),
+                text: "🦀\r\nold".into(),
+            })
+            .unwrap();
+        initialize_protocol(
+            &mut protocol,
+            json!({"textDocumentSync":{"openClose":true,"change":1}}),
+        );
+        outgoing.try_iter().for_each(drop);
+        assert_eq!(protocol.documents[&path].synced_end, Position::default());
+        protocol
+            .command(ClientCommand::Change {
+                path: path.clone(),
+                text: "🦀\r\nnew".into(),
+                version: 2,
+            })
+            .unwrap();
+        protocol.flush_documents().unwrap();
+        let change = outgoing.try_recv().unwrap().message;
+        assert_eq!(
+            change["params"]["contentChanges"][0],
+            json!({"text":"🦀\r\nnew"})
+        );
+        assert_eq!(protocol.documents[&path].synced_end, Position::default());
     }
 
     #[test]

@@ -13,6 +13,16 @@ pub(super) struct ExplorerNavigationState {
     focus_requested: Option<PathBuf>,
 }
 
+impl ExplorerNavigationState {
+    pub(super) fn release_project_rows(&mut self, root: &Path) {
+        if let Some(state) = self.projects.get_mut(root) {
+            state.rows_cache = None;
+            state.index_identity = 0;
+            state.awaiting_renamed_index = false;
+        }
+    }
+}
+
 #[derive(Default)]
 struct ProjectNavigation {
     selected: Option<PathBuf>,
@@ -22,6 +32,7 @@ struct ProjectNavigation {
     page_rows: usize,
     index_identity: usize,
     awaiting_renamed_index: bool,
+    rows_cache: Option<VisibleRowsCache>,
 }
 
 pub(super) struct VisibleRow<'a> {
@@ -29,6 +40,34 @@ pub(super) struct VisibleRow<'a> {
     pub(super) depth: usize,
     pub(super) ancestor_continuations: Vec<bool>,
     pub(super) last_sibling: bool,
+}
+
+pub(super) struct CachedVisibleRow {
+    pub(super) entry: workspace::WorkspaceEntry,
+    pub(super) depth: usize,
+    pub(super) ancestor_continuations: Vec<bool>,
+    pub(super) last_sibling: bool,
+}
+
+pub(super) struct CachedVisibleRows {
+    rows: Vec<CachedVisibleRow>,
+    pub(super) requested_directories: Vec<PathBuf>,
+}
+
+impl std::ops::Deref for CachedVisibleRows {
+    type Target = [CachedVisibleRow];
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+struct VisibleRowsCache {
+    // Retain the immutable index as well as its identity: an allocator reusing
+    // an old snapshot's address must never make changed folders look unchanged.
+    index: Arc<workspace::WorkspaceIndex>,
+    expanded: HashSet<PathBuf>,
+    rows: Arc<CachedVisibleRows>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -513,24 +552,59 @@ impl VEditApp {
             .entry(index.root.clone())
             .or_default();
         state.initialize(index, active.as_deref());
-        state.reconcile(index);
+        // Selection and collapse actions reconcile themselves. Ordinary frames
+        // only need reconciliation when a background directory read publishes.
+        if state.index_identity != index as *const workspace::WorkspaceIndex as usize {
+            state.reconcile(index);
+        }
     }
 
-    pub(super) fn explorer_rows<'a>(
-        &self,
-        index: &'a workspace::WorkspaceIndex,
-    ) -> Vec<VisibleRow<'a>> {
-        self.explorer_navigation
+    pub(super) fn explorer_rows(
+        &mut self,
+        index: &Arc<workspace::WorkspaceIndex>,
+    ) -> Arc<CachedVisibleRows> {
+        let state = self
+            .explorer_navigation
             .projects
-            .get(&index.root)
-            .map(|state| visible_rows(index, state))
-            .unwrap_or_default()
+            .entry(index.root.clone())
+            .or_default();
+        if let Some(cache) = &state.rows_cache
+            && Arc::ptr_eq(&cache.index, index)
+            && cache.expanded == state.expanded
+        {
+            return cache.rows.clone();
+        }
+        let mut requested_directories = vec![index.root.clone()];
+        let rows = visible_rows(index, state)
+            .into_iter()
+            .map(|row| {
+                if row.entry.is_dir && state.expanded.contains(&row.entry.path) {
+                    requested_directories.push(row.entry.path.clone());
+                }
+                CachedVisibleRow {
+                    entry: row.entry.clone(),
+                    depth: row.depth,
+                    ancestor_continuations: row.ancestor_continuations,
+                    last_sibling: row.last_sibling,
+                }
+            })
+            .collect();
+        let rows = Arc::new(CachedVisibleRows {
+            rows,
+            requested_directories,
+        });
+        state.rows_cache = Some(VisibleRowsCache {
+            index: index.clone(),
+            expanded: state.expanded.clone(),
+            rows: rows.clone(),
+        });
+        rows
     }
 
     pub(super) fn explorer_take_scroll_row(
         &mut self,
         root: &Path,
-        rows: &[VisibleRow<'_>],
+        rows: &[CachedVisibleRow],
     ) -> Option<usize> {
         let state = self.explorer_navigation.projects.get_mut(root)?;
         if !state.scroll_to_selection {
@@ -860,6 +934,141 @@ mod tests {
                 if rect.fill == fill && rect.rect.contains(row.center())
                     && rect.rect.width() > row.width() * 0.8)
         })
+    }
+
+    #[test]
+    #[ignore = "Manual release-mode Explorer row preparation benchmark"]
+    fn benchmark_explorer_unchanged_rows() {
+        use std::hint::black_box;
+
+        let root = PathBuf::from("benchmark-explorer");
+        let mut tree = workspace::ExplorerTree::new(root.clone());
+        let mut state = ProjectNavigation::default();
+        let mut directories = Vec::new();
+        for number in 0..100 {
+            let name = format!("directory_{number:04}");
+            let path = root.join(&name);
+            state.expanded.insert(path.clone());
+            directories.push(workspace::WorkspaceEntry {
+                path: path.clone(),
+                name,
+                is_dir: true,
+            });
+            let entries = (0..500)
+                .map(|file| {
+                    let name = format!("source_{file:04}.rs");
+                    workspace::WorkspaceEntry {
+                        path: path.join(&name),
+                        name,
+                        is_dir: false,
+                    }
+                })
+                .collect();
+            let generation = tree.begin(&path).unwrap();
+            tree.complete(
+                &path,
+                generation,
+                Ok(workspace::ExplorerDirectory {
+                    root: root.clone(),
+                    path: path.clone(),
+                    entries,
+                    warnings: Vec::new(),
+                }),
+            );
+        }
+        let generation = tree.begin(&root).unwrap();
+        tree.complete(
+            &root,
+            generation,
+            Ok(workspace::ExplorerDirectory {
+                root: root.clone(),
+                path: root.clone(),
+                entries: directories,
+                warnings: Vec::new(),
+            }),
+        );
+        let index = tree.snapshot();
+        let started = Instant::now();
+        for _ in 0..100 {
+            black_box(visible_rows(black_box(&index), black_box(&state)));
+        }
+        let rebuilt = started.elapsed() / 100;
+        let mut app = VEditApp::empty(egui::Context::default());
+        app.explorer_navigation.projects.insert(root, state);
+        assert_eq!(app.explorer_rows(&index).len(), 50_100);
+        let started = Instant::now();
+        for _ in 0..10_000 {
+            black_box(app.explorer_rows(black_box(&index)));
+        }
+        println!(
+            "50,100 Explorer rows: rebuilt {rebuilt:?}, cached {:?}/frame",
+            started.elapsed() / 10_000
+        );
+    }
+
+    #[test]
+    fn unchanged_explorer_frames_reuse_rows_and_expansion_rebuilds_them() {
+        let (fixture, mut app) = Fixture::new(20);
+        let index = app.explorer_index().unwrap();
+        app.explorer_initialize(&index);
+        let first = app.explorer_rows(&index);
+        let second = app.explorer_rows(&index);
+        assert_eq!(first.as_ptr(), second.as_ptr());
+
+        app.explorer_navigation
+            .projects
+            .get_mut(&fixture.0)
+            .unwrap()
+            .expanded
+            .insert(fixture.0.join("src"));
+        let expanded = app.explorer_rows(&index);
+        assert_ne!(first.as_ptr(), expanded.as_ptr());
+        assert!(
+            expanded
+                .iter()
+                .any(|row| row.entry.path == fixture.0.join("src/lib.rs"))
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|row| row.entry.path == fixture.0.join("src/lib.rs"))
+        );
+
+        app.explorer_collapse_all();
+        let collapsed = app.explorer_rows(&index);
+        assert_ne!(expanded.as_ptr(), collapsed.as_ptr());
+        assert_eq!(collapsed.len(), first.len());
+        assert_eq!(collapsed.as_ptr(), app.explorer_rows(&index).as_ptr());
+    }
+
+    #[test]
+    fn closing_project_releases_cached_rows_and_index_reference() {
+        let (fixture, mut app) = Fixture::new(0);
+        let index = app.explorer_index().unwrap();
+        app.explorer_initialize(&index);
+        let readers = Arc::strong_count(&index);
+        let rows = app.explorer_rows(&index);
+        let weak = Arc::downgrade(&rows);
+        drop(rows);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(Arc::strong_count(&index), readers + 1);
+
+        let reopened = Arc::new(workspace::WorkspaceIndex::empty(fixture.0.clone()));
+        let state = app
+            .explorer_navigation
+            .projects
+            .get_mut(&fixture.0)
+            .unwrap();
+        state.selected = Some(fixture.0.join("removed.txt"));
+        state.awaiting_renamed_index = true;
+        // Model the allocator reusing the old index address on reopening.
+        state.index_identity = Arc::as_ptr(&reopened) as usize;
+        app.explorer_navigation.release_project_rows(&fixture.0);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&index), readers);
+        assert!(!app.explorer_navigation.projects[&fixture.0].awaiting_renamed_index);
+        app.explorer_initialize(&reopened);
+        assert_eq!(selected(&app), None);
     }
 
     #[test]
@@ -1478,7 +1687,7 @@ mod tests {
                 .unwrap()
                 .scroll_to_selection
         );
-        let fresh_index = workspace::build_index(&root, Default::default()).unwrap();
+        let fresh_index = Arc::new(workspace::build_index(&root, Default::default()).unwrap());
         app.explorer_initialize(&fresh_index);
         let fresh_rows = app.explorer_rows(&fresh_index);
         let row = app.explorer_take_scroll_row(&root, &fresh_rows).unwrap();

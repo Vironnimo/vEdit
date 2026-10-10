@@ -73,6 +73,8 @@ mod sidebar_layout;
 mod split;
 #[path = "tab_drag.rs"]
 mod tab_drag;
+#[path = "task_output_ui.rs"]
+mod task_output_ui;
 #[path = "workspace_ui.rs"]
 mod workspace_ui;
 
@@ -665,6 +667,7 @@ pub struct VEditApp {
     command: String,
     task: Option<tasks::RunningTask>,
     output: String,
+    task_output_cache: task_output_ui::TaskOutputCache,
     task_status: String,
     register: Option<Yank>,
     yank_register: Option<Yank>,
@@ -917,6 +920,7 @@ impl VEditApp {
             command: String::new(),
             task: None,
             output: String::new(),
+            task_output_cache: task_output_ui::TaskOutputCache::default(),
             task_status: "Ready".into(),
             register: None,
             yank_register: None,
@@ -1343,6 +1347,7 @@ impl VEditApp {
                     self.capture_pane_navigation();
                     let previous_root = self.project().map(|project| project.root.clone());
                     let p = self.projects.remove(index);
+                    self.explorer_navigation.release_project_rows(&p.root);
                     p.index_cancel.store(true, Ordering::Relaxed);
                     for t in p.tabs {
                         self.agent_marks.detach_document(t.id);
@@ -1747,6 +1752,7 @@ impl VEditApp {
                                 p.git_root = s.root;
                                 p.git_branch = s.branch;
                                 p.git_tracking = s.tracking;
+                                p.git_view.update_working_cache(&s.files, &s.stats);
                                 p.git_changes = s.files;
                                 p.git_stats = s.stats;
                                 p.git_stats_error = s.stats_error;
@@ -4263,6 +4269,7 @@ impl VEditApp {
     }
     fn output_ui(&mut self, ui: &mut egui::Ui) {
         if !self.output_visible {
+            self.task_output_cache.clear();
             self.clear_hidden_output_focus();
             return;
         }
@@ -4339,6 +4346,7 @@ impl VEditApp {
                     });
                 });
                 if self.problems_visible {
+                    self.task_output_cache.clear();
                     self.problems_ui(ui);
                     return;
                 }
@@ -4388,16 +4396,7 @@ impl VEditApp {
                     .id_salt("task_output")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&self.output)
-                                    .monospace()
-                                    .size(12.0)
-                                    .color(TEXT),
-                            )
-                            .selectable(true)
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                        );
+                        self.task_output_cache.show(ui, &self.output, TEXT);
                     });
             });
         self.finish_output_region(ui, panel.response.rect);
@@ -5434,11 +5433,7 @@ impl VEditApp {
             let first =
                 rows.partition_point(|r| output.galley_pos.y + r.pos.y + r.size.y < clip.top());
             let last = rows.partition_point(|r| output.galley_pos.y + r.pos.y < clip.bottom());
-            let visible_rows: Vec<_> = crate::render::visual_rows(&output.galley)
-                .enumerate()
-                .take(last)
-                .skip(first)
-                .collect();
+            let visible_rows = syntax.visible_rows(document_id, &output.galley, first..last);
             find::paint_matches(ui, &output.galley, output.galley_pos, &visible_rows, &search_matches, search_cursor);
             agent_mark_remove = agent_marks_ui::paint_agent_mark_overlays(
                 ui, id, &output.galley, output.galley_pos, &visible_rows,

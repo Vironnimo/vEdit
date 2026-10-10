@@ -60,13 +60,8 @@ impl VEditApp {
         };
         self.explorer_initialize(&index);
         let rows = self.explorer_rows(&index);
-        let mut requested = vec![root.clone()];
-        requested.extend(
-            rows.iter()
-                .filter(|row| row.entry.is_dir && self.explorer_expanded(&row.entry.path))
-                .map(|row| row.entry.path.clone()),
-        );
-        for path in &requested {
+        let requested = &rows.requested_directories;
+        for path in requested {
             self.request_explorer_directory(self.active_project, path.clone());
         }
         let (loading, root_listed, errors) = self
@@ -165,12 +160,12 @@ impl VEditApp {
     fn explorer_tree_rows(
         &mut self,
         ui: &mut egui::Ui,
-        rows: &[explorer_navigation::VisibleRow<'_>],
+        rows: &[explorer_navigation::CachedVisibleRow],
         active: &Option<PathBuf>,
     ) {
         let owns_selection = self.explorer_keyboard_focused() || self.explorer_context_menu_open();
         for row in rows {
-            let entry = row.entry;
+            let entry = &row.entry;
             ui.push_id(&entry.path, |ui| {
                 let selected = self.explorer_selected(&entry.path);
                 let active_file = !entry.is_dir && active.as_ref() == Some(&entry.path);

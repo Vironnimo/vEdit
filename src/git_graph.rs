@@ -5,6 +5,7 @@
 //! frontier continues into that page.
 
 use crate::git::CommitSummary;
+use std::collections::HashMap;
 
 /// One segment between two lane positions in a half of a history row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,34 @@ impl Graph {
     }
 
     fn append_commit(&mut self, commit: &CommitSummary) {
+        // Most histories spend long stretches on one lane. Keep that common
+        // case free of frontier copies and lane lookups altogether.
+        if self.frontier.len() == 1
+            && self.frontier[0].hash == commit.hash
+            && commit.parents.len() <= 1
+        {
+            let color = self.frontier[0].color;
+            let edge = GraphEdge {
+                from_lane: 0,
+                to_lane: 0,
+                color,
+            };
+            let outgoing = if let Some(parent) = commit.parents.first() {
+                self.frontier[0].hash.clone_from(parent);
+                vec![edge]
+            } else {
+                self.frontier.clear();
+                Vec::new()
+            };
+            self.rows.push(GraphRow {
+                node_lane: 0,
+                node_color: color,
+                lane_count: 1,
+                incoming: vec![edge],
+                outgoing,
+            });
+            return;
+        }
         let tracked_lane = self
             .frontier
             .iter()
@@ -113,15 +142,26 @@ impl Graph {
             insertion_lane += 1;
         }
 
+        // Wide histories otherwise scan the whole frontier once for every
+        // outgoing edge. Tiny frontiers stay on the allocation-free fast path.
+        let lanes: Option<HashMap<_, _>> = (after.len() > 16).then(|| {
+            after
+                .iter()
+                .enumerate()
+                .map(|(lane, track)| (track.hash.as_str(), lane))
+                .collect()
+        });
+        let find_lane = |hash: &str| match &lanes {
+            Some(lanes) => lanes.get(hash).copied(),
+            None => after.iter().position(|track| track.hash == hash),
+        };
         let mut outgoing = Vec::with_capacity(before.len() + parents.len());
         for (lane, track) in before.iter().enumerate() {
             if Some(lane) == tracked_lane {
                 continue;
             }
-            let to_lane = after
-                .iter()
-                .position(|pending| pending.hash == track.hash)
-                .expect("an unrelated frontier track survives the row");
+            let to_lane =
+                find_lane(&track.hash).expect("an unrelated frontier track survives the row");
             outgoing.push(GraphEdge {
                 from_lane: lane,
                 to_lane,
@@ -129,10 +169,7 @@ impl Graph {
             });
         }
         for parent in parents {
-            let to_lane = after
-                .iter()
-                .position(|track| track.hash == parent)
-                .expect("every parent has a frontier track");
+            let to_lane = find_lane(&parent).expect("every parent has a frontier track");
             outgoing.push(GraphEdge {
                 from_lane: node_lane,
                 to_lane,
@@ -314,6 +351,34 @@ mod tests {
             assert_eq!(paged, entire);
         }
         assert_continuous(&entire.rows);
+    }
+
+    #[test]
+    fn wide_history_keeps_tracks_connected_across_page_boundaries() {
+        let mut commits = Vec::new();
+        for lane in 0..128 {
+            commits.push(commit(&format!("tip-{lane}"), &[&format!("parent-{lane}")]));
+        }
+        // Consume the middle lanes first, repeatedly shifting the surviving
+        // tracks, then join them at one shared base.
+        for lane in (0..128).step_by(2).chain((1..128).step_by(2).rev()) {
+            commits.push(commit(&format!("parent-{lane}"), &["base"]));
+        }
+        commits.push(commit("base", &[]));
+        let mut entire = Graph::default();
+        entire.append(&commits);
+        let mut paged = Graph::default();
+        for page in commits.chunks(60) {
+            paged.append(page);
+        }
+        assert_eq!(paged, entire);
+        assert_eq!(entire.lane_count, 128);
+        assert!(entire.frontier.is_empty());
+        assert_continuous(&entire.rows);
+        for (lane, row) in entire.rows[..128].iter().enumerate() {
+            assert_eq!(row.node_lane, lane);
+            assert_eq!(row.node_color, lane);
+        }
     }
 
     #[test]

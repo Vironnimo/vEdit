@@ -1,6 +1,8 @@
-# vEdit 0.4.19
+# vEdit 0.4.20
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.20 beschleunigt das Bearbeiten großer Dateien, die Projektsuche, Explorer, Git-Verlauf und -Graph sowie Markdown-Tabellen und die Anzeige von Taskausgaben. Die [Performance-Untersuchung](docs/performance-audit-0.4.20.md) dokumentiert die gemessenen Verbesserungen und verbleibenden Engpässe.
 
 Version 0.4.19 verbessert die Agentenbedienung: Jeder CLI-Befehl hat eine eigene Hilfe, `schema OP` zeigt gezielt seine JSON-Beispiele, und Textdateien lassen sich direkt als Entwurf laden oder revisionsgeschützt in einen Puffer übernehmen. UTF-16-Dateien mit BOM aus Windows PowerShell werden akzeptiert. Lange Pufferzeilen und Taskausgaben lassen sich vollständig weiterlesen. Der Agenten-Skill enthält die häufigen Abläufe direkt und trennt die Spezialthemen.
 

@@ -354,9 +354,14 @@ fn spawn_reader(
         .spawn(move || {
             let mut buffer = [0_u8; 8192];
             let mut decoder = Utf8Decoder::default();
+            let mut truncated = false;
             loop {
                 let text = match pipe.read(&mut buffer) {
                     Ok(0) => decoder.finish(),
+                    // The shared budget never reopens. Keep draining the pipe
+                    // so the command can finish, but avoid decoding/allocating
+                    // every later chunk once this reader observes truncation.
+                    Ok(_) if truncated => continue,
                     Ok(count) => decoder.decode(&buffer[..count]),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => {
@@ -375,7 +380,9 @@ fn spawn_reader(
                     let mut budget = budget
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    for chunk in budget.take(&text.0) {
+                    let chunks = budget.take(&text.0);
+                    truncated = budget.truncated;
+                    for chunk in chunks {
                         if !send_output(&sender, TaskEvent::Output(chunk), &cancel_requested) {
                             return;
                         }
@@ -903,6 +910,49 @@ mod tests {
             assert!(result.ends_with(TRUNCATION_NOTICE));
             assert!(budget.take("extra output").is_empty());
         }
+    }
+
+    #[test]
+    fn truncated_reader_keeps_draining_the_pipe_and_emits_one_notice() {
+        struct CountedReader {
+            data: std::io::Cursor<Vec<u8>>,
+            consumed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Read for CountedReader {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                let count = self.data.read(bytes)?;
+                self.consumed.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+        let source = "🦀 Grüße\r\n".repeat(MAX_OUTPUT_LINES * 3).into_bytes();
+        let total = source.len();
+        let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::sync_channel(128);
+        let reader = spawn_reader(
+            CountedReader {
+                data: std::io::Cursor::new(source),
+                consumed: consumed.clone(),
+            },
+            sender,
+            Arc::new(Mutex::new(OutputBudget::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        let output: String = receiver
+            .into_iter()
+            .map(|event| match event {
+                TaskEvent::Output(text) => text,
+                other => panic!("unexpected reader event: {other:?}"),
+            })
+            .collect();
+        reader.join().unwrap();
+        assert_eq!(consumed.load(Ordering::Relaxed), total);
+        assert_eq!(output.matches(TRUNCATION_NOTICE).count(), 1);
+        assert!(output.ends_with(TRUNCATION_NOTICE));
+        assert!(!output.contains('\u{fffd}'));
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+        assert!(output.lines().count() <= MAX_OUTPUT_LINES);
     }
 
     #[test]

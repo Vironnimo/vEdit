@@ -520,8 +520,32 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
         screen.state().git_busy.is_some(),
         "Enter on the labeled Stage control stages deliberately"
     );
-    screen.state_mut().git_busy = None;
-    screen.state_mut().projects[0].git_changes.remove(0);
+    let app = screen.state_mut();
+    app.git_busy = None;
+    let project = &mut app.projects[0];
+    let mut files = project.git_changes.clone();
+    files.remove(0);
+    project.git_status_request = Some(u64::MAX);
+    let snapshot = GitSnapshot {
+        root: project.git_root.clone(),
+        branch: project.git_branch.clone(),
+        tracking: project.git_tracking.clone(),
+        files,
+        stats: project.git_stats.clone(),
+        stats_error: None,
+        history: Ok(GitHistoryRefresh {
+            snapshot: project.git_history_snapshot.clone().unwrap_or_default(),
+            page: None,
+        }),
+    };
+    app.sender
+        .send(WorkerResult::GitStatus {
+            root: root.clone(),
+            request_id: u64::MAX,
+            result: Ok(snapshot),
+        })
+        .unwrap();
+    app.poll();
     screen.run_steps(3);
     assert_eq!(
         screen.ctx.memory(|m| m.focused()),
@@ -778,6 +802,34 @@ fn git_keyboard_tab_scrolls_actions_into_view_and_keeps_region_ownership() {
         "Tabbed actions must stay visible"
     );
     assert!(screen.state().git_content_has_focus());
+}
+
+#[test]
+fn git_mouse_context_menus_open_after_idle_and_restore_the_invoking_row() {
+    let mut screen = harness(keyboard_changes_fixture(), 360.0, false);
+    screen.run_steps(5);
+    let root = screen.state().projects[0].root.clone();
+    for file in ["first.py", "second.dart"] {
+        assert!(!egui::Popup::is_any_open(&screen.ctx));
+        screen.get_by_label(file).click_secondary();
+        screen.run_steps(3);
+        assert!(egui::Popup::is_any_open(&screen.ctx));
+        assert!(screen.query_by_label("View diff").is_some());
+        assert!(screen.query_by_label("Copy relative path").is_some());
+        screen.key_press(Key::Escape);
+        screen.run_steps(3);
+        assert!(!egui::Popup::is_any_open(&screen.ctx));
+        assert_eq!(
+            screen.ctx.memory(|memory| memory.focused()),
+            Some(git_row_id(
+                &root,
+                &format!("working:changes:file:src/{file}")
+            ))
+        );
+        assert!(screen.state().git_content_has_focus());
+        screen.run_steps(3);
+    }
+    assert!(screen.state().git_busy.is_none() && screen.state().diff.is_none());
 }
 
 #[test]

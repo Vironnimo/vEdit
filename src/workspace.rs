@@ -899,6 +899,8 @@ fn search_paths(
         let mut char_offset = 0;
         let mut line = 1;
         let mut line_start = 0;
+        let mut line_char_start = 0;
+        let mut line_end = text.find('\n').unwrap_or(text.len());
         for found in pattern.find_iter(text) {
             if cancelled(&options.cancel) || started.elapsed() >= options.max_duration {
                 results.truncated = true;
@@ -918,22 +920,25 @@ fn search_paths(
             }
             let preceding = &text[last_byte..found.start()];
             char_offset += preceding.chars().count();
-            for (position, character) in preceding.char_indices() {
-                if character == '\n' {
-                    line += 1;
-                    line_start = last_byte + position + 1;
-                }
+            for (position, _) in preceding.match_indices('\n') {
+                line += 1;
+                line_start = last_byte + position + 1;
+            }
+            if line_start > last_byte {
+                line_char_start = char_offset - text[line_start..found.start()].chars().count();
+            }
+            if found.start() > line_end {
+                line_end = text[found.start()..]
+                    .find('\n')
+                    .map_or(text.len(), |end| found.start() + end);
             }
             let start_char = char_offset;
             let match_chars = found.as_str().chars().count();
-            let line_end = text[found.start()..]
-                .find('\n')
-                .map_or(text.len(), |end| found.start() + end);
             let preview = line_preview(&text[line_start..line_end], found.start() - line_start);
             results.matches.push(SearchMatch {
                 path: path.clone(),
                 line,
-                column: text[line_start..found.start()].chars().count() + 1,
+                column: start_char - line_char_start + 1,
                 start_char,
                 end_char: start_char + match_chars,
                 preview,
@@ -951,9 +956,14 @@ fn search_paths(
 
 fn line_preview(line: &str, match_byte: usize) -> String {
     const PREVIEW_CHARS: usize = 240;
-    let match_char = line[..match_byte].chars().count();
-    let start = match_char.saturating_sub(80);
-    let mut chars = line.chars().skip(start);
+    // Locate the short context window from the match, rather than rescanning
+    // a potentially megabyte-long minified line for every result.
+    let start = line[..match_byte]
+        .char_indices()
+        .rev()
+        .nth(79)
+        .map_or(0, |(byte, _)| byte);
+    let mut chars = line[start..].chars();
     let mut result = String::new();
     if start > 0 {
         result.push('…');
@@ -2191,6 +2201,65 @@ mod tests {
         .unwrap();
         assert_eq!(limited.matches.len(), 1);
         assert!(limited.truncated);
+    }
+
+    #[test]
+    #[ignore = "Manual release-mode project search latency benchmark"]
+    fn benchmark_search_many_matches_in_long_unicode_line() {
+        let fixture = Fixture::new("search-long-line-benchmark");
+        let text = ("ö".repeat(1024) + "needle ").repeat(900);
+        fixture.write("minified.txt", &text);
+        let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
+        let started = Instant::now();
+        for _ in 0..10 {
+            let result = search_project(&index, "needle", SearchOptions::default()).unwrap();
+            assert_eq!(result.matches.len(), 900);
+            assert_eq!(result.matches[899].column, 899 * 1031 + 1025);
+            std::hint::black_box(result);
+        }
+        println!(
+            "{}-byte Unicode line, 900 matches: {:?}/search",
+            text.len(),
+            started.elapsed() / 10
+        );
+    }
+
+    #[test]
+    fn search_previews_and_columns_keep_unicode_boundaries_on_long_lines() {
+        let fixture = Fixture::new("search-long-line");
+        let prefix = "ö🦀x".repeat(200);
+        let line = format!("{prefix}needle {}needle", "ß".repeat(400));
+        fixture.write("long.txt", format!("{line}\r\n{line}\r\n"));
+        let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
+        let results = search_project(&index, "needle", SearchOptions::default()).unwrap();
+        assert_eq!(results.matches.len(), 4);
+        for (number, found) in results.matches.iter().enumerate() {
+            let column = if number % 2 == 0 { 601 } else { 1008 };
+            assert_eq!(found.line, number / 2 + 1);
+            assert_eq!(found.column, column);
+            assert_eq!(found.start_char, (number / 2) * 1014 + column - 1);
+            assert_eq!(found.end_char, found.start_char + 6);
+            assert!(found.preview.starts_with('…'));
+            assert_eq!(found.preview.chars().nth(81), Some('n'));
+        }
+    }
+
+    #[test]
+    fn search_preview_matches_character_window_at_every_unicode_boundary() {
+        let line = "ö🦀e\u{301} ab".repeat(70);
+        for (match_char, (match_byte, _)) in line.char_indices().enumerate() {
+            let start = match_char.saturating_sub(80);
+            let mut expected: String = line.chars().skip(start).take(240).collect();
+            if start > 0 {
+                expected.insert(0, '…');
+            }
+            if line.chars().count() > start + 240 {
+                expected.push('…');
+            }
+            assert_eq!(line_preview(&line, match_byte), expected);
+        }
+        assert_eq!(line_preview("", 0), "");
+        assert_eq!(line_preview("ö🦀", "ö🦀".len()), "ö🦀");
     }
 
     #[test]

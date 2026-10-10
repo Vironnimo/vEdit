@@ -19,6 +19,7 @@ const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GALLEY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_GALLEYS_PER_DOCUMENT: usize = 4;
 const MAX_SYNTAX_JOB_BYTES: usize = 16 * 1024 * 1024;
+const MAX_VISUAL_ROW_INDEX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Character-based line starts shared by the gutter and status bar. The text
 /// owner must invalidate this on disk reloads which do not increment revision.
@@ -345,6 +346,8 @@ struct Shared {
     wake: Mutex<Option<mpsc::SyncSender<()>>>,
     #[cfg(test)]
     layout_requests: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    visual_index_builds: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -358,6 +361,13 @@ struct Document {
     ready: Option<Ready>,
     pending: Option<Request>,
     galleys: Vec<CachedGalley>,
+    visual_rows: Vec<CachedVisualRows>,
+    last_used: u64,
+}
+
+struct CachedVisualRows {
+    job: Weak<LayoutJob>,
+    rows: Vec<VisualRow>,
     last_used: u64,
 }
 
@@ -432,6 +442,7 @@ impl SyntaxCache {
         if !same_atlas {
             for document in state.documents.values_mut() {
                 document.galleys.clear();
+                document.visual_rows.clear();
             }
             state.atlas = Some(AtlasStamp {
                 ctx: ui.ctx().clone(),
@@ -472,6 +483,7 @@ impl SyntaxCache {
             ready: None,
             pending: None,
             galleys: Vec::new(),
+            visual_rows: Vec::new(),
             last_used: serial,
         });
         entry.last_used = serial;
@@ -704,6 +716,7 @@ impl SyntaxCache {
                 ready: None,
                 pending: None,
                 galleys: Vec::new(),
+                visual_rows: Vec::new(),
                 last_used: serial,
             });
             entry.last_used = serial;
@@ -731,6 +744,81 @@ impl SyntaxCache {
             trim(&mut state, document);
         }
         galley
+    }
+
+    /// Map only the viewport after indexing a shaped layout once. The weak job
+    /// identity also survives TextEdit's selection-only galley clones, without
+    /// retaining glyphs for large documents beyond the galley memory budget.
+    pub fn visible_rows(
+        &self,
+        document: u64,
+        galley: &egui::Galley,
+        visible: std::ops::Range<usize>,
+    ) -> Vec<(usize, VisualRow)> {
+        if galley.rows.len() > MAX_VISUAL_ROW_INDEX_BYTES / size_of::<VisualRow>() {
+            // Do not repeatedly allocate an index that budget enforcement must
+            // immediately discard. Oversized layouts keep the bounded-output
+            // traversal used before indexing was introduced.
+            return visual_rows(galley)
+                .enumerate()
+                .take(visible.end)
+                .skip(visible.start)
+                .collect();
+        }
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.serial = state.serial.wrapping_add(1);
+        let serial = state.serial;
+        let entry = state.documents.entry(document).or_insert(Document {
+            ready: None,
+            pending: None,
+            galleys: Vec::new(),
+            visual_rows: Vec::new(),
+            last_used: serial,
+        });
+        entry.last_used = serial;
+        entry
+            .visual_rows
+            .retain(|cached| cached.job.strong_count() > 0);
+        let index = entry.visual_rows.iter().position(|cached| {
+            cached.job.ptr_eq(&Arc::downgrade(&galley.job))
+                && cached.rows.len() == galley.rows.len()
+        });
+        let index = index.unwrap_or_else(|| {
+            #[cfg(test)]
+            self.shared
+                .visual_index_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if entry.visual_rows.len() == MAX_GALLEYS_PER_DOCUMENT {
+                let oldest = entry
+                    .visual_rows
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, cached)| cached.last_used)
+                    .map(|(index, _)| index)
+                    .unwrap();
+                entry.visual_rows.remove(oldest);
+            }
+            let mut rows = Vec::with_capacity(galley.rows.len());
+            rows.extend(visual_rows(galley));
+            entry.visual_rows.push(CachedVisualRows {
+                job: Arc::downgrade(&galley.job),
+                rows,
+                last_used: serial,
+            });
+            entry.visual_rows.len() - 1
+        });
+        let cached = &mut entry.visual_rows[index];
+        cached.last_used = serial;
+        let end = visible.end.min(cached.rows.len());
+        let start = visible.start.min(end);
+        let rows = cached.rows[start..end]
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, row)| (start + index, row))
+            .collect();
+        trim(&mut state, document);
+        rows
     }
 
     /// Allows deterministic screenshot tests to settle asynchronous colors.
@@ -899,8 +987,19 @@ fn trim(state: &mut State, active: u64) {
                 .enumerate()
                 .min_by_key(|(_, cached)| cached.last_used)
                 .map(|(index, _)| index);
-            let Some(oldest) = oldest else { break };
-            entry.galleys.remove(oldest);
+            if let Some(oldest) = oldest {
+                entry.galleys.remove(oldest);
+            } else if let Some(oldest) = entry
+                .visual_rows
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(index, _)| index)
+            {
+                entry.visual_rows.remove(oldest);
+            } else {
+                break;
+            }
         } else {
             break;
         }
@@ -918,6 +1017,11 @@ fn document_bytes(document: &Document) -> usize {
             .galleys
             .iter()
             .map(|galley| galley.bytes)
+            .sum::<usize>()
+        + document
+            .visual_rows
+            .iter()
+            .map(|index| index.rows.capacity() * size_of::<VisualRow>())
             .sum::<usize>()
 }
 
@@ -1470,6 +1574,154 @@ mod tests {
         let resized = galley_pass(&ctx, &cache, 1, &text, 14.0, 121.0);
         assert!(!Arc::ptr_eq(&original, &resized));
         assert_eq!(resized.job.wrap.max_width, 121.0);
+    }
+
+    #[test]
+    fn deep_viewport_mapping_reuses_index_across_scrolls_and_selection_clones() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let text = "wrapped Grüße 🦀\r\n\tsecond line with extra words\n".repeat(300);
+        let galley = galley_pass(&ctx, &cache, 1, &text, 14.0, 100.0);
+        let expected: Vec<_> = visual_rows(&galley).enumerate().collect();
+        for first in [0, 20, expected.len() / 2, expected.len() - 10] {
+            let end = (first + 20).min(expected.len());
+            assert_eq!(
+                cache.visible_rows(1, &galley, first..end),
+                expected[first..end]
+            );
+        }
+        let cloned_for_selection = (*galley).clone();
+        let first = expected.len() - 20;
+        assert_eq!(
+            cache.visible_rows(1, &cloned_for_selection, first..expected.len()),
+            expected[first..]
+        );
+        assert_eq!(
+            cache
+                .shared
+                .visual_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "scrolling must not traverse all preceding source rows again"
+        );
+    }
+
+    #[test]
+    fn viewport_index_does_not_retain_large_galleys_and_handles_changed_layouts() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let first = galley_pass(&ctx, &cache, 1, "first 🦀\r\nnext line", 14.0, 100.0);
+        let strong_jobs = Arc::strong_count(&first.job);
+        cache.visible_rows(1, &first, 0..usize::MAX);
+        assert_eq!(Arc::strong_count(&first.job), strong_jobs);
+        // Large source galleys can be owned only by egui's font cache.
+        cache
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .documents
+            .get_mut(&1)
+            .unwrap()
+            .galleys
+            .clear();
+        assert_eq!(
+            cache.visible_rows(1, &first, 0..usize::MAX),
+            visual_rows(&first).enumerate().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            cache
+                .shared
+                .visual_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        for (text, width) in [
+            ("other 🦀\r\nnext line", 100.0),
+            ("other 🦀\r\nnext line", 35.0),
+        ] {
+            let changed = galley_pass(&ctx, &cache, 1, text, 14.0, width);
+            assert_eq!(
+                cache.visible_rows(1, &changed, 0..usize::MAX),
+                visual_rows(&changed).enumerate().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            cache
+                .shared
+                .visual_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert!(
+            cache
+                .visible_rows(1, &first, usize::MAX..usize::MAX)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn oversized_viewport_layout_skips_index_allocation_before_budget_enforcement() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let empty = galley_pass(&ctx, &cache, 1, "\n", 14.0, f32::INFINITY);
+        let mut oversized = (*empty).clone();
+        let row_count = MAX_VISUAL_ROW_INDEX_BYTES / size_of::<VisualRow>() + 1;
+        // Share one empty shaped row; exercising the limit needs no giant text
+        // allocation or glyph shaping in the regression fixture.
+        oversized.rows = vec![empty.rows[0].clone(); row_count];
+        oversized.rows.last_mut().unwrap().ends_with_newline = false;
+        for _ in 0..3 {
+            let visible = cache.visible_rows(1, &oversized, row_count - 4..row_count);
+            assert_eq!(visible.len(), 4);
+            assert_eq!(visible[0].0, row_count - 4);
+            assert_eq!(visible[0].1.line, row_count - 3);
+            assert_eq!(visible[3].1.start, row_count - 1);
+        }
+        assert_eq!(
+            cache
+                .shared
+                .visual_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(
+            cache.shared.state.lock().unwrap().documents[&1]
+                .visual_rows
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual headless source viewport performance measurement"]
+    fn deep_source_viewport_index_benchmark() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let text = "let value = Grüße; // 🦀\r\n".repeat(20_000);
+        let galley = galley_pass(&ctx, &cache, 1, &text, 14.0, f32::INFINITY);
+        let last = galley.rows.len();
+        let first = last - 60;
+        let started = Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(
+                visual_rows(&galley)
+                    .enumerate()
+                    .take(last)
+                    .skip(first)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let scanned = started.elapsed().as_secs_f64() * 1000.0 / 200.0;
+        cache.visible_rows(1, &galley, first..last);
+        let started = Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(cache.visible_rows(1, &galley, first..last));
+        }
+        let indexed = started.elapsed().as_secs_f64() * 1000.0 / 200.0;
+        println!(
+            "20,000-line source, final 60 visible rows, {:.1} MiB shaped geometry: scanning {scanned:.3} ms/frame, indexed {indexed:.3} ms/frame (same process, excludes shaping/painting)",
+            galley_bytes(&galley) as f64 / 1024.0 / 1024.0
+        );
     }
 
     #[test]

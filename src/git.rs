@@ -760,22 +760,12 @@ pub fn history_snapshot_cached(
     root: &Path,
     previous: Option<&HistorySnapshot>,
 ) -> GitResult<HistorySnapshot> {
-    let branch = current_branch(root)?;
-    let head = if has_head(root)? {
-        let output = checked_git(
-            root,
-            &string_args(&["rev-parse", "--verify", "HEAD"]),
-            "read history HEAD",
-        )?;
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        None
-    };
+    let head = read_head(root)?;
     let output = checked_git(
         root,
         &string_args(&[
             "for-each-ref",
-            "--format=%(objectname)%00%(refname)%00%(symref)%00%(*objectname)%00%(*objecttype)%00%(objecttype)",
+            "--format=%(objectname)%00%(refname)%00%(symref)%00%(*objectname)%00%(*objecttype)%00%(objecttype)%00%(HEAD)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
@@ -788,7 +778,7 @@ pub fn history_snapshot_cached(
             continue;
         }
         let fields: Vec<_> = line.split(|byte| *byte == 0).collect();
-        if fields.len() != 6 {
+        if fields.len() != 7 {
             return Err(GitError::new("read history branches", "invalid ref record"));
         }
         // origin/HEAD is an alias of a remote branch, not an extra branch tip.
@@ -819,9 +809,7 @@ pub fn history_snapshot_cached(
         let hash = String::from_utf8_lossy(hash).into_owned();
         validate_commit_hash(&hash)?;
         snapshot.refs.push(CommitRef {
-            current: kind == RefKind::Local
-                && branch.as_deref() == Some(name)
-                && head.as_deref() == Some(&hash),
+            current: kind == RefKind::Local && fields[6] == b"*" && head.as_deref() == Some(&hash),
             hash,
             name: name.to_owned(),
             kind,
@@ -980,13 +968,19 @@ fn unstage(root: &Path, paths: &[PathBuf]) -> GitResult<()> {
 }
 
 fn has_head(root: &Path) -> GitResult<bool> {
+    Ok(read_head(root)?.is_some())
+}
+
+fn read_head(root: &Path) -> GitResult<Option<String>> {
     let head = raw_git(
         root,
         &string_args(&["rev-parse", "--verify", "HEAD"]),
         "check repository HEAD",
     )?;
     if head.status.success() {
-        return Ok(true);
+        let hash = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        validate_commit_hash(&hash)?;
+        return Ok(Some(hash));
     }
     let branch = raw_git(
         root,
@@ -1001,7 +995,7 @@ fn has_head(root: &Path) -> GitResult<bool> {
             "check unborn branch",
         )?;
         if exists.status.code() == Some(1) {
-            return Ok(false);
+            return Ok(None);
         }
     }
     Err(command_error("check repository HEAD", &head))
@@ -1822,6 +1816,23 @@ mod tests {
                 thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+
+    #[test]
+    fn unchanged_history_snapshot_uses_two_git_processes() {
+        let repository = TestRepository::new();
+        repository.commit_all("Initial");
+        let head = repository.head_hash();
+        repository.git(&["update-ref", "refs/remotes/origin/main", &head]);
+        let previous = history_snapshot(&repository.0).unwrap();
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        let refreshed = history_snapshot_cached(&repository.0, Some(&previous)).unwrap();
+        assert_eq!(refreshed, previous);
+        assert!(std::sync::Arc::ptr_eq(
+            &refreshed.local_only,
+            &previous.local_only
+        ));
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 2);
     }
 
     #[test]

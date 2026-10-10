@@ -20,6 +20,11 @@ const MAX_DOCUMENTS: usize = 12;
 const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static INLINE_LAYOUT_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // Keep the same UI IDs so persisted scroll and text-selection state stays attached.
 fn with_reading_scrollbars<R>(ui: &mut egui::Ui, show: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let previous_scroll = ui.spacing().scroll;
@@ -65,6 +70,8 @@ struct CachedDocument {
     pending_g: Option<f64>,
     table_scroll: HashMap<usize, f32>,
     restore_tables: HashMap<usize, f32>,
+    table_layouts: HashMap<usize, TableGeometry>,
+    font_probe: Option<Arc<egui::Galley>>,
 }
 
 #[derive(Debug)]
@@ -180,7 +187,17 @@ impl MarkdownCache {
                 && self
                     .documents
                     .iter()
-                    .map(|entry| entry.text.len())
+                    .map(|entry| {
+                        entry.text.len()
+                            + entry
+                                .table_layouts
+                                .values()
+                                .map(|geometry| {
+                                    (geometry.widths.capacity() + geometry.offsets.capacity())
+                                        * std::mem::size_of::<f32>()
+                                })
+                                .sum::<usize>()
+                    })
                     .sum::<usize>()
                     > MAX_CACHE_BYTES)
         {
@@ -249,9 +266,29 @@ impl MarkdownCache {
                 pending_g: None,
                 table_scroll: HashMap::new(),
                 restore_tables: HashMap::new(),
+                table_layouts: HashMap::new(),
+                font_probe: None,
             });
         }
         let mut entry = entry.expect("created preview document");
+        // Keep the probe alive for every preview frame, even while a particular
+        // table is off screen, and invalidate measured heights after font/DPI changes.
+        let probe = ui.fonts_mut(|fonts| {
+            fonts.layout_no_wrap(
+                "vedit markdown font generation".into(),
+                FontId::monospace(1.0),
+                Color32::WHITE,
+            )
+        });
+        if entry
+            .font_probe
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &probe))
+        {
+            entry.heights.fill(None);
+            entry.table_layouts.clear();
+            entry.font_probe = Some(probe);
+        }
         let restored_scroll = self.restore_scroll.remove(&(pane, id));
         if let Some(offset) = restored_scroll {
             entry.scroll_y = offset;
@@ -398,6 +435,7 @@ impl MarkdownCache {
                                         smooth_scroll,
                                         table_scroll: &mut entry.table_scroll,
                                         restore_tables: &mut entry.restore_tables,
+                                        table_layouts: &mut entry.table_layouts,
                                     };
                                     renderer.block(ui, block, false);
                                 });
@@ -807,6 +845,7 @@ struct Renderer<'a> {
     smooth_scroll: bool,
     table_scroll: &'a mut HashMap<usize, f32>,
     restore_tables: &'a mut HashMap<usize, f32>,
+    table_layouts: &'a mut HashMap<usize, TableGeometry>,
 }
 
 struct InlineLayout {
@@ -952,6 +991,16 @@ struct TableRowLayout {
     height: f32,
 }
 
+/// Retain only small row geometry. Glyphs, links and selectable widgets belong
+/// to the visible rows rather than every cell of a long table on every frame.
+#[derive(Clone)]
+struct TableGeometry {
+    available: f32,
+    size: f32,
+    widths: Vec<f32>,
+    offsets: Vec<f32>,
+}
+
 fn table_column_widths(
     headers: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
@@ -1009,6 +1058,42 @@ fn table_column_widths(
 }
 
 impl Renderer<'_> {
+    fn table_row(
+        &self,
+        ui: &egui::Ui,
+        widths: &[f32],
+        alignments: &[Alignment],
+        row: &[Vec<Span>],
+        size: f32,
+        header: bool,
+    ) -> TableRowLayout {
+        let cells = widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| {
+                let align = match alignments.get(column) {
+                    Some(Alignment::Center) => Align::Center,
+                    Some(Alignment::Right) => Align::RIGHT,
+                    _ => Align::LEFT,
+                };
+                self.shape_inline(
+                    ui,
+                    row.get(column).map_or(&[], Vec::as_slice),
+                    size,
+                    header,
+                    *width,
+                    align,
+                )
+            })
+            .collect::<Vec<_>>();
+        let height = cells
+            .iter()
+            .map(|cell| cell.galley.size().y)
+            .fold(size * 1.55, f32::max)
+            + 24.0;
+        TableRowLayout { cells, height }
+    }
+
     fn table(
         &mut self,
         ui: &mut egui::Ui,
@@ -1018,40 +1103,32 @@ impl Renderer<'_> {
         source: usize,
     ) {
         let size = (self.font_size - 1.0).max(12.0);
-        let widths = table_column_widths(headers, rows, size, ui.available_width());
-        let table_width = widths.iter().sum::<f32>() + widths.len() as f32 * 24.0 + 2.0;
-        let prepared = std::iter::once(headers)
-            .chain(rows.iter().map(Vec::as_slice))
-            .enumerate()
-            .map(|(row_index, row)| {
-                let cells = widths
-                    .iter()
+        let available = ui.available_width();
+        let geometry = self
+            .table_layouts
+            .remove(&source)
+            .filter(|cached| cached.available == available && cached.size == size)
+            .unwrap_or_else(|| {
+                let widths = table_column_widths(headers, rows, size, available);
+                let mut offsets = Vec::with_capacity(rows.len() + 2);
+                offsets.push(0.0);
+                for (index, row) in std::iter::once(headers)
+                    .chain(rows.iter().map(Vec::as_slice))
                     .enumerate()
-                    .map(|(column, width)| {
-                        let align = match alignments.get(column) {
-                            Some(Alignment::Center) => Align::Center,
-                            Some(Alignment::Right) => Align::RIGHT,
-                            _ => Align::LEFT,
-                        };
-                        self.shape_inline(
-                            ui,
-                            row.get(column).map_or(&[], Vec::as_slice),
-                            size,
-                            row_index == 0,
-                            *width,
-                            align,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let height = cells
-                    .iter()
-                    .map(|cell| cell.galley.size().y)
-                    .fold(size * 1.55, f32::max)
-                    + 24.0;
-                TableRowLayout { cells, height }
-            })
-            .collect::<Vec<_>>();
-        let table_height = prepared.iter().map(|row| row.height).sum::<f32>();
+                {
+                    let layout = self.table_row(ui, &widths, alignments, row, size, index == 0);
+                    offsets.push(offsets.last().copied().unwrap_or_default() + layout.height);
+                }
+                TableGeometry {
+                    available,
+                    size,
+                    widths,
+                    offsets,
+                }
+            });
+        let widths = &geometry.widths;
+        let table_width = widths.iter().sum::<f32>() + widths.len() as f32 * 24.0 + 2.0;
+        let table_height = geometry.offsets.last().copied().unwrap_or_default();
         let salt = ("markdown_table", ui.id(), source);
         let scroll_id = ui.make_persistent_id(egui::IdSalt::new(salt));
         let mut scroll = egui::ScrollArea::horizontal()
@@ -1094,15 +1171,34 @@ impl Renderer<'_> {
         let output = with_reading_scrollbars(ui, |ui| {
             scroll.show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let table_start = ui.cursor().min;
-                for (row_index, TableRowLayout { cells, height }) in
-                    prepared.into_iter().enumerate()
-                {
-                    let (row_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(table_width, height), Sense::hover());
+                let (table_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(table_width, table_height), Sense::hover());
+                let first = geometry
+                    .offsets
+                    .partition_point(|offset| table_rect.top() + offset <= ui.clip_rect().top())
+                    .saturating_sub(1)
+                    .min(rows.len() + 1);
+                let last = geometry
+                    .offsets
+                    .partition_point(|offset| table_rect.top() + offset < ui.clip_rect().bottom())
+                    .min(rows.len() + 1);
+                for row_index in first..last {
+                    let height = geometry.offsets[row_index + 1] - geometry.offsets[row_index];
+                    let row_rect = egui::Rect::from_min_size(
+                        table_rect.left_top() + Vec2::new(0.0, geometry.offsets[row_index]),
+                        Vec2::new(table_width, height),
+                    );
                     if !ui.is_rect_visible(row_rect) {
                         continue;
                     }
+                    let row = if row_index == 0 {
+                        headers
+                    } else {
+                        &rows[row_index - 1]
+                    };
+                    let cells = self
+                        .table_row(ui, widths, alignments, row, size, row_index == 0)
+                        .cells;
                     let fill = if row_index == 0 {
                         crate::palette::SURFACE
                     } else if row_index % 2 == 1 {
@@ -1139,9 +1235,13 @@ impl Renderer<'_> {
                             Vec2::new(*width, height - 24.0),
                         );
                         let align = cell.galley.job.halign;
+                        // A row's selectable text keeps its identity when rows
+                        // above it enter or leave the virtualized viewport.
+                        let cell_id =
+                            ui.make_persistent_id(("table_cell", source, row_index, column));
                         let mut cell_ui = ui.new_child(
                             egui::UiBuilder::new()
-                                .id_salt(("table_cell", source, row_index, column))
+                                .id(cell_id)
                                 .max_rect(cell_rect)
                                 .layout(Layout::top_down(align)),
                         );
@@ -1150,10 +1250,6 @@ impl Renderer<'_> {
                         left += width + 24.0;
                     }
                 }
-                let table_rect = egui::Rect::from_min_max(
-                    table_start,
-                    egui::pos2(table_start.x + table_width, ui.cursor().top()),
-                );
                 ui.painter().rect_stroke(
                     table_rect,
                     6.0,
@@ -1164,6 +1260,7 @@ impl Renderer<'_> {
         });
         crate::render::remember_scroll_limits(ui.ctx(), &output);
         self.table_scroll.insert(source, output.state.offset.x);
+        self.table_layouts.insert(source, geometry);
     }
 
     fn block(&mut self, ui: &mut egui::Ui, block: &Block, compact: bool) {
@@ -1327,6 +1424,8 @@ impl Renderer<'_> {
         width: f32,
         align: Align,
     ) -> InlineLayout {
+        #[cfg(test)]
+        INLINE_LAYOUT_REQUESTS.with(|requests| requests.set(requests.get() + 1));
         let mut job = egui::text::LayoutJob::default();
         let has_code = spans.iter().any(|span| span.code);
         job.wrap.max_width = (width - if has_code { CODE_PADDING * 2.0 } else { 0.0 }).max(1.0);
@@ -2629,6 +2728,7 @@ mod tests {
         let mut next = None;
         let mut tables = HashMap::new();
         let mut restore = HashMap::new();
+        let mut table_layouts = HashMap::new();
         let mut measured = None;
         let output = context.run_ui(egui::RawInput::default(), |ui| {
             let renderer = Renderer {
@@ -2643,6 +2743,7 @@ mod tests {
                 smooth_scroll: false,
                 table_scroll: &mut tables,
                 restore_tables: &mut restore,
+                table_layouts: &mut table_layouts,
             };
             measured = Some(renderer.shape_inline(ui, spans, size, false, width, align));
         });
@@ -3031,5 +3132,177 @@ mod tests {
             "Cached 500-row Markdown table headless UI: {:.2} ms/frame (debug build, includes layout and UI widget generation, excludes GPU)",
             started.elapsed().as_secs_f64() * 1000.0 / 20.0
         );
+    }
+
+    #[test]
+    fn cached_large_table_shapes_only_visible_cells() {
+        let text = format!(
+            "| File | Description |\n| --- | --- |\n{}",
+            (0..500)
+                .map(|row| format!(
+                    "| `file_{row}.rs` | Unicode Grüße 🦀 and **wrapped words** for row {row}. |\n"
+                ))
+                .collect::<String>()
+        );
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        for pass in 0..3 {
+            preview_pass(&context, &mut cache, &text, pass as f64 * 0.1, vec![]);
+        }
+        INLINE_LAYOUT_REQUESTS.with(|requests| requests.set(0));
+        preview_pass(&context, &mut cache, &text, 0.4, vec![]);
+        let layouts = INLINE_LAYOUT_REQUESTS.with(std::cell::Cell::get);
+        assert!(
+            layouts < 40,
+            "a 340-point viewport should shape only its visible cells, got {layouts} layouts"
+        );
+        INLINE_LAYOUT_REQUESTS.with(|requests| requests.set(0));
+        preview_pass(
+            &context,
+            &mut cache,
+            &text,
+            0.5,
+            vec![egui::Event::Key {
+                key: egui::Key::G,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+        );
+        assert!(cache.documents[0].scroll_y > 10_000.0);
+        let layouts = INLINE_LAYOUT_REQUESTS.with(std::cell::Cell::get);
+        assert!(
+            layouts < 40,
+            "scrolling to the end must also shape only visible cells, got {layouts}"
+        );
+    }
+
+    #[test]
+    fn cached_table_geometry_tracks_width_font_and_same_revision_text_changes() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = "| File | Description |\n| --- | --- |\n| first | These are enough words to wrap repeatedly at a narrow width. |\n| last | End |\n";
+        let mut pass = |width, font_size, text: &str| {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Default::default(),
+                        Vec2::new(width, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        cache.show(
+                            ui,
+                            1,
+                            0,
+                            text,
+                            Path::new("README.md"),
+                            font_size,
+                            false,
+                            true,
+                            false,
+                        );
+                    });
+                },
+            );
+            let bounds = text_bounds(&output.shapes);
+            assert!(bounds.iter().any(|(text, _)| text == "last"));
+            output.drop_without_applying_deltas();
+            cache.documents[0].table_layouts[&0]
+                .offsets
+                .last()
+                .copied()
+                .unwrap()
+        };
+        let wide = pass(960.0, 14.0, text);
+        let narrow = pass(320.0, 14.0, text);
+        assert!(narrow > wide);
+        assert_eq!(pass(960.0, 14.0, text), wide);
+        assert!(pass(960.0, 22.0, text) > wide);
+        let changed = text.replace("| last | End |", "| middle | Added |\n| last | End |");
+        assert!(pass(960.0, 14.0, &changed) > wide);
+    }
+
+    #[test]
+    fn table_text_selection_survives_scrolling_past_preceding_rows() {
+        const SELECTED: &str = "Selected Grüße 🦀";
+        let source = format!(
+            "| Column |\n| --- |\n| Before |\n| {SELECTED} |\n{}",
+            "| More content |\n".repeat(20)
+        );
+        let mut screen = egui_kittest::Harness::builder()
+            .with_size([640.0, 340.0])
+            .build_ui_state(
+                move |ui, cache: &mut MarkdownCache| {
+                    cache.show(
+                        ui,
+                        1,
+                        0,
+                        &source,
+                        Path::new("README.md"),
+                        14.0,
+                        false,
+                        true,
+                        false,
+                    );
+                },
+                MarkdownCache::default(),
+            );
+        screen.run_steps(3);
+        let bounds = text_bounds(&screen.output().shapes);
+        let rect = bounds.iter().find(|(text, _)| text == SELECTED).unwrap().1;
+        let start = rect.left_center();
+        let end = rect.right_center();
+        screen.input_mut().events.extend([
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        screen.step();
+        screen
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(end));
+        screen.step();
+        screen.input_mut().events.push(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        screen.step();
+        screen.input_mut().events.extend([
+            egui::Event::PointerMoved(egui::pos2(300.0, 180.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -90.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            },
+        ]);
+        screen.step();
+        assert!(screen.state().documents[0].scroll_y >= 90.0);
+        screen.input_mut().events.push(egui::Event::Copy);
+        screen.step();
+        let copied = screen
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            });
+        assert_eq!(copied, Some(SELECTED));
     }
 }

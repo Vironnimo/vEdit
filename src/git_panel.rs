@@ -36,6 +36,8 @@ pub(super) struct GitViewState {
     working_cache: Option<WorkingTreeCache>,
     detail_tree: Option<(String, FileTree)>,
     keyboard_rows: Vec<egui::Id>,
+    keyboard_rows_key: Option<(PathBuf, bool, GitSection, u64, usize)>,
+    keyboard_expanded: HashMap<String, bool>,
     keyboard_last_focus: Option<egui::Id>,
     keyboard_header: Option<egui::Id>,
     keyboard_focus_pending: bool,
@@ -44,6 +46,77 @@ pub(super) struct GitViewState {
     detail_keyboard_focus: Option<egui::Id>,
     detail_keyboard_focus_pending: bool,
     detail_page_rows: usize,
+}
+
+impl GitViewState {
+    pub(super) fn update_working_cache(
+        &mut self,
+        files: &[git::FileStatus],
+        stats: &git::WorkingTreeStats,
+    ) {
+        if self
+            .working_cache
+            .as_ref()
+            .is_none_or(|cache| cache.files != files || cache.stats != *stats)
+        {
+            self.working_cache = Some(WorkingTreeCache::new(files, stats));
+            self.keyboard_rows_key = None;
+        }
+    }
+
+    fn update_keyboard_rows(
+        &mut self,
+        root: &Path,
+        repository: bool,
+        history_generation: u64,
+        commits: &[git::CommitSummary],
+    ) -> bool {
+        let key = (
+            root.to_path_buf(),
+            repository,
+            self.section,
+            history_generation,
+            commits.len(),
+        );
+        if self.keyboard_rows_key.as_ref() == Some(&key) && self.keyboard_expanded == self.expanded
+        {
+            return false;
+        }
+        self.keyboard_rows.clear();
+        if repository {
+            match self.section {
+                GitSection::Changes => {
+                    if let Some(cache) = &self.working_cache {
+                        for (group, tree) in &cache.groups {
+                            if tree.summary.total == 0 {
+                                continue;
+                            }
+                            let key = format!("working:{}", group.key());
+                            self.keyboard_rows.push(git_row_id(root, &key));
+                            if self.expanded.get(&key).copied().unwrap_or(true) {
+                                tree_keyboard_rows(
+                                    tree,
+                                    "",
+                                    &key,
+                                    root,
+                                    &self.expanded,
+                                    &mut self.keyboard_rows,
+                                );
+                            }
+                        }
+                    }
+                }
+                GitSection::History => self
+                    .keyboard_rows
+                    .extend(commits.iter().map(|commit| git_row_id(root, &commit.hash))),
+            }
+        } else {
+            self.keyboard_header = None;
+        }
+        self.keyboard_expanded.clone_from(&self.expanded);
+        self.keyboard_rows_key = Some(key);
+        true
+    }
 }
 
 fn git_row_id(root: &Path, key: &str) -> egui::Id {
@@ -301,12 +374,40 @@ fn take_git_popup_return(ctx: &egui::Context) -> Option<egui::Id> {
     })
 }
 
+fn benchmark_previous_git_frame(ctx: &egui::Context) -> bool {
+    #[cfg(test)]
+    {
+        ctx.data(|data| {
+            data.get_temp::<bool>(egui::Id::new("git-panel-benchmark-uncached"))
+                .unwrap_or(false)
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+
 fn git_context_menu(response: &egui::Response, contents: impl FnOnce(&mut egui::Ui, bool)) {
     let keyboard = response.has_focus()
         && response
             .ctx
             .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
     let id = response.id.with("git-context-menu");
+    // Closed menus have no UI to build. Keep the previous-open marker in this
+    // check so Escape still restores row focus on the frame after closing.
+    if !benchmark_previous_git_frame(&response.ctx)
+        && !keyboard
+        && !response.secondary_clicked()
+        && !egui::Popup::is_id_open(&response.ctx, id)
+        && !response.ctx.data(|data| {
+            data.get_temp::<bool>(id.with("git-was-open"))
+                .unwrap_or(false)
+        })
+    {
+        return;
+    }
     if keyboard {
         egui::Popup::open_id(&response.ctx, id);
         response.ctx.data_mut(|data| {
@@ -517,6 +618,7 @@ struct WorkingTreeCache {
     files: Vec<git::FileStatus>,
     stats: git::WorkingTreeStats,
     groups: [(ChangeGroup, FileTree); 3],
+    conflicted: bool,
 }
 
 impl WorkingTreeCache {
@@ -554,6 +656,7 @@ impl WorkingTreeCache {
                 (ChangeGroup::Changes, make(ChangeGroup::Changes)),
                 (ChangeGroup::Untracked, make(ChangeGroup::Untracked)),
             ],
+            conflicted: files.iter().any(git::FileStatus::is_conflicted),
         }
     }
 }
@@ -722,48 +825,20 @@ impl VEditApp {
                 .iter()
                 .position(|id| *id == focused || id.with("action") == focused)
         });
-        if state.working_cache.as_ref().is_none_or(|cache| {
-            cache.files != project.git_changes || cache.stats != project.git_stats
-        }) {
-            state.working_cache = Some(WorkingTreeCache::new(
-                &project.git_changes,
-                &project.git_stats,
-            ));
+        if state.working_cache.is_none() {
+            state.update_working_cache(&project.git_changes, &project.git_stats);
         }
-        state.keyboard_rows.clear();
-        if repo {
-            match state.section {
-                GitSection::Changes => {
-                    if let Some(cache) = &state.working_cache {
-                        for (group, tree) in &cache.groups {
-                            if tree.summary.total == 0 {
-                                continue;
-                            }
-                            let key = format!("working:{}", group.key());
-                            state.keyboard_rows.push(git_row_id(&root, &key));
-                            if state.expanded.get(&key).copied().unwrap_or(true) {
-                                tree_keyboard_rows(
-                                    tree,
-                                    "",
-                                    &key,
-                                    &root,
-                                    &state.expanded,
-                                    &mut state.keyboard_rows,
-                                );
-                            }
-                        }
-                    }
-                }
-                GitSection::History => state.keyboard_rows.extend(
-                    project
-                        .recent_commits
-                        .iter()
-                        .map(|commit| git_row_id(&root, &commit.hash)),
-                ),
-            }
-        } else {
-            state.keyboard_header = None;
+        if benchmark_previous_git_frame(ui.ctx()) {
+            // Reproduce the old per-frame preparation for the paired benchmark.
+            state.update_working_cache(&project.git_changes, &project.git_stats);
+            state.keyboard_rows_key = None;
         }
+        state.update_keyboard_rows(
+            &root,
+            repo,
+            project.git_history_generation,
+            &project.recent_commits,
+        );
         let mut keyboard_target = None;
         if state.keyboard_focus_pending {
             state.keyboard_focus_pending = false;
@@ -1039,15 +1114,14 @@ impl VEditApp {
                             actions.push(GitUiAction::SaveAll);
                         }
                     }
-                    let staged_count = project
-                        .git_changes
-                        .iter()
-                        .filter(|file| file.is_staged())
-                        .count();
-                    let conflicted = project
-                        .git_changes
-                        .iter()
-                        .any(git::FileStatus::is_conflicted);
+                    let (staged_count, conflicted) = if benchmark_previous_git_frame(ui.ctx()) {
+                        (project.git_changes.iter().filter(|file| file.is_staged()).count(),
+                            project.git_changes.iter().any(git::FileStatus::is_conflicted))
+                    } else {
+                        state.working_cache.as_ref()
+                            .map(|cache| (cache.groups[0].1.summary.total, cache.conflicted))
+                            .unwrap_or_default()
+                    };
                     let composer_height = if conflicted { 145.0 } else { 118.0 };
                     if let Some(error) = &project.git_stats_error {
                         error_note(ui, &format!("Line counts unavailable: {error}"));
@@ -1943,35 +2017,18 @@ fn draw_file_tree(
                 },
                 !busy,
             );
-            let rename = file
-                .original_path
-                .as_ref()
-                .map(|old| {
-                    format!(
-                        "\n{} from {old}",
-                        if file.status == git::FileChange::Copied {
-                            "Copied"
-                        } else {
-                            "Renamed"
-                        }
-                    )
+            let row = if benchmark_previous_git_frame(ui.ctx()) {
+                response
+                    .row
+                    .on_hover_text(file_tooltip(file, context, status_label))
+            } else {
+                response.row.on_hover_ui(|ui| {
+                    // Match egui's on_hover_text layout while delaying string
+                    // formatting until this specific tooltip is actually shown.
+                    ui.set_max_width(ui.spacing().tooltip_width);
+                    ui.add(egui::Label::new(file_tooltip(file, context, status_label)));
                 })
-                .unwrap_or_default();
-            let counts = match file.stats {
-                Some(stats) if stats.binary => "Binary file · line counts do not apply".to_owned(),
-                Some(stats) => format!("{} added, {} removed", stats.added, stats.removed),
-                None => "Line counts unavailable".to_owned(),
             };
-            let tooltip = format!(
-                "{}\n{status_label}{rename}\n{counts}\n{}",
-                file.path,
-                match context {
-                    TreeContext::Working(ChangeGroup::Staged) => "Click to view staged changes",
-                    TreeContext::Working(_) => "Click to view changes",
-                    TreeContext::Commit(_) => "Click to view the patch in this commit",
-                }
-            );
-            let row = response.row.on_hover_text(tooltip);
             if row.clicked() {
                 *selected = Some(key.clone());
                 queue_file_diff(file, context, actions);
@@ -2069,6 +2126,37 @@ fn draw_file_tree(
             });
         });
     }
+}
+
+fn file_tooltip(file: &TreeFile, context: TreeContext<'_>, status_label: &str) -> String {
+    let rename = file
+        .original_path
+        .as_ref()
+        .map(|old| {
+            format!(
+                "\n{} from {old}",
+                if file.status == git::FileChange::Copied {
+                    "Copied"
+                } else {
+                    "Renamed"
+                }
+            )
+        })
+        .unwrap_or_default();
+    let counts = match file.stats {
+        Some(stats) if stats.binary => "Binary file · line counts do not apply".to_owned(),
+        Some(stats) => format!("{} added, {} removed", stats.added, stats.removed),
+        None => "Line counts unavailable".to_owned(),
+    };
+    format!(
+        "{}\n{status_label}{rename}\n{counts}\n{}",
+        file.path,
+        match context {
+            TreeContext::Working(ChangeGroup::Staged) => "Click to view staged changes",
+            TreeContext::Working(_) => "Click to view changes",
+            TreeContext::Commit(_) => "Click to view the patch in this commit",
+        }
+    )
 }
 
 fn queue_file_diff(file: &TreeFile, context: TreeContext<'_>, actions: &mut Vec<GitUiAction>) {
@@ -2688,6 +2776,148 @@ mod tests {
             added,
             removed,
             binary: false,
+        }
+    }
+
+    #[test]
+    fn working_cache_updates_statistics_even_when_status_is_unchanged() {
+        let files = vec![git::FileStatus {
+            path: "src/main.rs".into(),
+            original_path: None,
+            index: git::FileChange::None,
+            worktree: git::FileChange::Modified,
+        }];
+        let mut stats = git::WorkingTreeStats::default();
+        stats.unstaged.insert(files[0].path.clone(), counts(1, 2));
+        let mut state = GitViewState::default();
+        state.update_working_cache(&files, &stats);
+        let cached_files = state.working_cache.as_ref().unwrap().files.as_ptr();
+        state.update_working_cache(&files, &stats);
+        assert_eq!(
+            state.working_cache.as_ref().unwrap().files.as_ptr(),
+            cached_files
+        );
+
+        stats.unstaged.insert(files[0].path.clone(), counts(40, 3));
+        state.update_working_cache(&files, &stats);
+        let changed = &state.working_cache.as_ref().unwrap().groups[1].1;
+        assert_eq!((changed.summary.added, changed.summary.removed), (40, 3));
+        stats.unstaged.clear();
+        state.update_working_cache(&files, &stats);
+        assert_eq!(
+            state.working_cache.as_ref().unwrap().groups[1]
+                .1
+                .summary
+                .known,
+            0
+        );
+    }
+
+    #[test]
+    fn keyboard_rows_reuse_cache_and_follow_expansion_index_and_history_changes() {
+        let root = Path::new("C:/git-cache-fixture");
+        let mut files = vec![git::FileStatus {
+            path: "src/main.rs".into(),
+            original_path: None,
+            index: git::FileChange::None,
+            worktree: git::FileChange::Modified,
+        }];
+        let mut state = GitViewState::default();
+        state.update_working_cache(&files, &git::WorkingTreeStats::default());
+        assert!(state.update_keyboard_rows(root, true, 1, &[]));
+        assert!(!state.update_keyboard_rows(root, true, 1, &[]));
+        assert_eq!(state.keyboard_rows.len(), 3);
+        state
+            .expanded
+            .insert("working:changes:folder:src".into(), false);
+        assert!(state.update_keyboard_rows(root, true, 1, &[]));
+        assert_eq!(state.keyboard_rows.len(), 2);
+        files[0].index = git::FileChange::Modified;
+        files[0].worktree = git::FileChange::None;
+        state.update_working_cache(&files, &git::WorkingTreeStats::default());
+        assert!(state.update_keyboard_rows(root, true, 1, &[]));
+        assert_eq!(
+            state.keyboard_rows[2],
+            git_row_id(root, "working:staged:file:src/main.rs")
+        );
+        state.section = GitSection::History;
+        let mut commits = vec![git::CommitSummary {
+            hash: "first".into(),
+            parents: vec![],
+            refs: vec![],
+            author: String::new(),
+            date: String::new(),
+            timestamp: 0,
+            on_remote: false,
+            subject: String::new(),
+        }];
+        assert!(state.update_keyboard_rows(root, true, 1, &commits));
+        assert!(!state.update_keyboard_rows(root, true, 1, &commits));
+        commits[0].hash = "replacement".into();
+        assert!(state.update_keyboard_rows(root, true, 2, &commits));
+        assert_eq!(state.keyboard_rows, [git_row_id(root, "replacement")]);
+        assert!(state.update_keyboard_rows(root, false, 2, &commits));
+        assert!(state.keyboard_rows.is_empty());
+    }
+
+    #[test]
+    #[ignore = "Manual paired headless Git panel benchmark; prints timings without timing assertions"]
+    fn benchmark_large_working_tree_panel() {
+        use egui_kittest::Harness;
+        for count in [1_000, 5_000] {
+            let mut app = VEditApp::empty(egui::Context::default());
+            let mut project = Project::new(PathBuf::from("C:/vedit-git-panel-benchmark"));
+            project.git_root = Some(project.root.clone());
+            project.git_branch = Some("main".into());
+            project.last_git_refresh = Instant::now() + Duration::from_secs(3600);
+            for index in 0..count {
+                let path = format!("src/group{:02}/file{index:05}.rs", index / 100);
+                project
+                    .git_stats
+                    .unstaged
+                    .insert(path.clone(), counts(12, 3));
+                project.git_changes.push(git::FileStatus {
+                    path,
+                    original_path: None,
+                    index: git::FileChange::None,
+                    worktree: git::FileChange::Modified,
+                });
+            }
+            app.projects.push(project);
+            let mut screen = Harness::builder().with_size([400.0, 700.0]).build_ui_state(
+                |ui, app: &mut VEditApp| {
+                    app.ctx = ui.ctx().clone();
+                    app.git_ui(ui);
+                },
+                app,
+            );
+            set_style(&screen.ctx);
+            screen.run_steps(4);
+            let mut samples = [Vec::new(), Vec::new()];
+            let expected_rows = screen.state().projects[0].git_view.keyboard_rows.clone();
+            for pair in 0..5 {
+                for mode in [pair % 2, 1 - pair % 2] {
+                    screen.ctx.data_mut(|data| {
+                        data.insert_temp(egui::Id::new("git-panel-benchmark-uncached"), mode == 0)
+                    });
+                    screen.run_steps(2);
+                    let started = Instant::now();
+                    screen.run_steps(10);
+                    samples[mode].push(started.elapsed().as_secs_f64() * 100.0);
+                    assert_eq!(
+                        screen.state().projects[0].git_view.keyboard_rows,
+                        expected_rows
+                    );
+                    std::hint::black_box(screen.output());
+                }
+            }
+            for timings in &mut samples {
+                timings.sort_by(f64::total_cmp);
+            }
+            eprintln!(
+                "Git panel {count} changed files: previous frame work {:.3} ms/frame, cached/deferred {:.3} ms/frame (5 paired samples, 10 frames/sample)",
+                samples[0][2], samples[1][2]
+            );
         }
     }
 

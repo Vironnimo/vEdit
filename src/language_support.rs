@@ -411,10 +411,17 @@ impl VEditApp {
                 .languages
                 .iter()
                 .filter(|(_, session)| {
-                    session
-                        .server
-                        .as_ref()
-                        .is_some_and(crate::lsp::LanguageServer::is_stopped)
+                    // A stopped server stays in the registry for its visible
+                    // error. Clean up once, not on every subsequent UI frame:
+                    // clearing diagnostics rebuilds the other sessions' lists.
+                    (session.ready
+                        || !session.opened.is_empty()
+                        || !session.diagnostics.is_empty()
+                        || session.error.is_none())
+                        && session
+                            .server
+                            .as_ref()
+                            .is_some_and(crate::lsp::LanguageServer::is_stopped)
                 })
                 .map(|(id, _)| id.clone())
                 .collect();

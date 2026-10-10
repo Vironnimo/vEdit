@@ -420,11 +420,10 @@ impl VimState {
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
-        let chars: Vec<char> = text.chars().collect();
         self.cursor = if self.mode == VimMode::Insert {
-            cursor.min(chars.len())
+            char_boundary(text, cursor).0
         } else {
-            normal_cursor(&chars, cursor)
+            normal_cursor(text, cursor)
         };
         self.preferred_column = None;
         self.pending = None;
@@ -1129,11 +1128,10 @@ impl VimState {
     }
 
     fn clamp_cursor(&mut self, text: &str) {
-        let chars: Vec<char> = text.chars().collect();
         self.cursor = if self.mode != VimMode::Normal {
-            self.cursor.min(chars.len())
+            char_boundary(text, self.cursor).0
         } else {
-            normal_cursor(&chars, self.cursor)
+            normal_cursor(text, self.cursor)
         };
     }
 
@@ -1825,18 +1823,43 @@ impl VimState {
         if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) && !matches!(key, 'j' | 'k') {
             self.visual_to_line_end = key == '$';
         }
-        let rows = lines(chars);
-        let row = row_for_cursor(&rows, self.cursor);
-        let line = rows[row];
+        // Ordinary motions only need the nearby rows, not a new index of every
+        // line in the document for each held navigation key.
+        let word_target = match key {
+            'w' | 'W' => Some(repeat_motion(
+                chars,
+                self.cursor,
+                count,
+                key == 'W',
+                word_forward,
+            )),
+            'b' | 'B' => Some(repeat_motion(
+                chars,
+                self.cursor,
+                count,
+                key == 'B',
+                word_backward,
+            )),
+            'e' | 'E' => Some(repeat_motion(
+                chars,
+                self.cursor,
+                count,
+                key == 'E',
+                word_end,
+            )),
+            _ => None,
+        };
+        if let Some(target) = word_target {
+            self.cursor = target;
+            self.preferred_column = None;
+            return;
+        }
+        let line = line_at_cursor(chars, self.cursor);
         if key == 'j' || key == 'k' {
             let col = *self
                 .preferred_column
                 .get_or_insert(self.cursor.saturating_sub(line.start));
-            let target = rows[if key == 'j' {
-                row.saturating_add(count).min(rows.len() - 1)
-            } else {
-                row.saturating_sub(count)
-            }];
+            let target = relative_line(chars, line, count, key == 'j');
             self.cursor = target.start + col.min(target.end.saturating_sub(target.start + 1));
             return;
         }
@@ -1849,13 +1872,9 @@ impl VimState {
             '0' => line.start,
             '^' => first_nonblank(chars, line),
             '+' | '-' | '_' => {
-                let target = if key == '-' {
-                    row.saturating_sub(count)
-                } else {
-                    row.saturating_add(count - usize::from(key == '_'))
-                        .min(rows.len() - 1)
-                };
-                first_nonblank(chars, rows[target])
+                let target =
+                    relative_line(chars, line, count - usize::from(key == '_'), key != '-');
+                first_nonblank(chars, target)
             }
             '|' => {
                 line.start
@@ -1864,20 +1883,17 @@ impl VimState {
                         .min(line.end.saturating_sub(line.start + 1))
             }
             '$' => {
-                let target = rows[row.saturating_add(count - 1).min(rows.len() - 1)];
+                let target = relative_line(chars, line, count - 1, true);
                 target.end.saturating_sub(1).max(target.start)
             }
-            'G' => first_nonblank(
-                chars,
-                rows[if explicit {
-                    count.saturating_sub(1).min(rows.len() - 1)
+            'G' => {
+                let target = if explicit {
+                    relative_line(chars, line_at_cursor(chars, 0), count - 1, true)
                 } else {
-                    rows.len() - 1
-                }],
-            ),
-            'w' | 'W' => repeat_motion(chars, self.cursor, count, key == 'W', word_forward),
-            'b' | 'B' => repeat_motion(chars, self.cursor, count, key == 'B', word_backward),
-            'e' | 'E' => repeat_motion(chars, self.cursor, count, key == 'E', word_end),
+                    line_at_cursor(chars, chars.len())
+                };
+                first_nonblank(chars, target)
+            }
             '%' => matching_bracket(chars, self.cursor).unwrap_or(self.cursor),
             '{' | '}' => paragraph(chars, self.cursor, count, key == '}'),
             _ => self.cursor,
@@ -2888,6 +2904,17 @@ fn char_to_byte(text: &str, cursor: usize) -> usize {
         .nth(cursor)
         .map_or(text.len(), |(index, _)| index)
 }
+
+fn char_boundary(text: &str, cursor: usize) -> (usize, usize) {
+    let mut count = 0;
+    for (position, (byte, _)) in text.char_indices().enumerate() {
+        if position == cursor {
+            return (position, byte);
+        }
+        count = position + 1;
+    }
+    (count, text.len())
+}
 fn repeated_text(text: &str, count: usize) -> Option<String> {
     if text.len().checked_mul(count)? > MAX_PASTE_BYTES {
         return None;
@@ -2895,26 +2922,27 @@ fn repeated_text(text: &str, count: usize) -> Option<String> {
     Some(text.repeat(count))
 }
 fn insert_delta(before: &str, after: &str, cursor: usize) -> InsertDelta {
-    let old: Vec<char> = before.chars().collect();
-    let new: Vec<char> = after.chars().collect();
-    let mut start = 0;
-    while start < old.len().min(new.len()).min(cursor) && old[start] == new[start] {
-        start += 1;
-    }
-    let mut suffix = 0;
-    while suffix
-        < old
-            .len()
-            .saturating_sub(start)
-            .min(new.len().saturating_sub(start))
-        && old[old.len() - suffix - 1] == new[new.len() - suffix - 1]
-    {
-        suffix += 1;
-    }
+    let mut prefix_bytes = 0;
+    let start = before
+        .chars()
+        .zip(after.chars())
+        .take(cursor)
+        .take_while(|(old, new)| old == new)
+        .inspect(|(ch, _)| prefix_bytes += ch.len_utf8())
+        .count();
+    let mut suffix_bytes = 0;
+    before[prefix_bytes..]
+        .chars()
+        .rev()
+        .zip(after[prefix_bytes..].chars().rev())
+        .take_while(|(old, new)| old == new)
+        .for_each(|(ch, _)| suffix_bytes += ch.len_utf8());
+    let old = &before[prefix_bytes..before.len() - suffix_bytes];
+    let new = &after[prefix_bytes..after.len() - suffix_bytes];
     InsertDelta {
         relative_start: start as isize - cursor as isize,
-        removed: old.len() - start - suffix,
-        inserted: new[start..new.len() - suffix].iter().collect(),
+        removed: old.chars().count(),
+        inserted: new.to_owned(),
     }
 }
 fn word_class(ch: char, big: bool) -> u8 {
@@ -3229,6 +3257,39 @@ fn row_for_cursor(rows: &[Line], cursor: usize) -> usize {
     rows.partition_point(|line| line.start <= cursor)
         .saturating_sub(1)
 }
+
+fn line_at_cursor(chars: &[char], cursor: usize) -> Line {
+    let cursor = cursor.min(chars.len());
+    let start = chars[..cursor]
+        .iter()
+        .rposition(|&ch| ch == '\n')
+        .map_or(0, |at| at + 1);
+    let newline = chars[cursor..]
+        .iter()
+        .position(|&ch| ch == '\n')
+        .map(|at| cursor + at);
+    let end = newline.map_or(chars.len(), |at| {
+        at - usize::from(at > start && chars[at - 1] == '\r')
+    });
+    Line {
+        start,
+        end,
+        newline,
+    }
+}
+
+fn relative_line(chars: &[char], mut line: Line, count: usize, down: bool) -> Line {
+    for _ in 0..count {
+        let next = if down {
+            line.newline.map(|at| at + 1)
+        } else {
+            line.start.checked_sub(1)
+        };
+        let Some(next) = next else { break };
+        line = line_at_cursor(chars, next);
+    }
+    line
+}
 fn first_nonblank(chars: &[char], line: Line) -> usize {
     let mut at = line.start;
     while at < line.end && (chars[at] == ' ' || chars[at] == '\t') {
@@ -3243,12 +3304,27 @@ fn last_nonblank(chars: &[char], line: Line) -> usize {
         .rposition(|ch| !ch.is_whitespace())
         .map_or(line.start, |column| line.start + column)
 }
-fn normal_cursor(chars: &[char], cursor: usize) -> usize {
-    let rows = lines(chars);
-    let at = cursor.min(chars.len());
-    let line = rows[row_for_cursor(&rows, at)];
-    at.min(line.end.saturating_sub(1).max(line.start))
-        .max(line.start)
+fn normal_cursor(text: &str, cursor: usize) -> usize {
+    let (mut cursor, byte) = char_boundary(text, cursor);
+    let mut prefix = &text[..byte];
+    let suffix = &text[byte..];
+    match suffix.chars().next() {
+        Some('\n') => {
+            if prefix.ends_with('\r') {
+                prefix = &prefix[..prefix.len() - 1];
+                cursor -= 1;
+            }
+        }
+        Some('\r') if suffix.starts_with("\r\n") => {}
+        None => {}
+        _ => return cursor,
+    }
+    // Only a line ending or EOF needs moving back. Empty lines keep their
+    // boundary, including CRLF and the empty row after a final newline.
+    if !prefix.is_empty() && !prefix.ends_with('\n') {
+        cursor -= 1;
+    }
+    cursor
 }
 fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
     let rows = lines(chars);
@@ -3317,6 +3393,58 @@ fn paragraph(chars: &[char], cursor: usize, count: usize, forward: bool) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_clamping_handles_unicode_crlf_empty_lines_and_stale_positions() {
+        for (text, expected) in [
+            ("", vec![0]),
+            ("α🦀", vec![0, 1, 1]),
+            ("α\r\n\r\nβ\n", vec![0, 0, 0, 3, 3, 5, 5, 7]),
+            ("\r\n", vec![0, 0, 2]),
+            ("α\rβ\r", vec![0, 1, 2, 3, 3]),
+        ] {
+            for (cursor, &clamped) in expected.iter().enumerate() {
+                assert_eq!(normal_cursor(text, cursor), clamped, "{text:?}, {cursor}");
+            }
+            assert_eq!(normal_cursor(text, usize::MAX), *expected.last().unwrap());
+        }
+    }
+
+    #[test]
+    fn nearby_line_motions_preserve_crlf_unicode_and_empty_rows() {
+        let mut text = "α🦀\r\n\r\n  βγ\r\nlast\r\n".to_owned();
+        let mut state = VimState::new();
+        keys(&mut state, &mut text, "lj");
+        assert_eq!(state.cursor, 4);
+        keys(&mut state, &mut text, "j");
+        assert_eq!(state.cursor, 7);
+        keys(&mut state, &mut text, "2k");
+        assert_eq!(state.cursor, 1);
+        keys(&mut state, &mut text, "2+");
+        assert_eq!(state.cursor, 8);
+        keys(&mut state, &mut text, "2$");
+        assert_eq!(state.cursor, 15);
+        keys(&mut state, &mut text, "G");
+        assert_eq!(state.cursor, text.chars().count());
+        keys(&mut state, &mut text, "2G");
+        assert_eq!(state.cursor, 4);
+    }
+
+    #[test]
+    fn insert_replay_delta_retains_scalar_boundaries_and_cursor_limited_prefix() {
+        for (before, after, cursor, start, removed, inserted) in [
+            ("α🦀\r\nβ", "α中\r\nβ", 1, 0, 1, "中"),
+            ("α🦀", "α🦀🦀", 1, 0, 0, "🦀"),
+            ("α\r\nβ", "αβ", 3, -2, 2, ""),
+            ("", "中", 0, 0, 0, "中"),
+            ("α🦀", "α🦀", 0, 0, 0, ""),
+        ] {
+            let delta = insert_delta(before, after, cursor);
+            assert_eq!(delta.relative_start, start);
+            assert_eq!(delta.removed, removed);
+            assert_eq!(delta.inserted, inserted);
+        }
+    }
 
     #[test]
     fn yank_feedback_reports_unicode_source_ranges_and_real_newlines() {

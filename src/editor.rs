@@ -36,6 +36,43 @@ fn clamp_selection(selection: Range<usize>, len: usize) -> Range<usize> {
     a.min(b)..a.max(b)
 }
 
+/// Resolve scalar offsets once, stopping at the selection end. Local edits can
+/// then copy the untouched UTF-8 slices without expanding the whole document.
+fn selection_offsets(text: &str, selection: Range<usize>) -> (Range<usize>, Range<usize>) {
+    let start = selection.start.min(selection.end);
+    let end = selection.start.max(selection.end);
+    let mut chars = 0..0;
+    let mut bytes = 0..0;
+    for (position, byte) in text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(text.len()))
+        .enumerate()
+    {
+        if position <= start {
+            chars.start = position;
+            bytes.start = byte;
+        }
+        chars.end = position;
+        bytes.end = byte;
+        if position == end {
+            break;
+        }
+    }
+    (chars, bytes)
+}
+
+fn replace_bytes(text: &str, range: Range<usize>, replacement: &str, cursor: usize) -> EditResult {
+    let mut output = String::with_capacity(text.len() - range.len() + replacement.len());
+    output.push_str(&text[..range.start]);
+    output.push_str(replacement);
+    output.push_str(&text[range.end..]);
+    EditResult {
+        text: output,
+        selection: cursor..cursor,
+    }
+}
+
 fn lines(chars: &[char]) -> Vec<Line> {
     let mut result = Vec::new();
     let mut start = 0;
@@ -174,19 +211,9 @@ pub fn go_to_line(text: &str, line_number: usize) -> usize {
 
 /// Replace the selection and place the caret after the replacement.
 pub fn replace_selection(text: &str, selection: Range<usize>, replacement: &str) -> EditResult {
-    let chars: Vec<char> = text.chars().collect();
-    let selection = clamp_selection(selection, chars.len());
+    let (selection, bytes) = selection_offsets(text, selection);
     let position = selection.start + replacement.chars().count();
-    let mut result = apply_edits(
-        &chars,
-        selection.clone(),
-        vec![Edit {
-            range: selection,
-            replacement: replacement.to_owned(),
-        }],
-    );
-    result.selection = position..position;
-    result
+    replace_bytes(text, bytes, replacement, position)
 }
 
 /// Indent or outdent the selected lines. A collapsed selection edits its line.
@@ -425,13 +452,9 @@ pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> EditResult
 /// Insert a tab or advance to the next visual tab stop with spaces.
 pub fn insert_tab(text: &str, selection: Range<usize>, width: usize, tabs: bool) -> EditResult {
     let width = width.clamp(1, 16);
-    let chars: Vec<char> = text.chars().collect();
-    let selection = clamp_selection(selection, chars.len());
-    let start = chars[..selection.start]
-        .iter()
-        .rposition(|&ch| ch == '\n')
-        .map_or(0, |at| at + 1);
-    let column = chars[start..selection.start].iter().fold(0, |column, &ch| {
+    let (selection, bytes) = selection_offsets(text, selection);
+    let start = text[..bytes.start].rfind('\n').map_or(0, |at| at + 1);
+    let column = text[start..bytes.start].chars().fold(0, |column, ch| {
         column
             + if ch == '\t' {
                 width - column % width
@@ -444,24 +467,19 @@ pub fn insert_tab(text: &str, selection: Range<usize>, width: usize, tabs: bool)
     } else {
         " ".repeat(width - column % width)
     };
-    replace_selection(text, selection, &insertion)
+    let cursor = selection.start + insertion.len();
+    replace_bytes(text, bytes, &insertion, cursor)
 }
 
 /// Insert a newline with the current line's indent. Opening braces, brackets,
 /// parentheses and a trailing colon add one level. Between matching delimiters
 /// this creates an indented empty line and places the caret there.
 pub fn smart_newline(text: &str, selection: Range<usize>, indent: &str) -> EditResult {
-    let chars: Vec<char> = text.chars().collect();
-    let selection = clamp_selection(selection, chars.len());
-    let rows = lines(&chars);
-    let line = rows[row_at(&rows, selection.start)];
-    let indent_end = indentation_end(&chars, line).min(selection.start);
-    let base: String = chars[line.start..indent_end].iter().collect();
-    let left = chars[line.start..selection.start]
-        .iter()
-        .rev()
-        .find(|&&ch| !horizontal_space(ch))
-        .copied();
+    let (selection, bytes) = selection_offsets(text, selection);
+    let line_start = text[..bytes.start].rfind('\n').map_or(0, |at| at + 1);
+    let prefix = &text[line_start..bytes.start];
+    let base = &prefix[..prefix.len() - prefix.trim_start_matches([' ', '\t']).len()];
+    let left = prefix.chars().rev().find(|&ch| !horizontal_space(ch));
     let deeper = matches!(left, Some('{' | '[' | '(' | ':'));
     let expected_close = match left {
         Some('{') => Some('}'),
@@ -469,31 +487,20 @@ pub fn smart_newline(text: &str, selection: Range<usize>, indent: &str) -> EditR
         Some('(') => Some(')'),
         _ => None,
     };
-    let right_at = selection.end
-        + chars[selection.end..]
-            .iter()
-            .take_while(|&&ch| horizontal_space(ch))
-            .count();
-    let between = expected_close.is_some() && chars.get(right_at).copied() == expected_close;
+    let suffix = &text[bytes.end..];
+    let right = suffix.trim_start_matches([' ', '\t']);
+    let right_at = bytes.end + suffix.len() - right.len();
+    let between = expected_close.is_some() && right.chars().next() == expected_close;
     let ending = newline(text);
     let mut replacement = format!("{ending}{base}{}", if deeper { indent } else { "" });
     // Keep a separate caret offset when a closing delimiter needs its own line.
     let cursor = selection.start + replacement.chars().count();
     if between {
         replacement.push_str(ending);
-        replacement.push_str(&base);
+        replacement.push_str(base);
     }
-    let end = if between { right_at } else { selection.end };
-    let mut result = apply_edits(
-        &chars,
-        selection.start..end,
-        vec![Edit {
-            range: selection.start..end,
-            replacement,
-        }],
-    );
-    result.selection = cursor..cursor;
-    result
+    let end = if between { right_at } else { bytes.end };
+    replace_bytes(text, bytes.start..end, &replacement, cursor)
 }
 
 /// Find non-overlapping literal matches. Empty queries produce no matches.
@@ -601,6 +608,25 @@ mod tests {
         let result = smart_newline("  café();", 9..9, "    ");
         assert_eq!(result.text, "  café();\n  ");
         assert_eq!(result.selection, 12..12);
+    }
+
+    #[test]
+    fn local_edits_clamp_unicode_selections_and_preserve_raw_line_endings() {
+        let replaced = replace_selection("α🦀\r\nβ", 1..usize::MAX, "中\r\n");
+        assert_eq!(replaced.text, "α中\r\n");
+        assert_eq!(replaced.selection, 4..4);
+        let appended = replace_selection("α🦀", usize::MAX..usize::MAX, "β");
+        assert_eq!(appended.text, "α🦀β");
+        assert_eq!(appended.selection, 3..3);
+        let tab = insert_tab("α\r\n\t🦀tail", Range { start: 8, end: 5 }, 4, false);
+        assert_eq!(tab.text, "α\r\n\t🦀   l");
+        assert_eq!(tab.selection, 8..8);
+        let newline = smart_newline("α\r\n\t{🦀  }\r\nβ", Range { start: 6, end: 5 }, "\t");
+        assert_eq!(newline.text, "α\r\n\t{\r\n\t\t\r\n\t}\r\nβ");
+        assert_eq!(newline.selection, 9..9);
+        let empty = smart_newline("", usize::MAX..usize::MAX, "    ");
+        assert_eq!(empty.text, "\n");
+        assert_eq!(empty.selection, 1..1);
     }
 
     #[test]
