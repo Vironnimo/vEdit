@@ -60,15 +60,17 @@ fn deliver_refresh(
         .send(WorkerResult::GitStatus {
             root: app.projects[0].root.clone(),
             request_id: u64::MAX,
-            result: Ok(GitSnapshot {
+            result: Ok(Box::new(GitSnapshot {
                 root: app.projects[0].git_root.clone(),
+                parent_root: None,
                 branch: Some("main".into()),
                 tracking: None,
+                main_comparison: Ok(None),
                 files: Vec::new(),
                 stats: git::WorkingTreeStats::default(),
                 stats_error: None,
                 history: Ok(GitHistoryRefresh { snapshot, page }),
-            }),
+            })),
         })
         .unwrap();
     app.poll();
@@ -79,7 +81,7 @@ fn history_screen(app: VEditApp) -> Harness<'static, VEditApp> {
     // A dispatched page stays pending across frames so its request guard can
     // be tested independently of worker scheduling and the rest of the editor.
     let screen = Harness::builder()
-        .with_size([360.0, 600.0])
+        .with_size([360.0, 800.0])
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
@@ -169,6 +171,140 @@ impl Drop for HoverRepository {
         );
         let _ = fs::remove_dir_all(&root);
     }
+}
+
+fn wait_for_git_refresh(app: &mut VEditApp, index: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app.projects[index].git_loading {
+        assert!(Instant::now() < deadline, "Git refresh timed out");
+        app.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.projects[index].git_error.is_none());
+}
+
+#[test]
+fn parent_repository_is_not_used_without_selection() {
+    let repository = HoverRepository::new();
+    let nested = repository.0.join("examples").join("tiny-project");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(repository.0.join("outside.txt"), "outside the project\n").unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.projects.push(Project::new(nested));
+    app.refresh_git(0, true);
+    wait_for_git_refresh(&mut app, 0);
+    let project = &app.projects[0];
+    assert!(project.git_root.is_none());
+    assert!(project.git_branch.is_none());
+    assert!(project.git_changes.is_empty());
+    assert!(project.recent_commits.is_empty());
+    assert_eq!(project.uncommitted_change_count(), None);
+    assert!(project.git_parent_root.is_some());
+    assert!(project.git_approved_parent.is_none());
+}
+
+#[test]
+fn parent_repository_choice_is_persisted_and_can_be_revoked() {
+    let repository = HoverRepository::new();
+    let nested = repository.0.join("examples");
+    fs::create_dir(&nested).unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.recovery_session_path = repository.0.join(".git/vedit-test-session.json");
+    app.projects.push(Project::new(nested));
+    app.refresh_git(0, true);
+    wait_for_git_refresh(&mut app, 0);
+    let mut screen = history_screen(app);
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Initialize repository").is_none());
+    assert!(screen.query_by_label("Push").is_none());
+    screen.state_mut().focus_git_content();
+    screen.run_steps(2);
+    let select = screen.get_by_label("Use parent repository");
+    assert_eq!(
+        screen
+            .ctx
+            .read_response(screen.ctx.memory(|m| m.focused()).unwrap())
+            .unwrap()
+            .rect,
+        select.rect()
+    );
+    select.click();
+    screen.run_steps(2);
+    wait_for_git_refresh(screen.state_mut(), 0);
+    assert!(screen.state().projects[0].git_root.is_some());
+    assert_eq!(screen.state().projects[0].recent_commits.len(), 2);
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Using parent repository").is_some());
+    assert!(screen.query_by_label("Push").is_some());
+    let saved: Session =
+        serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
+    let mut restored = VEditApp::empty(egui::Context::default());
+    restored.restore_session_projects(saved.projects);
+    restored.refresh_git(0, true);
+    wait_for_git_refresh(&mut restored, 0);
+    assert!(restored.projects[0].git_root.is_some());
+    let generation = screen.state().projects[0].git_history_generation;
+    screen.get_by_label("···").click();
+    screen.run_steps(2);
+    screen.get_by_label("Stop using parent repository").click();
+    screen.run_steps(2);
+    deliver_page(
+        screen.state_mut(),
+        generation,
+        0,
+        Ok(git::HistoryPage {
+            commits: vec![commit(80)],
+            has_more: false,
+        }),
+    );
+    wait_for_git_refresh(screen.state_mut(), 0);
+    assert!(screen.state().projects[0].git_root.is_none());
+    assert!(screen.state().projects[0].recent_commits.is_empty());
+    assert!(
+        screen.state().session().projects[0]
+            .git_approved_parent
+            .is_none()
+    );
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Use parent repository").is_some());
+    assert!(screen.query_by_label("Push").is_none());
+    // Wait for the final background session write before removing the fixture.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let saved = fs::read(&screen.state().recovery_session_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok());
+        if saved.is_some_and(|s| s.projects[0].git_approved_parent.is_none()) {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn new_project_repository_replaces_the_selected_parents_history() {
+    let repository = HoverRepository::new();
+    let nested = repository.0.join("examples");
+    fs::create_dir(&nested).unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    let mut project = Project::new(nested.clone());
+    project.git_approved_parent = Some(repository.0.clone());
+    app.projects.push(project);
+    app.refresh_git(0, true);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].recent_commits.len(), 2);
+    git::initialize(&nested).unwrap();
+    app.refresh_git(0, true);
+    wait_for_git_refresh(&mut app, 0);
+    let project = &app.projects[0];
+    assert_eq!(
+        fs::canonicalize(project.git_root.as_ref().unwrap()).unwrap(),
+        fs::canonicalize(nested).unwrap()
+    );
+    assert!(project.git_parent_root.is_none());
+    assert!(project.recent_commits.is_empty());
+    assert!(!project.git_history_update_available);
 }
 
 #[test]
@@ -362,10 +498,12 @@ fn repository_relocation_releases_hover_slots_and_discards_old_repository_result
         .send(WorkerResult::GitStatus {
             root: root.clone(),
             request_id: u64::MAX,
-            result: Ok(GitSnapshot {
+            result: Ok(Box::new(GitSnapshot {
                 root: Some(repository.0.clone()),
+                parent_root: None,
                 branch: Some("main".into()),
                 tracking: None,
+                main_comparison: Ok(None),
                 files: Vec::new(),
                 stats: git::WorkingTreeStats::default(),
                 stats_error: None,
@@ -373,7 +511,7 @@ fn repository_relocation_releases_hover_slots_and_discards_old_repository_result
                     snapshot: app.projects[0].git_history_snapshot.clone().unwrap(),
                     page: None,
                 }),
-            }),
+            })),
         })
         .unwrap();
     app.poll();

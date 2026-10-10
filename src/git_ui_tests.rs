@@ -446,3 +446,29 @@ fn git_branch_picker_shows_local_and_remote_branches() {
     }
     visual_tests::snapshot(&mut screen, "vedit_git_branches");
 }
+
+#[test]
+fn repository_overview_screenshots() {
+    let mut app = git_workspace();
+    app.projects[0].git_branch = Some("feature/agent-work".into());
+    app.projects[0].git_tracking = Some(git::BranchInfo {
+        name: Some("feature/agent-work".into()),
+        upstream: Some("origin/feature/agent-work".into()),
+        ahead: 3,
+        behind: 1,
+        divergence_known: true,
+    });
+    app.projects[0].git_main_comparison = Ok(Some(git::BranchComparison {
+        base: "main".into(),
+        ahead: 12,
+        behind: 2,
+    }));
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "vedit_git_overview");
+    screen.set_size(Vec2::new(960.0, 640.0));
+    visual_tests::snapshot(&mut screen, "vedit_git_overview_compact");
+    let project = &mut screen.state_mut().projects[0];
+    project.clear_git_repository_data();
+    project.git_parent_root = Some(PathBuf::from("C:/Code/vEdit"));
+    visual_tests::snapshot(&mut screen, "vedit_git_parent_repository");
+}

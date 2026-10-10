@@ -80,7 +80,7 @@ fn fixture() -> VEditApp {
 
 fn harness(app: VEditApp, width: f32, full_sidebar: bool) -> Harness<'static, VEditApp> {
     let screen = Harness::builder()
-        .with_size([width, 600.0])
+        .with_size([width, 800.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
             move |ui, app: &mut VEditApp| {
@@ -168,6 +168,20 @@ fn history_keeps_subject_author_and_colored_branch_metadata_on_separate_lines() 
         let rows = row_rects(&screen);
         for (row, commit) in rows.iter().zip(&screen.state().projects[0].recent_commits) {
             assert_eq!(row.height(), 44.0);
+            let history_clip = screen
+                .output()
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    let egui::Shape::Text(text) = &shape.shape else {
+                        return None;
+                    };
+                    text.galley
+                        .text()
+                        .starts_with(&commit.subject)
+                        .then_some(shape.clip_rect)
+                })
+                .unwrap();
             let texts: Vec<_> = screen
                 .output()
                 .shapes
@@ -177,14 +191,21 @@ fn history_keeps_subject_author_and_colored_branch_metadata_on_separate_lines() 
                         return None;
                     };
                     let center_y = text.pos.y + text.galley.size().y * 0.5;
-                    (center_y >= row.top() && center_y < row.bottom())
-                        .then_some((text, shape.clip_rect))
+                    // Virtual rows can extend under the separately clipped footer.
+                    (shape.clip_rect == history_clip
+                        && center_y >= row.top()
+                        && center_y < row.bottom())
+                    .then_some((text, shape.clip_rect))
                 })
                 .collect();
             assert_eq!(
                 texts.len(),
                 2,
-                "subject and branch metadata have separate lines"
+                "subject and branch metadata have separate lines: {:?}",
+                texts
+                    .iter()
+                    .map(|(text, _)| text.galley.text())
+                    .collect::<Vec<_>>()
             );
             assert!(texts[1].0.galley.text().starts_with("Local  "));
             for reference in &commit.refs {
@@ -528,8 +549,10 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
     project.git_status_request = Some(u64::MAX);
     let snapshot = GitSnapshot {
         root: project.git_root.clone(),
+        parent_root: None,
         branch: project.git_branch.clone(),
         tracking: project.git_tracking.clone(),
+        main_comparison: project.git_main_comparison.clone(),
         files,
         stats: project.git_stats.clone(),
         stats_error: None,
@@ -542,7 +565,7 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
         .send(WorkerResult::GitStatus {
             root: root.clone(),
             request_id: u64::MAX,
-            result: Ok(snapshot),
+            result: Ok(Box::new(snapshot)),
         })
         .unwrap();
     app.poll();
@@ -895,6 +918,81 @@ fn git_keyboard_no_repository_focus_has_safe_initialize_target() {
         screen.get_by_label("Initialize repository").rect()
     );
     assert!(screen.state().git_busy.is_none());
+}
+
+#[test]
+fn repository_overview_keeps_push_visible_and_separates_files_tracking_and_main() {
+    let mut app = fixture();
+    app.projects[0].git_tracking = Some(git::BranchInfo {
+        name: Some("feature".into()),
+        upstream: Some("origin/feature".into()),
+        ahead: 3,
+        behind: 2,
+        divergence_known: true,
+    });
+    app.projects[0].git_main_comparison = Ok(Some(git::BranchComparison {
+        base: "main".into(),
+        ahead: 12,
+        behind: 1,
+    }));
+    let mut screen = harness(app, 300.0, false);
+    screen.run_steps(2);
+    for label in [
+        "Repository status",
+        "Working tree clean",
+        "Tracking · origin/feature",
+        "3 ahead · 2 behind",
+        "Local base · main",
+        "12 ahead · 1 behind",
+        "Fetch",
+        "Pull",
+        "Push",
+        "Remote status as of last fetch",
+    ] {
+        assert!(screen.query_by_label(label).is_some(), "missing {label}");
+    }
+    screen.state_mut().projects[0]
+        .git_changes
+        .push(git::FileStatus {
+            path: "file.rs".into(),
+            original_path: None,
+            index: git::FileChange::Modified,
+            worktree: git::FileChange::Modified,
+        });
+    let project = &mut screen.state_mut().projects[0];
+    project
+        .git_view
+        .update_working_cache(&project.git_changes, &project.git_stats);
+    screen.run_steps(2);
+    assert!(screen.query_by_label("1 changed file").is_some());
+    assert!(
+        screen
+            .query_by_label("1 staged · 1 unstaged · 0 untracked")
+            .is_some()
+    );
+    assert!(screen.query_by_label("Push").is_some());
+    assert!(screen.query_by_label("3 ahead · 2 behind").is_some());
+    screen.state_mut().projects[0]
+        .git_tracking
+        .as_mut()
+        .unwrap()
+        .divergence_known = false;
+    screen.run_steps(2);
+    assert!(
+        screen
+            .query_by_label("Tracking status unavailable · Fetch to refresh")
+            .is_some()
+    );
+    assert!(screen.query_by_label("3 ahead · 2 behind").is_none());
+    screen.state_mut().projects[0].git_tracking = None;
+    screen.run_steps(2);
+    assert!(
+        screen
+            .query_by_label("No tracking branch configured")
+            .is_some()
+    );
+    assert!(screen.query_by_label("Push").is_some());
+    assert!(screen.query_by_label("12 ahead · 1 behind").is_some());
 }
 
 #[test]

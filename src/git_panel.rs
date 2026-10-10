@@ -687,6 +687,8 @@ enum GitUiAction {
     Pull,
     Push,
     Initialize,
+    UseParentRepository,
+    StopUsingParentRepository,
     SwitchBranch(String),
 }
 
@@ -781,6 +783,15 @@ impl VEditApp {
             .show(ui, |ui| {
                 ui.set_max_height(height.max(480.0));
                 self.git_ui_contents(ui);
+                // Inner regions can be taller than a short sidebar. Their focus
+                // requests must also reveal the control in this outer scroller.
+                if self.git_content_has_focus()
+                    && let Some(focused) = ui.memory(|memory| memory.focused())
+                    && let Some(response) = ui.ctx().read_response(focused)
+                    && !ui.clip_rect().contains(response.rect.center())
+                {
+                    ui.scroll_to_rect(response.rect, Some(Align::Center));
+                }
             });
     }
 
@@ -881,6 +892,9 @@ impl VEditApp {
         }
 
         ui.spacing_mut().item_spacing.y = 4.0;
+        if repo {
+            ui.label(RichText::new("Repository status").strong());
+        }
         ui.horizontal(|ui| {
             let toolbar_width = if repo { 45.0 } else { 0.0 };
             let width = (ui.available_width() - toolbar_width).max(35.0);
@@ -893,9 +907,14 @@ impl VEditApp {
                         "Detached HEAD"
                     } else if loading {
                         "Finding repository…"
+                    } else if project.git_parent_root.is_some() {
+                        "Parent repository available"
                     } else {
                         "No repository"
                     });
+                    if !repo {
+                        return ui.label(RichText::new(label).strong().color(MUTED));
+                    }
                     let response = ui
                         .menu_button(
                             RichText::new(format!("{label} ▾")).strong().color(ACCENT),
@@ -991,22 +1010,15 @@ impl VEditApp {
                                 actions.push(GitUiAction::UnstageAll);
                                 ui.close();
                             }
-                            ui.separator();
-                            for (label, tip, action) in [
-                                ("Fetch", "Fetch updates from the remote", GitUiAction::Fetch),
-                                (
-                                    "Pull",
-                                    "Pull updates into the current branch",
-                                    GitUiAction::Pull,
-                                ),
-                                (
-                                    "Push",
-                                    "Push committed changes to the remote",
-                                    GitUiAction::Push,
-                                ),
-                            ] {
-                                if design::menu_item(ui, label, "", tip).clicked() {
-                                    actions.push(action);
+                            if project.git_parent_root.is_some() {
+                                ui.separator();
+                                if design::menu_item(
+                                    ui,
+                                    "Stop using parent repository",
+                                    "",
+                                    "Disable Git for this project until you select the parent repository again",
+                                ).clicked() {
+                                    actions.push(GitUiAction::StopUsingParentRepository);
                                     ui.close();
                                 }
                             }
@@ -1029,57 +1041,76 @@ impl VEditApp {
                 }
             });
         });
-        if let Some(tracking) = &project.git_tracking
-            && let Some(upstream) = &tracking.upstream
-        {
-            let suffix = if tracking.ahead != 0 || tracking.behind != 0 {
-                format!("  ↑ {}  ↓ {}", tracking.ahead, tracking.behind)
-            } else {
-                String::new()
-            };
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!("{upstream}{suffix}"))
-                        .size(10.5)
-                        .color(MUTED),
-                )
-                .truncate(),
-            )
-            .on_hover_text("Remote tracking status, based on the last fetch");
+        if repo && let Some(parent) = &project.git_parent_root {
+            ui.label(
+                RichText::new("Using parent repository")
+                    .size(11.0)
+                    .color(MUTED),
+            );
+            ui.add(egui::Label::new(crate::paths::display(parent)).wrap());
+        }
+        if repo {
+            repository_overview(ui, project, &mut state, unsaved_count, busy, &mut actions);
         }
         if let Some(error) = &project.git_error {
             error_note(ui, error);
         }
         if !repo {
             ui.add_space(12.0);
-            ui.label(
-                RichText::new(if loading {
-                    "Reading repository…"
-                } else {
-                    "Track this project's changes with Git."
-                })
-                .size(12.0)
-                .color(MUTED),
-            );
-            if !loading && !busy {
-                let initialize = design::ghost_button(
-                    ui,
-                    "Initialize repository",
-                    "Create a local Git repository in this project",
+            if let Some(parent) = &project.git_parent_root {
+                let name = parent
+                    .file_name()
+                    .unwrap_or(parent.as_os_str())
+                    .to_string_lossy();
+                ui.label(
+                    RichText::new(format!("This folder belongs to the repository {name}."))
+                        .size(12.0)
+                        .color(TEXT),
                 );
-                state.keyboard_header = Some(initialize.id);
-                state.keyboard_controls.push(initialize.id);
-                if initialize.clicked() {
-                    actions.push(GitUiAction::Initialize);
+                ui.add(egui::Label::new(crate::paths::display(parent)).wrap());
+                ui.add_space(8.0);
+                ui.label(RichText::new("Using it shows changes and history for the entire repository. Git actions also apply to that repository.").size(11.0).color(MUTED));
+                let select = ui
+                    .add_enabled_ui(!loading && !busy, |ui| {
+                        design::primary_button(ui, "Use parent repository", Vec2::new(0.0, 30.0))
+                            .on_hover_text("Remember this repository for this project")
+                    })
+                    .inner;
+                state.keyboard_header = Some(select.id);
+                state.keyboard_controls.push(select.id);
+                if select.clicked() {
+                    actions.push(GitUiAction::UseParentRepository);
+                }
+            } else {
+                ui.label(
+                    RichText::new(if loading {
+                        "Reading repository…"
+                    } else {
+                        "Track this project's changes with Git."
+                    })
+                    .size(12.0)
+                    .color(MUTED),
+                );
+                if !loading && !busy {
+                    let initialize = design::ghost_button(
+                        ui,
+                        "Initialize repository",
+                        "Create a local Git repository in this project",
+                    );
+                    state.keyboard_header = Some(initialize.id);
+                    state.keyboard_controls.push(initialize.id);
+                    if initialize.clicked() {
+                        actions.push(GitUiAction::Initialize);
+                    }
                 }
             }
         } else {
             ui.add_space(7.0);
             let changed_count = project.git_changes.len();
-            let total_height = ui.available_height().max(360.0);
+            let total_height = ui.available_height().max(420.0);
             let ratio = state.split_ratio.unwrap_or(0.5).clamp(0.25, 0.75);
             let changes_height =
-                (total_height * ratio).clamp(185.0, (total_height - 140.0).max(185.0));
+                (total_height * ratio).clamp(215.0, (total_height - 140.0).max(215.0));
             let (changes_rect, _) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), changes_height),
                 egui::Sense::hover(),
@@ -1726,6 +1757,12 @@ impl VEditApp {
                 GitUiAction::Initialize => {
                     self.git_action(root.to_path_buf(), GitAction::Initialize)
                 }
+                GitUiAction::UseParentRepository => {
+                    self.set_git_parent_repository(project_index, true);
+                }
+                GitUiAction::StopUsingParentRepository => {
+                    self.set_git_parent_repository(project_index, false);
+                }
             }
         }
     }
@@ -1733,6 +1770,166 @@ impl VEditApp {
 
 fn error_note(ui: &mut egui::Ui, error: &str) {
     ui.label(RichText::new(error).size(11.0).color(ORANGE));
+}
+
+fn repository_overview(
+    ui: &mut egui::Ui,
+    project: &Project,
+    state: &mut GitViewState,
+    unsaved_count: usize,
+    busy: bool,
+    actions: &mut Vec<GitUiAction>,
+) {
+    ui.separator();
+    if let Some(cache) = &state.working_cache {
+        let count = cache.files.len();
+        let (label, color) = if cache.conflicted {
+            (format!("Conflicts · {count} changed files"), RED)
+        } else if count == 0 {
+            ("Working tree clean".into(), GREEN)
+        } else {
+            (
+                format!(
+                    "{count} changed {}",
+                    if count == 1 { "file" } else { "files" }
+                ),
+                ORANGE,
+            )
+        };
+        ui.label(RichText::new(label).strong().color(color));
+        if count > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{} staged · {} unstaged · {} untracked",
+                    cache.groups[0].1.summary.total,
+                    cache.groups[1].1.summary.total,
+                    cache.groups[2].1.summary.total
+                ))
+                .small()
+                .color(MUTED),
+            )
+            .on_hover_text(
+                "File counts; a partially staged file appears in both staged and unstaged.",
+            );
+        }
+    }
+    if unsaved_count > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{unsaved_count} unsaved documents · not yet in Git"
+            ))
+            .small()
+            .color(ORANGE),
+        );
+    }
+    if let Some(tracking) = &project.git_tracking
+        && let Some(upstream) = &tracking.upstream
+    {
+        if tracking.divergence_known {
+            comparison_status(
+                ui,
+                &format!("Tracking · {upstream}"),
+                tracking.ahead,
+                tracking.behind,
+            );
+        } else {
+            ui.label(
+                RichText::new(format!("Tracking · {upstream}"))
+                    .small()
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new("Tracking status unavailable · Fetch to refresh")
+                    .small()
+                    .color(ORANGE),
+            );
+        }
+    } else {
+        ui.label(
+            RichText::new("No tracking branch configured")
+                .small()
+                .color(MUTED),
+        );
+    }
+    match &project.git_main_comparison {
+        Ok(Some(comparison)) => comparison_status(
+            ui,
+            &format!("Local base · {}", comparison.base),
+            comparison.ahead,
+            comparison.behind,
+        ),
+        Ok(None) => {
+            ui.label(
+                RichText::new("No local main or master branch")
+                    .small()
+                    .color(MUTED),
+            );
+        }
+        Err(error) => {
+            ui.label(
+                RichText::new("Main comparison unavailable")
+                    .small()
+                    .color(ORANGE),
+            )
+            .on_hover_text(error);
+        }
+    }
+    ui.add_enabled_ui(!busy, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for (label, tip, action) in [
+                (
+                    "Fetch",
+                    "Update remote status without changing local files",
+                    GitUiAction::Fetch,
+                ),
+                (
+                    "Pull",
+                    "Pull the tracking branch with fast-forward only",
+                    GitUiAction::Pull,
+                ),
+                (
+                    "Push",
+                    "Push committed changes using Git's configured push destination",
+                    GitUiAction::Push,
+                ),
+            ] {
+                let response = if label == "Push"
+                    && project
+                        .git_tracking
+                        .as_ref()
+                        .is_some_and(|tracking| tracking.divergence_known && tracking.ahead > 0)
+                {
+                    design::primary_button(ui, label, Vec2::new(58.0, 28.0)).on_hover_text(tip)
+                } else {
+                    ui.add(egui::Button::new(label).min_size(Vec2::new(58.0, 28.0)))
+                        .on_hover_text(tip)
+                };
+                state.keyboard_controls.push(response.id);
+                if response.clicked() {
+                    actions.push(action);
+                }
+            }
+        });
+    });
+    ui.label(
+        RichText::new("Remote status as of last fetch")
+            .size(10.5)
+            .color(MUTED),
+    );
+}
+
+fn comparison_status(ui: &mut egui::Ui, label: &str, ahead: usize, behind: usize) {
+    ui.horizontal_wrapped(|ui| {
+        ui.add(egui::Label::new(RichText::new(label).small().color(MUTED)).truncate())
+            .on_hover_text(label);
+        let (text, color) = if ahead == 0 && behind == 0 {
+            ("Up to date".into(), GREEN)
+        } else {
+            (format!("{ahead} ahead · {behind} behind"), if behind > 0 { ORANGE } else { ACCENT })
+        };
+        ui.add(egui::Label::new(RichText::new(text).strong().color(color)).wrap_mode(egui::TextWrapMode::Extend))
+            .on_hover_text("Commit counts: ahead exists only on the current branch; behind exists only on the comparison branch. Uncommitted files are counted separately.");
+    });
 }
 
 pub(super) fn refresh_indicator(ui: &mut egui::Ui, running: bool) -> egui::Response {

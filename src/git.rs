@@ -214,6 +214,64 @@ pub struct BranchInfo {
     pub upstream: Option<String>,
     pub ahead: usize,
     pub behind: usize,
+    /// False when the configured upstream has no fetched commit to compare.
+    pub divergence_known: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchComparison {
+    pub base: String,
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+/// Compare HEAD with local main (or master). This reads local objects only;
+/// the independent tracking comparison describes the last fetched remote state.
+pub fn main_comparison(root: &Path) -> GitResult<Option<BranchComparison>> {
+    let output = checked_git(
+        root,
+        &string_args(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/main",
+            "refs/heads/master",
+        ]),
+        "find main branch",
+    )?;
+    let refs = String::from_utf8_lossy(&output.stdout);
+    let Some(base) = ["main", "master"].into_iter().find(|name| {
+        refs.lines()
+            .any(|line| line == format!("refs/heads/{name}"))
+    }) else {
+        return Ok(None);
+    };
+    let output = checked_git(
+        root,
+        &string_args(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("HEAD...refs/heads/{base}"),
+            "--",
+        ]),
+        "compare with main branch",
+    )?;
+    let counts = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| GitError::new("compare with main branch", "invalid commit counts"))?;
+    let [ahead, behind] = counts.as_slice() else {
+        return Err(GitError::new(
+            "compare with main branch",
+            "invalid commit counts",
+        ));
+    };
+    Ok(Some(BranchComparison {
+        base: base.into(),
+        ahead: *ahead,
+        behind: *behind,
+    }))
 }
 
 /// Initialize a Git repository in `root`.
@@ -240,6 +298,43 @@ pub fn repository_root(root: &Path) -> GitResult<Option<PathBuf>> {
     Err(command_error("repository detection", &output))
 }
 
+/// The enclosing repository is only active when it is the opened folder itself
+/// or the user has selected this particular parent repository for the project.
+pub struct ProjectRepository {
+    pub root: Option<PathBuf>,
+    pub parent: Option<PathBuf>,
+}
+
+pub fn project_repository(
+    project: &Path,
+    approved_parent: Option<&Path>,
+) -> GitResult<ProjectRepository> {
+    let Some(repository) = repository_root(project)? else {
+        return Ok(ProjectRepository {
+            root: None,
+            parent: None,
+        });
+    };
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path)
+            .map_err(|error| GitError::new("repository detection", error.to_string()))
+    };
+    let repository_path = canonical(&repository)?;
+    if canonical(project)? == repository_path {
+        return Ok(ProjectRepository {
+            root: Some(repository),
+            parent: None,
+        });
+    }
+    let approved = approved_parent
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .is_some_and(|path| path == repository_path);
+    Ok(ProjectRepository {
+        root: approved.then(|| repository.clone()),
+        parent: Some(repository),
+    })
+}
+
 /// Returns the current branch, or `None` when HEAD is detached.
 pub fn current_branch(root: &Path) -> GitResult<Option<String>> {
     let args = string_args(&["branch", "--show-current"]);
@@ -256,6 +351,7 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
         upstream: None,
         ahead: 0,
         behind: 0,
+        divergence_known: false,
     };
     if info.name.is_none() {
         return Ok(info);
@@ -297,6 +393,7 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
     }
     info.ahead = counts[0];
     info.behind = counts[1];
+    info.divergence_known = true;
     Ok(info)
 }
 
@@ -1532,6 +1629,7 @@ fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo
         upstream: None,
         ahead: 0,
         behind: 0,
+        divergence_known: false,
     };
     let mut saw_branch = false;
     let mut files = Vec::new();
@@ -1554,6 +1652,7 @@ fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo
             continue;
         }
         if let Some(counts) = record.strip_prefix(b"# branch.ab ") {
+            tracking.divergence_known = true;
             let counts = std::str::from_utf8(counts).map_err(|_| invalid())?;
             let (ahead, behind) = counts.split_once(' ').ok_or_else(invalid)?;
             tracking.ahead = ahead
@@ -2035,6 +2134,85 @@ mod tests {
     }
 
     #[test]
+    fn project_repository_requires_the_exact_parent_but_accepts_roots_and_worktrees() {
+        let repository = TestRepository::new();
+        let nested = repository.0.join("examples");
+        fs::create_dir(&nested).unwrap();
+        assert!(project_repository(&nested, None).unwrap().root.is_none());
+        let selected = project_repository(&nested, Some(&repository.0)).unwrap();
+        assert!(selected.root.is_some() && selected.parent.is_some());
+        let other = TestRepository::new();
+        assert!(
+            project_repository(&nested, Some(&other.0))
+                .unwrap()
+                .root
+                .is_none()
+        );
+        let own = project_repository(&fs::canonicalize(&repository.0).unwrap(), None).unwrap();
+        assert!(own.root.is_some() && own.parent.is_none());
+        repository.commit_all("Initial");
+        let worktree = TestRepository::empty_directory();
+        repository.git(&["worktree", "add", "--detach", worktree.0.to_str().unwrap()]);
+        assert!(worktree.0.join(".git").is_file());
+        let own = project_repository(&worktree.0, None).unwrap();
+        assert!(own.root.is_some() && own.parent.is_none());
+        initialize(&nested).unwrap();
+        let own = project_repository(&nested, Some(&repository.0)).unwrap();
+        assert!(own.root.is_some() && own.parent.is_none());
+    }
+
+    #[test]
+    fn main_comparison_is_independent_of_tracking_and_counts_both_sides() {
+        let repository = TestRepository::new();
+        assert_eq!(main_comparison(&repository.0).unwrap(), None);
+        repository.commit_all("Initial");
+        repository.git(&["switch", "-c", "feature"]);
+        repository.write("feature.txt", "first\n");
+        repository.commit_all("Feature one");
+        repository.git(&["remote", "add", "origin", repository.0.to_str().unwrap()]);
+        repository.git(&["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        repository.git(&["config", "branch.feature.remote", "origin"]);
+        repository.git(&["config", "branch.feature.merge", "refs/heads/feature"]);
+        repository.write("feature.txt", "second\n");
+        repository.commit_all("Feature two");
+        repository.git(&["switch", "main"]);
+        repository.write("main.txt", "base advanced\n");
+        repository.commit_all("Main advanced");
+        assert_eq!(
+            main_comparison(&repository.0).unwrap(),
+            Some(BranchComparison {
+                base: "main".into(),
+                ahead: 0,
+                behind: 0,
+            })
+        );
+        repository.git(&["switch", "feature"]);
+        assert_eq!(
+            main_comparison(&repository.0).unwrap(),
+            Some(BranchComparison {
+                base: "main".into(),
+                ahead: 2,
+                behind: 1,
+            })
+        );
+        let (_, tracking) = status_with_tracking(&repository.0).unwrap();
+        assert_eq!(tracking.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!((tracking.ahead, tracking.behind), (1, 0));
+        assert!(tracking.divergence_known);
+        repository.git(&["update-ref", "-d", "refs/remotes/origin/feature"]);
+        let (_, tracking) = status_with_tracking(&repository.0).unwrap();
+        assert_eq!(tracking.upstream.as_deref(), Some("origin/feature"));
+        assert!(!tracking.divergence_known);
+        repository.git(&["branch", "-m", "main", "master"]);
+        assert_eq!(
+            main_comparison(&repository.0).unwrap().unwrap().base,
+            "master"
+        );
+        repository.git(&["switch", "--detach"]);
+        assert_eq!(main_comparison(&repository.0).unwrap().unwrap().ahead, 2);
+    }
+
+    #[test]
     fn new_repository_has_a_branch_and_empty_history() {
         let repository = TestRepository::new();
         assert_eq!(
@@ -2049,6 +2227,7 @@ mod tests {
                 upstream: None,
                 ahead: 0,
                 behind: 0,
+                divergence_known: false,
             }
         );
     }
@@ -2350,6 +2529,7 @@ mod tests {
                 upstream: Some("tracking".into()),
                 ahead: 1,
                 behind: 1,
+                divergence_known: true,
             }
         );
         assert!(pull(&repository.0).is_err());

@@ -90,10 +90,12 @@ fn full_snapshot_updates_count_and_invalidates_an_older_indicator() {
         .send(WorkerResult::GitStatus {
             root: root.clone(),
             request_id: 401,
-            result: Ok(GitSnapshot {
+            result: Ok(Box::new(GitSnapshot {
                 root: Some(root.clone()),
+                parent_root: None,
                 branch: Some("main".into()),
                 tracking: None,
+                main_comparison: Ok(None),
                 files: vec![git::FileStatus {
                     path: "change.txt".into(),
                     original_path: None,
@@ -106,7 +108,7 @@ fn full_snapshot_updates_count_and_invalidates_an_older_indicator() {
                     snapshot: git::HistorySnapshot::default(),
                     page: None,
                 }),
-            }),
+            })),
         })
         .unwrap();
     app.poll();
@@ -152,7 +154,7 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
         NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
     ));
     fs::create_dir(&root).unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), None);
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), None);
     git::initialize(&root).unwrap();
     let hooks = root.join(".git").join("isolated-test-hooks");
     fs::create_dir_all(&hooks).unwrap();
@@ -170,15 +172,22 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
             .unwrap();
         assert!(output.status.success());
     }
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(0));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(0));
     fs::write(root.join("file.txt"), "first\n").unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(1));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(1));
+    let nested = root.join("examples");
+    fs::create_dir(&nested).unwrap();
+    assert_eq!(read_uncommitted_count(&nested, None).unwrap(), None);
+    assert_eq!(
+        read_uncommitted_count(&nested, Some(&root)).unwrap(),
+        Some(1)
+    );
     git::stage_all(&root).unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(1));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(1));
     git::commit(&root, "initial").unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(0));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(0));
     fs::write(root.join("file.txt"), "second\n").unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(1));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(1));
     let mut app = fixture(1);
     app.projects.push(Project::new(root.clone()));
     app.refresh_inactive_git_indicators();
@@ -197,7 +206,7 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
     assert!(app.projects[1].recent_commits.is_empty());
     git::stage_all(&root).unwrap();
     git::commit(&root, "save change").unwrap();
-    assert_eq!(read_uncommitted_count(&root).unwrap(), Some(0));
+    assert_eq!(read_uncommitted_count(&root, None).unwrap(), Some(0));
     app.projects[1].last_git_indicator_refresh =
         Instant::now() - REFRESH_INTERVAL - Duration::from_secs(1);
     app.refresh_inactive_git_indicators();

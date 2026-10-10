@@ -174,6 +174,7 @@ struct SessionProject {
     active_tab_index: Option<usize>,
     layout: Option<split::SessionLayout>,
     git_split_ratio: Option<f32>,
+    git_approved_parent: Option<PathBuf>,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -202,9 +203,12 @@ struct Project {
     index_error: Option<String>,
     rust_project: bool,
     git_root: Option<PathBuf>,
+    git_parent_root: Option<PathBuf>,
+    git_approved_parent: Option<PathBuf>,
     git_branch: Option<String>,
     git_branches: Vec<git::CommitRef>,
     git_tracking: Option<git::BranchInfo>,
+    git_main_comparison: Result<Option<git::BranchComparison>, String>,
     git_changes: Vec<git::FileStatus>,
     git_stats: git::WorkingTreeStats,
     git_stats_error: Option<String>,
@@ -246,9 +250,12 @@ impl Project {
             index_error: None,
             rust_project: false,
             git_root: None,
+            git_parent_root: None,
+            git_approved_parent: None,
             git_branch: None,
             git_branches: Vec::new(),
             git_tracking: None,
+            git_main_comparison: Ok(None),
             git_changes: Vec::new(),
             git_stats: git::WorkingTreeStats::default(),
             git_stats_error: None,
@@ -404,8 +411,10 @@ impl EditorTab {
 }
 struct GitSnapshot {
     root: Option<PathBuf>,
+    parent_root: Option<PathBuf>,
     branch: Option<String>,
     tracking: Option<git::BranchInfo>,
+    main_comparison: Result<Option<git::BranchComparison>, String>,
     files: Vec<git::FileStatus>,
     stats: git::WorkingTreeStats,
     stats_error: Option<String>,
@@ -462,7 +471,7 @@ enum WorkerResult {
     GitStatus {
         root: PathBuf,
         request_id: u64,
-        result: Result<GitSnapshot, String>,
+        result: Result<Box<GitSnapshot>, String>,
     },
     GitIndicator {
         root: PathBuf,
@@ -783,6 +792,7 @@ impl VEditApp {
             }
             let mut project = Project::new(root.clone());
             project.tasks = entry.tasks;
+            project.git_approved_parent = entry.git_approved_parent;
             project.git_view.split_ratio = entry
                 .git_split_ratio
                 .filter(|ratio| ratio.is_finite())
@@ -1740,6 +1750,11 @@ impl VEditApp {
                         p.git_indicator_request = None;
                         match result {
                             Ok(s) => {
+                                let s = *s;
+                                if p.git_root != s.root {
+                                    p.clear_git_repository_data();
+                                }
+                                p.git_parent_root = s.parent_root;
                                 p.git_indicator_count = s.root.as_ref().map(|_| s.files.len());
                                 let repository = s.root.as_ref().unwrap_or(&p.root);
                                 p.git_view
@@ -1752,6 +1767,7 @@ impl VEditApp {
                                 p.git_root = s.root;
                                 p.git_branch = s.branch;
                                 p.git_tracking = s.tracking;
+                                p.git_main_comparison = s.main_comparison;
                                 p.git_view.update_working_cache(&s.files, &s.stats);
                                 p.git_changes = s.files;
                                 p.git_stats = s.stats;
@@ -1802,7 +1818,9 @@ impl VEditApp {
                     self.finish_git_indicator(root, request_id, result);
                 }
                 WorkerResult::GitCommit { root, hash, result } => {
-                    if let Some(p) = self.projects.iter_mut().find(|p| p.root == root) {
+                    if let Some(p) = self.projects.iter_mut().find(|p| p.root == root)
+                        && p.git_root.is_some()
+                    {
                         if let Ok(detail) = &result {
                             // Keep recent immutable commits without growing with history.
                             if p.git_view.detail_cache.len() >= 16 {
@@ -2099,13 +2117,19 @@ impl VEditApp {
         // An older lightweight inactive refresh must not supersede this snapshot.
         p.git_indicator_request = None;
         let root = p.root.clone();
+        let approved_parent = p.git_approved_parent.clone();
+        let previous_repository = p.git_root.clone();
         let previous_history = p.git_history_snapshot.clone();
         let refresh_history = std::mem::take(&mut p.git_history_refresh_requested);
         let previous_history_error = p.git_history_error.clone().filter(|_| !refresh_history);
         self.worker(move || {
             let result = (|| {
-                let repo = git::repository_root(&root).map_err(|e| e.to_string())?;
-                if let Some(repo) = repo {
+                let repository = git::project_repository(&root, approved_parent.as_deref())
+                    .map_err(|e| e.to_string())?;
+                if let Some(repo) = repository.root {
+                    let same_repository = previous_repository.as_ref() == Some(&repo);
+                    let previous_history = previous_history.filter(|_| same_repository);
+                    let previous_history_error = previous_history_error.filter(|_| same_repository);
                     let (status, tracking) =
                         git::status_with_tracking(&repo).map_err(|e| e.to_string())?;
                     let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
@@ -2133,10 +2157,13 @@ impl VEditApp {
                         };
                         Ok(GitHistoryRefresh { snapshot, page })
                     })();
+                    let main_comparison = git::main_comparison(&repo).map_err(|e| e.to_string());
                     Ok(GitSnapshot {
                         root: Some(repo),
+                        parent_root: repository.parent,
                         branch: status.branch,
                         tracking: Some(tracking),
+                        main_comparison,
                         files: status.files,
                         stats,
                         stats_error,
@@ -2145,8 +2172,10 @@ impl VEditApp {
                 } else {
                     Ok(GitSnapshot {
                         root: None,
+                        parent_root: repository.parent,
                         branch: None,
                         tracking: None,
+                        main_comparison: Ok(None),
                         files: Vec::new(),
                         stats: git::WorkingTreeStats::default(),
                         stats_error: None,
@@ -2160,7 +2189,7 @@ impl VEditApp {
             WorkerResult::GitStatus {
                 root,
                 request_id,
-                result,
+                result: result.map(Box::new),
             }
         });
     }
@@ -2832,6 +2861,7 @@ impl VEditApp {
                     root: p.root.clone(),
                     tasks: p.tasks.clone(),
                     git_split_ratio: p.git_view.split_ratio,
+                    git_approved_parent: p.git_approved_parent.clone(),
                     open_files: Vec::new(),
                     active_file: p.tabs.get(p.active_tab).and_then(|t| t.path.clone()),
                     tabs: p
