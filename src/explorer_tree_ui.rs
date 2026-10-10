@@ -168,12 +168,13 @@ impl VEditApp {
         rows: &[explorer_navigation::VisibleRow<'_>],
         active: &Option<PathBuf>,
     ) {
+        let owns_selection = self.explorer_keyboard_focused() || self.explorer_context_menu_open();
         for row in rows {
             let entry = row.entry;
             ui.push_id(&entry.path, |ui| {
                 let selected = self.explorer_selected(&entry.path);
                 let active_file = !entry.is_dir && active.as_ref() == Some(&entry.path);
-                let emphasized = if self.explorer_keyboard_focused() {
+                let emphasized = if owns_selection {
                     selected
                 } else {
                     active_file
@@ -196,6 +197,8 @@ impl VEditApp {
                         last_sibling: row.last_sibling,
                         expanded: entry.is_dir.then(|| self.explorer_expanded(&entry.path)),
                         file_color: file_color(Some(&entry.path)),
+                        // A context menu keeps the tree's target selected even
+                        // while menu items temporarily own keyboard focus.
                         selected: emphasized,
                         active_file,
                         tooltip: &tooltip,

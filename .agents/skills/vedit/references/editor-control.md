@@ -139,6 +139,8 @@ To persist exclusions, supply `{"op":"settings","patch":{"search_excludes":["nod
 {"op":"file","action":{"action":"rename","path":"C:/project/draft.md","name":"plan.md"}}
 ```
 
+To delete a file or folder, use `action:{"action":"delete","path":"C:/project/obsolete.txt"}`. The item goes to the Windows Recycle Bin; restore it there to undo. Unsaved buffers and agent drafts under that path block deletion.
+
 To create a folder, use `action:{"action":"create_folder","parent":"C:/project","name":"plans"}`. These requests start background operations. Use the returned `job_id` with `file_job` and require `complete:true`, `applied:true`, and no error before relying on the destination or retargeted documents. Up to four jobs can be pending; the most recent 32 are retained in the current app process. Retain the actual job ID; after expiration or uncertain delivery, inspect files and current app state before attempting another mutation.
 
 ## Ordered work and recovery

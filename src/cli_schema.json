@@ -461,6 +461,13 @@
       }
     },
     {
+      "op": "file",
+      "action": {
+        "action": "delete",
+        "path": "C:/project/obsolete.txt"
+      }
+    },
+    {
       "op": "file_job",
       "job_id": 1
     }
@@ -592,6 +599,7 @@
   "sidebar_layout": "status.panels.sidebars reports left/right selected panel, requested visibility, effective_visible after compact-window collapse, preferred width, and right_panels (all other panels are assigned left). panel left_sidebar/right_sidebar shows or hides that side; explorer/search/source_control/review use their persistent side assignment. Hiding a panel that is not selected does not hide another panel. Arrange panel positions via View > Explorer left, Git right or the sidebar title menu; positions, visibility and widths persist. A compact-window hint can reveal the temporarily hidden side without losing preferences.",
   "strictness": "Unknown/duplicate fields and contradictory constraints fail before effects. A user dialog blocks mutation, but read-only observations remain available.",
   "file_actions": {
+    "delete": "Moves the explicit path (file or folder) to the Windows Recycle Bin. Unsaved buffers, agent drafts, busy documents, workspace roots, symlinks/reparse points and network paths are refused. Clean affected tabs close after success. Edits made during execution remain as untitled drafts. Restore the item from the Windows Recycle Bin to undo; no permanent-delete fallback.",
     "rename": "Renames in the same parent directory without replacing an existing file/folder. Preserves open buffer contents, dirty state, cursor and attached panes; paths update after actual completion. Busy documents/jobs are refused.",
     "limits": "At most four pending jobs; the newest 32 completed jobs are retained. IDs include the process identity and expire after app restart/eviction. status.file_jobs is bounded and may mark details_truncated; file_job returns full details.",
     "create_folder": "Creates one new folder under an existing workspace directory without overwrite.",

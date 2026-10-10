@@ -2,6 +2,9 @@
 use super::*;
 use std::fs::OpenOptions;
 
+#[path = "recycle.rs"]
+mod recycle;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EditorAction {
     Cut,
@@ -256,6 +259,7 @@ fn native_history_step(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FileOperation {
     Rename,
+    Delete,
     NewFile,
     NewFolder,
 }
@@ -322,11 +326,12 @@ impl FileJob {
     fn value(&self) -> serde_json::Value {
         serde_json::json!({
             "job_id": self.id,
-            "action": if self.operation == FileOperation::Rename { "rename" } else { "create_folder" },
+            "action": match self.operation { FileOperation::Rename => "rename", FileOperation::Delete => "delete", FileOperation::NewFolder => "create_folder", FileOperation::NewFile => "create_file" },
             "status": match self.phase { FileJobPhase::Preparing | FileJobPhase::Applying => "pending", FileJobPhase::Applied => "applied", FileJobPhase::Failed => "failed" },
             "phase": match self.phase { FileJobPhase::Preparing => "preparing", FileJobPhase::Applying => "applying", _ => "complete" },
             "complete": !self.pending(), "applied": self.phase == FileJobPhase::Applied,
-            "path": crate::paths::display(&self.source), "destination": crate::paths::display(&self.destination),
+            "path": crate::paths::display(&self.source), "destination": if self.operation == FileOperation::Delete { None } else { Some(crate::paths::display(&self.destination)) },
+            "undo": (self.operation == FileOperation::Delete && self.phase == FileJobPhase::Applied).then_some("Restore this item from the Windows Recycle Bin"),
             "error": self.error, "updated_tabs": self.updated_tabs,
         })
     }
@@ -474,6 +479,7 @@ impl VEditApp {
         let (operation, source, name) = match action {
             FileAction::Rename { path, name } => (FileOperation::Rename, path, name),
             FileAction::CreateFolder { parent, name } => (FileOperation::NewFolder, parent, name),
+            FileAction::Delete { path } => (FileOperation::Delete, path, String::new()),
         };
         if !source.is_absolute() {
             return Response::failure(
@@ -494,7 +500,9 @@ impl VEditApp {
                 "Windows paths cannot exceed 32767 UTF-16 code units",
             );
         }
-        if let Err(error) = validate_name(&name) {
+        if operation != FileOperation::Delete
+            && let Err(error) = validate_name(&name)
+        {
             return Response::failure("invalid_name", error);
         }
         if self
@@ -510,7 +518,9 @@ impl VEditApp {
                 "Four filesystem operations are pending. Inspect their job status before submitting more.",
             );
         }
-        let destination = if operation == FileOperation::Rename {
+        let destination = if operation == FileOperation::Delete {
+            source.clone()
+        } else if operation == FileOperation::Rename {
             source.parent().unwrap_or(&source).join(&name)
         } else {
             source.join(&name)
@@ -527,7 +537,7 @@ impl VEditApp {
                 "A pending filesystem operation affects this path. Wait for its job result first.",
             );
         }
-        if operation == FileOperation::Rename
+        if matches!(operation, FileOperation::Rename | FileOperation::Delete)
             && self
                 .projects
                 .iter()
@@ -541,8 +551,13 @@ impl VEditApp {
         {
             return Response::failure(
                 "document_busy",
-                "An affected document is loading or saving. Wait before renaming it.",
+                "An affected document is loading or saving. Wait before changing its path.",
             );
+        }
+        if operation == FileOperation::Delete
+            && let Some(error) = self.context_delete_error(&source)
+        {
+            return Response::failure("delete_blocked", error);
         }
         while self.context_file_jobs.entries.len() >= 32 {
             let Some(index) = self
@@ -557,7 +572,7 @@ impl VEditApp {
         }
         static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
         let id = (u64::from(std::process::id()) << 32) | NEXT_JOB.fetch_add(1, Ordering::Relaxed);
-        let revisions = if operation == FileOperation::Rename {
+        let revisions = if matches!(operation, FileOperation::Rename | FileOperation::Delete) {
             self.projects
                 .iter()
                 .flat_map(|project| &project.tabs)
@@ -648,13 +663,13 @@ impl VEditApp {
                 "Filesystem actions must stay inside a registered workspace's real folder"
                     .to_owned(),
             )
-        } else if operation == FileOperation::Rename
+        } else if matches!(operation, FileOperation::Rename | FileOperation::Delete)
             && self
                 .projects
                 .iter()
                 .any(|project| project.root.starts_with(&source))
         {
-            Some("A workspace folder or a folder containing a registered workspace cannot be renamed while it is open".to_owned())
+            Some("A workspace folder or a folder containing a registered workspace cannot be renamed or deleted while it is open".to_owned())
         } else if self
             .context_file_jobs
             .entries
@@ -663,7 +678,7 @@ impl VEditApp {
             .any(|job| file_jobs_overlap(job, operation, &source, &destination))
         {
             Some("Another pending operation affects the resolved path".to_owned())
-        } else if operation == FileOperation::Rename
+        } else if matches!(operation, FileOperation::Rename | FileOperation::Delete)
             && self
                 .projects
                 .iter()
@@ -679,6 +694,9 @@ impl VEditApp {
                 "An affected document started loading or saving; no filesystem change was applied"
                     .to_owned(),
             )
+        } else if operation == FileOperation::Delete && self.context_delete_error(&source).is_some()
+        {
+            self.context_delete_error(&source)
         } else if self.context_file_jobs.entries[index]
             .revisions
             .iter()
@@ -702,15 +720,33 @@ impl VEditApp {
             self.context_fail_file_job(prepared.id, error);
             return;
         }
+        // Capture document identities at the final canonical-path check. A
+        // workspace closed and reopened during the worker must not let its new
+        // documents be mistaken for the original operation's buffers.
+        let delete_revisions = (operation == FileOperation::Delete).then(|| {
+            self.projects
+                .iter()
+                .flat_map(|project| &project.tabs)
+                .filter(|tab| {
+                    tab.path
+                        .as_ref()
+                        .is_some_and(|path| path_contains(&source, path))
+                })
+                .map(|tab| (tab.id, tab.revision))
+                .collect()
+        });
         let job = &mut self.context_file_jobs.entries[index];
         job.source = source.clone();
         job.destination = destination.clone();
+        if let Some(revisions) = delete_revisions {
+            job.revisions = revisions;
+        }
         job.phase = FileJobPhase::Applying;
         self.worker(move || {
-            let result = if operation == FileOperation::Rename {
-                rename_without_overwrite(&source, &destination)
-            } else {
-                fs::create_dir(&destination).map_err(|error| error.to_string())
+            let result = match operation {
+                FileOperation::Rename => rename_without_overwrite(&source, &destination),
+                FileOperation::Delete => recycle::delete(&source),
+                _ => fs::create_dir(&destination).map_err(|error| error.to_string()),
             };
             WorkerResult::ContextFile(FileActionResult {
                 job_id: Some(prepared.id),
@@ -1096,6 +1132,17 @@ impl VEditApp {
             popup = popup.at_position(position);
         }
         popup.show(|ui| {
+            let target =
+                ui.add(egui::Label::new(RichText::new(file_title(path)).strong()).truncate());
+            target.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    format!("Context target: {}", file_title(path)),
+                )
+            });
+            target.on_hover_text(crate::paths::display(path));
+            ui.separator();
             if !is_dir {
                 if design::menu_item(ui, "Open", "", "Open this file in the current pane").clicked()
                 {
@@ -1150,6 +1197,29 @@ impl VEditApp {
                 action = Some(4);
                 ui.close();
             }
+            if ui
+                .add_enabled_ui(can_rename, |ui| {
+                    let response = design::menu_item(
+                        ui,
+                        "Delete",
+                        "Del",
+                        "Move this item to the Windows Recycle Bin",
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            "Delete",
+                        )
+                    });
+                    response
+                })
+                .inner
+                .clicked()
+            {
+                action = Some(8);
+                ui.close();
+            }
             ui.separator();
             for (label, tooltip, command) in [
                 ("Copy path", "Copy the full Windows path", 5),
@@ -1197,6 +1267,7 @@ impl VEditApp {
                     .unwrap_or(path),
             )),
             Some(7) => self.context_reveal(path.into()),
+            Some(8) => self.context_begin_delete(path),
             _ => {}
         }
     }
@@ -1226,6 +1297,16 @@ impl VEditApp {
         );
         let mut action = None;
         response.context_menu(|ui| {
+            let target = ui.label(RichText::new(file_title(root)).strong());
+            target.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    format!("Context target: {}", file_title(root)),
+                )
+            });
+            target.on_hover_text(crate::paths::display(root));
+            ui.separator();
             for (label, tooltip, command) in [
                 ("New file…", "Create a file in the project folder", 0),
                 ("New folder…", "Create a folder in the project folder", 1),
@@ -1254,12 +1335,28 @@ impl VEditApp {
                     ui.close();
                 }
             }
+            if ui
+                .add_enabled_ui(self.explorer_has_expanded_folders(), |ui| {
+                    design::menu_item(
+                        ui,
+                        "Collapse all",
+                        "",
+                        "Collapse all folders in this project",
+                    )
+                })
+                .inner
+                .clicked()
+            {
+                action = Some(5);
+                ui.close();
+            }
         });
         match action {
             Some(0) => self.context_begin_file_action(FileOperation::NewFile, root),
             Some(1) => self.context_begin_file_action(FileOperation::NewFolder, root),
             Some(2) => self.ctx.copy_text(crate::paths::display(root)),
             Some(3) => self.context_reveal(root.into()),
+            Some(5) => self.explorer_collapse_all(),
             Some(4) => {
                 if let Some(index) = self
                     .projects
@@ -1330,13 +1427,41 @@ impl VEditApp {
         }
     }
 
+    fn context_delete_error(&self, path: &Path) -> Option<String> {
+        if self
+            .projects
+            .iter()
+            .any(|project| path_contains(path, &project.root))
+        {
+            return Some("Remove this workspace from vEdit before deleting its folder".into());
+        }
+        self.projects.iter().flat_map(|project| &project.tabs).find(|tab| {
+            tab.path.as_ref().is_some_and(|open| path_contains(path, open))
+                && (tab.dirty || tab.agent_unsaved || tab.loading || tab.saving)
+        }).map(|tab| format!("Cannot delete: {} has unsaved changes or a pending load/save. Save or close that document first; nothing was deleted.", tab.title))
+    }
+
+    pub(super) fn context_begin_delete(&mut self, path: &Path) {
+        let response =
+            self.control_file_action(crate::cli::FileAction::Delete { path: path.into() });
+        if response.ok {
+            self.status(
+                format!("Moving {} to the Recycle Bin…", file_title(path)),
+                false,
+            );
+        } else if let Some(error) = response.error {
+            self.status(error.message, true);
+        }
+        self.focus_explorer();
+    }
+
     pub(super) fn context_path_busy(&self, path: &Path) -> bool {
         self.context_file_dialog.as_ref().is_some_and(|dialog| {
             dialog.busy
                 && dialog.operation == FileOperation::Rename
                 && path.starts_with(&dialog.path)
         }) || self.context_file_jobs.entries.iter().any(|job| {
-            job.operation == FileOperation::Rename
+            matches!(job.operation, FileOperation::Rename | FileOperation::Delete)
                 && job.pending()
                 && (path_contains(&job.source, path) || path_contains(&job.destination, path))
         })
@@ -1354,6 +1479,7 @@ impl VEditApp {
             FileOperation::Rename => "Rename",
             FileOperation::NewFile => "New file",
             FileOperation::NewFolder => "New folder",
+            FileOperation::Delete => "Delete",
         };
         let mut submit = false;
         let mut cancel = false;
@@ -1505,6 +1631,7 @@ impl VEditApp {
                     fs::create_dir(&new_path).map_err(|error| error.to_string())
                 }
                 FileOperation::Rename => rename_without_overwrite(&old_path, &new_path),
+                FileOperation::Delete => recycle::delete(&old_path),
             };
             WorkerResult::ContextFile(FileActionResult {
                 job_id: None,
@@ -1563,6 +1690,76 @@ impl VEditApp {
             self.session_dirty = true;
             self.status(
                 "Renamed; open documents and unsaved changes preserved",
+                false,
+            );
+        } else if result.operation == FileOperation::Delete {
+            let original_tabs = result
+                .job_id
+                .and_then(|id| {
+                    self.context_file_jobs
+                        .entries
+                        .iter()
+                        .find(|job| job.id == id)
+                })
+                .map(|job| {
+                    job.revisions
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .collect::<std::collections::HashSet<_>>()
+                });
+            let mut close_tabs = Vec::new();
+            for project in &mut self.projects {
+                let language_paths: Vec<_> = project
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        original_tabs
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&tab.id))
+                    })
+                    .filter_map(|tab| tab.path.as_ref())
+                    .filter(|path| path_contains(&result.old_path, path))
+                    .cloned()
+                    .collect();
+                for path in language_paths {
+                    project.close_language_paths(&path);
+                }
+                for tab in &mut project.tabs {
+                    if original_tabs
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&tab.id))
+                        && tab
+                            .path
+                            .as_ref()
+                            .is_some_and(|path| path_contains(&result.old_path, path))
+                    {
+                        updated_tabs.push(tab.id);
+                        if tab.dirty || tab.agent_unsaved {
+                            // Editing can continue after dispatch. Never discard a buffer
+                            // just because its on-disk file was successfully recycled.
+                            tab.path = None;
+                            tab.fingerprint = None;
+                            tab.dirty = true;
+                            tab.agent_unsaved = true;
+                            tab.revision = tab.revision.saturating_add(1);
+                        } else {
+                            close_tabs.push(tab.id);
+                        }
+                    }
+                }
+            }
+            for id in close_tabs {
+                self.remove_closed_document(id);
+                self.remove_document_from_layout(id);
+            }
+            self.control_prune_review();
+            self.reconcile_layout_after_close();
+            self.session_dirty = true;
+            self.status(
+                format!(
+                    "{} moved to Recycle Bin; restore it there to undo",
+                    file_title(&result.old_path)
+                ),
                 false,
             );
         } else {
@@ -1702,7 +1899,7 @@ fn prepare_file_operation(
     source: PathBuf,
     name: String,
 ) -> Result<(PathBuf, PathBuf), String> {
-    if operation == FileOperation::Rename {
+    if matches!(operation, FileOperation::Rename | FileOperation::Delete) {
         let metadata = fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
         #[cfg(windows)]
         let reparse = {
@@ -1712,9 +1909,12 @@ fn prepare_file_operation(
         #[cfg(not(windows))]
         let reparse = false;
         if metadata.file_type().is_symlink() || reparse {
-            return Err("Use the real workspace path; renaming symlinks or reparse points through the CLI is unsupported".into());
+            return Err("Use the real workspace path; renaming or deleting symlinks or reparse points is unsupported".into());
         }
         let source = fs::canonicalize(&source).map_err(|error| error.to_string())?;
+        if operation == FileOperation::Delete {
+            return Ok((source.clone(), source));
+        }
         let parent = source.parent().ok_or("A volume root cannot be renamed")?;
         let destination = validated_child(parent, &name)?;
         Ok((source, destination))
@@ -1758,12 +1958,12 @@ fn file_jobs_overlap(
     source: &Path,
     destination: &Path,
 ) -> bool {
-    let own = if job.operation == FileOperation::Rename {
+    let own = if matches!(job.operation, FileOperation::Rename | FileOperation::Delete) {
         vec![job.source.as_path(), job.destination.as_path()]
     } else {
         vec![job.destination.as_path()]
     };
-    let proposed = if operation == FileOperation::Rename {
+    let proposed = if matches!(operation, FileOperation::Rename | FileOperation::Delete) {
         vec![source, destination]
     } else {
         vec![destination]
@@ -1866,6 +2066,203 @@ mod tests {
         fs::remove_dir(base.join("workspace")).unwrap();
         fs::remove_dir(base.join("outside")).unwrap();
         fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn delete_folder_refuses_unsaved_buffers_and_agent_drafts() {
+        let (mut app, base) = filesystem_fixture();
+        let folder = app.projects[0].root.join("documents");
+        fs::create_dir(&folder).unwrap();
+        let old = app.projects[0].root.join("source.txt");
+        let source = folder.join("source.txt");
+        fs::rename(&old, &source).unwrap();
+        app.tab_mut().unwrap().path = Some(source.clone());
+        for agent_draft in [false, true] {
+            let tab = app.tab_mut().unwrap();
+            tab.dirty = !agent_draft;
+            tab.agent_unsaved = agent_draft;
+            let response = app.control_file_action(crate::cli::FileAction::Delete {
+                path: folder.clone(),
+            });
+            assert!(!response.ok);
+            assert_eq!(response.error.as_ref().unwrap().code, "delete_blocked");
+            assert!(
+                response
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("source.txt")
+            );
+            assert_eq!(app.tab().unwrap().text, "unsaved human buffer");
+            assert_eq!(fs::read_to_string(&source).unwrap(), "saved on disk");
+            assert!(app.context_file_jobs.entries.is_empty());
+        }
+        fs::rename(&source, &old).unwrap();
+        fs::remove_dir(folder).unwrap();
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[test]
+    fn delete_rechecks_unsaved_changes_before_applying() {
+        let (mut app, base) = filesystem_fixture();
+        let source = app.projects[0].root.join("source.txt");
+        app.tab_mut().unwrap().dirty = false;
+        let response = app.control_file_action(crate::cli::FileAction::Delete {
+            path: source.clone(),
+        });
+        assert!(response.ok);
+        assert!(app.context_file_path_pending(&source));
+        app.tab_mut().unwrap().agent_unsaved = true;
+        let done = wait_file_job(&mut app, response.result["job_id"].as_u64().unwrap());
+        assert_eq!(done["status"], "failed");
+        assert_eq!(done["applied"], false);
+        assert!(source.exists());
+        assert!(app.tab().unwrap().agent_unsaved);
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[test]
+    fn delete_refuses_workspace_roots_and_paths_outside_workspaces() {
+        let (mut app, base) = filesystem_fixture();
+        let response = app.control_file_action(crate::cli::FileAction::Delete {
+            path: app.projects[0].root.clone(),
+        });
+        assert!(!response.ok);
+        assert!(response.error.unwrap().message.contains("workspace"));
+        let outside = base.join("outside");
+        let response = app.control_file_action(crate::cli::FileAction::Delete {
+            path: outside.clone(),
+        });
+        assert!(response.ok);
+        let done = wait_file_job(&mut app, response.result["job_id"].as_u64().unwrap());
+        assert_eq!(done["status"], "failed");
+        assert!(
+            done["error"]
+                .as_str()
+                .unwrap()
+                .contains("registered workspace")
+        );
+        assert!(outside.is_dir());
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[test]
+    fn completed_delete_closes_clean_tabs_and_preserves_edits_during_execution() {
+        let (mut app, base) = filesystem_fixture();
+        let source = app.projects[0].root.join("source.txt");
+        let mut clean = EditorTab::new(
+            Some(app.projects[0].root.join("clean.txt")),
+            "clean.txt".into(),
+        );
+        clean.text = "clean buffer".into();
+        clean.saved_text = clean.text.clone();
+        app.projects[0].tabs.push(clean);
+        let dirty_id = app.projects[0].tabs[0].id;
+        let clean_id = app.projects[0].tabs[1].id;
+        app.context_file_result(FileActionResult {
+            job_id: None,
+            operation: FileOperation::Delete,
+            old_path: app.projects[0].root.clone(),
+            new_path: app.projects[0].root.clone(),
+            result: Ok(()),
+        });
+        assert!(app.tab_by_id_mut(clean_id).is_none());
+        let kept = app.tab_by_id_mut(dirty_id).unwrap();
+        assert!(kept.path.is_none());
+        assert_eq!(kept.text, "unsaved human buffer");
+        assert_eq!(kept.selection, 2..6);
+        assert!(kept.dirty);
+        assert!(kept.agent_unsaved);
+        assert!(kept.fingerprint.is_none());
+        assert!(source.exists()); // Result simulation does not touch the filesystem.
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_junction_is_refused_without_touching_target() {
+        let (mut app, base) = filesystem_fixture();
+        let link = app.projects[0].root.join("link");
+        let target = base.join("outside");
+        fs::write(target.join("keep.txt"), "protected target").unwrap();
+        recycle::test_junction(&link, &target);
+        let response =
+            app.control_file_action(crate::cli::FileAction::Delete { path: link.clone() });
+        assert!(response.ok);
+        let done = wait_file_job(&mut app, response.result["job_id"].as_u64().unwrap());
+        assert_eq!(done["status"], "failed");
+        assert!(done["error"].as_str().unwrap().contains("reparse"));
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "protected target"
+        );
+        assert!(fs::symlink_metadata(&link).is_ok());
+        fs::remove_dir(link).unwrap();
+        fs::remove_file(target.join("keep.txt")).unwrap();
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[test]
+    fn delete_completion_does_not_close_documents_reopened_after_dispatch() {
+        let (mut app, base) = filesystem_fixture();
+        let root = app.projects[0].root.clone();
+        let source = root.join("source.txt");
+        let original = app.projects[0].tabs[0].id;
+        app.context_file_jobs.entries.push_back(FileJob {
+            id: 12,
+            operation: FileOperation::Delete,
+            source: source.clone(),
+            destination: source.clone(),
+            phase: FileJobPhase::Applying,
+            error: None,
+            revisions: vec![(original, 0)],
+            updated_tabs: Vec::new(),
+        });
+        let replacement = EditorTab::new(Some(source.clone()), "source.txt".into());
+        let replacement_id = replacement.id;
+        app.projects[0].tabs = vec![replacement];
+        app.projects[0]
+            .rust_language_mut()
+            .opened
+            .insert(source.clone(), (0, 1));
+        app.context_file_result(FileActionResult {
+            job_id: Some(12),
+            operation: FileOperation::Delete,
+            old_path: source.clone(),
+            new_path: source.clone(),
+            result: Ok(()),
+        });
+        let untouched = app.tab_by_id_mut(replacement_id).unwrap();
+        assert_eq!(untouched.path.as_ref(), Some(&source));
+        assert!(!untouched.dirty);
+        assert_eq!(
+            app.projects[0].rust_language().opened.get(&source),
+            Some(&(0, 1))
+        );
+        assert!(
+            !app.projects[0]
+                .rust_language()
+                .retired_paths
+                .contains(&source)
+        );
+        let done = app.control_file_job(12).result;
+        assert_eq!(done["status"], "applied");
+        assert_eq!(done["updated_tabs"], serde_json::json!([]));
+        cleanup_filesystem_fixture(&base);
+    }
+
+    #[test]
+    fn missing_delete_target_reports_failure_without_applying() {
+        let (mut app, base) = filesystem_fixture();
+        let missing = app.projects[0].root.join("missing.txt");
+        let response = app.control_file_action(crate::cli::FileAction::Delete { path: missing });
+        let done = wait_file_job(&mut app, response.result["job_id"].as_u64().unwrap());
+        assert_eq!(done["action"], "delete");
+        assert_eq!(done["status"], "failed");
+        assert_eq!(done["applied"], false);
+        assert!(done["undo"].is_null());
+        cleanup_filesystem_fixture(&base);
     }
 
     #[test]

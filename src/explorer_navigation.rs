@@ -43,6 +43,7 @@ enum Move {
     Child,
     Open,
     Rename,
+    Delete,
     Menu,
     Editor,
 }
@@ -52,6 +53,7 @@ enum Effect {
     None,
     Open(PathBuf),
     Rename(PathBuf, bool),
+    Delete(PathBuf),
     Menu(PathBuf),
     Editor,
 }
@@ -246,6 +248,7 @@ impl ProjectNavigation {
                 return Effect::Open(path);
             }
             Move::Rename => return Effect::Rename(path, row.entry.is_dir),
+            Move::Delete => return Effect::Delete(path),
             Move::Menu => return Effect::Menu(path),
             Move::Editor => unreachable!(),
         };
@@ -273,6 +276,7 @@ fn movement(key: Key, swap_jk: bool) -> Option<Move> {
         Key::ArrowRight | Key::L => Move::Child,
         Key::Enter => Move::Open,
         Key::F2 => Move::Rename,
+        Key::Delete => Move::Delete,
         Key::Escape => Move::Editor,
         _ => return None,
     })
@@ -408,6 +412,14 @@ impl VEditApp {
     /// Run before editor/Vim input dispatch. Returns true while Explorer owns
     /// this frame's keyboard input, including a frame that opens an editor.
     pub(super) fn explorer_navigation_keys(&mut self) -> bool {
+        if self.explorer_context_menu_open()
+            && self.ctx.input(|input| input.key_pressed(Key::Escape))
+        {
+            // Let the popup consume Escape first. Restore its selected tree
+            // row on the next frame, after the popup has actually closed.
+            self.explorer_navigation.focus_requested =
+                self.project().map(|project| project.root.clone());
+        }
         if !self.explorer_keyboard_focused()
             || self.palette.is_some()
             || self.picker.is_some()
@@ -470,6 +482,10 @@ impl VEditApp {
                 }
                 Effect::Rename(path, is_dir) => {
                     self.context_begin_rename(&path, is_dir);
+                    break;
+                }
+                Effect::Delete(path) => {
+                    self.context_begin_delete(&path);
                     break;
                 }
                 Effect::Menu(path) => {
@@ -566,6 +582,7 @@ impl VEditApp {
         self.register_region_focus_widget(id);
         if self.explorer_navigation.focus_requested.as_deref() == Some(root)
             && self.context_file_dialog.is_none()
+            && !egui::Popup::is_any_open(&self.ctx)
             && ui.is_enabled()
             && ui.memory(|memory| memory.allows_interaction(ui.layer_id()))
         {
@@ -589,10 +606,36 @@ impl VEditApp {
             .is_some_and(|state| state.selected.as_deref() == Some(path))
     }
 
+    pub(super) fn explorer_context_menu_open(&self) -> bool {
+        self.project()
+            .and_then(|project| self.explorer_navigation.projects.get(&project.root))
+            .and_then(|state| state.selected.as_deref())
+            .is_some_and(|path| egui::Popup::is_id_open(&self.ctx, self.explorer_menu_id(path)))
+    }
+
     pub(super) fn explorer_expanded(&self, path: &Path) -> bool {
         self.project()
             .and_then(|project| self.explorer_navigation.projects.get(&project.root))
             .is_some_and(|state| state.expanded.contains(path))
+    }
+
+    pub(super) fn explorer_has_expanded_folders(&self) -> bool {
+        self.project()
+            .and_then(|project| self.explorer_navigation.projects.get(&project.root))
+            .is_some_and(|state| !state.expanded.is_empty())
+    }
+
+    pub(super) fn explorer_collapse_all(&mut self) {
+        let Some(index) = self.explorer_index() else {
+            return;
+        };
+        let Some(state) = self.explorer_navigation.projects.get_mut(&index.root) else {
+            return;
+        };
+        state.expanded.clear();
+        state.reconcile(&index);
+        state.scroll_to_selection = true;
+        self.focus_explorer();
     }
 
     pub(super) fn explorer_row_interaction(
@@ -614,25 +657,20 @@ impl VEditApp {
             if response.clicked() && is_dir && !state.expanded.remove(path) {
                 state.expanded.insert(path.into());
             }
-            if response.clicked() {
-                // A folder has exactly the same input ownership as a file
-                // row. Clear pending editor/search owners and restore the
-                // Explorer widget on the following render, when native focus
-                // changes from this pointer click have finished.
-                self.focus_explorer();
-            } else {
-                if let Some(tab) = self.tab_mut() {
-                    tab.focus = false;
-                }
-                self.ctx
-                    .memory_mut(|memory| memory.request_focus(focus_id(&root)));
-                lock_explorer_focus(&self.ctx, focus_id(&root));
+            // A context click has the same selection/input ownership as a
+            // normal row click. Clear pending editor/search focus before the
+            // popup opens, so an unrelated text field cannot steal its keys.
+            self.focus_explorer();
+            if response.secondary_clicked() {
+                // The popup now owns focus; do not take it back while it is
+                // navigating its menu items on the following render.
+                self.explorer_navigation.focus_requested = None;
             }
             self.ctx.request_repaint();
         }
         let selected = self.explorer_selected(path);
         if selected
-            && self.explorer_keyboard_focused()
+            && (self.explorer_keyboard_focused() || self.explorer_context_menu_open())
             && response.rect.intersects(response.ctx.content_rect())
         {
             response
@@ -1123,6 +1161,116 @@ mod tests {
         screen.run_steps(2);
         assert!(screen.state().context_file_dialog.is_some());
         key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+        assert!(screen.state().explorer_keyboard_focused());
+    }
+
+    #[test]
+    fn escape_from_pointer_menu_returns_keys_to_the_context_target() {
+        let (fixture, app) = Fixture::new(0);
+        let mut screen = harness(app);
+        let pointer = screen.get_by_label("src").rect().center();
+        screen.input_mut().events.extend([
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        screen.run_steps(3);
+        screen.get_by_label("Rename…").focus();
+        screen.run_steps(2);
+        key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+        assert!(!screen.state().explorer_context_menu_open());
+        assert!(screen.state().explorer_keyboard_focused());
+        assert_eq!(selected(screen.state()), Some(fixture.0.join("src")));
+        key(&mut screen, Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(selected(screen.state()), Some(fixture.0.join(".gitignore")));
+        assert_eq!(screen.state().tab().unwrap().text, "# Plan\n");
+    }
+
+    #[test]
+    fn collapse_all_keeps_visible_ancestor_selected_and_other_projects_unchanged() {
+        let (fixture, mut app) = Fixture::new(0);
+        let (_other_fixture, other) = Fixture::new(0);
+        app.projects
+            .push(other.projects.into_iter().next().unwrap());
+        for project in &app.projects {
+            app.explorer_navigation
+                .projects
+                .entry(project.root.clone())
+                .or_default()
+                .initialize(
+                    project.index.as_ref().unwrap(),
+                    Some(&project.root.join("src/nested/deep.rs")),
+                );
+        }
+        assert!(app.explorer_has_expanded_folders());
+        let original_document = app.tab().unwrap().text.clone();
+        app.explorer_collapse_all();
+        assert!(!app.explorer_has_expanded_folders());
+        assert_eq!(selected(&app), Some(fixture.0.join("src")));
+        assert_eq!(app.tab().unwrap().text, original_document);
+        assert!(app.explorer_keyboard_focused());
+        app.active_project = 1;
+        assert!(app.explorer_has_expanded_folders());
+        assert_eq!(
+            selected(&app),
+            Some(app.projects[1].root.join("src/nested/deep.rs"))
+        );
+    }
+
+    #[test]
+    fn delete_key_only_targets_the_selected_tree_item() {
+        let (_fixture, app) = Fixture::new(0);
+        let index = app.project().unwrap().index.as_ref().unwrap();
+        let target = index.root.join("src");
+        let mut state = ProjectNavigation::default();
+        state.initialize(index, Some(&target));
+        assert_eq!(state.apply(index, Move::Delete), Effect::Delete(target));
+        let mut events = vec![egui::Event::Key {
+            key: Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        assert_eq!(collect_moves(&mut events, false), vec![Move::Delete]);
+        assert!(events.is_empty());
+        assert!(index.root.join("src/lib.rs").exists());
+    }
+
+    #[test]
+    fn delete_key_preserves_unsaved_editor_text_and_does_not_delete_its_file() {
+        let (fixture, mut app) = Fixture::new(0);
+        app.tab_mut().unwrap().text = "unsaved work".into();
+        app.tab_mut().unwrap().dirty = true;
+        let mut screen = harness(app);
+        screen.state_mut().focus_explorer();
+        key(&mut screen, Key::Delete, egui::Modifiers::NONE);
+        assert!(screen.state().status.as_ref().unwrap().1);
+        assert!(
+            screen
+                .state()
+                .status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("unsaved")
+        );
+        assert_eq!(screen.state().tab().unwrap().text, "unsaved work");
+        assert!(screen.state().tab().unwrap().dirty);
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("plan ü.md")).unwrap(),
+            "# Plan\n"
+        );
         assert!(screen.state().explorer_keyboard_focused());
     }
 

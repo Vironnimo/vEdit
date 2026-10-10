@@ -346,7 +346,10 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        let highlighted = row.selected || response.has_focus() || response.clicked();
+        let highlighted = row.selected
+            || response.has_focus()
+            || response.clicked()
+            || response.secondary_clicked();
         let fill = if highlighted {
             Some(
                 visuals

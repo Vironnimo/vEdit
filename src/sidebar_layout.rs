@@ -921,6 +921,17 @@ impl VEditApp {
             self.new_file();
             ui.close();
         }
+        if view == SidebarView::Explorer
+            && ui
+                .add_enabled(
+                    self.explorer_has_expanded_folders(),
+                    egui::Button::new("Collapse all"),
+                )
+                .clicked()
+        {
+            self.explorer_collapse_all();
+            ui.close();
+        }
     }
 
     pub(super) fn sidebar_drag_keys(&mut self) -> bool {

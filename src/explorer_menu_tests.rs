@@ -45,10 +45,15 @@ impl Drop for Fixture {
 }
 
 fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
+    let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
+    if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
+        options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
+    }
     let mut screen = Harness::builder()
         .with_size([520.0, 520.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
+        .wgpu_setup(setup)
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
@@ -178,6 +183,61 @@ fn background_does_not_replace_file_or_folder_context_menu() {
             }
         );
     }
+}
+
+fn row_has_selection_fill(screen: &Harness<'_, VEditApp>, row: egui::Rect) -> bool {
+    let visuals = &screen.ctx.style_of(screen.ctx.theme()).visuals;
+    let fill = visuals
+        .selection
+        .bg_fill
+        .lerp_to_gamma(visuals.panel_fill, 0.24);
+    screen.output().shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::epaint::Shape::Rect(rect)
+            if rect.fill == fill && rect.rect.contains(row.center())
+                && rect.rect.width() > row.width() * 0.8)
+    })
+}
+
+#[test]
+fn right_click_highlights_its_target_while_the_menu_owns_focus() {
+    let (fixture, mut app) = Fixture::new(true);
+    let mut tab = EditorTab::new(Some(fixture.0.join("notes.txt")), "notes.txt".into());
+    tab.text = "unsaved document".into();
+    tab.saved_text = "existing document".into();
+    tab.dirty = true;
+    app.projects[0].tabs.push(tab);
+    app.bind_current_pane();
+    let mut screen = harness(app);
+    set_style(&screen.ctx);
+    screen.run_steps(3);
+    let target = screen.get_by_label("src").rect();
+    let previously_active = screen.get_by_label("notes.txt").rect();
+    assert!(!screen.state().explorer_selected(&fixture.0.join("src")));
+    right_click(&mut screen, target.center());
+    assert!(screen.query_by_label("Context target: src").is_some());
+    assert!(screen.query_by_label("Delete").is_some());
+    let menu_item = screen.get_by_label("Rename…").rect();
+    screen.hover_at(menu_item.center());
+    screen.get_by_label("Rename…").focus();
+    screen.run_steps(3);
+    assert!(screen.state().explorer_selected(&fixture.0.join("src")));
+    assert!(row_has_selection_fill(&screen, target));
+    assert!(!row_has_selection_fill(&screen, previously_active));
+    assert!(!screen.state().explorer_expanded(&fixture.0.join("src")));
+    assert_eq!(screen.state().tab().unwrap().text, "unsaved document");
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+        screen.snapshot_options(
+            "vedit_explorer_context_menu_review",
+            &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+        );
+    }
+    screen.get_by_label("Rename…").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().context_file_dialog.as_ref().unwrap().path,
+        fixture.0.join("src")
+    );
+    assert_eq!(screen.state().projects[0].tabs.len(), 1);
 }
 
 #[test]

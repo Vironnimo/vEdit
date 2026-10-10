@@ -25,6 +25,9 @@ path = "src/main.rs"
 name = "vedit-cli"
 path = "src/cli_main.rs"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
 egui-wgpu = { version = "0.36.2", default-features = false }

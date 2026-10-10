@@ -373,6 +373,7 @@ pub enum TaskAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileAction {
+    Delete { path: PathBuf },
     Rename { path: PathBuf, name: String },
     CreateFolder { parent: PathBuf, name: String },
 }
@@ -660,7 +661,7 @@ pub const HELP: &str = r#"vEdit CLI — read, edit and arrange the running edito
   vedit-cli git-switch-branch REF [WORKSPACE]
   vedit-cli new [TITLE]
   vedit-cli task check|test|build|run_file|stop
-  vedit-cli file ACTION.json
+  vedit-cli file ACTION.json  (rename, create_folder, or delete to Recycle Bin)
   vedit-cli file-job JOB_ID
   vedit-cli layout [CHANGE.json]
   vedit-cli raise
@@ -1626,7 +1627,9 @@ fn resolve_paths(request: &mut Request) {
         }
         | Request::SaveAs { path, .. } => *path = absolute(path.clone()),
         Request::File { action } => match action {
-            FileAction::Rename { path, .. } => *path = absolute(path.clone()),
+            FileAction::Rename { path, .. } | FileAction::Delete { path } => {
+                *path = absolute(path.clone())
+            }
             FileAction::CreateFolder { parent, .. } => *parent = absolute(parent.clone()),
         },
         Request::Search {
@@ -2074,14 +2077,16 @@ pub fn validate(request: &Request) -> Result<(), String> {
         },
         Request::File { action } => {
             let (path, name) = match action {
-                FileAction::Rename { path, name } => (path, name),
-                FileAction::CreateFolder { parent, name } => (parent, name),
+                FileAction::Rename { path, name } => (path, Some(name)),
+                FileAction::CreateFolder { parent, name } => (parent, Some(name)),
+                FileAction::Delete { path } => (path, None),
             };
             validate_path(path)?;
-            if name.trim().is_empty()
-                || name.len() > 255
-                || name.contains(['\\', '/'])
-                || matches!(name.as_str(), "." | "..")
+            if let Some(name) = name
+                && (name.trim().is_empty()
+                    || name.len() > 255
+                    || name.contains(['\\', '/'])
+                    || matches!(name.as_str(), "." | ".."))
             {
                 return Err(
                     "File action name must be a single new name (1..255 bytes), never a path"
@@ -3373,6 +3378,49 @@ mod tests {
             panic!()
         };
     }
+    #[test]
+    fn delete_file_command_resolves_unicode_target_and_does_not_autostart() {
+        let manifest = std::env::temp_dir().join(format!(
+            "vedit-delete-action-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"action":"delete", "path":"obsolete/Pläne 東京.txt"}))
+                .unwrap(),
+        )
+        .unwrap();
+        let parsed = parse_args([OsString::from("file"), manifest.as_os_str().to_owned()]);
+        std::fs::remove_file(&manifest).unwrap();
+        let Parsed::Command {
+            request:
+                Request::File {
+                    action: FileAction::Delete { path },
+                },
+            start,
+        } = parsed.unwrap()
+        else {
+            panic!()
+        };
+        assert!(!start);
+        assert_eq!(path, absolute("obsolete/Pläne 東京.txt".into()));
+    }
+
+    #[test]
+    fn delete_action_requires_an_explicit_path_and_rejects_extra_payload() {
+        let request: Request = serde_json::from_value(json!({"op":"file", "action":{"action":"delete", "path":absolute("obsolete.txt".into())}})).unwrap();
+        validate(&request).unwrap();
+        assert!(
+            serde_json::from_value::<Request>(json!({"op":"file", "action":{"action":"delete"}}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<Request>(json!({"op":"file", "action":{"action":"delete", "path":"obsolete.txt", "name":"different.txt"}})).is_err());
+    }
+
     #[test]
     fn selections_and_lifecycle_constraints_are_never_silently_ignored() {
         let request:Request=serde_json::from_value(json!({"op":"selection","tab_id":1,"range":{"start":{"line":1},"end":{"line":1,"column":2}}})).unwrap();
