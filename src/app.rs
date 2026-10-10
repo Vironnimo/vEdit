@@ -2100,8 +2100,8 @@ impl VEditApp {
             let result = (|| {
                 let repo = git::repository_root(&root).map_err(|e| e.to_string())?;
                 if let Some(repo) = repo {
-                    let status = git::status(&repo).map_err(|e| e.to_string())?;
-                    let tracking = git::branch_info(&repo).ok();
+                    let (status, tracking) =
+                        git::status_with_tracking(&repo).map_err(|e| e.to_string())?;
                     let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
                         Ok(stats) => (stats, None),
                         Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
@@ -2130,7 +2130,7 @@ impl VEditApp {
                     Ok(GitSnapshot {
                         root: Some(repo),
                         branch: status.branch,
-                        tracking,
+                        tracking: Some(tracking),
                         files: status.files,
                         stats,
                         stats_error,

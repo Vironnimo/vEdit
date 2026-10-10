@@ -310,6 +310,34 @@ fn graph_subject_author_and_row_background_select_the_same_commit() {
 }
 
 #[test]
+fn background_repository_refresh_does_not_keep_repainting_the_window() {
+    let mut app = fixture();
+    app.projects[0].git_loading = true;
+    let mut screen = harness(app, 1000.0, true);
+    screen.run_steps(4);
+    assert!(screen.query_by_label("Refreshing repository").is_some());
+    let settled = screen
+        .try_run()
+        .expect("automatic Git refresh must not animate the entire editor while waiting");
+    assert!(settled <= 4);
+    assert!(screen.state().projects[0].git_loading);
+}
+
+#[test]
+fn background_refresh_of_empty_history_also_settles() {
+    let mut app = fixture();
+    app.projects[0].git_loading = true;
+    app.projects[0].recent_commits.clear();
+    let mut screen = harness(app, 1000.0, true);
+    screen.run_steps(4);
+    assert!(screen.query_by_label("Loading commits…").is_some());
+    screen
+        .try_run()
+        .expect("a repository without commits must not animate on each automatic refresh");
+    assert!(screen.state().projects[0].git_loading);
+}
+
+#[test]
 fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     let mut app = fixture();
     let branch = "feature/header-Überarbeitung-der-sehr-langen-Branch-Beschreibung";

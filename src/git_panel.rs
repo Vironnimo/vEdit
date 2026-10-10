@@ -1347,7 +1347,11 @@ impl VEditApp {
                 ui.add_space(7.0);
                 if project.git_history_loading || (project.recent_commits.is_empty() && loading) {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(14.0).color(MUTED));
+                        if project.git_history_loading {
+                            ui.add(egui::Spinner::new().size(14.0).color(MUTED));
+                        } else {
+                            refresh_indicator(ui, true);
+                        }
                         ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                     });
                 } else if project.git_history_error.is_none() && !project.recent_commits.is_empty()
@@ -1669,10 +1673,14 @@ pub(super) fn refresh_indicator(ui: &mut egui::Ui, running: bool) -> egui::Respo
                 "Refreshing repository",
             )
         });
-        egui::Spinner::new()
-            .size(14.0)
-            .color(MUTED)
-            .paint_at(ui, rect);
+        // Automatic refreshes run every few seconds. An animated spinner here
+        // repaints the entire editor at display rate for every Git subprocess.
+        // The worker wakes the UI when the snapshot is ready; a static activity
+        // mark keeps that wait visible without creating an idle render loop.
+        for offset in [-4.0, 0.0, 4.0] {
+            ui.painter()
+                .circle_filled(rect.center() + Vec2::new(offset, 0.0), 1.25, MUTED);
+        }
         response.on_hover_text("Refreshing repository")
     } else {
         response

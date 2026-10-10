@@ -22,7 +22,8 @@ const HEADER_LIMIT: usize = 8 * 1024;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const BACKPRESSURE_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+const PROCESS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
@@ -151,6 +152,7 @@ impl ServerConfig {
 pub struct LanguageServer {
     pub receiver: Receiver<LspEvent>,
     commands: SyncSender<ClientCommand>,
+    wake: SyncSender<()>,
     stopped: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
 }
@@ -161,11 +163,13 @@ impl LanguageServer {
     #[cfg(test)]
     pub fn test_channel() -> (Self, SyncSender<LspEvent>) {
         let (commands, _command_rx) = mpsc::sync_channel(8);
+        let (wake, _wake_rx) = mpsc::sync_channel(1);
         let (events, receiver) = mpsc::sync_channel(64);
         (
             Self {
                 receiver,
                 commands,
+                wake,
                 stopped: Arc::new(AtomicBool::new(false)),
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
             },
@@ -186,6 +190,8 @@ impl LanguageServer {
         ctx: Option<egui::Context>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::sync_channel(128);
+        let (wake, wake_rx) = mpsc::sync_channel(1);
+        let worker_wake = wake.clone();
         let (event_tx, receiver) = mpsc::sync_channel(128);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
@@ -196,7 +202,15 @@ impl LanguageServer {
         if let Err(error) = thread::Builder::new()
             .name("vedit-language-server".into())
             .spawn(move || {
-                let result = run_server(root, config, command_rx, &emitter, &worker_stopped);
+                let result = run_server(
+                    root,
+                    config,
+                    command_rx,
+                    &worker_wake,
+                    wake_rx,
+                    &emitter,
+                    &worker_stopped,
+                );
                 let manually_stopped = worker_stopped.swap(true, Ordering::AcqRel);
                 if let Err(error) = result
                     && !manually_stopped
@@ -213,6 +227,7 @@ impl LanguageServer {
         Self {
             receiver,
             commands: command_tx,
+            wake,
             stopped,
             shutdown_requested,
         }
@@ -278,10 +293,15 @@ impl LanguageServer {
     pub fn shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
         self.stopped.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
     }
 
     fn send(&self, command: ClientCommand) -> bool {
-        !self.is_stopped() && self.commands.try_send(command).is_ok()
+        if self.is_stopped() || self.commands.try_send(command).is_err() {
+            return false;
+        }
+        let _ = self.wake.try_send(());
+        true
     }
 }
 
@@ -344,7 +364,7 @@ impl EventEmitter {
                 Err(mpsc::TrySendError::Full(returned)) => {
                     event = returned;
                     blocked_since.get_or_insert_with(Instant::now);
-                    thread::sleep(POLL_INTERVAL);
+                    thread::sleep(BACKPRESSURE_RETRY_INTERVAL);
                 }
             }
         }
@@ -364,6 +384,15 @@ enum Inbound {
     Message(Value),
     Written(u64),
     Error(String),
+}
+
+fn send_inbound(sender: &SyncSender<Inbound>, wake: &SyncSender<()>, message: Inbound) -> bool {
+    let sent = sender.send(message).is_ok();
+    // Keep the queues bounded independently, but let either queue wake the
+    // supervisor immediately. A capacity-one wake queue coalesces bursts and
+    // preserves signals sent between draining the inputs and going to sleep.
+    let _ = wake.try_send(());
+    sent
 }
 struct Outbound {
     token: u64,
@@ -454,6 +483,8 @@ fn run_server(
     root: PathBuf,
     config: ServerConfig,
     commands: Receiver<ClientCommand>,
+    wake: &SyncSender<()>,
+    wake_rx: Receiver<()>,
     events: &EventEmitter,
     stopped: &AtomicBool,
 ) -> Result<(), String> {
@@ -519,6 +550,7 @@ fn run_server(
     let (inbound_tx, inbound_rx) = mpsc::sync_channel(32);
     let (writer_tx, writer_rx) = mpsc::sync_channel::<Outbound>(32);
     let reader_tx = inbound_tx.clone();
+    let reader_wake = wake.clone();
     thread::Builder::new()
         .name("vedit-lsp-reader".into())
         .spawn(move || {
@@ -526,15 +558,20 @@ fn run_server(
             loop {
                 match read_message(&mut reader) {
                     Ok(Some(message)) => {
-                        if reader_tx.send(Inbound::Message(message)).is_err() {
+                        if !send_inbound(&reader_tx, &reader_wake, Inbound::Message(message)) {
                             break;
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        let _ = reader_wake.try_send(());
+                        break;
+                    }
                     Err(error) => {
-                        let _ = reader_tx.send(Inbound::Error(format!(
-                            "Invalid language server response: {error}"
-                        )));
+                        send_inbound(
+                            &reader_tx,
+                            &reader_wake,
+                            Inbound::Error(format!("Invalid language server response: {error}")),
+                        );
                         break;
                     }
                 }
@@ -542,18 +579,21 @@ fn run_server(
         })
         .map_err(|error| format!("Could not read language server: {error}"))?;
     let write_tx = inbound_tx.clone();
+    let writer_wake = wake.clone();
     thread::Builder::new()
         .name("vedit-lsp-writer".into())
         .spawn(move || {
             let mut writer = stdin;
             for outbound in writer_rx {
                 if let Err(error) = write_message(&mut writer, &outbound.message) {
-                    let _ = write_tx.send(Inbound::Error(format!(
-                        "Could not update language server: {error}"
-                    )));
+                    send_inbound(
+                        &write_tx,
+                        &writer_wake,
+                        Inbound::Error(format!("Could not update language server: {error}")),
+                    );
                     break;
                 }
-                if write_tx.send(Inbound::Written(outbound.token)).is_err() {
+                if !send_inbound(&write_tx, &writer_wake, Inbound::Written(outbound.token)) {
                     break;
                 }
             }
@@ -654,18 +694,20 @@ fn run_server(
             protocol.flush_documents()?;
         }
         protocol.flush_writes()?;
-        match inbound_rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Inbound::Message(message)) => protocol.message(message, events)?,
-            Ok(Inbound::Written(token)) => {
-                protocol.writes.remove(&token);
-            }
-            Ok(Inbound::Error(error)) => return Err(error),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(format!(
-                    "{} disconnected unexpectedly.",
-                    protocol.config.name
-                ));
+        for _ in 0..32 {
+            match inbound_rx.try_recv() {
+                Ok(Inbound::Message(message)) => protocol.message(message, events)?,
+                Ok(Inbound::Written(token)) => {
+                    protocol.writes.remove(&token);
+                }
+                Ok(Inbound::Error(error)) => return Err(error),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(format!(
+                        "{} disconnected unexpectedly.",
+                        protocol.config.name
+                    ));
+                }
             }
         }
         while let Some(event) = protocol.failed_requests.pop_front() {
@@ -701,6 +743,10 @@ fn run_server(
                 )),
             });
         }
+        // Commands, incoming messages, completed writes and shutdown wake this
+        // wait. Idle servers only need a fallback process check, while pending
+        // requests and writes retain their precise timeout deadlines.
+        let _ = wake_rx.recv_timeout(protocol.wait_duration(Instant::now()));
     }
     // Dropping the guard stops the entire language server process tree. Waiting
     // for an LSP shutdown response here would make closing the editor fragile.
@@ -713,6 +759,17 @@ fn configuration() -> Value {
 }
 
 impl Protocol {
+    fn wait_duration(&self, now: Instant) -> Duration {
+        self.writes
+            .values()
+            .copied()
+            .chain(self.pending.values().map(|request| request.deadline))
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
+            .unwrap_or(PROCESS_CHECK_INTERVAL)
+            .min(PROCESS_CHECK_INTERVAL)
+    }
+
     fn extend_deadlines(&mut self, paused: Duration) {
         // Time spent waiting for the editor to consume events is not a server
         // timeout. The reader/writer acknowledgements are backpressured too.
@@ -1867,6 +1924,86 @@ mod tests {
     }
 
     #[test]
+    fn idle_supervisor_waits_for_events_and_keeps_request_deadlines() {
+        let (mut protocol, _outgoing) = protocol();
+        let now = Instant::now();
+        assert_eq!(protocol.wait_duration(now), Duration::from_secs(1));
+
+        protocol.pending.insert(
+            1,
+            PendingRequest {
+                kind: RequestKind::Definition,
+                deadline: now + Duration::from_millis(80),
+            },
+        );
+        assert_eq!(protocol.wait_duration(now), Duration::from_millis(80));
+        protocol.writes.insert(2, now + Duration::from_millis(30));
+        assert_eq!(protocol.wait_duration(now), Duration::from_millis(30));
+        assert_eq!(
+            protocol.wait_duration(now + Duration::from_millis(31)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn client_commands_and_shutdown_wake_a_sleeping_supervisor() {
+        let (_events, receiver) = mpsc::sync_channel(1);
+        let (commands, command_rx) = mpsc::sync_channel(8);
+        let (wake, wake_rx) = mpsc::sync_channel(1);
+        let server = LanguageServer {
+            receiver,
+            commands,
+            wake,
+            stopped: Arc::new(AtomicBool::new(false)),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (received_tx, received_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(command_rx.try_recv(), Ok(ClientCommand::Save(_))));
+            received_tx.send(()).unwrap();
+            wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            received_tx.send(()).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(server.save(Path::new("example.rs")));
+        received_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an accepted command must interrupt an idle supervisor wait");
+        server.shutdown();
+        received_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown must interrupt an idle supervisor wait");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn inbound_messages_and_write_completions_coalesce_wakes_without_losing_input() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let (wake, wake_rx) = mpsc::sync_channel(1);
+        assert!(send_inbound(&sender, &wake, Inbound::Written(7)));
+        assert!(send_inbound(
+            &sender,
+            &wake,
+            Inbound::Message(json!({"id":2,"result":null})),
+        ));
+        assert!(wake_rx.try_recv().is_ok());
+        assert!(wake_rx.try_recv().is_err());
+        assert!(matches!(receiver.try_recv(), Ok(Inbound::Written(7))));
+        assert!(matches!(receiver.try_recv(), Ok(Inbound::Message(_))));
+
+        assert!(send_inbound(
+            &sender,
+            &wake,
+            Inbound::Error("closed".into())
+        ));
+        assert!(wake_rx.try_recv().is_ok());
+        assert!(matches!(receiver.try_recv(), Ok(Inbound::Error(_))));
+    }
+
+    #[test]
     fn full_event_queue_preserves_lifecycle_requests_and_diagnostics_until_ui_resumes() {
         let (sender, receiver) = mpsc::sync_channel(1);
         sender.send(LspEvent::Ready).unwrap();
@@ -1917,9 +2054,11 @@ mod tests {
         sender.send(LspEvent::Ready).unwrap();
         let emitter = EventEmitter::new(sender, None);
         let (commands, _commands_rx) = mpsc::sync_channel(1);
+        let (wake, _wake_rx) = mpsc::sync_channel(1);
         let server = LanguageServer {
             receiver,
             commands,
+            wake,
             stopped: Arc::new(AtomicBool::new(true)),
             shutdown_requested: Arc::clone(&emitter.shutdown_requested),
         };
@@ -1944,9 +2083,11 @@ mod tests {
         sender.send(LspEvent::Ready).unwrap();
         let emitter = EventEmitter::new(sender, None);
         let (commands, _commands_rx) = mpsc::sync_channel(1);
+        let (wake, _wake_rx) = mpsc::sync_channel(1);
         let server = LanguageServer {
             receiver,
             commands,
+            wake,
             stopped: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::clone(&emitter.shutdown_requested),
         };
@@ -2533,8 +2674,8 @@ mod tests {
         );
         server.shutdown();
         drop(server);
-        // Give the supervisor its polling interval to stop child processes
-        // before the fixture cleans up their working directory.
+        // Allow process teardown after shutdown wakes the supervisor, before
+        // the fixture cleans up the child processes' working directory.
         thread::sleep(Duration::from_millis(150));
     }
 }

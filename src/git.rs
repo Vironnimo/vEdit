@@ -23,6 +23,11 @@ const UNTRACKED_FILE_LIMIT: usize = 1024 * 1024;
 const UNTRACKED_TOTAL_LIMIT: usize = 8 * 1024 * 1024;
 const UNTRACKED_PATH_LIMIT: usize = 128;
 
+#[cfg(test)]
+thread_local! {
+    static GIT_COMMAND_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub type GitResult<T> = Result<T, GitError>;
 
 /// A readable error returned by a Git operation.
@@ -243,6 +248,7 @@ pub fn current_branch(root: &Path) -> GitResult<Option<String>> {
     Ok((!branch.is_empty()).then_some(branch))
 }
 
+#[cfg(test)]
 pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
     let name = current_branch(root)?;
     let mut info = BranchInfo {
@@ -296,10 +302,26 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
 
 /// Reads the current branch and concise staged, unstaged, and untracked file
 /// status. Renames retain both the new path and Git's reported previous path.
+#[cfg(test)]
 pub fn status(root: &Path) -> GitResult<RepoStatus> {
     let files = status_files(root)?;
     let branch = current_branch(root)?;
     Ok(RepoStatus { branch, files })
+}
+
+/// Read file status and local branch tracking in the same Git process.
+pub fn status_with_tracking(root: &Path) -> GitResult<(RepoStatus, BranchInfo)> {
+    let args = string_args(&[
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "--ahead-behind",
+        "-z",
+        "--untracked-files=all",
+        "--renames",
+    ]);
+    let output = checked_git(root, &args, "read repository status")?;
+    parse_status_with_tracking(&output.stdout)
 }
 
 /// Count changed paths without reading branch, diff statistics or history.
@@ -427,8 +449,8 @@ fn tracked_diff(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Read both tracked comparisons in two Git invocations, rather than spawning a
-/// process for every file. NUL-delimited paths retain Unicode and control bytes.
+/// Read each tracked comparison only when the status includes changes for it.
+/// NUL-delimited paths retain Unicode and control bytes.
 pub fn working_tree_stats(root: &Path, files: &[FileStatus]) -> GitResult<WorkingTreeStats> {
     let common = [
         "diff",
@@ -439,18 +461,21 @@ pub fn working_tree_stats(root: &Path, files: &[FileStatus]) -> GitResult<Workin
         "-z",
         "--find-renames",
     ];
-    let mut staged_args = string_args(&common);
-    staged_args.push(OsString::from("--cached"));
-    let staged = checked_git(root, &staged_args, "read staged line statistics")?;
-    let unstaged = checked_git(
-        root,
-        &string_args(&common),
-        "read working tree line statistics",
-    )?;
-    let mut statistics = WorkingTreeStats {
-        staged: parse_numstat(&staged.stdout)?.into_iter().collect(),
-        unstaged: parse_numstat(&unstaged.stdout)?.into_iter().collect(),
-    };
+    let mut statistics = WorkingTreeStats::default();
+    if files.iter().any(FileStatus::is_staged) {
+        let mut staged_args = string_args(&common);
+        staged_args.push(OsString::from("--cached"));
+        let staged = checked_git(root, &staged_args, "read staged line statistics")?;
+        statistics.staged = parse_numstat(&staged.stdout)?.into_iter().collect();
+    }
+    if files.iter().any(FileStatus::is_unstaged) {
+        let unstaged = checked_git(
+            root,
+            &string_args(&common),
+            "read working tree line statistics",
+        )?;
+        statistics.unstaged = parse_numstat(&unstaged.stdout)?.into_iter().collect();
+    }
     let mut remaining = UNTRACKED_TOTAL_LIMIT;
     for file in files
         .iter()
@@ -1021,6 +1046,8 @@ fn raw_git_with_input(
     operation: &str,
     input: Option<Vec<u8>>,
 ) -> GitResult<Output> {
+    #[cfg(test)]
+    GIT_COMMAND_COUNT.with(|count| count.set(count.get() + 1));
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
@@ -1496,6 +1523,117 @@ fn parse_commit_files(bytes: &[u8]) -> GitResult<Vec<CommitFile>> {
     Ok(files)
 }
 
+fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo)> {
+    let invalid = || {
+        GitError::new(
+            "parse repository status",
+            "Git returned an unexpected porcelain v2 status record",
+        )
+    };
+    if !bytes.ends_with(&[0]) {
+        return Err(invalid());
+    }
+    let mut tracking = BranchInfo {
+        name: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+    };
+    let mut saw_branch = false;
+    let mut files = Vec::new();
+    let mut records = bytes.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if let Some(name) = record.strip_prefix(b"# branch.head ") {
+            if name.is_empty() {
+                return Err(invalid());
+            }
+            saw_branch = true;
+            tracking.name =
+                (name != b"(detached)").then(|| String::from_utf8_lossy(name).into_owned());
+            continue;
+        }
+        if let Some(upstream) = record.strip_prefix(b"# branch.upstream ") {
+            tracking.upstream = Some(String::from_utf8_lossy(upstream).into_owned());
+            continue;
+        }
+        if let Some(counts) = record.strip_prefix(b"# branch.ab ") {
+            let counts = std::str::from_utf8(counts).map_err(|_| invalid())?;
+            let (ahead, behind) = counts.split_once(' ').ok_or_else(invalid)?;
+            tracking.ahead = ahead
+                .strip_prefix('+')
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?;
+            tracking.behind = behind
+                .strip_prefix('-')
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?;
+            continue;
+        }
+        // Porcelain v2 allows future optional headers; they do not change paths.
+        if record.starts_with(b"# ") || record.starts_with(b"! ") {
+            continue;
+        }
+        if let Some(path) = record.strip_prefix(b"? ") {
+            if path.is_empty() {
+                return Err(invalid());
+            }
+            files.push(FileStatus {
+                path: String::from_utf8_lossy(path).into_owned(),
+                original_path: None,
+                index: FileChange::None,
+                worktree: FileChange::Untracked,
+            });
+            continue;
+        }
+        let field_count = match record[0] {
+            b'1' => 9,
+            b'2' => 10,
+            b'u' => 11,
+            _ => return Err(invalid()),
+        };
+        // Only split the fixed prefix: spaces, tabs and newlines in the path
+        // belong to the filename, and rename sources are separate NUL records.
+        let fields: Vec<_> = record.splitn(field_count, |byte| *byte == b' ').collect();
+        if fields.len() != field_count
+            || fields[0].len() != 1
+            || fields[1].len() != 2
+            || fields[field_count - 1].is_empty()
+        {
+            return Err(invalid());
+        }
+        let original_path = if record[0] == b'2' {
+            let original = records
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(invalid)?;
+            Some(String::from_utf8_lossy(original).into_owned())
+        } else {
+            None
+        };
+        files.push(FileStatus {
+            path: String::from_utf8_lossy(fields[field_count - 1]).into_owned(),
+            original_path,
+            index: change_from_code(fields[1][0] as char),
+            worktree: change_from_code(fields[1][1] as char),
+        });
+    }
+    if !saw_branch {
+        return Err(invalid());
+    }
+    Ok((
+        RepoStatus {
+            branch: tracking.name.clone(),
+            files,
+        },
+        tracking,
+    ))
+}
+
 fn parse_status(bytes: &[u8]) -> GitResult<Vec<FileStatus>> {
     let mut records = bytes.split(|byte| *byte == 0);
     let mut files = Vec::new();
@@ -1544,7 +1682,7 @@ fn parse_status(bytes: &[u8]) -> GitResult<Vec<FileStatus>> {
 
 fn change_from_code(code: char) -> FileChange {
     match code {
-        ' ' => FileChange::None,
+        ' ' | '.' => FileChange::None,
         'M' => FileChange::Modified,
         'A' => FileChange::Added,
         'D' => FileChange::Deleted,
@@ -1902,6 +2040,128 @@ mod tests {
                 behind: 0,
             }
         );
+    }
+
+    #[test]
+    fn idle_status_and_tracking_use_one_git_process() {
+        let repository = TestRepository::new();
+        repository.commit_all("Initial");
+        repository.git(&["branch", "tracking"]);
+        repository.git(&["config", "branch.main.remote", "."]);
+        repository.git(&["config", "branch.main.merge", "refs/heads/tracking"]);
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        let (status, tracking) = status_with_tracking(&repository.0).unwrap();
+        assert!(status.files.is_empty());
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(tracking.upstream.as_deref(), Some("tracking"));
+        assert_eq!((tracking.ahead, tracking.behind), (0, 0));
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 1);
+    }
+
+    #[test]
+    fn clean_worktree_statistics_do_not_launch_git() {
+        let repository = TestRepository::new();
+        repository.commit_all("Initial");
+        let files = status(&repository.0).unwrap().files;
+        assert!(files.is_empty());
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            working_tree_stats(&repository.0, &files).unwrap(),
+            WorkingTreeStats::default()
+        );
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn combined_status_preserves_changes_and_branch_states() {
+        let repository = TestRepository::new();
+        let check = || {
+            let (combined, tracking) = status_with_tracking(&repository.0).unwrap();
+            assert_eq!(combined, status(&repository.0).unwrap());
+            assert_eq!(tracking, branch_info(&repository.0).unwrap());
+        };
+        // An unborn branch and untracked files still have a useful status.
+        repository.write("--über old name.txt", "initial\n");
+        check();
+        stage_all(&repository.0).unwrap();
+        check();
+        commit(&repository.0, "Initial").unwrap();
+        repository.git(&["branch", "tracking"]);
+        repository.git(&["config", "branch.main.remote", "."]);
+        repository.git(&["config", "branch.main.merge", "refs/heads/tracking"]);
+        repository.write("local.txt", "local\n");
+        repository.commit_all("Ahead");
+        repository.git(&["checkout", "tracking"]);
+        repository.write("remote.txt", "remote\n");
+        repository.commit_all("Behind");
+        repository.git(&["checkout", "main"]);
+        check();
+        fs::rename(
+            repository.0.join("--über old name.txt"),
+            repository.0.join("--über renamed file.txt"),
+        )
+        .unwrap();
+        stage_all(&repository.0).unwrap();
+        repository.write("--über renamed file.txt", "working change\n");
+        repository.write("untracked file.txt", "new\n");
+        check();
+        repository.commit_all("Rename");
+        repository.git(&["checkout", "--detach"]);
+        check();
+    }
+
+    #[test]
+    fn combined_status_preserves_merge_conflicts() {
+        let repository = TestRepository::new();
+        repository.write("conflict.txt", "base\n");
+        repository.commit_all("Base");
+        repository.git(&["branch", "other"]);
+        repository.write("conflict.txt", "main\n");
+        repository.commit_all("Main");
+        repository.git(&["checkout", "other"]);
+        repository.write("conflict.txt", "other\n");
+        repository.commit_all("Other");
+        let merge = raw_git(
+            &repository.0,
+            &string_args(&["merge", "main"]),
+            "create merge conflict",
+        )
+        .unwrap();
+        assert!(!merge.status.success());
+        let (combined, _) = status_with_tracking(&repository.0).unwrap();
+        assert_eq!(combined, status(&repository.0).unwrap());
+        assert_eq!(combined.files.len(), 1);
+        assert!(combined.files[0].is_conflicted());
+    }
+
+    #[test]
+    fn worktree_statistics_only_run_comparisons_with_changed_files() {
+        let repository = TestRepository::new();
+        repository.write("file.txt", "initial\n");
+        repository.commit_all("Initial");
+        repository.write("untracked.txt", "first\nsecond\n");
+        let files = status(&repository.0).unwrap().files;
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        let statistics = working_tree_stats(&repository.0, &files).unwrap();
+        assert_eq!(statistics.unstaged["untracked.txt"].added, 2);
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 0);
+
+        repository.write("file.txt", "modified\n");
+        let files = status(&repository.0).unwrap().files;
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        let statistics = working_tree_stats(&repository.0, &files).unwrap();
+        assert_eq!(statistics.unstaged["file.txt"].added, 1);
+        assert!(statistics.staged.is_empty());
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 1);
+
+        stage_all(&repository.0).unwrap();
+        let files = status(&repository.0).unwrap().files;
+        GIT_COMMAND_COUNT.with(|count| count.set(0));
+        let statistics = working_tree_stats(&repository.0, &files).unwrap();
+        assert_eq!(statistics.staged["file.txt"].added, 1);
+        assert_eq!(statistics.staged["untracked.txt"].added, 2);
+        assert!(statistics.unstaged.is_empty());
+        assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 1);
     }
 
     #[test]
@@ -2472,6 +2732,40 @@ mod tests {
         let details = commit_details(&repository.0, &hash).unwrap();
         assert_eq!(details.files[0].path, file);
         assert_eq!(details.files[0].stats, stats.staged[file]);
+    }
+
+    #[test]
+    fn porcelain_v2_preserves_paths_and_rejects_truncated_records() {
+        let (status, tracking) = parse_status_with_tracking(
+            b"# branch.oid (initial)\0# branch.head main\0# future.header data\0\
+              1 .M N... 100644 100644 100644 a b tab\tand\nnewline.txt\0\
+              2 R. N... 100644 100644 100644 a b R100 new name.txt\0old name.txt\0\
+              u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
+              ? new file.txt\0",
+        )
+        .unwrap();
+        assert_eq!(tracking.name.as_deref(), Some("main"));
+        assert_eq!(status.files.len(), 4);
+        assert_eq!(status.files[0].path, "tab\tand\nnewline.txt");
+        assert_eq!(status.files[0].index, FileChange::None);
+        assert_eq!(status.files[0].worktree, FileChange::Modified);
+        assert_eq!(status.files[1].path, "new name.txt");
+        assert_eq!(
+            status.files[1].original_path.as_deref(),
+            Some("old name.txt")
+        );
+        assert!(status.files[2].is_conflicted());
+        assert!(status.files[3].is_untracked());
+        for invalid in [
+            b"# branch.head main".as_slice(),
+            b"# branch.head main\0# branch.ab 1 -2\0",
+            b"# branch.head main\0# branch.ab +1 -x\0",
+            b"# branch.head main\0? \0",
+            b"# branch.head main\x001 .M missing fields\0",
+            b"# branch.head main\x002 R. N... 100644 100644 100644 a b R100 new.txt\0",
+        ] {
+            assert!(parse_status_with_tracking(invalid).is_err());
+        }
     }
 
     #[test]

@@ -65,6 +65,7 @@ try {
     $packagedPolish = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/interaction-polish-0.4.13.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
     [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'interaction-polish-0.4.13.md'), $packagedPolish, [System.Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/ux-fixes-0.4.14.md') -Destination $documentationDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/idle-performance-0.4.19.md') -Destination $documentationDirectory -Force
     $packagedChrome = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/window-chrome-0.4.15.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
     [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'window-chrome-0.4.15.md'), $packagedChrome, [System.Text.UTF8Encoding]::new($false))
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'

@@ -343,6 +343,8 @@ pub struct SyntaxCache {
 struct Shared {
     state: Mutex<State>,
     wake: Mutex<Option<mpsc::SyncSender<()>>>,
+    #[cfg(test)]
+    layout_requests: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -364,6 +366,18 @@ struct CachedGalley {
     bytes: usize,
     revision: u64,
     last_used: u64,
+    language: String,
+    style: GalleyStyle,
+    syntax_generation: Option<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct GalleyStyle {
+    font: f32,
+    fallback: Color32,
+    wrap_width: f32,
+    line_height: f32,
+    tab_width: usize,
 }
 
 struct AtlasStamp {
@@ -373,6 +387,7 @@ struct AtlasStamp {
 }
 
 struct Ready {
+    generation: u64,
     language: String,
     font: f32,
     job: Arc<LayoutJob>,
@@ -443,6 +458,10 @@ impl SyntaxCache {
         fallback: Color32,
         wrap_width: f32,
     ) -> LayoutJob {
+        #[cfg(test)]
+        self.shared
+            .layout_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if text.is_empty() || text.len() > MAX_DOCUMENT_BYTES || language.is_empty() {
             return plain(text, font, fallback, wrap_width);
         }
@@ -565,6 +584,52 @@ impl SyntaxCache {
         tab_width: usize,
     ) -> Arc<egui::Galley> {
         self.begin_frame(ui);
+        let style = GalleyStyle {
+            font,
+            fallback,
+            // Match egui's glyph cache normalization for fractional pane widths.
+            wrap_width: wrap_width.round(),
+            line_height,
+            tab_width,
+        };
+        // Check before constructing a LayoutJob: cloning its text and all syntax
+        // sections on every blink or background repaint defeats the glyph cache.
+        let syntax_generation = {
+            let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.serial = state.serial.wrapping_add(1);
+            let serial = state.serial;
+            if let Some(entry) = state.documents.get_mut(&document) {
+                entry.last_used = serial;
+                let generation =
+                    if text.is_empty() || text.len() > MAX_DOCUMENT_BYTES || language.is_empty() {
+                        None
+                    } else {
+                        entry.ready.as_ref().map(|ready| ready.generation)
+                    };
+                if let Some(cached) = entry.galleys.iter_mut().find(|cached| {
+                    cached.revision == revision
+                        && cached.language == language
+                        && cached.style == style
+                        && cached.syntax_generation == generation
+                        // TextEdit may mutate in place before revision advances.
+                        && cached.value.job.text == text
+                }) {
+                    cached.last_used = serial;
+                    if let Some(pending) = &mut entry.pending
+                        && pending.queued
+                        && pending.language == language
+                        && pending.font == font
+                        && &*pending.text == text
+                    {
+                        pending.serial = serial;
+                    }
+                    return Arc::clone(&cached.value);
+                }
+                generation
+            } else {
+                None
+            }
+        };
         let mut job = self.layout(
             ui.ctx(),
             document,
@@ -573,7 +638,7 @@ impl SyntaxCache {
             language,
             font,
             fallback,
-            wrap_width,
+            style.wrap_width,
         );
         for section in &mut job.sections {
             section.format.line_height = Some(font * line_height);
@@ -621,6 +686,9 @@ impl SyntaxCache {
                 .find(|cached| *cached.value.job == job)
             {
                 cached.last_used = serial;
+                cached.language = language.into();
+                cached.style = style;
+                cached.syntax_generation = syntax_generation;
                 return Arc::clone(&cached.value);
             }
         }
@@ -654,6 +722,11 @@ impl SyntaxCache {
                 bytes,
                 revision,
                 last_used: serial,
+                language: language.into(),
+                style,
+                // Captured before layout so colors arriving while we shape
+                // cannot make this older galley appear current on the next pass.
+                syntax_generation,
             });
             trim(&mut state, document);
         }
@@ -929,6 +1002,7 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
             {
                 let ctx = entry.pending.take().unwrap().ctx;
                 entry.ready = Some(Ready {
+                    generation: request.serial,
                     language: request.language,
                     font: request.font,
                     job: Arc::new(job),
@@ -1339,6 +1413,104 @@ mod tests {
         galley_pass(&ctx, &cache, 2, "second document", 14.0, f32::INFINITY);
         let returned = galley_pass(&ctx, &cache, 1, "first document\n🦀", 14.0, f32::INFINITY);
         assert!(Arc::ptr_eq(&first, &returned));
+    }
+
+    #[test]
+    fn idle_source_frames_reuse_layout_without_rebuilding_text_and_sections() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let text = "fn main() { let value = \"Grüße 🦀\"; }\n".repeat(200);
+        source_galley_pass(&ctx, &cache, &text, 14.0, f32::INFINITY);
+        settle(&cache, 1, &text, "rs", 14.0);
+        let original = source_galley_pass(&ctx, &cache, &text, 14.0, f32::INFINITY);
+        let requests = cache
+            .shared
+            .layout_requests
+            .load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..10 {
+            assert!(Arc::ptr_eq(
+                &original,
+                &source_galley_pass(&ctx, &cache, &text, 14.0, f32::INFINITY)
+            ));
+        }
+        assert_eq!(
+            cache
+                .shared
+                .layout_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            requests,
+            "an unchanged frame must not copy the document or rebuild all syntax sections"
+        );
+    }
+
+    #[test]
+    fn idle_plaintext_frames_reuse_fractional_width_layouts() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let text = "\tGrüße 🦀 with words that wrap\r\n".repeat(50);
+        let original = galley_pass(&ctx, &cache, 1, &text, 14.0, 120.25);
+        let requests = cache
+            .shared
+            .layout_requests
+            .load(std::sync::atomic::Ordering::Relaxed);
+        for width in [120.25, 120.49, 120.0, 120.25] {
+            assert!(Arc::ptr_eq(
+                &original,
+                &galley_pass(&ctx, &cache, 1, &text, 14.0, width)
+            ));
+        }
+        assert_eq!(
+            cache
+                .shared
+                .layout_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            requests,
+            "equivalent rounded widths must reuse the layout without copying plain text"
+        );
+        let resized = galley_pass(&ctx, &cache, 1, &text, 14.0, 121.0);
+        assert!(!Arc::ptr_eq(&original, &resized));
+        assert_eq!(resized.job.wrap.max_width, 121.0);
+    }
+
+    #[test]
+    fn cached_source_layout_tracks_fallback_color_line_height_and_language() {
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let text = "fn main() { let value = \"Grüße 🦀\"; }\n";
+        let pass = |language, fallback, line_height| {
+            let mut result = None;
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                result = Some(cache.galley_with_preferences(
+                    ui,
+                    1,
+                    0,
+                    text,
+                    language,
+                    14.0,
+                    fallback,
+                    f32::INFINITY,
+                    line_height,
+                    4,
+                ));
+            });
+            output.drop_without_applying_deltas();
+            result.unwrap()
+        };
+        let original = pass("", Color32::WHITE, 1.35);
+        let recolored = pass("", Color32::YELLOW, 1.35);
+        assert!(!Arc::ptr_eq(&original, &recolored));
+        assert_eq!(recolored.job.sections[0].format.color, Color32::YELLOW);
+        let taller = pass("", Color32::YELLOW, 2.0);
+        assert!(taller.rows[0].size.y > recolored.rows[0].size.y);
+
+        pass("rs", Color32::YELLOW, 2.0);
+        settle(&cache, 1, text, "rs", 14.0);
+        let highlighted = pass("rs", Color32::YELLOW, 2.0);
+        assert!(highlighted.job.sections.len() > 1);
+        assert!(Arc::ptr_eq(&highlighted, &pass("rs", Color32::YELLOW, 2.0)));
+        let plain = pass("", Color32::YELLOW, 2.0);
+        assert_eq!(plain.job.sections.len(), 1);
+        assert_eq!(plain.job.sections[0].format.color, Color32::YELLOW);
     }
 
     #[test]
