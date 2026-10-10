@@ -8,6 +8,10 @@ mod documents;
 #[path = "control_queries.rs"]
 mod queries;
 
+#[cfg(test)]
+#[path = "cli_round_trip_tests.rs"]
+mod cli_round_trip_tests;
+
 impl VEditApp {
     pub(super) fn start_control(&mut self) {
         match cli::Server::start(self.ctx.clone()) {
@@ -275,6 +279,7 @@ impl VEditApp {
                 tab_id,
                 start_line,
                 line_count,
+                start_column,
             } => {
                 let Some((project, index)) = self.control_find_tab(tab_id) else {
                     return unknown_tab(tab_id);
@@ -289,23 +294,21 @@ impl VEditApp {
                 if let Some(error) = &tab.error {
                     return Response::failure("file_error", error);
                 }
-                let lines: Vec<_> = tab.text.split('\n').collect();
-                if start_line > lines.len() {
-                    return Response::failure(
-                        "invalid_location",
-                        format!(
-                            "Document has {} lines; requested line {start_line}",
-                            lines.len()
-                        ),
-                    );
-                }
-                let end = (start_line - 1).saturating_add(line_count).min(lines.len());
-                let mut text = lines[start_line - 1..end].join("\n");
-                let truncated = text.len() > 262_144;
-                if truncated {
-                    truncate_utf8(&mut text, 262_144);
-                }
-                json!({"tab_id":tab_id,"revision":tab.revision,"dirty":tab.dirty,"start_line":start_line,"end_line":end,"total_lines":lines.len(),"text":text,"truncated":truncated,"next_line":if !truncated && end<lines.len(){Some(end+1)}else{None}})
+                let mut result = match text_page(
+                    &tab.text,
+                    start_line,
+                    start_column,
+                    line_count,
+                    262_144,
+                    false,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return Response::failure("invalid_location", error),
+                };
+                result["tab_id"] = json!(tab_id);
+                result["revision"] = json!(tab.revision);
+                result["dirty"] = json!(tab.dirty);
+                result
             }
             Request::Save { tab_ids } => {
                 let mut items = Vec::new();
@@ -537,16 +540,26 @@ impl VEditApp {
     }
     fn control_tabs(&self, limit: usize, offset: usize) -> Value {
         let total = self.projects.iter().map(|p| p.tabs.len()).sum::<usize>();
-        let items = self
+        let candidates = self
             .projects
             .iter()
             .enumerate()
             .flat_map(|(project, p)| (0..p.tabs.len()).map(move |index| (project, index)))
             .skip(offset)
-            .take(limit)
-            .map(|(project, index)| self.control_tab_value(project, index))
-            .collect::<Vec<_>>();
-        json!({"items":items,"total":total,"offset":offset,"has_more":offset.saturating_add(limit)<total})
+            .take(limit);
+        let mut items = Vec::new();
+        let mut bytes = 0;
+        for (project, index) in candidates {
+            let item = self.control_tab_value(project, index);
+            let size = serde_json::to_vec(&item).map_or(262_144, |value| value.len());
+            if !items.is_empty() && bytes + size > 262_144 {
+                break;
+            }
+            bytes += size;
+            items.push(item);
+        }
+        let next = offset.saturating_add(items.len());
+        json!({"items":items,"total":total,"offset":offset,"has_more":next<total,"next_offset":if next<total{Some(next)}else{None}})
     }
     fn control_tab_value(&self, project: usize, index: usize) -> Value {
         let tab = &self.projects[project].tabs[index];
@@ -693,6 +706,88 @@ fn truncate_utf8(text: &mut String, maximum: usize) {
     }
 }
 
+/// Page by lines, continuing oversized lines at exact Unicode columns. Reading
+/// documents keeps the existing omitted-final-LF convention; output retains LF.
+fn text_page(
+    text: &str,
+    line: usize,
+    column: usize,
+    count: usize,
+    budget: usize,
+    keep_lf: bool,
+) -> Result<Value, String> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    if keep_lf && text.ends_with('\n') {
+        starts.pop();
+    }
+    if line == 0 || line > starts.len() || column == 0 {
+        return Err(format!(
+            "Text has {} lines; requested line {line}, column {column}. Nothing changed.",
+            starts.len()
+        ));
+    }
+    let line_start = starts[line - 1];
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |index| line_start + index);
+    let content = &text[line_start..line_end];
+    let content = if line_end < text.len() {
+        content.strip_suffix('\r').unwrap_or(content)
+    } else {
+        content
+    };
+    let char_byte = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(content.len()))
+        .nth(column - 1)
+        .ok_or_else(|| {
+            format!(
+                "Line {line} has {} characters; column {column} is outside it. Nothing changed.",
+                content.chars().count()
+            )
+        })?;
+    let start = line_start + char_byte;
+    let last = (line - 1).saturating_add(count).min(starts.len());
+    let page_end = starts
+        .get(last)
+        .copied()
+        .map_or(text.len(), |end| if keep_lf { end } else { end - 1 });
+    let mut end = page_end.min(start.saturating_add(budget));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    // A continuation never starts between CR and LF.
+    if end < page_end
+        && end > start
+        && text.as_bytes()[end - 1] == b'\r'
+        && text.as_bytes()[end] == b'\n'
+    {
+        end -= 1;
+    }
+    let chunk = &text[start..end];
+    let byte_limit = end < page_end;
+    let (next_line, next_column) = if byte_limit {
+        let lines = chunk.bytes().filter(|byte| *byte == b'\n').count();
+        let col = match chunk.rsplit_once('\n') {
+            Some((_, tail)) => tail.chars().count() + 1,
+            None => column + chunk.chars().count(),
+        };
+        (Some(line + lines), Some(col))
+    } else if last < starts.len() {
+        (Some(last + 1), Some(1))
+    } else {
+        (None, None)
+    };
+    let end_line = if byte_limit { next_line.unwrap() } else { last };
+    Ok(
+        json!({"text":chunk,"start_line":line,"start_column":column,"end_line":end_line,"total_lines":starts.len(),
+        "truncated":byte_limit || (keep_lf && next_line.is_some()),"byte_limit_reached":byte_limit,
+        "next_line":next_line,"next_column":next_column}),
+    )
+}
+
 /// Converts exact one-based coordinates without clamping or splitting CRLF.
 pub(super) fn character_offset(text: &str, location: &Location) -> Result<usize, String> {
     if location.line == 0 || location.column == 0 {
@@ -736,6 +831,46 @@ fn validate_annotation(text: &str, annotation: &Annotation) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tabs_byte_budget_continues_after_the_last_returned_id() {
+        let mut app = VEditApp::empty(egui::Context::default());
+        let mut project = Project::new(std::env::temp_dir().join("vedit-tabs-page"));
+        for index in 0..30 {
+            let mut tab = EditorTab::new(None, format!("Draft {index}"));
+            tab.annotations = (0..20)
+                .map(|mark| Annotation {
+                    id: format!("mark-{mark}"),
+                    start: Location { line: 1, column: 1 },
+                    end: None,
+                    note: "x".repeat(1024),
+                    severity: cli::AnnotationSeverity::Info,
+                })
+                .collect();
+            project.tabs.push(tab);
+        }
+        let expected: Vec<_> = project.tabs.iter().map(|tab| json!(tab.id)).collect();
+        app.projects.push(project);
+        let mut seen = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = app.control_tabs(100, offset);
+            let items = page["items"].as_array().unwrap();
+            assert!(!items.is_empty() && items.len() < 30);
+            assert!(serde_json::to_vec(&page).unwrap().len() < 263_168);
+            seen.extend(items.iter().map(|item| item["id"].clone()));
+            if page["next_offset"].is_null() {
+                break;
+            }
+            let next = page["next_offset"].as_u64().unwrap() as usize;
+            assert_eq!(next, offset + items.len());
+            offset = next;
+        }
+        assert_eq!(seen, expected);
+        let exhausted = app.control_tabs(100, 100);
+        assert_eq!(exhausted["next_offset"], Value::Null);
+        assert_eq!(exhausted["has_more"], false);
+    }
+
     #[test]
     fn exact_unicode_and_crlf_coordinates() {
         let text = "a😀\r\nβeta\n";
@@ -933,6 +1068,7 @@ mod tests {
         let read = app.control_request(Request::Read {
             tab_id: id,
             start_line: 1,
+            start_column: 1,
             line_count: 10,
         });
         assert!(read.ok);

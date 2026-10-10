@@ -994,7 +994,16 @@ fn explorer_root_heading_stays_open_and_children_have_one_level_of_indent() {
     let mut app = fixture(1);
     app.projects[0].root = root.clone();
     app.projects[0].index = Some(Arc::new(
-        workspace::build_index(&root, Default::default()).unwrap(),
+        // This render fixture needs its checked-in files even when a parent
+        // directory ignores the checkout (for example a managed worktree).
+        workspace::build_index(
+            &root,
+            workspace::IndexOptions {
+                show_ignored_files: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
     ));
     app.projects[0].tabs[0].path = Some(root.join("src/main.rs"));
     let mut screen = harness(app);

@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "cli_help.rs"]
+pub mod help;
+
 #[path = "cli_spawn.rs"]
 mod spawn;
 #[path = "cli_transport.rs"]
@@ -18,6 +21,10 @@ pub use transport::{Server, send};
 
 pub const MAX_FILES: usize = 100;
 pub const MAX_ANNOTATIONS: usize = 500;
+
+#[cfg(test)]
+#[path = "cli_workflow_tests.rs"]
+mod workflow_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,6 +54,9 @@ pub struct Location {
 }
 fn one() -> usize {
     1
+}
+fn is_one(value: &usize) -> bool {
+    *value == 1
 }
 fn default_limit() -> usize {
     100
@@ -425,6 +435,8 @@ pub enum Request {
         start_line: usize,
         #[serde(default = "default_limit")]
         line_count: usize,
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        start_column: usize,
     },
     Save {
         tab_ids: Vec<u64>,
@@ -527,6 +539,8 @@ pub enum Request {
         start_line: usize,
         #[serde(default = "default_limit")]
         line_count: usize,
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        start_column: usize,
     },
     GitStatus {
         #[serde(default)]
@@ -615,150 +629,12 @@ impl Response {
     }
 }
 
-pub const HELP: &str = r#"vEdit CLI — read, edit and arrange the running editor. Commands return JSON.
-
-  vedit-cli open PATH... [--line N] [--column N] [--preview|--source]
-  vedit-cli review MANIFEST.json
-  vedit-cli status
-  vedit-cli tabs [--limit N] [--offset N]
-  vedit-cli focus TAB_ID [--line N] [--column N] [--preview|--source]
-  vedit-cli close TAB_ID...
-  vedit-cli clear-marks [TAB_ID...]
-  vedit-cli workspace DIRECTORY
-  vedit-cli panel explorer|search|source_control|review|left_sidebar|right_sidebar|output|problems|settings [--hide]
-  vedit-cli read TAB_ID [--line N] [--count N]
-  vedit-cli save TAB_ID...
-  vedit-cli selection TAB_ID
-  vedit-cli settings [PATCH.json]
-  vedit-cli settings leader-key space|comma|backslash|CHAR
-  vedit-cli settings swap-jk true|false
-  vedit-cli settings font jetbrains-mono|consolas|cascadia-mono
-  vedit-cli bookmarks [list] [--limit N] [--offset N]
-  vedit-cli bookmarks toggle [--tab ID] [--label TEXT]
-  vedit-cli bookmarks remove|jump ID
-  vedit-cli bookmarks rename ID --label TEXT
-  vedit-cli agent-marks [list] [--limit N] [--offset N]
-  vedit-cli agent-marks take [--request-id TOKEN] [--limit N]
-  vedit-cli agent-marks batch [BATCH_ID] [--limit N] [--offset N]
-  vedit-cli agent-marks text MARK_ID [--batch BATCH_ID] [--offset N] [--count N]
-  vedit-cli agent-marks ack BATCH_ID
-  vedit-cli agent-marks restore [BATCH_ID]
-  vedit-cli agent-marks clear
-  vedit-cli agent-marks remove MARK_ID
-  vedit-cli agent-marks note MARK_ID TEXT
-  vedit-cli agent-marks add [--tab TAB_ID] [--note TEXT]
-  vedit-cli command TAB_ID undo|redo|select_all|clear_selection|indent|outdent|toggle_comment|duplicate_line|delete_line|reload|find_next|find_previous|source|preview --revision N
-  vedit-cli find TAB_ID QUERY [--case-sensitive] [--whole-word] [--limit N] [--offset N]
-  vedit-cli replace TAB_ID QUERY REPLACEMENT --revision N [--case-sensitive] [--whole-word] [--first]
-  vedit-cli diff TAB_ID [--count N]
-  vedit-cli diagnostics TAB_ID [--limit N] [--offset N]
-  vedit-cli search QUERY [WORKSPACE] [--case-sensitive] [--whole-word] [--limit N]
-                    [--exclude PATTERN ...|--no-excludes]
-  vedit-cli output [--line N] [--count N]
-  vedit-cli git-status [WORKSPACE] [--limit N] [--offset N]
-  vedit-cli git-branches [WORKSPACE] [--limit N] [--offset N]
-  vedit-cli git-history [WORKSPACE] [--limit N] [--offset N]
-  vedit-cli git-switch-branch REF [WORKSPACE]
-  vedit-cli new [TITLE]
-  vedit-cli task check|test|build|run_file|stop
-  vedit-cli file ACTION.json  (rename, create_folder, or delete to Recycle Bin)
-  vedit-cli file-job JOB_ID
-  vedit-cli layout [CHANGE.json]
-  vedit-cli raise
-  vedit-cli request JSON_FILE       ('-' reads standard input)
-  vedit-cli schema
-
-Open/review/workspace start the sibling vedit.exe if needed. --no-start prevents
-startup. Other commands require a running app. Relative paths resolve against
-your working directory; review paths resolve against the manifest's directory.
-Coordinates are 1-based lines and Unicode character columns, never byte offsets.
-Opening is applied on the GUI thread; loading:true is pending, so inspect status
-until the tab is ready. Existing unsaved text is preserved. Close refuses dirty
-tabs. Batches report per-item results; retry only failed items.
-Each project keeps its own tab groups, splits and views. workspace selects its
-saved layout; focus selects the named tab's project. Buffer read/edit/save do not
-switch projects. status.layout includes workspace and only its current panes.
-
-Git branches/history are read-only and include local and fetched remote refs.
-Omit WORKSPACE for the active project, --limit for 100 rows, --offset for the
-first row. Follow next_offset while has_more is true. History uses the visible
-snapshot when available and includes on_remote, exact date/time and Unix timestamp.
-Git switch-branch takes the exact ref from git-branches (refs/heads/... or
-refs/remotes/...). It waits for completion and returns the resulting branch.
-Remote refs create a tracking branch. Unsaved documents and Git conflicts refuse
-the switch; no force, reset or automatic stash. These commands do not fetch.
-
-Review example:
-{"title":"Plan","files":[{"path":"plan.md","view":"preview"},
-{"path":"src/main.rs","annotations":[{"start":{"line":12},
-"end":{"line":16,"column":1},"note":"Check the changed flow"}]}]}
-End coordinates are inclusive. Without end, the entire start line is marked.
-Review replaces previous review marks. Marked files reveal their first mark
-unless location is supplied. Open/review refresh clean buffers from disk;
-unsaved buffers remain intact.
-Files stay in their owning project. A multi-project review keeps every successful
-buffer and mark and reveals the first success's project; open reveals the last.
-Use focus TAB_ID to reveal another project's review item.
-
-Use request JSON_FILE for atomic edits, save-as, selection changes and ordered
-batches. Get the tab revision from read/tabs first; edit/replace/command/save_as
-require expected_revision. A mismatch applies nothing. Edits are undoable and
-pause autosave for that tab until explicitly saved, leaving global preferences
-alone. Editing ranges have an EXCLUSIVE end; review marks have inclusive ends.
-Send either set_text or nonoverlapping edits referring to the same revision:
-{"op":"edit","tab_id":1,"expected_revision":3,"edits":[{"range":{
-"start":{"line":2,"column":1},"end":{"line":2,"column":3}},"text":"96"}]}
-layout changes use {"action":"split","orientation":"vertical","tab_id":1};
-vertical means side by side, horizontal means top/bottom. To reorder or move a
-tab, send {"action":"move_tab","source_pane_id":1,"pane_id":2,"tab_id":42,
-"index":0}. Use actual IDs from layout; index is the final zero-based target
-position after removing any existing target reference. The result returns the
-updated groups and focus; an empty source split collapses. Layout actions require
-panes and tabs from the active workspace. Pane IDs remain unique/stable across
-project switches; inactive IDs fail without effects.
-Select the project first, then inspect layout and use its current IDs. Use schema
-for complete request shapes and task/disk-search limits. Batch stops at the first
-failed/partial step by default and reports completed steps; it never rolls back
-or replays them.
-
-Search reads saved workspace files on a bounded background walk. Omitted filters
-use settings.search_excludes. Repeated --exclude rules replace that list for one
-search; --no-excludes clears optional filters only. .gitignore and VCS-directory
-guards still apply; unsaved buffers are excluded. Results report actual excludes
-and excludes_source. JSON search accepts optional excludes:[] or ["folder/glob"].
-Settings patches accept editor_font, search_excludes and swap_jk; omitted/null
-fields remain unchanged. Exclusion rules are gitignore-style, max 128 rules/1024 bytes each/
-16 KiB total, trimmed with Windows separators normalized; ! negation is refused.
-Invalid rules apply nothing. swap_jk defaults false and swaps j/k navigation;
-inserted text and literal find/replacement targets keep their original letters.
-editor_font defaults jetbrains_mono; consolas and cascadia_mono are alternatives.
-JetBrains Mono is bundled; unavailable Windows fonts fall back to it.
-
-agent-marks reads the user's selected snippets across projects, including unsaved
-text, without clearing them. This is separate from review/clear-marks annotations.
-take removes the live collection into a durable batch and returns its first page.
-Follow non-null next_offset with batch BATCH_ID; follow each text_next_offset with
-text MARK_ID --batch BATCH_ID, then its next_offset until null, for long snippets.
-Only ack BATCH_ID after reading every page and full snippet;
-a fresh take is blocked while a batch awaits ack. Reuse --request-id TOKEN to retry
-the same take safely. batch without ID reads the latest batch after lost delivery.
-ack retains the batch for reading/restoration until the next take. restore merges
-it without duplicating IDs; clear/remove preserve an undo collection for restore.
-Ranges are 1-based Unicode positions with exclusive ends. Captured text is frozen;
-stale/range_current describe current-mark positions; frozen batches always report
-range_current:false. Read current source before relying on a receipt's position.
-take/ack are saved atomically before success (persistence:saved); other mark
-mutations queue persistence (persistence:queued). Notes accept up
-to 4096 Unicode characters; empty text clears a note. add captures the existing
-nonempty selection only; it never edits or saves the document.
-"#;
-
 // A single startup parse result; keeping Request inline avoids a heap indirection
 // on the normal command path. These values are never stored in a collection.
 #[allow(clippy::large_enum_variant)]
 pub enum Parsed {
-    Help,
-    Schema,
+    Help { command: Option<String> },
+    Schema { topic: Option<String> },
     Command { request: Request, start: bool },
 }
 
@@ -771,8 +647,9 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         })
         .collect::<Result<_, _>>()?;
     if args.is_empty() {
-        return Ok(Parsed::Help);
+        return Ok(Parsed::Help { command: None });
     }
+    args = normalize_equals(args);
     // A label or other option value may literally be `--help`, `--`, or
     // `--no-start`. Only interpret global flags in argument positions owned
     // by the CLI, never inside a supplied value.
@@ -795,24 +672,37 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 no_start = true;
                 return false;
             }
-            "--line" | "--column" | "--limit" | "--offset" | "--count" | "--revision" | "--tab"
-            | "--label" | "--note" | "--batch" | "--request-id" | "--exclude" => {
-                expects_value = true
-            }
+            value if help::takes_value(value) => expects_value = true,
             _ => {}
         }
         true
     });
     if help {
-        return Ok(Parsed::Help);
+        let command = args
+            .first()
+            .filter(|arg| !matches!(arg.as_str(), "--help" | "-h"))
+            .cloned();
+        if let Some(name) = &command
+            && help::command(name).is_none()
+        {
+            return Err(format!("Unknown command {name}; use vedit-cli --help"));
+        }
+        return Ok(Parsed::Help { command });
     }
     if args.is_empty() {
         return Err("A command is required after --no-start; use --help".into());
     }
     let command = args.remove(0);
     if command == "schema" {
-        require_empty(&args)?;
-        return Ok(Parsed::Schema);
+        if args.len() > 1 {
+            return Err("schema takes at most one operation name; use schema --help".into());
+        }
+        let topic = args.first().cloned();
+        schema_topic(topic.as_deref())?;
+        return Ok(Parsed::Schema { topic });
+    }
+    if help::command(&command).is_none() {
+        return Err(format!("Unknown command {command}; use vedit-cli --help"));
     }
     let mut options = Options::default();
     let mut positional = Vec::new();
@@ -856,6 +746,16 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 &mut options.tab,
                 tab_id(&iter.next().ok_or("--tab needs a tab ID")?)?,
                 "--tab",
+            )?,
+            "--file" => set_option(
+                &mut options.file,
+                iter.next().ok_or("--file needs a text file path")?,
+                "--file",
+            )?,
+            "--path" => set_option(
+                &mut options.path,
+                iter.next().ok_or("--path needs a destination path")?,
+                "--path",
             )?,
             "--label" => set_option(
                 &mut options.label,
@@ -974,6 +874,31 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         "clear-marks" => Request::ClearMarks {
             tab_ids: ids(&positional, false)?,
         },
+        "edit" => Request::Edit {
+            tab_id: tab_id(one_argument(
+                &positional,
+                "edit needs TAB_ID --file TEXT_FILE --revision N",
+            )?)?,
+            expected_revision: options.required_revision()?,
+            edits: Vec::new(),
+            set_text: Some(read_input_file(&absolute(
+                options
+                    .file
+                    .as_ref()
+                    .ok_or("edit requires --file TEXT_FILE")?
+                    .into(),
+            ))?),
+        },
+        "save-as" => {
+            if positional.len() != 2 {
+                return Err("save-as needs TAB_ID PATH --revision N".into());
+            }
+            Request::SaveAs {
+                tab_id: tab_id(&positional[0])?,
+                expected_revision: options.required_revision()?,
+                path: absolute((&positional[1]).into()),
+            }
+        }
         "save" => Request::Save {
             tab_ids: ids(&positional, true)?,
         },
@@ -993,6 +918,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
         "read" => Request::Read {
             tab_id: tab_id(one_argument(&positional, "read needs exactly one tab ID")?)?,
             start_line: options.line.unwrap_or(1),
+            start_column: options.column.unwrap_or(1),
             line_count: options.count.unwrap_or(100),
         },
         "selection" => Request::Selection {
@@ -1108,6 +1034,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
             require_empty(&positional)?;
             Request::Output {
                 start_line: options.line.unwrap_or(1),
+                start_column: options.column.unwrap_or(1),
                 line_count: options.count.unwrap_or(100),
             }
         }
@@ -1148,12 +1075,17 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
 
         "new" => {
             if positional.len() > 1 {
-                return Err("new takes an optional TITLE; use request for path/text".into());
+                return Err("new takes an optional TITLE, --file TEXT_FILE and --path PATH".into());
             }
             Request::New {
                 title: positional.first().cloned(),
-                text: String::new(),
-                path: None,
+                text: options
+                    .file
+                    .as_ref()
+                    .map(|path| read_input_file(&absolute(path.into())))
+                    .transpose()?
+                    .unwrap_or_default(),
+                path: options.path.as_ref().map(|path| absolute(path.into())),
             }
         }
         "task" => Request::Task {
@@ -1201,7 +1133,8 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
             if contents.len() > 1_048_576 {
                 return Err("Request exceeds 1 MiB".into());
             }
-            let mut request: Request = transport::from_unique_json(json_bytes(&contents))
+            let contents = decode_input(&contents)?;
+            let mut request: Request = transport::from_unique_json(contents.as_bytes())
                 .map_err(|e| format!("Invalid request: {e}"))?;
             resolve_paths(&mut request);
             request
@@ -1220,6 +1153,8 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
 
 #[derive(Default)]
 struct Options {
+    file: Option<String>,
+    path: Option<String>,
     line: Option<usize>,
     column: Option<usize>,
     view: Option<DocumentView>,
@@ -1241,94 +1176,38 @@ struct Options {
 }
 impl Options {
     fn allowed(&self, command: &str) -> Result<(), String> {
-        for (present, allowed, flag) in [
-            (
-                self.line.is_some(),
-                matches!(command, "open" | "focus" | "read" | "output"),
-                "--line",
-            ),
-            (
-                self.column.is_some(),
-                matches!(command, "open" | "focus"),
-                "--column",
-            ),
-            (
-                self.view.is_some(),
-                matches!(command, "open" | "focus"),
-                "--preview/--source",
-            ),
-            (
-                self.limit.is_some(),
-                matches!(
-                    command,
-                    "tabs"
-                        | "find"
-                        | "search"
-                        | "diagnostics"
-                        | "git-status"
-                        | "git-branches"
-                        | "git-history"
-                        | "bookmarks"
-                        | "agent-marks"
-                ),
-                "--limit",
-            ),
-            (
-                self.offset.is_some(),
-                matches!(
-                    command,
-                    "tabs"
-                        | "find"
-                        | "diagnostics"
-                        | "git-status"
-                        | "git-branches"
-                        | "git-history"
-                        | "bookmarks"
-                        | "agent-marks"
-                ),
-                "--offset",
-            ),
-            (
-                self.count.is_some(),
-                matches!(command, "read" | "output" | "diff" | "agent-marks"),
-                "--count",
-            ),
-            (
-                self.revision.is_some(),
-                matches!(command, "command" | "replace"),
-                "--revision",
-            ),
-            (
-                self.tab.is_some(),
-                matches!(command, "bookmarks" | "agent-marks"),
-                "--tab",
-            ),
-            (self.label.is_some(), command == "bookmarks", "--label"),
-            (self.note.is_some(), command == "agent-marks", "--note"),
-            (self.batch.is_some(), command == "agent-marks", "--batch"),
-            (
-                self.request_id.is_some(),
-                command == "agent-marks",
-                "--request-id",
-            ),
-            (self.excludes.is_some(), command == "search", "--exclude"),
-            (self.no_excludes, command == "search", "--no-excludes"),
-            (
-                self.case_sensitive,
-                matches!(command, "find" | "search" | "replace"),
-                "--case-sensitive",
-            ),
-            (
-                self.whole_word,
-                matches!(command, "find" | "search" | "replace"),
-                "--whole-word",
-            ),
-            (self.first, command == "replace", "--first"),
-            (self.hide, command == "panel", "--hide"),
+        let definition = help::command(command)
+            .ok_or_else(|| format!("Unknown command {command}; use vedit-cli --help"))?;
+        for (present, flag) in [
+            (self.line.is_some(), "--line"),
+            (self.column.is_some(), "--column"),
+            (self.file.is_some(), "--file"),
+            (self.path.is_some(), "--path"),
+            (self.view.is_some(), "--preview"),
+            (self.limit.is_some(), "--limit"),
+            (self.offset.is_some(), "--offset"),
+            (self.count.is_some(), "--count"),
+            (self.revision.is_some(), "--revision"),
+            (self.tab.is_some(), "--tab"),
+            (self.label.is_some(), "--label"),
+            (self.note.is_some(), "--note"),
+            (self.batch.is_some(), "--batch"),
+            (self.request_id.is_some(), "--request-id"),
+            (self.excludes.is_some(), "--exclude"),
+            (self.no_excludes, "--no-excludes"),
+            (self.case_sensitive, "--case-sensitive"),
+            (self.whole_word, "--whole-word"),
+            (self.first, "--first"),
+            (self.hide, "--hide"),
         ] {
-            if present && !allowed {
-                return Err(format!("{flag} is not supported by {command}"));
+            if present && !definition.flags.contains(&flag) {
+                return Err(format!(
+                    "{flag} is not supported by {command}; use vedit-cli {command} --help"
+                ));
             }
+        }
+        if self.column.is_some() && self.line.is_none() {
+            return Err("--column requires --line".into());
         }
         Ok(())
     }
@@ -1607,12 +1486,77 @@ fn read_json_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > 1_048_576 {
-        return Err("JSON file exceeds 1 MiB".into());
+        return Err("Input file exceeds 1 MiB; use smaller range edits or requests".into());
     }
-    Ok(bytes)
+    decode_input(&bytes).map(String::into_bytes)
 }
 fn json_bytes(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes)
+}
+
+fn read_input_file(path: &std::path::Path) -> Result<String, String> {
+    String::from_utf8(read_json_file(path)?).map_err(|error| error.to_string())
+}
+
+fn decode_input(bytes: &[u8]) -> Result<String, String> {
+    let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        let big_endian = bytes[0] == 0xfe;
+        if !(bytes.len() - 2).is_multiple_of(2) {
+            return Err(
+                "Incomplete UTF-16 input; save the complete file as UTF-8 or UTF-16 with BOM"
+                    .into(),
+            );
+        }
+        let units: Vec<_> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = [pair[0], pair[1]];
+                if big_endian {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                }
+            })
+            .collect();
+        String::from_utf16(&units).map_err(|_| {
+            "Invalid UTF-16 input; save the file as valid UTF-8 or UTF-16 with BOM".to_owned()
+        })?
+    } else {
+        std::str::from_utf8(json_bytes(bytes))
+            .map_err(|_| "Input is not UTF-8; save it as UTF-8 or UTF-16 with BOM".to_owned())?
+            .to_owned()
+    };
+    if text.len() > 1_048_576 {
+        return Err("Decoded input exceeds 1 MiB; use smaller range edits or requests".into());
+    }
+    Ok(text)
+}
+
+/// Expand option=value only where the parser owns the token, never inside data.
+fn normalize_equals(args: Vec<String>) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut literal = false;
+    let mut expects_value = false;
+    for arg in args {
+        if literal || expects_value {
+            expects_value = false;
+            result.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            literal = true;
+        }
+        if let Some((flag, value)) = arg.split_once('=')
+            && help::takes_value(flag)
+        {
+            result.push(flag.to_owned());
+            result.push(value.to_owned());
+            continue;
+        }
+        expects_value = help::takes_value(&arg);
+        result.push(arg);
+    }
+    result
 }
 fn resolve_paths(request: &mut Request) {
     match request {
@@ -1737,10 +1681,11 @@ pub fn validate(request: &Request) -> Result<(), String> {
             tab_id,
             start_line,
             line_count,
+            start_column,
         } => {
             validate_id(*tab_id)?;
-            if *start_line == 0 || *line_count == 0 || *line_count > 500 {
-                return Err("read uses a positive start_line and 1..500 lines".into());
+            if *start_line == 0 || *start_column == 0 || *line_count == 0 || *line_count > 500 {
+                return Err("read uses positive start_line/start_column and 1..500 lines".into());
             }
         }
         Request::Workspace { path } if !path.is_absolute() => {
@@ -1917,9 +1862,10 @@ pub fn validate(request: &Request) -> Result<(), String> {
         Request::Output {
             start_line,
             line_count,
+            start_column,
         } => {
-            if *start_line == 0 || !(1..=500).contains(line_count) {
-                return Err("output uses a positive start_line and 1..500 lines".into());
+            if *start_line == 0 || *start_column == 0 || !(1..=500).contains(line_count) {
+                return Err("output uses positive start_line/start_column and 1..500 lines".into());
             }
         }
         Request::GitStatus {
@@ -2280,6 +2226,50 @@ pub fn forward_paths(paths: Vec<PathBuf>) -> Result<Option<Response>, String> {
 
 pub fn schema() -> Value {
     serde_json::from_str(include_str!("cli_schema.json")).expect("bundled CLI schema is valid JSON")
+}
+
+pub fn schema_topic(topic: Option<&str>) -> Result<Value, String> {
+    let full = schema();
+    let Some(topic) = topic else {
+        return Ok(full);
+    };
+    let operation = topic.replace('-', "_");
+    let examples: Vec<_> = full["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|example| example["op"] == operation)
+        .cloned()
+        .collect();
+    if examples.is_empty() {
+        return Err(format!(
+            "Unknown schema operation {topic}; use vedit-cli schema for available operations"
+        ));
+    }
+    let mut selected = json!({"protocol":full["protocol"], "commands":examples, "coordinates":full["coordinates"], "ids":full["ids"], "strictness":full["strictness"]});
+    let section = match operation.as_str() {
+        "edit" | "new" | "save" | "save_as" | "selection" | "find" | "replace" | "command" => {
+            "editing"
+        }
+        "file" | "file_job" => "file_actions",
+        "read" | "diff" | "diagnostics" | "search" | "output" | "git_status" | "task" => "queries",
+        "open" | "review" | "focus" | "close" | "clear_marks" => "defaults",
+        "panel" => "panels",
+        other => other,
+    };
+    if let Some(value) = full.get(section) {
+        selected[section] = if section == "queries" {
+            json!({operation.clone(): value[&operation]})
+        } else {
+            value.clone()
+        };
+    }
+    if let Some(value) = full.get("responses") {
+        selected["responses"] = value.clone();
+    }
+    // Keep limits discoverable without requiring the complete catalog.
+    selected["limits"] = full["limits"].clone();
+    Ok(selected)
 }
 #[cfg(test)]
 mod tests {
@@ -2714,7 +2704,7 @@ mod tests {
         }
         assert!(matches!(
             parse(&["bookmarks", "toggle", "--label", "x", "--help"]).unwrap(),
-            Parsed::Help
+            Parsed::Help { .. }
         ));
         assert!(
             matches!(parse(&["open", "--no-start", "--", "--no-start"]).unwrap(), Parsed::Command { request: Request::Open { files }, start: false } if files[0].path.file_name().unwrap() == "--no-start")

@@ -591,6 +591,7 @@ fn inactive_document_read_edit_and_save_preserve_active_project_and_other_local_
     let response = app.control_request(Request::Read {
         tab_id: id,
         start_line: 1,
+        start_column: 1,
         line_count: 3,
     });
     assert!(response.ok);

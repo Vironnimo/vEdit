@@ -140,7 +140,18 @@ update its references, CLI help and schema together when that interface changes.
 `docs/agent-interface.md` separates the current observable contract from historical
 evaluations. Versioned review notes retain their original results and scope.
 
-## Git CLI integration fixture
+## CLI integration fixtures
+
+The general CLI workflow fixture exercises the executable against a headless editor
+and private endpoint, including Unicode input, drafts, revisions, paging, errors and
+partial results. It also tests the available Windows PowerShell/PowerShell 7 shells.
+It does not contact the user's window:
+
+```powershell
+cargo build --bin vedit-cli
+$env:VEDIT_CLI_TEST_BINARY = (Resolve-Path 'target/debug/vedit-cli.exe').Path
+cargo test --bin vedit cli_agent_workflow_round_trip_in_isolated_editor -- --ignored --nocapture
+```
 
 The Git CLI round trip uses its own temporary repository and private control endpoint,
 without opening or restarting a real editor. Build the CLI, then run just this check:

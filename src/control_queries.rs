@@ -129,7 +129,8 @@ impl VEditApp {
             Request::Output {
                 start_line,
                 line_count,
-            } => self.control_output(*start_line, *line_count),
+                start_column,
+            } => self.control_output(*start_line, *start_column, *line_count),
             Request::GitStatus {
                 workspace,
                 limit,
@@ -343,29 +344,32 @@ impl VEditApp {
         }))
     }
 
-    fn control_output(&self, start_line: usize, line_count: usize) -> Response {
-        let lines: Vec<_> = self.output.split_inclusive('\n').collect();
-        // Empty output still has a valid first line, so agents can inspect a newly started task.
-        let total = lines.len().max(1);
-        if start_line > total {
-            return Response::failure(
-                "invalid_location",
-                format!("Output has {total} lines; requested line {start_line}"),
-            );
-        }
-        let start = (start_line - 1).min(lines.len());
-        let (text, returned, truncated, partial_line) = bounded_lines(&lines[start..], line_count);
-        let end = start + returned;
+    fn control_output(
+        &self,
+        start_line: usize,
+        start_column: usize,
+        line_count: usize,
+    ) -> Response {
+        let mut result = match text_page(
+            &self.output,
+            start_line,
+            start_column,
+            line_count,
+            TEXT_BYTES,
+            true,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Response::failure("invalid_location", error),
+        };
         let mut command = self.command.clone();
         truncate_utf8(&mut command, 4096);
         let mut status = self.task_status.clone();
         truncate_utf8(&mut status, 1024);
-        Response::success(json!({
-            "text":text,"start_line":start_line,"end_line":end,"total_lines":total,
-            "truncated":truncated,"byte_limit_reached":partial_line,"next_line":if !partial_line&&end<lines.len(){Some(end+1)}else{None},
-            "running":self.task.is_some(),"status":status,"command":command,
-            "snapshot":true
-        }))
+        result["running"] = json!(self.task.is_some());
+        result["status"] = json!(status);
+        result["command"] = json!(command);
+        result["snapshot"] = json!(true);
+        Response::success(result)
     }
 
     fn control_git_status(&self, path: Option<&Path>, limit: usize, offset: usize) -> Response {
@@ -656,6 +660,40 @@ fn git_commit_json(commit: &git::CommitSummary) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_buffer_and_output_pages_reconstruct_exact_unicode_and_crlf() {
+        let original = format!("{}\r\nlast\n", "😀東京".repeat(40_000));
+        for operation in ["read", "output"] {
+            let (mut app, id) = app_with_tab(&original, "");
+            app.output = original.clone();
+            let mut reconstructed = String::new();
+            let (mut line, mut column) = (1, 1);
+            for _ in 0..100 {
+                let mut value = json!({"op":operation,"start_line":line,"line_count":1});
+                if column != 1 {
+                    value["start_column"] = json!(column);
+                }
+                if operation == "read" {
+                    value["tab_id"] = json!(id);
+                }
+                let response = app.control_request(serde_json::from_value(value).unwrap());
+                assert!(response.ok, "{:?}", response.error);
+                let result = response.result;
+                reconstructed.push_str(result["text"].as_str().unwrap());
+                if result["next_line"].is_null() {
+                    assert!(reconstructed == original, "{operation} lost a continuation");
+                    break;
+                }
+                let next_column = result["next_column"].as_u64().unwrap();
+                if operation == "read" && result["byte_limit_reached"] != true {
+                    reconstructed.push('\n');
+                }
+                (line, column) = (result["next_line"].as_u64().unwrap(), next_column);
+            }
+            assert!(reconstructed == original);
+        }
+    }
+
     use super::*;
 
     fn app_with_tab(text: &str, saved: &str) -> (VEditApp, u64) {
@@ -800,6 +838,7 @@ mod tests {
             },
             Request::Output {
                 start_line: 1,
+                start_column: 1,
                 line_count: 100,
             },
             Request::GitStatus {
@@ -826,6 +865,7 @@ mod tests {
         let response = app
             .control_query(&Request::Output {
                 start_line: 2,
+                start_column: 1,
                 line_count: 1,
             })
             .unwrap();
@@ -891,6 +931,7 @@ mod tests {
         let response = app
             .control_query(&Request::Output {
                 start_line: 1,
+                start_column: 1,
                 line_count: 100,
             })
             .unwrap();
@@ -898,7 +939,8 @@ mod tests {
         assert_eq!(text.len(), TEXT_BYTES);
         assert!(text.chars().all(|character| character == '😀'));
         assert_eq!(response.result["byte_limit_reached"], true);
-        assert_eq!(response.result["next_line"], Value::Null);
+        assert_eq!(response.result["next_line"], 1);
+        assert_eq!(response.result["next_column"], TEXT_BYTES / 4 + 1);
         assert!(serde_json::to_vec(&response).unwrap().len() < QUERY_PAYLOAD_BYTES);
     }
 

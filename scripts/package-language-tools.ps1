@@ -34,7 +34,14 @@ $licensePath = Join-Path $projectRoot "target/node-$nodeVersion-LICENSE.txt"
 if (-not (Test-Path -LiteralPath $licensePath)) {
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE" -OutFile $licensePath
 }
-Copy-Item -LiteralPath $nodePath -Destination (Join-Path $toolsDirectory 'node.exe') -Force
+$packagedNodePath = Join-Path $toolsDirectory 'node.exe'
+# A running language server locks its executable. Identical bytes already form
+# the requested bundle, so leave that runtime in place without stopping it.
+$nodeAlreadyPackaged = (Test-Path -LiteralPath $packagedNodePath -PathType Leaf) -and
+    ((Get-FileHash -LiteralPath $nodePath).Hash -eq (Get-FileHash -LiteralPath $packagedNodePath).Hash)
+if (-not $nodeAlreadyPackaged) {
+    Copy-Item -LiteralPath $nodePath -Destination $packagedNodePath -Force
+}
 Copy-Item -LiteralPath $licensePath -Destination (Join-Path $toolsDirectory 'node-LICENSE.txt') -Force
 Set-Content -LiteralPath (Join-Path $toolsDirectory 'node-version.txt') -Value $nodeVersion -Encoding utf8
 Write-Output "Python language support packaged: basedpyright $installedVersion, Node $nodeVersion"

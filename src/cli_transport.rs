@@ -297,7 +297,7 @@ fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
         .map_err(|error| format!("Could not encode the control request: {error}"))?;
     if bytes.len() + 1 > MAX_REQUEST_BYTES {
         return Err(format!(
-            "The control request exceeds {MAX_REQUEST_BYTES} bytes. Split the review into smaller batches. The request was not sent."
+            "The encoded control request exceeds {MAX_REQUEST_BYTES} bytes. The request was not sent. Reduce its payload or use smaller independent edits. Keep a review's intended annotations together: each review replaces the previous one."
         ));
     }
     bytes.push(b'\n');
@@ -325,7 +325,7 @@ fn endpoint_address(endpoint: &Endpoint) -> SocketAddr {
 fn read_endpoint(path: &Path) -> Result<Endpoint, String> {
     let file = fs::File::open(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            "No vEdit control endpoint exists. Start vEdit 0.3 or newer, then run the command again.".into()
+            "No vEdit control endpoint exists. The request was not sent. Start vEdit, or use open/workspace to start the sibling executable.".into()
         } else {
             format!("Could not read the vEdit control endpoint: {error}")
         }

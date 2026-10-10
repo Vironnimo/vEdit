@@ -1,6 +1,6 @@
 # Review manifests
 
-Save a UTF-8 JSON file and run:
+This reference covers multi-file reviews that replace the current review annotations. Replace example paths, IDs and positions with values from the task and current buffers. Save a UTF-8 JSON file and run:
 
 ```powershell
 & $VEditCli review 'C:/project/review.json'
@@ -56,4 +56,4 @@ Supply `start` and a helpful `note` for each annotation. `id` is optional; suppl
 
 Review submission replaces the previous review annotations. Unknown fields and invalid manifests are rejected before that replacement. Filesystem or later load failures can still leave a partially applied review: inspect each item and the current editor state. For successful items, retain their returned tab IDs. Verify pending items after loading; correct failed paths or ranges before submitting a complete replacement when needed.
 
-`schema` is the current machine-readable contract for manifests and other requests. Use `request JSON_FILE` or `request -` for its supported structured actions when the ordinary commands do not cover the task.
+`schema review` gives the current review request examples and defaults. Use `request JSON_FILE` for structured actions when ordinary commands do not cover the task.

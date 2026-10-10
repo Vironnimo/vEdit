@@ -1,6 +1,8 @@
-# vEdit 0.4.18
+# vEdit 0.4.19
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.19 verbessert die Agentenbedienung: Jeder CLI-Befehl hat eine eigene Hilfe, `schema OP` zeigt gezielt seine JSON-Beispiele, und Textdateien lassen sich direkt als Entwurf laden oder revisionsgeschützt in einen Puffer übernehmen. UTF-16-Dateien mit BOM aus Windows PowerShell werden akzeptiert. Lange Pufferzeilen und Taskausgaben lassen sich vollständig weiterlesen. Der Agenten-Skill enthält die häufigen Abläufe direkt und trennt die Spezialthemen.
 
 Version 0.4.18 ergänzt die geteilte Git-Ansicht mit verschiebbarer Trennlinie, lokalen und entfernten Commits, Branch-Wechsel und genauen Zeitangaben. Die Statusleiste bietet mehr Platz und richtet Modus, Branch und Speicherstatus einheitlich aus. Der Explorer markiert das Ziel eines Rechtsklicks deutlich und kann Dateien und Ordner in den Windows-Papierkorb verschieben. Seit Version 0.4.17 heißt Morrow **vEdit** und übernimmt das Farbschema von vBot und Watchtower: warmes Graphit, helle cremefarbene Schrift und Orange für Aktionen und Auswahl. Grün, Gelb, Blau und Rot kennzeichnen weiterhin Erfolg, Warnungen, Informationen und Fehler.
 
@@ -223,8 +225,13 @@ Tabs lassen sich mit der Maus innerhalb einer Tab-Leiste umsortieren oder in ein
 .\dist\vEdit\vedit-cli.exe read 12 --line 1 --count 50
 .\dist\vEdit\vedit-cli.exe request ".\editor-action.json"
 .\dist\vEdit\vedit-cli.exe --help
-.\dist\vEdit\vedit-cli.exe schema
+.\dist\vEdit\vedit-cli.exe read --help
+.\dist\vEdit\vedit-cli.exe schema edit
 ```
+
+`new [TITLE] --file TEXTDATEI` erstellt einen ungespeicherten Entwurf. `edit TAB_ID --file TEXTDATEI --revision N` ersetzt den gesamten Pufferinhalt durch den vorbereiteten Text; für gezielte Bereiche bleibt `request` verfügbar. `save-as TAB_ID PFAD --revision N` speichert unter einem noch nicht vorhandenen Ziel. Text- und JSON-Dateien akzeptieren UTF-8 mit oder ohne BOM sowie UTF-16 mit BOM; Zeilenenden bleiben im Text erhalten. In Windows PowerShell setzt `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)` die Dekodierung der CLI-Ausgabe auf UTF-8.
+
+`read` und `output` liefern bei weiteren Textteilen `next_line` und `next_column`; diese Werte gehen an `--line` und `--column`. Bei `byte_limit_reached:true` schließen die Textteile direkt aneinander an. Zwischen vollständigen `read`-Zeilenpaketen ist ein Zeilenumbruch einzufügen; `output` enthält seine Trennzeichen bereits. Beim Zusammensetzen eines Puffers muss die Revision gleich bleiben.
 
 Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App-Prozess. Die oben gezeigte `12` ist ein Beispiel. `request` führt strukturierte JSON-Aktionen aus; `schema` zeigt deren aktuelle Formen und Vorgaben.
 

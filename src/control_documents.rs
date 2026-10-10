@@ -66,7 +66,9 @@ impl VEditApp {
                 self.bookmark_lines.clear();
                 self.session_dirty = true;
                 self.persist_session();
-                Response::success(json!({"applied":true,"id":id,"persistence":"queued"}))
+                Response::success(
+                    json!({"applied":true,"id":id,"label":label,"persistence":"queued"}),
+                )
             }
             cli::BookmarkAction::Jump { id } => {
                 if self.bookmarks.get(id).is_none() {
@@ -1850,6 +1852,7 @@ mod tests {
                 Request::Read {
                     tab_id: id,
                     start_line: 1,
+                    start_column: 1,
                     line_count: 1,
                 },
                 Request::Settings { patch: None },
@@ -1874,6 +1877,7 @@ mod tests {
             actions: vec![Request::Read {
                 tab_id: id,
                 start_line: 1,
+                start_column: 1,
                 line_count: 1,
             }],
             stop_on_error: true,

@@ -4,6 +4,16 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
+## CLI discovery and text workflows (0.4.19)
+
+Every ordinary command has focused `COMMAND --help`; the command catalog also owns allowed flags. `schema OP` returns typed examples and the relevant rules. JSON responses and exit codes remain compatible (0 read/applied, 1 failed, 2 partial execution); neither success nor partial execution implies background completion.
+
+`new [TITLE] --file TEXT_FILE` creates a draft, `edit TAB_ID --file TEXT_FILE --revision N` replaces complete buffer text, and `save-as TAB_ID PATH --revision N` uses the existing guarded Save As operation. Range edits remain structured requests. UTF-8 with/without BOM and UTF-16 with BOM are accepted from input files and explicit request stdin. Both encoded and decoded input are limited to 1 MiB, with the transport's encoded packet limit still applying. Options accept `--name=value`; payload values are not reinterpreted as flags.
+
+`read` and `output` accept optional `start_column` (CLI `--column` with `--line`). `next_line` and `next_column` continue oversized lines without cutting a Unicode scalar or CRLF pair. For byte continuations concatenate text directly; complete read line pages omit their final LF, while output preserves separators. The default column is omitted on the wire for older receivers; a non-default column requires this receiver version. Preserve the returned revision across buffer pages.
+
+The skill contains common recipes and separates buffer, layout/settings, marks, project work and review references. Its startup paths are relative to the skill folder, not the caller's directory. The audit and validation record is in [CLI audit 0.4.19](cli-audit-0.4.19.md). Earlier measurements below remain historical.
+
 ## Observable contract
 
 Version 0.4.16 adds `reopen_tab` to the effective keybinding catalog (default
