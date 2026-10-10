@@ -11,7 +11,7 @@ const SECTIONS: &[&str] = &[
     "Vim",
 ];
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn settings_section(&self) -> String {
         self.ctx
             .data(|data| data.get_temp::<String>(egui::Id::new("settings_section")))
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn settings_categories_are_reachable_and_zoomed_pages_fit() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         visual_tests::workspace(&mut app);
         let mut screen = visual_tests::harness(app);
         screen.run_steps(3);
@@ -163,14 +163,14 @@ mod tests {
         screen.run_steps(3);
         assert_eq!(screen.state().settings_section(), "Keyboard");
         assert!(screen.query_by_label("Reset all").is_some());
-        visual_tests::snapshot(&mut screen, "morrow_keyboard_settings");
+        visual_tests::snapshot(&mut screen, "vedit_keyboard_settings");
         screen.get_by_label("Tasks").click();
         screen.run_steps(3);
         assert_eq!(screen.state().settings_section(), "Tasks");
-        visual_tests::snapshot(&mut screen, "morrow_task_settings");
+        visual_tests::snapshot(&mut screen, "vedit_task_settings");
         screen.get_by_label("Languages").click();
         screen.run_steps(3);
-        visual_tests::snapshot(&mut screen, "morrow_language_settings");
+        visual_tests::snapshot(&mut screen, "vedit_language_settings");
         screen.set_size(Vec2::new(960.0, 640.0));
         screen.state_mut().settings.ui_scale = 2.0;
         screen.ctx.set_zoom_factor(2.0);
@@ -191,7 +191,7 @@ mod tests {
                 "{label} remains reachable at 200%: {bounds:?}"
             );
         }
-        visual_tests::snapshot(&mut screen, "morrow_zoomed_language_settings");
+        visual_tests::snapshot(&mut screen, "vedit_zoomed_language_settings");
         screen.key_press(Key::Escape);
         screen.run_steps(3);
         assert!(!screen.state().settings_open);

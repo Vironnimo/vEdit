@@ -1,11 +1,11 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.set_sidebar_view_visible(SidebarView::Explorer, false);
     app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
-    let mut project = Project::new(PathBuf::from("C:/morrow-git-render-only"));
+    let mut project = Project::new(PathBuf::from("C:/vedit-git-render-only"));
     project.git_root = Some(project.root.clone());
     project.git_branch = Some("main".into());
     project.git_view.section = GitSection::History;
@@ -76,12 +76,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp, width: f32, full_sidebar: bool) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp, width: f32, full_sidebar: bool) -> Harness<'static, VEditApp> {
     let screen = Harness::builder()
         .with_size([width, 600.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            move |ui, app: &mut MorrowApp| {
+            move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 if full_sidebar {
                     app.sidebar_ui(ui);
@@ -99,7 +99,7 @@ fn harness(app: MorrowApp, width: f32, full_sidebar: bool) -> Harness<'static, M
     screen
 }
 
-fn row_rects(screen: &Harness<'static, MorrowApp>) -> Vec<egui::Rect> {
+fn row_rects(screen: &Harness<'static, VEditApp>) -> Vec<egui::Rect> {
     screen.state().projects[0]
         .recent_commits
         .iter()
@@ -141,12 +141,12 @@ fn git_explains_unsaved_documents_and_save_action_preserves_agent_draft_until_sa
 #[test]
 fn git_unsaved_count_includes_other_open_folders_of_the_repository() {
     let mut app = fixture();
-    let mut peer = Project::new(PathBuf::from("C:/morrow-git-render-only/sub"));
+    let mut peer = Project::new(PathBuf::from("C:/vedit-git-render-only/sub"));
     for (path, dirty, saving) in [
-        ("C:/morrow-git-render-only/sub/a.rs", true, false),
-        ("C:/morrow-git-render-only/sub/b.rs", false, true),
-        ("C:/morrow-git-render-only/sub/clean.rs", false, false),
-        ("C:/morrow-git-render-only-other/no.rs", true, false),
+        ("C:/vedit-git-render-only/sub/a.rs", true, false),
+        ("C:/vedit-git-render-only/sub/b.rs", false, true),
+        ("C:/vedit-git-render-only/sub/clean.rs", false, false),
+        ("C:/vedit-git-render-only-other/no.rs", true, false),
     ] {
         let mut tab = EditorTab::new(Some(PathBuf::from(path)), "file".into());
         tab.dirty = dirty;
@@ -345,7 +345,7 @@ fn segmented_sections_have_a_visible_active_marker_and_support_keyboard_switchin
     let changes = screen.get_by_label("Changes  0").rect();
     let history = screen.get_by_label("History").rect();
     assert_eq!(changes.size(), history.size());
-    let active_marker = |screen: &Harness<'static, MorrowApp>, rect: egui::Rect| {
+    let active_marker = |screen: &Harness<'static, VEditApp>, rect: egui::Rect| {
         screen.output().shapes.iter().any(|shape| {
             matches!(&shape.shape,
             egui::Shape::LineSegment { points, stroke }
@@ -378,7 +378,7 @@ fn segmented_sections_have_a_visible_active_marker_and_support_keyboard_switchin
     );
 }
 
-fn keyboard_changes_fixture() -> MorrowApp {
+fn keyboard_changes_fixture() -> VEditApp {
     let mut app = fixture();
     let project = &mut app.projects[0];
     project.git_view.section = GitSection::Changes;
@@ -832,7 +832,7 @@ fn git_keyboard_nested_diff_returns_to_invoking_commit_file() {
         .with_size([1000.0, 760.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.git_ui(ui);
                 app.overlays();

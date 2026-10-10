@@ -3,12 +3,12 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture(text: &str, markdown: bool) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(text: &str, markdown: bool) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-editor-ux-render-only");
+    let root = std::env::temp_dir().join("vedit-editor-ux-render-only");
     let mut project = Project::new(root.clone());
     let name = if markdown { "plan.md" } else { "notes.txt" };
     let mut tab = EditorTab::new(Some(root.join(name)), name.into());
@@ -20,12 +20,12 @@ fn fixture(text: &str, markdown: bool) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // These fixtures never read/write documents or user recovery data.
                 app.last_disk_check = Instant::now();
@@ -51,12 +51,12 @@ fn harness(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn text(screen: &mut Harness<'_, MorrowApp>, value: &str) {
+fn text(screen: &mut Harness<'_, VEditApp>, value: &str) {
     screen.event(egui::Event::Text(value.into()));
     screen.run_steps(2);
 }
 
-fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn key(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     screen.input_mut().events.extend([
         egui::Event::ModifiersChanged(modifiers),
         egui::Event::Key {
@@ -273,7 +273,7 @@ fn large_find_shows_pending_progress_and_accepts_query_refinement() {
     // Draw the actual toolbar against a large buffer, without laying out its
     // source galley. Its first count lookup starts the real debounced worker.
     let mut screen = Harness::builder().with_size([380.0, 220.0]).build_ui_state(
-        |ui, app: &mut MorrowApp| {
+        |ui, app: &mut VEditApp| {
             app.ctx = ui.ctx().clone();
             app.validate_vim_search();
             app.find_ui(ui);
@@ -318,7 +318,7 @@ fn large_find_shows_pending_progress_and_accepts_query_refinement() {
     assert_eq!(screen.state().tab().unwrap().text, original);
 }
 
-fn suggestions(screen: &mut Harness<'_, MorrowApp>, count: usize) {
+fn suggestions(screen: &mut Harness<'_, VEditApp>, count: usize) {
     text(screen, "i");
     screen.state_mut().tab_mut().unwrap().set_cursor(2..2);
     screen.run_steps(2);
@@ -492,7 +492,7 @@ fn narrow_find_replace_screenshot() {
     app.find_next(false);
     let mut narrow = visual_tests::harness(app);
     narrow.set_size(Vec2::new(960.0, 720.0));
-    visual_tests::snapshot(&mut narrow, "morrow_narrow_find_replace");
+    visual_tests::snapshot(&mut narrow, "vedit_narrow_find_replace");
 }
 
 #[test]
@@ -509,7 +509,7 @@ fn long_suggestions_screenshot() {
         .as_mut()
         .unwrap()
         .selected = 110;
-    visual_tests::snapshot(&mut completions, "morrow_long_suggestions");
+    visual_tests::snapshot(&mut completions, "vedit_long_suggestions");
 }
 
 #[test]
@@ -520,5 +520,5 @@ fn small_settings_screenshot() {
     app.settings_open = true;
     let mut settings = visual_tests::harness(app);
     settings.set_size(Vec2::new(960.0, 640.0));
-    visual_tests::snapshot(&mut settings, "morrow_small_settings");
+    visual_tests::snapshot(&mut settings, "vedit_small_settings");
 }

@@ -5,7 +5,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "morrow project tasks café & 'quoted' {} {}",
+            "vedit project tasks café & 'quoted' {} {}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -148,7 +148,7 @@ fn dart_tasks_inherit_selected_sdk_but_project_override_wins() {
     let file = fixture.write("main.dart");
     let selected = fixture.write("chosen sdk/bin/dart.exe");
     let override_sdk = fixture.write("other sdk/bin/dart.exe");
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings
         .language_servers
         .iter_mut()
@@ -193,7 +193,7 @@ fn dart_tasks_inherit_selected_sdk_but_project_override_wins() {
 fn custom_commands_keep_source_literal_and_provide_paths_as_environment() {
     let fixture = Fixture::new();
     let file = fixture.write("special & $(injection).other");
-    let source = "some-tool $env:MORROW_FILE --arg";
+    let source = "some-tool $env:VEDIT_FILE --arg";
     let config = TaskConfiguration {
         run_file: source.into(),
         ..Default::default()
@@ -205,13 +205,39 @@ fn custom_commands_keep_source_literal_and_provide_paths_as_environment() {
     assert!(
         resolved
             .environment
-            .contains(&("MORROW_FILE".into(), file.into_os_string()))
+            .contains(&("VEDIT_FILE".into(), file.into_os_string()))
     );
     assert!(
         resolved
             .environment
-            .contains(&("MORROW_ROOT".into(), fixture.0.as_os_str().into()))
+            .contains(&("VEDIT_ROOT".into(), fixture.0.as_os_str().into()))
     );
+}
+
+#[test]
+fn saved_morrow_commands_keep_their_environment_after_rename() {
+    let fixture = Fixture::new();
+    let file = fixture.write("draft with spaces.py");
+    let source = "& $env:MORROW_PYTHON $env:MORROW_FILE";
+    let config = TaskConfiguration {
+        run_file: source.into(),
+        ..Default::default()
+    };
+    let resolved = config
+        .resolve(&fixture.0, Some(&file), ProjectTaskAction::RunFile)
+        .unwrap();
+    assert_eq!(resolved.command, tasks::CommandSpec::Shell(source.into()));
+    for suffix in ["ROOT", "FILE", "PYTHON"] {
+        let value = |prefix: &str| {
+            resolved
+                .environment
+                .iter()
+                .find(|(name, _)| name == &OsString::from(format!("{prefix}_{suffix}")))
+                .map(|(_, value)| value)
+        };
+        assert!(value("VEDIT").is_some());
+        assert_eq!(value("MORROW"), value("VEDIT"));
+    }
 }
 
 #[test]
@@ -240,7 +266,7 @@ fn run_file_never_treats_readme_as_python_from_project_fallback() {
 #[test]
 fn project_tasks_persist_and_legacy_projects_get_defaults() {
     let fixture = Fixture::new();
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     let mut project = Project::new(fixture.0.clone());
     project.tasks = TaskConfiguration {
         profile: TaskProfile::Custom,
@@ -252,7 +278,7 @@ fn project_tasks_persist_and_legacy_projects_get_defaults() {
     app.projects.push(project);
     let saved = serde_json::to_string(&app.session()).unwrap();
     let session: Session = serde_json::from_str(&saved).unwrap();
-    let mut restored = MorrowApp::empty(egui::Context::default());
+    let mut restored = VEditApp::empty(egui::Context::default());
     restored.restore_session_projects(session.projects);
     assert_eq!(restored.projects[0].tasks, expected);
     let legacy: SessionProject =
@@ -264,7 +290,7 @@ fn project_tasks_persist_and_legacy_projects_get_defaults() {
 fn tasks_refuse_dirty_or_still_saving_buffers_without_starting_a_process() {
     let fixture = Fixture::new();
     let file = fixture.write("main.py");
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     let mut project = Project::new(fixture.0.clone());
     let mut tab = EditorTab::new(Some(file), "main.py".into());
     tab.dirty = true;
@@ -312,9 +338,9 @@ fn live_python_tasks_preserve_unicode_stdout_stderr_and_paths_without_utf8_mode(
     let file = fixture.write("print ü café.py");
     fs::write(&file, "import sys\nassert sys.flags.utf8_mode == 0\nprint('stdout üé 🚀')\nprint('stderr äö 🐍', file=sys.stderr)\nprint(__file__)\n").unwrap();
     let custom = if cfg!(windows) {
-        "& $env:MORROW_PYTHON $env:MORROW_FILE"
+        "& $env:VEDIT_PYTHON $env:VEDIT_FILE"
     } else {
-        "\"$MORROW_PYTHON\" \"$MORROW_FILE\""
+        "\"$VEDIT_PYTHON\" \"$VEDIT_FILE\""
     };
     for config in [
         TaskConfiguration::default(),

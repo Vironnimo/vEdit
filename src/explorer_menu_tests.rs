@@ -6,10 +6,10 @@ use egui_kittest::{Harness, kittest::Queryable};
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new(with_files: bool) -> (Self, MorrowApp) {
+    fn new(with_files: bool) -> (Self, VEditApp) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-explorer-context-{}-{}",
+            "vedit-explorer-context-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -20,7 +20,7 @@ impl Fixture {
             fs::write(root.join("src/lib.txt"), "nested document").unwrap();
         }
         let root = fs::canonicalize(root).unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         let mut project = Project::new(root.clone());
         project.last_git_refresh = Instant::now();
@@ -44,13 +44,13 @@ impl Drop for Fixture {
     }
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([520.0, 520.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.explorer(ui);
                 let ctx = ui.ctx().clone();
@@ -62,7 +62,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn right_click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) {
+fn right_click(screen: &mut Harness<'_, VEditApp>, point: egui::Pos2) {
     screen.hover_at(point);
     screen.event(egui::Event::PointerButton {
         pos: point,
@@ -80,7 +80,7 @@ fn right_click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) {
     screen.run_steps(3);
 }
 
-fn assert_workspace_menu(screen: &Harness<'_, MorrowApp>) {
+fn assert_workspace_menu(screen: &Harness<'_, VEditApp>) {
     for label in [
         "New file…",
         "New folder…",

@@ -2,11 +2,11 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
-    let root = std::env::temp_dir().join("morrow-focus-feedback-render");
+    let root = std::env::temp_dir().join("vedit-focus-feedback-render");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
@@ -21,12 +21,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.draw_ui(ui);
             },
@@ -42,7 +42,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn shortcut(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     let modifiers = egui::Modifiers {
         command: modifiers.ctrl,
         ..modifiers
@@ -67,7 +67,7 @@ fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modi
     screen.run_steps(2);
 }
 
-fn distinct_region_buffers(left_insert: bool) -> (MorrowApp, u64, u64, u64, u64) {
+fn distinct_region_buffers(left_insert: bool) -> (VEditApp, u64, u64, u64, u64) {
     let mut app = fixture();
     let left_pane = app.current_pane_id();
     let left_tab = app.tab_mut().unwrap();
@@ -119,7 +119,7 @@ fn pressed(key: Key) -> egui::Event {
     }
 }
 
-fn undo_focused_insert(screen: &mut Harness<'_, MorrowApp>) {
+fn undo_focused_insert(screen: &mut Harness<'_, VEditApp>) {
     screen
         .input_mut()
         .events
@@ -323,7 +323,7 @@ fn directional_focus_uses_horizontal_and_vertical_geometry_without_wrapping() {
     assert_eq!(screen.state().current_pane_id(), left);
 }
 
-fn yank_feedback_rects(screen: &Harness<'_, MorrowApp>) -> Vec<egui::Rect> {
+fn yank_feedback_rects(screen: &Harness<'_, VEditApp>) -> Vec<egui::Rect> {
     screen
         .output()
         .shapes

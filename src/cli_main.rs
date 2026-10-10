@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 mod cli;
+#[allow(dead_code)]
+mod profile;
 
 fn main() {
     let result = match cli::parse_args(std::env::args_os().skip(1)) {

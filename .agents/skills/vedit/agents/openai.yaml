@@ -1,0 +1,4 @@
+interface:
+  display_name: "vEdit"
+  short_description: "Control editor buffers, views and reviews in vEdit"
+  default_prompt: "Use $vedit to arrange the editor and carry out this task in its open documents."

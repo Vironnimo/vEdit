@@ -1,4 +1,4 @@
 fn main() {
-    let editor = "Morrow";
+    let editor = "vEdit";
     println!("Welcome to {editor}!");
 }

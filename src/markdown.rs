@@ -12,12 +12,9 @@ use eframe::egui::{
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-const ACCENT: Color32 = Color32::from_rgb(126, 211, 182);
-const MUTED: Color32 = Color32::from_rgb(139, 150, 172);
-const INK: Color32 = Color32::from_rgb(224, 230, 240);
-const SURFACE: Color32 = Color32::from_rgb(22, 26, 34);
-const BORDER: Color32 = Color32::from_rgb(43, 50, 63);
-const INLINE_CODE: Color32 = Color32::from_rgb(30, 37, 47);
+use crate::palette::{
+    ACCENT, BORDER, MUTED, PANEL as SURFACE, SURFACE as INLINE_CODE, TEXT as INK,
+};
 const CODE_PADDING: f32 = 2.0;
 const MAX_DOCUMENTS: usize = 12;
 const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
@@ -1107,7 +1104,7 @@ impl Renderer<'_> {
                         continue;
                     }
                     let fill = if row_index == 0 {
-                        Color32::from_rgb(29, 34, 44)
+                        crate::palette::SURFACE
                     } else if row_index % 2 == 1 {
                         SURFACE
                     } else {
@@ -1334,7 +1331,7 @@ impl Renderer<'_> {
         let has_code = spans.iter().any(|span| span.code);
         job.wrap.max_width = (width - if has_code { CODE_PADDING * 2.0 } else { 0.0 }).max(1.0);
         job.halign = align;
-        let strong_family = FontFamily::Name("morrow-semibold".into());
+        let strong_family = FontFamily::Name("vedit-semibold".into());
         let has_strong = ui.fonts_mut(|fonts| fonts.families().contains(&strong_family));
         let mut links = Vec::new();
         let mut code = Vec::new();
@@ -2934,7 +2931,7 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(
                             egui::Frame::new()
-                                .fill(Color32::from_rgb(17, 20, 27))
+                                .fill(crate::palette::BG)
                                 .inner_margin(12.0),
                         )
                         .show(ui, |ui| {
@@ -2958,9 +2955,9 @@ mod tests {
             ("preview-ui", "segoeui.ttf", FontFamily::Proportional),
             ("preview-code", "CascadiaMono.ttf", FontFamily::Monospace),
             (
-                "morrow-semibold",
+                "vedit-semibold",
                 "seguisb.ttf",
-                FontFamily::Name("morrow-semibold".into()),
+                FontFamily::Name("vedit-semibold".into()),
             ),
         ] {
             if let Ok(bytes) = std::fs::read(
@@ -2989,7 +2986,7 @@ mod tests {
     fn inline_snapshot(screen: &mut egui_kittest::Harness<'_, MarkdownCache>, name: &str) {
         screen.hover_at(egui::pos2(-20.0, -20.0));
         screen.run_steps(3);
-        if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+        if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
             screen.snapshot_options(
                 name,
                 &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
@@ -3003,7 +3000,7 @@ mod tests {
     fn markdown_inline_code_screenshot() {
         inline_snapshot(
             &mut inline_preview_harness(980.0),
-            "morrow_markdown_inline_code",
+            "vedit_markdown_inline_code",
         );
     }
 
@@ -3011,7 +3008,7 @@ mod tests {
     fn narrow_markdown_inline_code_screenshot() {
         inline_snapshot(
             &mut inline_preview_harness(420.0),
-            "morrow_narrow_markdown_inline_code",
+            "vedit_narrow_markdown_inline_code",
         );
     }
 

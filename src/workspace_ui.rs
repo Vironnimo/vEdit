@@ -53,7 +53,7 @@ fn query_id() -> egui::Id {
     egui::Id::new("workspace_picker_query")
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn workspace_picker_open(&self) -> bool {
         egui::Popup::is_id_open(&self.ctx, picker_id())
     }

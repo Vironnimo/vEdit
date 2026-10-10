@@ -1492,23 +1492,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "morrow"
-version = "0.4.16"
-dependencies = [
- "eframe",
- "egui-wgpu",
- "egui_extras",
- "egui_kittest",
- "ignore",
- "pulldown-cmark",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "syntect",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2979,6 +2962,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "vedit"
+version = "0.4.17"
+dependencies = [
+ "eframe",
+ "egui-wgpu",
+ "egui_extras",
+ "egui_kittest",
+ "ignore",
+ "pulldown-cmark",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "syntect",
 ]
 
 [[package]]

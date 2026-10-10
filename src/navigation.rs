@@ -48,7 +48,7 @@ enum NavigationAction {
     PasteYank,
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn navigation_modal_open(&self) -> bool {
         self.navigation.picker.is_some()
     }
@@ -979,10 +979,10 @@ mod tests {
 
     const DOCUMENT: &str = "alpha first\nbeta second\ngamma third\n";
 
-    fn fixture() -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn fixture() -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
-        let root = std::env::temp_dir().join("morrow-navigation-in-memory");
+        let root = std::env::temp_dir().join("vedit-navigation-in-memory");
         let mut project = Project::new(root.clone());
         project.last_git_refresh = Instant::now();
         let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
@@ -993,7 +993,7 @@ mod tests {
         app
     }
 
-    fn seeded_fixture() -> MorrowApp {
+    fn seeded_fixture() -> VEditApp {
         let mut app = fixture();
         let path = app.tab().unwrap().path.clone().unwrap();
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(vec![
@@ -1015,7 +1015,7 @@ mod tests {
             },
             Bookmark {
                 id: 11,
-                path: std::env::temp_dir().join("morrow-other-project/plan.md"),
+                path: std::env::temp_dir().join("vedit-other-project/plan.md"),
                 line: 8,
                 column: 2,
                 label: "Other project".into(),
@@ -1025,13 +1025,13 @@ mod tests {
         app
     }
 
-    fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+    fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
         let mut screen = Harness::builder()
             .with_size([1080.0, 740.0])
             .with_step_dt(1.0 / 60.0)
             .with_os(egui::os::OperatingSystem::Windows)
             .build_ui_state(
-                |ui, app: &mut MorrowApp| {
+                |ui, app: &mut VEditApp| {
                     app.ctx = ui.ctx().clone();
                     if !app.navigation_keys() {
                         app.handle_vim();
@@ -1045,7 +1045,7 @@ mod tests {
         screen
     }
 
-    fn character(screen: &mut Harness<'_, MorrowApp>, key: Key, text: &str) {
+    fn character(screen: &mut Harness<'_, VEditApp>, key: Key, text: &str) {
         let key_event = |pressed| egui::Event::Key {
             key,
             physical_key: None,

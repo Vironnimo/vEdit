@@ -10,14 +10,14 @@ enum Editing {
     Native,
 }
 
-fn fixture(editing: Editing, smooth: bool, wrap: bool) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(editing: Editing, smooth: bool, wrap: bool) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = smooth;
     app.settings.word_wrap = wrap;
     app.settings.vim = !matches!(editing, Editing::Native);
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-selection-scroll-in-memory");
+    let root = std::env::temp_dir().join("vedit-selection-scroll-in-memory");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
@@ -35,13 +35,13 @@ fn fixture(editing: Editing, smooth: bool, wrap: bool) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -70,7 +70,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn point_at_character(screen: &Harness<'_, MorrowApp>, character: usize) -> egui::Pos2 {
+fn point_at_character(screen: &Harness<'_, VEditApp>, character: usize) -> egui::Pos2 {
     let viewport = screen.state().editor_rect.unwrap();
     let text = &screen.state().tab().unwrap().text;
     let document = screen
@@ -93,11 +93,11 @@ fn point_at_character(screen: &Harness<'_, MorrowApp>, character: usize) -> egui
     document.pos + egui::vec2(caret.left() + 1.0, caret.center().y)
 }
 
-fn character_at_line(screen: &Harness<'_, MorrowApp>, line: usize, column: usize) -> usize {
+fn character_at_line(screen: &Harness<'_, VEditApp>, line: usize, column: usize) -> usize {
     editor::go_to_line(&screen.state().tab().unwrap().text, line) + column
 }
 
-fn pointer_button(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2, pressed: bool) {
+fn pointer_button(screen: &mut Harness<'_, VEditApp>, point: egui::Pos2, pressed: bool) {
     screen.input_mut().events.extend([
         egui::Event::PointerMoved(point),
         egui::Event::PointerButton {
@@ -110,7 +110,7 @@ fn pointer_button(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2, presse
     screen.run_steps(1);
 }
 
-fn move_pointer(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) {
+fn move_pointer(screen: &mut Harness<'_, VEditApp>, point: egui::Pos2) {
     screen
         .input_mut()
         .events
@@ -118,12 +118,12 @@ fn move_pointer(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) {
     screen.run_steps(1);
 }
 
-fn scroll_offset(screen: &Harness<'_, MorrowApp>) -> egui::Vec2 {
+fn scroll_offset(screen: &Harness<'_, VEditApp>) -> egui::Vec2 {
     let app = screen.state();
     app.find.view_scroll[&(app.current_pane_id(), app.tab().unwrap().id)].1
 }
 
-fn native_range(screen: &Harness<'_, MorrowApp>) -> egui::text::CCursorRange {
+fn native_range(screen: &Harness<'_, VEditApp>) -> egui::text::CCursorRange {
     let app = screen.state();
     let id = app.document_widget_id(app.tab().unwrap().id);
     egui::TextEdit::load_state(&screen.ctx, id)
@@ -133,7 +133,7 @@ fn native_range(screen: &Harness<'_, MorrowApp>) -> egui::text::CCursorRange {
         .unwrap()
 }
 
-fn begin_selection(screen: &mut Harness<'_, MorrowApp>, character: usize) -> usize {
+fn begin_selection(screen: &mut Harness<'_, VEditApp>, character: usize) -> usize {
     let point = point_at_character(screen, character);
     assert!(screen.state().editor_rect.unwrap().contains(point));
     pointer_button(screen, point, true);
@@ -142,7 +142,7 @@ fn begin_selection(screen: &mut Harness<'_, MorrowApp>, character: usize) -> usi
     anchor
 }
 
-fn assert_unchanged_document(screen: &Harness<'_, MorrowApp>) {
+fn assert_unchanged_document(screen: &Harness<'_, VEditApp>) {
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, tab.saved_text);
     assert!(!tab.dirty);

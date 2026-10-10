@@ -5,12 +5,12 @@ use egui_kittest::Harness;
 
 const PRESERVED_REGISTER: &str = "KEEP🦀";
 
-fn fixture(document: &str, vim: bool) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(document: &str, vim: bool) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.vim = vim;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-native-input-render-only");
+    let root = std::env::temp_dir().join("vedit-native-input-render-only");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
@@ -28,12 +28,12 @@ fn fixture(document: &str, vim: bool) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.shortcuts();
                 app.handle_vim();
@@ -47,7 +47,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn events(screen: &mut Harness<'_, MorrowApp>, events: impl IntoIterator<Item = egui::Event>) {
+fn events(screen: &mut Harness<'_, VEditApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
     super::editor_input_tests::settle(screen);
@@ -63,7 +63,7 @@ fn key(key: Key) -> egui::Event {
     }
 }
 
-fn assert_unedited(screen: &Harness<'_, MorrowApp>, document: &str, revision: u64) {
+fn assert_unedited(screen: &Harness<'_, VEditApp>, document: &str, revision: u64) {
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, document);
     assert_eq!(tab.revision, revision);
@@ -71,7 +71,7 @@ fn assert_unedited(screen: &Harness<'_, MorrowApp>, document: &str, revision: u6
     assert!(!tab.vim.can_undo());
 }
 
-fn assert_copied(screen: &Harness<'_, MorrowApp>, expected: &str) {
+fn assert_copied(screen: &Harness<'_, VEditApp>, expected: &str) {
     assert!(
         screen
             .output()

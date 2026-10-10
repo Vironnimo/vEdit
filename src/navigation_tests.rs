@@ -5,12 +5,12 @@ use egui_kittest::{Harness, kittest::Queryable};
 
 const DOCUMENT: &str = "intro 🦀\nalpha gi first\nbeta GI second\nthird gi marker\nlast line\n";
 
-fn fixture(document: &str) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(document: &str) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-navigation-render-only");
+    let root = std::env::temp_dir().join("vedit-navigation-render-only");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
@@ -22,12 +22,12 @@ fn fixture(document: &str) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1360.0, 900.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // Render-only fixtures never run disk/session/recovery writes.
                 // Loaded-file workers remain available to the isolated temp test.
@@ -53,12 +53,12 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn text(screen: &mut Harness<'_, MorrowApp>, characters: &str) {
+fn text(screen: &mut Harness<'_, VEditApp>, characters: &str) {
     screen.event(egui::Event::Text(characters.into()));
     screen.run_steps(2);
 }
 
-fn character(screen: &mut Harness<'_, MorrowApp>, key: Key, character: &str) {
+fn character(screen: &mut Harness<'_, VEditApp>, key: Key, character: &str) {
     let event = |pressed| egui::Event::Key {
         key,
         physical_key: None,
@@ -74,7 +74,7 @@ fn character(screen: &mut Harness<'_, MorrowApp>, key: Key, character: &str) {
     screen.run_steps(2);
 }
 
-fn cursor(screen: &mut Harness<'_, MorrowApp>, position: usize) {
+fn cursor(screen: &mut Harness<'_, VEditApp>, position: usize) {
     screen
         .state_mut()
         .tab_mut()
@@ -83,7 +83,7 @@ fn cursor(screen: &mut Harness<'_, MorrowApp>, position: usize) {
     screen.run_steps(2);
 }
 
-fn assert_unchanged(screen: &Harness<'_, MorrowApp>, document: &str) {
+fn assert_unchanged(screen: &Harness<'_, VEditApp>, document: &str) {
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, document);
     assert!(!tab.dirty);
@@ -106,7 +106,7 @@ fn gi_positions(document: &str) -> Vec<usize> {
         .collect()
 }
 
-fn begin_jump(screen: &mut Harness<'_, MorrowApp>) {
+fn begin_jump(screen: &mut Harness<'_, VEditApp>) {
     text(screen, "  f");
     let jump = screen
         .state()
@@ -377,7 +377,7 @@ impl TemporaryDocument {
     fn new(document: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let folder = std::env::temp_dir().join(format!(
-            "morrow-navigation-load-test-{}-{}-{}",
+            "vedit-navigation-load-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -403,7 +403,7 @@ impl Drop for TemporaryDocument {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-navigation-load-test-")
+                .starts_with("vedit-navigation-load-test-")
         );
         for _ in 0..3 {
             if fs::remove_dir_all(&self.0).is_ok() {

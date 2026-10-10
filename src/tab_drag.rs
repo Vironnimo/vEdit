@@ -20,7 +20,7 @@ pub(super) struct TabDragState {
     preview_moves: HashMap<(u64, u64), egui::Id>,
 }
 
-impl MorrowApp {
+impl VEditApp {
     #[cfg(test)]
     pub(super) fn tab_strip_rect(&self, pane_id: u64) -> Option<egui::Rect> {
         self.tab_drag.strips.get(&pane_id).map(|strip| strip.rect)
@@ -372,7 +372,7 @@ impl MorrowApp {
         if let Some(position) = position {
             let ghost = self.ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
-                egui::Id::new("morrow_dragged_tab"),
+                egui::Id::new("vedit_dragged_tab"),
             ));
             let label = ghost.layout_no_wrap(
                 drag.title.chars().take(70).collect::<String>(),

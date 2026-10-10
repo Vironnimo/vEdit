@@ -1,9 +1,9 @@
 use super::*;
 use crate::lsp::{Diagnostic, LanguageServer, LspEvent, TextRange};
 
-fn rust_app() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
-    let mut project = Project::new(PathBuf::from("C:/morrow-language-tests"));
+fn rust_app() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
+    let mut project = Project::new(PathBuf::from("C:/vedit-language-tests"));
     project.rust_project = true;
     project.indexing = false;
     let mut tab = EditorTab::new(Some(project.root.join("main.rs")), "main.rs".into());
@@ -412,7 +412,7 @@ fn mixed_language_sessions_keep_diagnostics_and_restart_independent() {
 #[test]
 fn definition_not_found_from_another_project_cannot_clear_pending_navigation() {
     let mut app = rust_app();
-    let mut other = Project::new(PathBuf::from("C:/morrow-other-language-tests"));
+    let mut other = Project::new(PathBuf::from("C:/vedit-other-language-tests"));
     let (server, events) = LanguageServer::test_channel();
     other.rust_language_mut().server = Some(server);
     other.rust_language_mut().ready = true;

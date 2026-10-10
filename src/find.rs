@@ -956,7 +956,7 @@ impl FindState {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn find_search_running(&self) -> bool {
         self.tab().is_some_and(|tab| {
             self.find
@@ -1494,9 +1494,9 @@ pub(super) fn paint_matches(
                     rect,
                     1.5,
                     if current {
-                        Color32::from_rgba_unmultiplied(237, 191, 126, 85)
+                        Color32::from_rgba_unmultiplied(ORANGE.r(), ORANGE.g(), ORANGE.b(), 85)
                     } else {
-                        Color32::from_rgba_unmultiplied(147, 174, 255, 38)
+                        Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), 38)
                     },
                 );
                 if current {
@@ -1578,8 +1578,8 @@ mod escape_tests {
     #[test]
     fn async_query_cancellation_discards_query_input_and_preserves_second_escape() {
         let ctx = egui::Context::default();
-        let mut app = MorrowApp::empty(ctx.clone());
-        let mut project = Project::new(std::env::temp_dir().join("morrow-async-escape-unit"));
+        let mut app = VEditApp::empty(ctx.clone());
+        let mut project = Project::new(std::env::temp_dir().join("vedit-async-escape-unit"));
         project.last_git_refresh = Instant::now();
         let mut tab = EditorTab::new(None, "search.txt".into());
         tab.text = format!("start foo {}", "a".repeat(ASYNC_DOCUMENT_BYTES));
@@ -1646,9 +1646,9 @@ mod escape_tests {
     #[test]
     fn async_query_pointer_cancel_discards_preceding_query_commands() {
         let ctx = egui::Context::default();
-        let mut app = MorrowApp::empty(ctx.clone());
+        let mut app = VEditApp::empty(ctx.clone());
         let mut project =
-            Project::new(std::env::temp_dir().join("morrow-async-pointer-cancel-unit"));
+            Project::new(std::env::temp_dir().join("vedit-async-pointer-cancel-unit"));
         project.last_git_refresh = Instant::now();
         let mut tab = EditorTab::new(None, "search.txt".into());
         tab.text = format!("start foo {}", "a".repeat(ASYNC_DOCUMENT_BYTES));

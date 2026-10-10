@@ -2,7 +2,7 @@
 //! Quick Open keeps its independent bounded index and ignore policy.
 use super::*;
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn explorer_index(&self) -> Option<Arc<workspace::WorkspaceIndex>> {
         let project = self.project()?;
         project

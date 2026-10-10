@@ -106,7 +106,7 @@ impl Project {
         }
     }
 }
-impl MorrowApp {
+impl VEditApp {
     fn configured_language(&self, path: &Path) -> Option<&LanguageServerSettings> {
         self.settings
             .language_servers
@@ -246,7 +246,7 @@ impl MorrowApp {
                 ORANGE,
             )
         } else if session.is_some_and(LanguageSession::active) {
-            ("ready", "Analysis connected. Request suggestions or go to definition from the editor. Click for Problems and language controls.".into(),ACCENT)
+            ("ready", "Analysis connected. Request suggestions or go to definition from the editor. Click for Problems and language controls.".into(),GREEN)
         } else if config.language_id == "rust"
             && project.is_some_and(|project| !project.rust_project && !project.indexing)
         {

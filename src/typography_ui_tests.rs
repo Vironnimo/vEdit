@@ -4,12 +4,12 @@ use egui_kittest::{Harness, kittest::Queryable};
 
 const DOCUMENT: &str = "before: target after\nSecond line · β🦀\n";
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-typography-render-only");
+    let root = std::env::temp_dir().join("vedit-typography-render-only");
     let mut project = Project::new(root.clone());
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
     project.last_git_refresh = Instant::now();
@@ -22,13 +22,13 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut styled = false;
     let mut screen = Harness::builder()
         .with_size([1200.0, 900.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            move |ui, app: &mut MorrowApp| {
+            move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 if !styled {
                     set_style(&app.ctx);
@@ -56,7 +56,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn source_shape(screen: &Harness<'_, MorrowApp>, text: &str) -> egui::epaint::TextShape {
+fn source_shape(screen: &Harness<'_, VEditApp>, text: &str) -> egui::epaint::TextShape {
     screen
         .output()
         .shapes
@@ -68,7 +68,7 @@ fn source_shape(screen: &Harness<'_, MorrowApp>, text: &str) -> egui::epaint::Te
         .expect("The editor must paint the requested source document")
 }
 
-fn character_point(screen: &Harness<'_, MorrowApp>, character: usize) -> egui::Pos2 {
+fn character_point(screen: &Harness<'_, VEditApp>, character: usize) -> egui::Pos2 {
     let document = source_shape(screen, DOCUMENT);
     let cursor = document
         .galley
@@ -76,7 +76,7 @@ fn character_point(screen: &Harness<'_, MorrowApp>, character: usize) -> egui::P
     document.pos + egui::vec2(cursor.left() + 1.0, cursor.center().y)
 }
 
-fn select_target(screen: &mut Harness<'_, MorrowApp>) {
+fn select_target(screen: &mut Harness<'_, VEditApp>) {
     let start = character_point(screen, 8);
     let end = character_point(screen, 14);
     screen.hover_at(start);
@@ -89,7 +89,7 @@ fn select_target(screen: &mut Harness<'_, MorrowApp>) {
     assert_eq!(screen.state().tab().unwrap().selection, 8..14);
 }
 
-fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn key(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     screen.input_mut().events.extend([
         egui::Event::ModifiersChanged(modifiers),
         egui::Event::Key {
@@ -155,7 +155,7 @@ fn source_reading_preferences_change_geometry_numbers_and_highlight_without_edit
     let larger = source_shape(&screen, DOCUMENT);
     assert!(larger.galley.rows[1].pos.y > before.galley.rows[1].pos.y * 2.0);
     assert_eq!(larger.galley.job.sections[0].format.line_height, Some(64.0));
-    let numbers = |screen: &Harness<'_, MorrowApp>| -> Vec<String> {
+    let numbers = |screen: &Harness<'_, VEditApp>| -> Vec<String> {
         let source = source_shape(screen, DOCUMENT);
         screen
             .output()
@@ -176,7 +176,7 @@ fn source_reading_preferences_change_geometry_numbers_and_highlight_without_edit
             .collect()
     };
     assert_eq!(numbers(&screen), ["1", "2", "1"]);
-    let has_highlight = |screen: &Harness<'_, MorrowApp>| {
+    let has_highlight = |screen: &Harness<'_, VEditApp>| {
         screen.output().shapes.iter().any(|shape| {
             matches!(&shape.shape,
             egui::epaint::Shape::Rect(rect) if rect.fill == ACCENT.linear_multiply(0.055))
@@ -361,7 +361,7 @@ fn receiver_font_change_relayouts_split_sources_and_keeps_search_marks_on_glyphs
                 .iter()
                 .any(|paint| matches!(&paint.shape,
                     egui::epaint::Shape::Rect(rect)
-                        if rect.fill == Color32::from_rgba_unmultiplied(147, 174, 255, 38)
+                        if rect.fill == Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), 38)
                             && (rect.rect.left() - left).abs() < 0.1
                             && (rect.rect.right() - right).abs() < 0.1
                             && (rect.rect.top() - top).abs() < 0.1

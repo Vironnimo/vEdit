@@ -3,7 +3,7 @@
 use super::*;
 use std::{collections::BTreeSet, sync::atomic::AtomicU64};
 
-const NEEDLE: &str = "morrow_search_needle";
+const NEEDLE: &str = "vedit_search_needle";
 
 struct Fixture {
     root: PathBuf,
@@ -15,7 +15,7 @@ impl Fixture {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let temporary_root = fs::canonicalize(std::env::temp_dir()).unwrap();
         let root = temporary_root.join(format!(
-            "morrow-project-search-test-{label}-{}-{}-{}-ü 日本",
+            "vedit-project-search-test-{label}-{}-{}-{}-ü 日本",
             std::process::id(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -83,7 +83,7 @@ impl Drop for Fixture {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-project-search-test-")
+                .starts_with("vedit-project-search-test-")
         );
         if let Ok(resolved) = fs::canonicalize(&self.root) {
             assert_eq!(resolved, self.root);

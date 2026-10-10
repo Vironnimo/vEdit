@@ -1,8 +1,8 @@
-# Agent control of Morrow
+# Agent control of vEdit
 
-The CLI controls Morrow's editor state and presents plans and review targets. The `morrow` skill belongs to this repository at `.agents/skills/morrow/`; portable builds bundle it under `skills/morrow/`. Neither building nor using the application installs a personal skill.
+The CLI controls vEdit's editor state and presents plans and review targets. The `vedit` skill belongs to this repository at `.agents/skills/vedit/`; portable builds bundle it under `skills/vedit/`. Neither building nor using the application installs a personal skill.
 
-The packaged CLI is `dist/Morrow/morrow-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
+The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
 ## Observable contract
 

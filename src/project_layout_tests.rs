@@ -13,7 +13,7 @@ impl WorkspaceFiles {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-project-layout-{}-{}",
+            "vedit-project-layout-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -69,8 +69,8 @@ fn document(project: &str, name: &str) -> String {
         .collect()
 }
 
-fn fixture(files: &WorkspaceFiles) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(files: &WorkspaceFiles) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
@@ -96,15 +96,15 @@ fn fixture(files: &WorkspaceFiles) -> MorrowApp {
     app
 }
 
-fn layout(app: &MorrowApp) -> Value {
+fn layout(app: &VEditApp) -> Value {
     serde_json::to_value(app.editor_session_layout()).unwrap()
 }
 
-fn panes(app: &MorrowApp) -> Vec<Value> {
+fn panes(app: &VEditApp) -> Vec<Value> {
     app.layout_status()["panes"].as_array().unwrap().clone()
 }
 
-fn assert_own_documents(app: &MorrowApp, project: usize) {
+fn assert_own_documents(app: &VEditApp, project: usize) {
     let own: std::collections::HashSet<_> = app.projects[project]
         .tabs
         .iter()
@@ -123,16 +123,16 @@ fn assert_own_documents(app: &MorrowApp, project: usize) {
     }
 }
 
-fn change(app: &mut MorrowApp, action: LayoutAction) {
+fn change(app: &mut VEditApp, action: LayoutAction) {
     app.control_layout(action).unwrap();
 }
 
-fn cursor(app: &mut MorrowApp, offset: usize) {
+fn cursor(app: &mut VEditApp, offset: usize) {
     app.tab_mut().unwrap().set_cursor(offset..offset);
     app.capture_pane_navigation();
 }
 
-fn arrange_a(app: &mut MorrowApp) -> (u64, u64, u64) {
+fn arrange_a(app: &mut VEditApp) -> (u64, u64, u64) {
     app.switch_project(0);
     let first = app.current_pane_id();
     let first_tab = app.projects[0].tabs[0].id;
@@ -200,7 +200,7 @@ fn arrange_a(app: &mut MorrowApp) -> (u64, u64, u64) {
     (first, right, bottom)
 }
 
-fn arrange_b(app: &mut MorrowApp) -> (u64, u64) {
+fn arrange_b(app: &mut VEditApp) -> (u64, u64) {
     app.switch_project(1);
     let upper = app.current_pane_id();
     let third = app.projects[1].tabs[2].id;
@@ -470,7 +470,7 @@ fn cli_layout_rejects_inactive_tabs_and_panes_without_switching_or_mutating() {
     assert_eq!(layout(&app), after_insert);
 }
 
-fn wait_loaded(app: &mut MorrowApp) {
+fn wait_loaded(app: &mut VEditApp) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while app
         .projects
@@ -664,7 +664,7 @@ fn inactive_document_read_edit_and_save_preserve_active_project_and_other_local_
     assert_own_documents(&app, 0);
 }
 
-fn save_recoveries(app: &MorrowApp) {
+fn save_recoveries(app: &VEditApp) {
     for tab in app
         .projects
         .iter()
@@ -675,8 +675,8 @@ fn save_recoveries(app: &MorrowApp) {
     }
 }
 
-fn restore(saved: Session) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn restore(saved: Session) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.restore_session_workspace(saved.projects, saved.active_project, saved.layout);
     wait_loaded(&mut app);
@@ -878,12 +878,12 @@ fn legacy_shared_strip_keeps_each_projects_own_file_order_and_selected_view() {
     assert_eq!(restarted.tab().unwrap().vim.cursor, 22);
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1280.0, 820.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -908,7 +908,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn wheel(screen: &mut Harness<'_, MorrowApp>, x: f32, amount: f32) {
+fn wheel(screen: &mut Harness<'_, VEditApp>, x: f32, amount: f32) {
     screen.event(egui::Event::PointerMoved(egui::pos2(x, 450.0)));
     screen.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
@@ -919,7 +919,7 @@ fn wheel(screen: &mut Harness<'_, MorrowApp>, x: f32, amount: f32) {
     screen.run_steps(3);
 }
 
-fn preview_offset(app: &MorrowApp, pane: u64) -> f32 {
+fn preview_offset(app: &VEditApp, pane: u64) -> f32 {
     let snapshot = layout(app);
     let pane = snapshot["panes"]
         .as_array()

@@ -3,19 +3,19 @@ use super::context_actions::EditorAction;
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
     app.bind_current_pane();
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([960.0, 640.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -40,7 +40,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn painted_text(screen: &Harness<'_, MorrowApp>, text: &str) -> Option<egui::Rect> {
+fn painted_text(screen: &Harness<'_, VEditApp>, text: &str) -> Option<egui::Rect> {
     screen
         .output()
         .shapes
@@ -115,7 +115,7 @@ fn file_conflict_banner_offers_save_as_without_reloading_unsaved_text() {
     let tab = app.tab_mut().unwrap();
     tab.text.push_str("// preserved local work\n");
     tab.changed();
-    tab.error = Some("This file changed outside Morrow.".into());
+    tab.error = Some("This file changed outside vEdit.".into());
     let id = tab.id;
     let original = tab.text.clone();
     let revision = tab.revision;
@@ -203,7 +203,7 @@ fn colliding_file_tabs_are_distinguishable_and_recompute_in_each_split() {
 
 #[test]
 fn same_named_projects_have_distinct_visible_header_labels_after_switching() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     for parent in ["client", "server"] {
         let root = PathBuf::from(r"C:\work").join(parent).join("project");
@@ -284,7 +284,7 @@ fn windows_clipboard_newlines_are_normalized_for_native_vim_and_menu_paste() {
     }
 }
 
-fn explorer_row(screen: &Harness<'_, MorrowApp>, name: &str) -> egui::Rect {
+fn explorer_row(screen: &Harness<'_, VEditApp>, name: &str) -> egui::Rect {
     screen
         .query_all_by_label(name)
         .find(|node| node.rect().top() > 90.0)
@@ -292,7 +292,7 @@ fn explorer_row(screen: &Harness<'_, MorrowApp>, name: &str) -> egui::Rect {
         .rect()
 }
 
-fn filled_selection(screen: &Harness<'_, MorrowApp>, row: egui::Rect) -> bool {
+fn filled_selection(screen: &Harness<'_, VEditApp>, row: egui::Rect) -> bool {
     let visuals = screen.ctx.style_of(egui::Theme::Dark).visuals.clone();
     // Explorer deliberately softens the theme's selection fill. Keep testing
     // the exact filled row so the active file and keyboard selection remain
@@ -425,7 +425,7 @@ fn markdown_scroll_tracks_are_visible_without_hover_in_actual_narrow_split() {
 
 #[test]
 fn welcome_explains_how_to_type_and_find_vim_settings_at_minimum_height() {
-    let screen = harness(MorrowApp::empty(egui::Context::default()));
+    let screen = harness(VEditApp::empty(egui::Context::default()));
     for label in ["i / Esc", "v / V", "Ctrl+Comma"] {
         let rect = screen.get_by_label(label).rect();
         assert!(
@@ -450,5 +450,5 @@ fn file_identity_and_agent_draft_screenshot() {
     app.projects[0].tabs[0].changed();
     app.projects[0].tabs[0].agent_unsaved = true;
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_file_identity");
+    visual_tests::snapshot(&mut screen, "vedit_file_identity");
 }

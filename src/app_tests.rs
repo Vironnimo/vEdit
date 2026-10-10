@@ -7,7 +7,7 @@ impl Fixture {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
-            "morrow-app-{label}-{}-{}",
+            "vedit-app-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -24,10 +24,10 @@ impl Fixture {
         path
     }
 
-    fn app(&self) -> MorrowApp {
+    fn app(&self) -> VEditApp {
         let ctx = egui::Context::default();
         ctx.set_os(egui::os::OperatingSystem::Windows);
-        let mut app = MorrowApp::empty(ctx);
+        let mut app = VEditApp::empty(ctx);
         app.recovery_session_path = self.0.join("recovery/session.json");
         app.settings.autosave = false;
         app.add_project(self.0.clone());
@@ -35,7 +35,7 @@ impl Fixture {
         app
     }
 
-    fn open(&self, app: &mut MorrowApp, path: PathBuf) -> u64 {
+    fn open(&self, app: &mut VEditApp, path: PathBuf) -> u64 {
         app.open_file(path);
         let id = app.tab().expect("opened tab").id;
         wait_until(app, |app| !app.tab().unwrap().loading);
@@ -53,13 +53,13 @@ impl Drop for Fixture {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-app-")
+                .starts_with("vedit-app-")
         );
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
-fn wait_until(app: &mut MorrowApp, condition: impl Fn(&MorrowApp) -> bool) {
+fn wait_until(app: &mut VEditApp, condition: impl Fn(&VEditApp) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         app.poll();
@@ -74,7 +74,7 @@ fn wait_until(app: &mut MorrowApp, condition: impl Fn(&MorrowApp) -> bool) {
     }
 }
 
-fn change_tab(app: &mut MorrowApp, text: &str) {
+fn change_tab(app: &mut VEditApp, text: &str) {
     let tab = app.tab_mut().expect("active tab");
     tab.text = text.into();
     tab.changed();
@@ -90,7 +90,7 @@ fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
     }
 }
 
-fn shortcut_frame(app: &mut MorrowApp, key: Key, modifiers: egui::Modifiers) {
+fn shortcut_frame(app: &mut VEditApp, key: Key, modifiers: egui::Modifiers) {
     let ctx = app.ctx.clone();
     let mut output = ctx.run_ui(
         egui::RawInput {
@@ -102,12 +102,12 @@ fn shortcut_frame(app: &mut MorrowApp, key: Key, modifiers: egui::Modifiers) {
     output.textures_delta.clear();
 }
 
-fn editor_harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn editor_harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut harness = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.poll();
                 app.shortcuts();
@@ -128,7 +128,7 @@ fn editor_harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
 }
 
 fn text_key_frame(
-    harness: &mut Harness<'_, MorrowApp>,
+    harness: &mut Harness<'_, VEditApp>,
     key: Key,
     text: &str,
     modifiers: egui::Modifiers,

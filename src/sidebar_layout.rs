@@ -127,7 +127,7 @@ fn sidebar_limits(available: f32, both: bool, other_width: f32) -> (f32, f32) {
     (MIN_SIDEBAR.min(maximum), maximum)
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn sidebar_session(&self) -> SidebarSession {
         SidebarSession {
             left: self.sidebar,

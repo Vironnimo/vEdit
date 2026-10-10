@@ -4,11 +4,11 @@ use egui_kittest::{Harness, kittest::Queryable};
 
 const PATCH: &str = "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-git-modals-render-only");
+    let root = std::env::temp_dir().join("vedit-git-modals-render-only");
     let mut project = Project::new(root.clone());
     for (name, text) in [
         ("notes.txt", "first line\nsecond line\n"),
@@ -39,12 +39,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1440.0, 920.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -69,19 +69,19 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn details(screen: &mut Harness<'_, MorrowApp>) {
+fn details(screen: &mut Harness<'_, VEditApp>) {
     screen.state_mut().projects[0].git_view.detail_open = true;
     screen.run_steps(4);
     assert!(screen.state().git_detail_open());
 }
 
-fn child_diff(screen: &mut Harness<'_, MorrowApp>) {
+fn child_diff(screen: &mut Harness<'_, VEditApp>) {
     screen.state_mut().diff = Some(("notes.txt · aaaaaaaa".into(), PATCH.into()));
     screen.run_steps(4);
     assert!(screen.state().diff.is_some());
 }
 
-fn click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) -> Vec<String> {
+fn click(screen: &mut Harness<'_, VEditApp>, point: egui::Pos2) -> Vec<String> {
     let mut copied = Vec::new();
     for event in [
         egui::Event::PointerMoved(point),
@@ -119,7 +119,7 @@ fn click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2) -> Vec<String> 
     copied
 }
 
-fn outside_tab(screen: &Harness<'_, MorrowApp>) -> egui::Pos2 {
+fn outside_tab(screen: &Harness<'_, VEditApp>) -> egui::Pos2 {
     let point = screen.get_by_label("other.txt").rect().center();
     let modal = screen
         .ctx
@@ -133,7 +133,7 @@ fn outside_tab(screen: &Harness<'_, MorrowApp>) -> egui::Pos2 {
     point
 }
 
-fn assert_source_unchanged(screen: &Harness<'_, MorrowApp>, id: u64, selection: Range<usize>) {
+fn assert_source_unchanged(screen: &Harness<'_, VEditApp>, id: u64, selection: Range<usize>) {
     let tab = screen.state().tab().unwrap();
     assert_eq!(
         tab.id, id,
@@ -381,7 +381,7 @@ fn outside_click_also_dismisses_loading_and_failed_diffs() {
 fn closing_the_last_git_modal_restores_markdown_reading_without_source_focus() {
     let mut app = fixture();
     let tab = app.tab_mut().unwrap();
-    tab.path = Some(std::env::temp_dir().join("morrow-git-modals-render-only/plan.md"));
+    tab.path = Some(std::env::temp_dir().join("vedit-git-modals-render-only/plan.md"));
     tab.title = "plan.md".into();
     tab.text = "# Reading plan\n\nA longer paragraph to read.\n\n".repeat(40);
     tab.saved_text = tab.text.clone();
@@ -428,7 +428,7 @@ fn dense_commit_metadata_remains_scrollable_at_the_minimum_window_size() {
     );
     assert!(close.top() >= bounds.top() && close.bottom() <= bounds.bottom());
     assert!(close.left() >= 0.0 && close.right() <= 960.0);
-    fn subject_y(screen: &Harness<'_, MorrowApp>) -> f32 {
+    fn subject_y(screen: &Harness<'_, VEditApp>) -> f32 {
         fn find(shape: &egui::Shape) -> Option<f32> {
             match shape {
                 egui::Shape::Text(text)
@@ -479,7 +479,7 @@ fn commit_modal_screenshot() {
     let mut app = fixture();
     app.projects[0].git_view.detail_open = true;
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_commit_modal");
+    visual_tests::snapshot(&mut screen, "vedit_commit_modal");
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn nested_diff_modal_screenshot() {
     app.projects[0].git_view.detail_open = true;
     app.diff = Some(("notes.txt · aaaaaaaa".into(), PATCH.into()));
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_nested_diff_modal");
+    visual_tests::snapshot(&mut screen, "vedit_nested_diff_modal");
 }
 
 #[test]
@@ -502,5 +502,5 @@ fn wrapped_diff_modal_screenshot() {
     );
     app.diff = Some(("notes.txt · Working tree".into(), patch));
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_wrapped_diff_modal");
+    visual_tests::snapshot(&mut screen, "vedit_wrapped_diff_modal");
 }

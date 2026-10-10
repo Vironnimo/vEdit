@@ -194,7 +194,7 @@ impl LanguageServer {
         let fallback = emitter.clone();
         let server_name = config.name.clone();
         if let Err(error) = thread::Builder::new()
-            .name("morrow-language-server".into())
+            .name("vedit-language-server".into())
             .spawn(move || {
                 let result = run_server(root, config, command_rx, &emitter, &worker_stopped);
                 let manually_stopped = worker_stopped.swap(true, Ordering::AcqRel);
@@ -520,7 +520,7 @@ fn run_server(
     let (writer_tx, writer_rx) = mpsc::sync_channel::<Outbound>(32);
     let reader_tx = inbound_tx.clone();
     thread::Builder::new()
-        .name("morrow-lsp-reader".into())
+        .name("vedit-lsp-reader".into())
         .spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -543,7 +543,7 @@ fn run_server(
         .map_err(|error| format!("Could not read language server: {error}"))?;
     let write_tx = inbound_tx.clone();
     thread::Builder::new()
-        .name("morrow-lsp-writer".into())
+        .name("vedit-lsp-writer".into())
         .spawn(move || {
             let mut writer = stdin;
             for outbound in writer_rx {
@@ -563,7 +563,7 @@ fn run_server(
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
     let tail = Arc::clone(&stderr_tail);
     thread::Builder::new()
-        .name("morrow-lsp-stderr".into())
+        .name("vedit-lsp-stderr".into())
         .spawn(move || {
             let mut reader = stderr;
             let mut buffer = [0_u8; 4096];
@@ -608,7 +608,7 @@ fn run_server(
     );
     protocol.queue(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
         "processId":std::process::id(), "rootUri":protocol.root_uri,
-        "clientInfo":{"name":"Morrow","version":env!("CARGO_PKG_VERSION")},
+        "clientInfo":{"name":"vEdit","version":env!("CARGO_PKG_VERSION")},
         "workspaceFolders":protocol.workspace_folders(),
         "capabilities":{
             "general":{"positionEncodings":["utf-16"]},
@@ -2185,7 +2185,7 @@ mod tests {
     #[test]
     fn document_updates_are_coalesced_until_initialized_and_stale_changes_are_ignored() {
         let (mut protocol, outgoing) = protocol();
-        let path = protocol.root.join("morrow-lsp-document.rs");
+        let path = protocol.root.join("vedit-lsp-document.rs");
         protocol
             .command(ClientCommand::Open {
                 path: path.clone(),
@@ -2243,7 +2243,7 @@ mod tests {
         for completion in [false, true] {
             let (mut protocol, _outgoing) = protocol();
             protocol.ready = true;
-            let path = protocol.root.join("morrow-lsp-error.rs");
+            let path = protocol.root.join("vedit-lsp-error.rs");
             let (sender, events) = mpsc::sync_channel(8);
             let emitter = EventEmitter::new(sender, None);
             let request = |id| {
@@ -2302,7 +2302,7 @@ mod tests {
     fn rpc_cancellation_clears_the_request_without_success_or_a_warning() {
         let (mut protocol, _outgoing) = protocol();
         protocol.ready = true;
-        let path = protocol.root.join("morrow-lsp-cancel.rs");
+        let path = protocol.root.join("vedit-lsp-cancel.rs");
         let (sender, events) = mpsc::sync_channel(8);
         let emitter = EventEmitter::new(sender, None);
         protocol
@@ -2379,7 +2379,7 @@ mod tests {
     #[test]
     fn versioned_diagnostics_do_not_replace_newer_document_state() {
         let (mut protocol, _outgoing) = protocol();
-        let path = protocol.root.join("morrow-lsp-diagnostics.rs");
+        let path = protocol.root.join("vedit-lsp-diagnostics.rs");
         protocol
             .command(ClientCommand::Change {
                 path: path.clone(),
@@ -2414,12 +2414,12 @@ mod tests {
                 .unwrap()
                 .as_nanos();
             let root = std::env::temp_dir().join(format!(
-                "morrow-lsp-tests-{}-{stamp} with spaces ü",
+                "vedit-lsp-tests-{}-{stamp} with spaces ü",
                 std::process::id()
             ));
             fs::create_dir(&root).unwrap();
             fs::create_dir(root.join("src")).unwrap();
-            fs::write(root.join("Cargo.toml"), "[package]\nname = \"morrow_lsp_smoke\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n").unwrap();
+            fs::write(root.join("Cargo.toml"), "[package]\nname = \"vedit_lsp_smoke\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n").unwrap();
             Self(root)
         }
     }
@@ -2431,7 +2431,7 @@ mod tests {
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with("morrow-lsp-tests-")
+                    .starts_with("vedit-lsp-tests-")
             );
             for _ in 0..10 {
                 if fs::remove_dir_all(&self.0).is_ok() {

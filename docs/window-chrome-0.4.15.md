@@ -49,7 +49,7 @@ egui scale, including interface zoom. During a Windows DPI transition the native
 backend scales the previous regions until the next UI frame arrives. Popups and
 dialogs clear native drag/maximize regions so their controls stay interactive.
 The earlier monitor-move fix remains in place. Dependency changes and source
-references are documented in [the winit patch notes](../vendor/winit/MORROW_PATCH.md).
+references are documented in [the winit patch notes](../vendor/winit/VEDIT_PATCH.md).
 
 Regression coverage exercises pointer, keyboard and accessibility activation,
 project-switch input ordering and Undo, window controls at small/scaled sizes,

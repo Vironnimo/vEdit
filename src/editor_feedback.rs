@@ -108,7 +108,7 @@ impl EditorTab {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn reveal_search_result(&mut self, path: PathBuf, line: usize, column: usize) {
         self.open_file(path);
         self.set_document_view(crate::cli::DocumentView::Source);

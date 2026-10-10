@@ -1,10 +1,10 @@
 use super::*;
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.vim = true;
     app.settings.autosave = false;
-    let mut project = Project::new(std::env::temp_dir().join("morrow-find-async-unit"));
+    let mut project = Project::new(std::env::temp_dir().join("vedit-find-async-unit"));
     project.last_git_refresh = Instant::now();
     let mut tab = EditorTab::new(None, "search.txt".into());
     tab.text = format!("start foo middle foo {}", "a".repeat(ASYNC_DOCUMENT_BYTES));
@@ -18,7 +18,7 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn begin(app: &mut MorrowApp, operator: Option<char>) {
+fn begin(app: &mut VEditApp, operator: Option<char>) {
     let pane = app.current_pane_id();
     let mut state = std::mem::take(&mut app.find);
     let tab = app.tab_mut().unwrap();
@@ -33,7 +33,7 @@ fn begin(app: &mut MorrowApp, operator: Option<char>) {
     app.find = state;
 }
 
-fn finish(app: &MorrowApp) {
+fn finish(app: &VEditApp) {
     let tab = app.tab().unwrap();
     let matches = crate::search::search(&tab.text, "foo", true, false, true).unwrap();
     app.find.worker.as_ref().unwrap().finish(tab.id, matches);
@@ -249,7 +249,7 @@ fn queued_global_shortcut_reaches_full_draw_dispatch_after_completion() {
         .with_size([900.0, 500.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -285,7 +285,7 @@ fn toolbar_completion_keeps_query_widget_focused_for_following_text() {
         .with_size([900.0, 500.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();

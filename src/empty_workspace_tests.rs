@@ -4,13 +4,13 @@ use egui_kittest::Harness;
 
 const SOURCE: &str = "ONLY_A_DOCUMENT_BODY\nsecond line stays intact\n";
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
     for name in ["A", "B"] {
-        let root = std::env::temp_dir().join(format!("morrow-intentional-empty-{name}"));
+        let root = std::env::temp_dir().join(format!("vedit-intentional-empty-{name}"));
         let mut project = Project::new(root.clone());
         project.last_git_refresh = Instant::now();
         if name == "A" {
@@ -27,12 +27,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1280.0, 850.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -56,7 +56,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn painted(screen: &Harness<'_, MorrowApp>, pane: u64, label: &str) -> bool {
+fn painted(screen: &Harness<'_, VEditApp>, pane: u64, label: &str) -> bool {
     fn contains(shape: &egui::Shape, rect: egui::Rect, label: &str) -> bool {
         match shape {
             egui::Shape::Text(text) => text.galley.job.text == label && rect.contains(text.pos),
@@ -72,7 +72,7 @@ fn painted(screen: &Harness<'_, MorrowApp>, pane: u64, label: &str) -> bool {
         .any(|shape| contains(&shape.shape, rect, label))
 }
 
-fn arrangement(app: &MorrowApp) -> serde_json::Value {
+fn arrangement(app: &VEditApp) -> serde_json::Value {
     let mut layout = serde_json::to_value(app.editor_session_layout()).unwrap();
     // Rendering initializes viewport offsets and the native cursor selection.
     // This comparison checks the split tree, groups, views and saved Vim cursors.

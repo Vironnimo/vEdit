@@ -44,7 +44,7 @@ impl fmt::Debug for Window {
 
 #[cfg(windows_platform)]
 impl Window {
-    /// Morrow custom titlebar regions, in client physical pixels [left, top,
+    /// vEdit custom titlebar regions, in client physical pixels [left, top,
     /// right, bottom]. Publish after layout; pass empty regions while a popup
     /// or modal needs those areas. Windows owns caption drags/double-clicks and
     /// maximize interactions, including Windows 11's Snap Layout hover menu.

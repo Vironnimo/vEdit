@@ -3,8 +3,9 @@
 
 use super::*;
 
-const CURRENT_FILL: Color32 = Color32::from_rgba_unmultiplied_const(237, 191, 126, 85);
-const OTHER_FILL: Color32 = Color32::from_rgba_unmultiplied_const(147, 174, 255, 38);
+const CURRENT_FILL: Color32 =
+    Color32::from_rgba_unmultiplied_const(ORANGE.r(), ORANGE.g(), ORANGE.b(), 85);
+const OTHER_FILL: Color32 = Color32::from_rgba_unmultiplied_const(BLUE.r(), BLUE.g(), BLUE.b(), 38);
 
 struct Painted {
     galley: Arc<egui::Galley>,

@@ -254,7 +254,7 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         ui.painter().text(
             egui::pos2(rect.left() + 43.0, rect.center().y),
             Align2::LEFT_CENTER,
-            "morrow",
+            "vEdit",
             FontId::proportional(15.0),
             ui.visuals().text_color(),
         );

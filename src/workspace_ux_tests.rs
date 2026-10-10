@@ -2,11 +2,11 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture(count: usize) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(count: usize) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     for name in ["alpha", "beta"].into_iter().take(count) {
-        let root = std::env::temp_dir().join("morrow-ux-fixture").join(name);
+        let root = std::env::temp_dir().join("vedit-ux-fixture").join(name);
         let mut project = Project::new(root.clone());
         project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
         let mut tab = EditorTab::new(Some(root.join("src/lib.rs")), "lib.rs".into());
@@ -19,12 +19,12 @@ fn fixture(count: usize) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([960.0, 640.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -253,7 +253,7 @@ fn welcome_actions_shortcuts_and_version_fit_the_minimum_window() {
             "{label}: {rect:?}"
         );
     }
-    let version = format!("MORROW  /  {}", env!("CARGO_PKG_VERSION"));
+    let version = format!("VEDIT  /  {}", env!("CARGO_PKG_VERSION"));
     let version_rect = screen.get_by_label(&version).rect();
     assert!(
         version_rect.bottom() < 613.0,

@@ -8,12 +8,12 @@ use egui_kittest::{
 
 const DOCUMENT: &str = "alpha 🦀 document\nsecond line\nunsaved review text\n";
 
-fn fixture(count: usize) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(count: usize) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     for index in 0..count {
-        let root = std::env::temp_dir().join(format!("morrow-workspace-ui-{index:02}"));
+        let root = std::env::temp_dir().join(format!("vedit-workspace-ui-{index:02}"));
         let mut project = Project::new(root.clone());
         project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
         project.last_git_refresh = Instant::now();
@@ -27,16 +27,16 @@ fn fixture(count: usize) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     harness_with_size(app, Vec2::new(1360.0, 900.0))
 }
 
-fn harness_with_size(app: MorrowApp, size: Vec2) -> Harness<'static, MorrowApp> {
+fn harness_with_size(app: VEditApp, size: Vec2) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // These render-only fixtures never persist sessions or buffers,
                 // refresh Git, inspect files, or open native operating-system UI.
@@ -62,7 +62,7 @@ fn harness_with_size(app: MorrowApp, size: Vec2) -> Harness<'static, MorrowApp> 
     screen
 }
 
-fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn shortcut(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     // Windows input reports Ctrl both as the physical control modifier and
     // egui's platform-independent command modifier.
     let modifiers = egui::Modifiers {
@@ -89,7 +89,7 @@ fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modi
     screen.run_steps(2);
 }
 
-fn project_shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key) {
+fn project_shortcut(screen: &mut Harness<'_, VEditApp>, key: Key) {
     shortcut(
         screen,
         key,
@@ -97,7 +97,7 @@ fn project_shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key) {
     );
 }
 
-fn visual_draft(app: &mut MorrowApp) {
+fn visual_draft(app: &mut VEditApp) {
     let tab = app.tab_mut().unwrap();
     tab.saved_text = "saved original\n".into();
     tab.dirty = true;
@@ -108,7 +108,7 @@ fn visual_draft(app: &mut MorrowApp) {
     tab.pending_selection = Some(6..12);
 }
 
-fn assert_draft(app: &MorrowApp, project: usize) {
+fn assert_draft(app: &VEditApp, project: usize) {
     let tab = &app.projects[project].tabs[0];
     assert_eq!(tab.text, DOCUMENT);
     assert_eq!(tab.saved_text, "saved original\n");
@@ -118,7 +118,7 @@ fn assert_draft(app: &MorrowApp, project: usize) {
     assert!(!tab.saving);
 }
 
-fn tab_groups(app: &MorrowApp) -> serde_json::Value {
+fn tab_groups(app: &VEditApp) -> serde_json::Value {
     let status = app.layout_status();
     serde_json::json!({
         "tree": status["tree"],
@@ -128,7 +128,7 @@ fn tab_groups(app: &MorrowApp) -> serde_json::Value {
     })
 }
 
-fn split_fixture() -> (MorrowApp, Vec<serde_json::Value>) {
+fn split_fixture() -> (VEditApp, Vec<serde_json::Value>) {
     let mut app = fixture(3);
     app.split_active(crate::cli::SplitOrientation::Vertical)
         .unwrap();
@@ -144,7 +144,7 @@ fn split_fixture() -> (MorrowApp, Vec<serde_json::Value>) {
     (app, groups)
 }
 
-fn assert_groups_belong_to_project(app: &MorrowApp, project: usize) {
+fn assert_groups_belong_to_project(app: &VEditApp, project: usize) {
     let own_ids = app.projects[project]
         .tabs
         .iter()
@@ -166,15 +166,9 @@ fn assert_groups_belong_to_project(app: &MorrowApp, project: usize) {
 #[test]
 fn project_tabs_and_the_compact_project_list_stay_in_the_titlebar() {
     let screen = harness(fixture(3));
-    let project = screen
-        .get_by_label("Project: morrow-workspace-ui-00")
-        .rect();
-    let second = screen
-        .get_by_label("Project: morrow-workspace-ui-01")
-        .rect();
-    let third = screen
-        .get_by_label("Project: morrow-workspace-ui-02")
-        .rect();
+    let project = screen.get_by_label("Project: vedit-workspace-ui-00").rect();
+    let second = screen.get_by_label("Project: vedit-workspace-ui-01").rect();
+    let third = screen.get_by_label("Project: vedit-workspace-ui-02").rect();
     let list = screen.get_by_label("Switch project").rect();
     let menu = screen.get_by_label("Main menu").rect();
     assert!(project.top() < menu.top());
@@ -186,7 +180,7 @@ fn project_tabs_and_the_compact_project_list_stay_in_the_titlebar() {
     assert!(list.width() <= 30.0);
     assert_eq!(
         screen
-            .get_by_label("Project: morrow-workspace-ui-00")
+            .get_by_label("Project: vedit-workspace-ui-00")
             .accesskit_node()
             .toggled(),
         Some(egui::accesskit::Toggled::True),
@@ -206,12 +200,12 @@ fn opening_project_picker_reveals_the_current_project_beyond_the_first_page() {
     assert!(screen.state().workspace_picker_open());
     assert!(
         screen
-            .query_by_label_contains("morrow-workspace-ui-22 ·")
+            .query_by_label_contains("vedit-workspace-ui-22 ·")
             .is_some(),
         "the selected project must be rendered in the visible virtualized rows"
     );
     let next = screen
-        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .get_by_label_contains("vedit-workspace-ui-23 ·")
         .rect();
     assert!(
         next.bottom() <= screen.get_by_label("Add project…").rect().top(),
@@ -220,14 +214,14 @@ fn opening_project_picker_reveals_the_current_project_beyond_the_first_page() {
     screen.hover_at(next.center());
     screen.run_steps(1);
     let after_hover = screen
-        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .get_by_label_contains("vedit-workspace-ui-23 ·")
         .rect();
     assert_eq!(
         next, after_hover,
         "opening near the end must not move project hit targets after hover"
     );
     screen
-        .get_by_label_contains("morrow-workspace-ui-23 ·")
+        .get_by_label_contains("vedit-workspace-ui-23 ·")
         .click();
     screen.run_steps(3);
     assert_eq!(
@@ -244,7 +238,7 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     let mut screen = harness(app);
     assert_eq!(tab_groups(screen.state()), expected_groups[0]);
     screen
-        .get_by_label("Project: morrow-workspace-ui-01")
+        .get_by_label("Project: vedit-workspace-ui-01")
         .click();
     screen.run_steps(3);
     assert_eq!(screen.state().active_project, 1);
@@ -254,7 +248,7 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     assert_groups_belong_to_project(screen.state(), 1);
     assert_draft(screen.state(), 0);
     screen
-        .get_by_label("Project: morrow-workspace-ui-00")
+        .get_by_label("Project: vedit-workspace-ui-00")
         .click();
     screen.run_steps(3);
     let tab = screen.state().tab().unwrap();
@@ -276,7 +270,7 @@ fn project_tabs_support_keyboard_and_accesskit_activation() {
     let mut screen = harness(fixture(3));
     for (index, key) in [(1, Key::Enter), (2, Key::Space)] {
         screen
-            .get_by_label(&format!("Project: morrow-workspace-ui-{index:02}"))
+            .get_by_label(&format!("Project: vedit-workspace-ui-{index:02}"))
             .focus();
         screen.run_steps(1);
         screen.key_press(key);
@@ -285,7 +279,7 @@ fn project_tabs_support_keyboard_and_accesskit_activation() {
         assert!(!screen.state().workspace_picker_open());
     }
     screen
-        .get_by_label("Project: morrow-workspace-ui-00")
+        .get_by_label("Project: vedit-workspace-ui-00")
         .click_accesskit();
     screen.run_steps(3);
     assert_eq!(screen.state().active_project, 0);
@@ -328,7 +322,7 @@ fn direct_project_click_keeps_same_frame_insert_prefix_in_the_old_buffer_and_und
             .ctx
             .options(|options| options.input_options.surrender_focus_on);
         let point = screen
-            .get_by_label("Project: morrow-workspace-ui-01")
+            .get_by_label("Project: vedit-workspace-ui-01")
             .rect()
             .center();
         // All events share one RawInput frame; Harness::event would instead
@@ -372,7 +366,7 @@ fn direct_project_click_keeps_same_frame_insert_prefix_in_the_old_buffer_and_und
             "the prefix guard must restore ordinary pointer focus behavior"
         );
         screen
-            .get_by_label("Project: morrow-workspace-ui-00")
+            .get_by_label("Project: vedit-workspace-ui-00")
             .click();
         screen.run_steps(3);
         if vim {
@@ -400,21 +394,19 @@ fn cached_git_changes_have_a_dot_while_clean_unknown_and_unsaved_only_do_not() {
     app.projects[2].git_indicator_count = None;
     app.projects[2].tabs[0].dirty = true;
     let mut screen = harness(app);
-    let changed = screen
-        .get_by_label("Project: morrow-workspace-ui-01")
-        .rect();
+    let changed = screen.get_by_label("Project: vedit-workspace-ui-01").rect();
     let marker = screen
-        .get_by_label("3 uncommitted changes in morrow-workspace-ui-01")
+        .get_by_label("3 uncommitted changes in vedit-workspace-ui-01")
         .rect();
     assert!(changed.contains_rect(marker));
     assert!(
         screen
-            .query_by_label_contains("uncommitted changes in morrow-workspace-ui-00")
+            .query_by_label_contains("uncommitted changes in vedit-workspace-ui-00")
             .is_none()
     );
     assert!(
         screen
-            .query_by_label_contains("uncommitted changes in morrow-workspace-ui-02")
+            .query_by_label_contains("uncommitted changes in vedit-workspace-ui-02")
             .is_none()
     );
     assert!(screen.output().shapes.iter().any(|shape| {
@@ -426,19 +418,17 @@ fn cached_git_changes_have_a_dot_while_clean_unknown_and_unsaved_only_do_not() {
     screen.run_steps(3);
     assert!(
         screen
-            .query_by_label("3 uncommitted changes in morrow-workspace-ui-01")
+            .query_by_label("3 uncommitted changes in vedit-workspace-ui-01")
             .is_none()
     );
     assert!(
         screen
-            .query_by_label("1 uncommitted change in morrow-workspace-ui-00")
+            .query_by_label("1 uncommitted change in vedit-workspace-ui-00")
             .is_some()
     );
     assert_eq!(
         changed,
-        screen
-            .get_by_label("Project: morrow-workspace-ui-01")
-            .rect(),
+        screen.get_by_label("Project: vedit-workspace-ui-01").rect(),
         "status refresh must not move a neighboring tab's hit target"
     );
 }
@@ -450,7 +440,7 @@ fn cycling_many_projects_and_resizing_reveal_the_active_header_tab() {
         project_shortcut(&mut screen, key);
         assert_eq!(screen.state().active_project, selected);
         let tab = screen
-            .get_by_label(&format!("Project: morrow-workspace-ui-{selected:02}"))
+            .get_by_label(&format!("Project: vedit-workspace-ui-{selected:02}"))
             .rect();
         let list = screen.get_by_label("Switch project").rect();
         assert!(
@@ -463,9 +453,7 @@ fn cycling_many_projects_and_resizing_reveal_the_active_header_tab() {
     }
     screen.set_size(Vec2::new(500.0, 360.0));
     screen.run_steps(3);
-    let active = screen
-        .get_by_label("Project: morrow-workspace-ui-23")
-        .rect();
+    let active = screen.get_by_label("Project: vedit-workspace-ui-23").rect();
     let list = screen.get_by_label("Switch project").rect();
     assert!(active.left() >= 122.0 - 1.0);
     assert!(active.right() <= list.left() - PROJECT_TAB_GAP + 1.0);
@@ -519,7 +507,7 @@ fn narrow_zoom_keeps_project_list_keyboard_search_and_footer_inside_the_viewport
     }
     assert!(
         screen
-            .query_by_label("Project: morrow-workspace-ui-00")
+            .query_by_label("Project: vedit-workspace-ui-00")
             .is_none()
     );
     project_shortcut(&mut screen, Key::P);
@@ -670,7 +658,7 @@ fn project_cycle_waits_for_an_earlier_application_command() {
     assert_eq!(screen.state().projects[1].tabs[0].text, DOCUMENT);
 }
 
-fn insert_then_project_chord(screen: &mut Harness<'_, MorrowApp>, key: Key) {
+fn insert_then_project_chord(screen: &mut Harness<'_, VEditApp>, key: Key) {
     let modifiers = egui::Modifiers {
         ctrl: true,
         command: true,
@@ -809,12 +797,12 @@ fn typed_project_filter_does_not_reach_the_editor() {
     assert_eq!(screen.state().workspace_ui.query, "workspace-ui-02");
     assert!(
         screen
-            .query_by_label_contains("morrow-workspace-ui-02 ·")
+            .query_by_label_contains("vedit-workspace-ui-02 ·")
             .is_some()
     );
     assert!(
         screen
-            .query_by_label_contains("morrow-workspace-ui-01 ·")
+            .query_by_label_contains("vedit-workspace-ui-01 ·")
             .is_none()
     );
     assert_draft(screen.state(), 0);
@@ -836,13 +824,13 @@ fn project_filter_accepts_pasted_paths_with_forward_or_backward_slashes() {
         screen.run_steps(3);
         assert!(
             screen
-                .query_by_label_contains("morrow-workspace-ui-02 ·")
+                .query_by_label_contains("vedit-workspace-ui-02 ·")
                 .is_some(),
             "separator {separator:?}"
         );
         assert!(
             screen
-                .query_by_label_contains("morrow-workspace-ui-01 ·")
+                .query_by_label_contains("vedit-workspace-ui-01 ·")
                 .is_none()
         );
         screen.key_press(Key::Enter);
@@ -870,7 +858,7 @@ fn many_projects_keep_a_bounded_picker_and_keyboard_reveal_the_last_row() {
     screen.key_press(Key::End);
     screen.run_steps(4);
     let row = screen
-        .get_by_label_contains("morrow-workspace-ui-39 ·")
+        .get_by_label_contains("vedit-workspace-ui-39 ·")
         .rect();
     let add = screen.get_by_label("Add project…").rect();
     assert!(row.top() >= query.bottom());

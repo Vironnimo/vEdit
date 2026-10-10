@@ -125,7 +125,7 @@ pub fn open_terminal(root: &Path, environment: Vec<(OsString, OsString)>) -> Res
         // Waiting in a detached worker releases the process handle when the
         // user exits, without blocking the editor or tying shell lifetime to it.
         let _ = thread::Builder::new()
-            .name("morrow-terminal".into())
+            .name("vedit-terminal".into())
             .spawn(move || {
                 let _ = child.wait();
             });
@@ -159,7 +159,7 @@ fn spawn_invocation(
     };
     let fallback_sender = sender.clone();
     if let Err(error) = thread::Builder::new()
-        .name("morrow-task".into())
+        .name("vedit-task".into())
         .spawn(move || {
             run_task(
                 root,
@@ -350,7 +350,7 @@ fn spawn_reader(
     cancel_requested: Arc<AtomicBool>,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
-        .name("morrow-task-output".into())
+        .name("vedit-task-output".into())
         .spawn(move || {
             let mut buffer = [0_u8; 8192];
             let mut decoder = Utf8Decoder::default();
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_working_directory() {
-        let root = directory().join("this-directory-must-not-exist-morrow-task-test");
+        let root = directory().join("this-directory-must-not-exist-vedit-task-test");
         let task = spawn_task(root, "echo test".into());
         let events = collect(&task);
         assert!(matches!(events.first(), Some(TaskEvent::Error(_))));
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn direct_program_preserves_literal_arguments_environment_and_exit_code() {
         let root = std::env::temp_dir().join(format!(
-            "morrow native task café & 'quoted' {} {}",
+            "vedit native task café & 'quoted' {} {}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -751,7 +751,7 @@ mod tests {
         let (program, script, text, mut args) = (
             "powershell.exe",
             root.join("native script.ps1"),
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.WriteLine($args[0]); [Console]::Out.WriteLine($env:MORROW_FILE); exit 13",
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.WriteLine($args[0]); [Console]::Out.WriteLine($env:VEDIT_FILE); exit 13",
             vec![
                 OsString::from("-NoProfile"),
                 "-NonInteractive".into(),
@@ -764,7 +764,7 @@ mod tests {
         let (program, script, text, mut args) = (
             "/bin/sh",
             root.join("native script.sh"),
-            "printf '%s\\n' \"$1\" \"$MORROW_FILE\"; exit 13",
+            "printf '%s\\n' \"$1\" \"$VEDIT_FILE\"; exit 13",
             Vec::new(),
         );
         std::fs::write(&script, text).unwrap();
@@ -776,7 +776,7 @@ mod tests {
                 program: program.into(),
                 args,
             },
-            vec![("MORROW_FILE".into(), literal.into())],
+            vec![("VEDIT_FILE".into(), literal.into())],
         );
         let events = collect(&task);
         let _ = std::fs::remove_file(script);
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn interactive_terminal_rejects_missing_directories_and_files() {
-        let missing = directory().join("this-directory-must-not-exist-morrow-terminal-test");
+        let missing = directory().join("this-directory-must-not-exist-vedit-terminal-test");
         assert!(
             open_terminal(&missing, Vec::new())
                 .unwrap_err()
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn runs_in_a_directory_with_spaces_and_unicode() {
         let root = std::env::temp_dir().join(format!(
-            "morrow task café & project {} {}",
+            "vedit task café & project {} {}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

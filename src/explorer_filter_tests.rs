@@ -8,7 +8,7 @@ impl Fixture {
     fn new(extra_files: usize) -> Self {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-lazy-explorer-{}-{}",
+            "vedit-lazy-explorer-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
@@ -24,8 +24,8 @@ impl Fixture {
         Self(root)
     }
 
-    fn app(&self) -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn app(&self) -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         let mut project = Project::new(self.0.clone());
         project.index = Some(Arc::new(
@@ -42,7 +42,7 @@ impl Drop for Fixture {
     }
 }
 
-fn finish(app: &mut MorrowApp, directory: &Path) {
+fn finish(app: &mut VEditApp, directory: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         app.poll();
@@ -237,15 +237,15 @@ fn expanded_folder_reads_keep_concurrent_workers_bounded() {
 
 #[test]
 fn synthetic_explorer_snapshots_render_without_filters_limit_banners_or_workers() {
-    let mut app = MorrowApp::empty(egui::Context::default());
-    let root = PathBuf::from("C:/morrow-in-memory-explorer-fixture");
+    let mut app = VEditApp::empty(egui::Context::default());
+    let root = PathBuf::from("C:/vedit-in-memory-explorer-fixture");
     let mut index = workspace::WorkspaceIndex::empty(root.clone());
     index.truncated = true;
     let mut project = Project::new(root);
     project.index = Some(Arc::new(index));
     app.projects.push(project);
     let mut screen = Harness::builder().with_size([300.0, 220.0]).build_ui_state(
-        |ui, app: &mut MorrowApp| {
+        |ui, app: &mut VEditApp| {
             app.ctx = ui.ctx().clone();
             app.explorer(ui);
         },

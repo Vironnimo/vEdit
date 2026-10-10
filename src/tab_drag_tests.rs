@@ -2,12 +2,12 @@
 use super::*;
 use egui_kittest::Harness;
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-tab-drag-in-memory");
+    let root = std::env::temp_dir().join("vedit-tab-drag-in-memory");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     for (name, text) in [
@@ -24,7 +24,7 @@ fn fixture() -> MorrowApp {
     app.bind_current_pane();
     app
 }
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
     if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
         options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
@@ -34,7 +34,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
         .with_os(egui::os::OperatingSystem::Windows)
         .wgpu_setup(setup)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -58,7 +58,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen.run_steps(3);
     screen
 }
-fn documents(app: &MorrowApp, pane: u64) -> Vec<u64> {
+fn documents(app: &VEditApp, pane: u64) -> Vec<u64> {
     app.editor_layout
         .panes
         .iter()
@@ -67,7 +67,7 @@ fn documents(app: &MorrowApp, pane: u64) -> Vec<u64> {
         .documents
         .clone()
 }
-fn tab_center(screen: &Harness<'_, MorrowApp>, pane: u64, title: &str) -> egui::Pos2 {
+fn tab_center(screen: &Harness<'_, VEditApp>, pane: u64, title: &str) -> egui::Pos2 {
     fn find(shape: &egui::Shape, rect: egui::Rect, title: &str) -> Option<egui::Pos2> {
         match shape {
             egui::Shape::Text(text)
@@ -90,7 +90,7 @@ fn tab_center(screen: &Harness<'_, MorrowApp>, pane: u64, title: &str) -> egui::
         .unwrap_or_else(|| panic!("tab {title} not painted in pane {pane}"))
 }
 fn pointer(
-    screen: &mut Harness<'_, MorrowApp>,
+    screen: &mut Harness<'_, VEditApp>,
     position: egui::Pos2,
     pressed: bool,
     button: egui::PointerButton,
@@ -104,7 +104,7 @@ fn pointer(
     });
     screen.run_steps(1);
 }
-fn start_drag(screen: &mut Harness<'_, MorrowApp>, pane: u64, title: &str, target: egui::Pos2) {
+fn start_drag(screen: &mut Harness<'_, VEditApp>, pane: u64, title: &str, target: egui::Pos2) {
     let start = tab_center(screen, pane, title);
     pointer(screen, start, true, egui::PointerButton::Primary);
     screen.event(egui::Event::PointerMoved(start + Vec2::new(15.0, 0.0)));
@@ -116,13 +116,13 @@ fn start_drag(screen: &mut Harness<'_, MorrowApp>, pane: u64, title: &str, targe
         "pointer drag must be active before release"
     );
 }
-fn release(screen: &mut Harness<'_, MorrowApp>, target: egui::Pos2) {
+fn release(screen: &mut Harness<'_, VEditApp>, target: egui::Pos2) {
     pointer(screen, target, false, egui::PointerButton::Primary);
     screen.run_steps(3);
     assert!(!screen.state().tab_drag_active());
 }
 fn drag_snapshot(
-    screen: &mut Harness<'_, MorrowApp>,
+    screen: &mut Harness<'_, VEditApp>,
     name: &str,
     pointer: egui::Pos2,
     insertion: bool,
@@ -185,7 +185,7 @@ fn drag_snapshot(
             "a visible vertical insertion marker must be painted"
         );
     }
-    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
         screen.snapshot_options(
             name,
             &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
@@ -194,7 +194,7 @@ fn drag_snapshot(
         screen.snapshot(name);
     }
 }
-fn exclusive_right(app: &mut MorrowApp) -> u64 {
+fn exclusive_right(app: &mut VEditApp) -> u64 {
     let first = app.projects[0].tabs[0].id;
     let second = app.projects[0].tabs[1].id;
     let right = app.split_active(SplitOrientation::Vertical).unwrap();
@@ -326,7 +326,7 @@ fn pointer_reorder_shows_insertion_and_does_not_switch_tabs_until_drop() {
     start_drag(&mut screen, 1, "plan.md", target);
     assert_eq!(documents(screen.state(), 1), ids);
     assert_eq!(screen.state().tab().unwrap().id, ids[0]);
-    drag_snapshot(&mut screen, "morrow_tab_drag_insert", target, true);
+    drag_snapshot(&mut screen, "vedit_tab_drag_insert", target, true);
     release(&mut screen, target);
     assert_eq!(documents(screen.state(), 1), vec![ids[2], ids[0], ids[1]]);
     assert_eq!(screen.state().tab().unwrap().id, ids[2]);
@@ -391,7 +391,7 @@ fn pointer_drop_on_editor_body_moves_and_closes_empty_source() {
     let mut screen = harness(app);
     let target = screen.state().editor_layout.rects[&right].center();
     start_drag(&mut screen, 1, "plan.md", target);
-    drag_snapshot(&mut screen, "morrow_tab_drag_pane", target, false);
+    drag_snapshot(&mut screen, "vedit_tab_drag_pane", target, false);
     release(&mut screen, target);
     assert_eq!(screen.state().editor_layout.panes.len(), 1);
     assert_eq!(screen.state().editor_layout.root.first_id(), right);
@@ -415,7 +415,7 @@ fn pointer_drop_shared_tab_deduplicates_destination() {
     assert_eq!(screen.state().projects[0].tabs.len(), 3);
 }
 
-fn wheel(screen: &mut Harness<'_, MorrowApp>, pane: u64, delta: Vec2) {
+fn wheel(screen: &mut Harness<'_, VEditApp>, pane: u64, delta: Vec2) {
     let position = screen.state().editor_layout.rects[&pane].center();
     screen.event(egui::Event::PointerMoved(position));
     screen.event(egui::Event::MouseWheel {
@@ -529,7 +529,7 @@ fn wide_preview_tables() -> (String, Vec<usize>) {
     (text, tables)
 }
 
-fn preview_label_position(screen: &Harness<'_, MorrowApp>, pane: u64, label: &str) -> egui::Pos2 {
+fn preview_label_position(screen: &Harness<'_, VEditApp>, pane: u64, label: &str) -> egui::Pos2 {
     fn find(shape: &egui::Shape, pane: egui::Rect, label: &str) -> Option<egui::Pos2> {
         match shape {
             egui::Shape::Text(text) if text.galley.job.text == label && pane.contains(text.pos) => {
@@ -548,7 +548,7 @@ fn preview_label_position(screen: &Harness<'_, MorrowApp>, pane: u64, label: &st
         .unwrap_or_else(|| panic!("Preview label {label} must be visible in pane {pane}"))
 }
 
-fn table_wheel(screen: &mut Harness<'_, MorrowApp>, pane: u64, label: &str, delta: f32) {
+fn table_wheel(screen: &mut Harness<'_, VEditApp>, pane: u64, label: &str, delta: f32) {
     let position = preview_label_position(screen, pane, label) + Vec2::splat(5.0);
     screen.event(egui::Event::PointerMoved(position));
     screen.event(egui::Event::MouseWheel {

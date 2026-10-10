@@ -401,7 +401,7 @@ impl WrappedRows {
         // detects replaced fonts whose ASCII metrics happen to be identical.
         let probe = ui.fonts_mut(|fonts| {
             fonts.layout_no_wrap(
-                "morrow diff font generation".into(),
+                "vedit diff font generation".into(),
                 FontId::monospace(1.0),
                 Color32::WHITE,
             )
@@ -1214,17 +1214,17 @@ impl Palette {
             normal: ui.visuals().text_color(),
             muted: ui.visuals().weak_text_color(),
             added: if dark {
-                Color32::from_rgb(126, 211, 182)
+                crate::palette::GREEN
             } else {
                 Color32::from_rgb(25, 115, 75)
             },
             removed: if dark {
-                Color32::from_rgb(240, 136, 148)
+                crate::palette::RED
             } else {
                 Color32::from_rgb(183, 45, 63)
             },
             hunk: if dark {
-                Color32::from_rgb(147, 174, 255)
+                crate::palette::BLUE
             } else {
                 Color32::from_rgb(62, 87, 175)
             },

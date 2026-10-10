@@ -1,10 +1,10 @@
 [package]
-name = "morrow"
-version = "0.4.16"
+name = "vedit"
+version = "0.4.17"
 edition = "2024"
 description = "A calm, multi-project code editor for Windows"
 license = "MIT"
-default-run = "morrow"
+default-run = "vedit"
 
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "persistence"] }
@@ -18,11 +18,11 @@ regex = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [[bin]]
-name = "morrow"
+name = "vedit"
 path = "src/main.rs"
 
 [[bin]]
-name = "morrow-cli"
+name = "vedit-cli"
 path = "src/cli_main.rs"
 
 [dev-dependencies]
@@ -30,7 +30,7 @@ egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
 egui-wgpu = { version = "0.36.2", default-features = false }
 
 [patch.crates-io]
-# Windows mixed-DPI dragging and custom chrome: see vendor/winit/MORROW_PATCH.md.
+# Windows mixed-DPI dragging and custom chrome: see vendor/winit/VEDIT_PATCH.md.
 winit = { path = "vendor/winit" }
 
 [profile.release]

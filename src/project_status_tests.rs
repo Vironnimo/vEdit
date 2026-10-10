@@ -1,10 +1,10 @@
 use super::*;
 
-fn fixture(count: usize) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(count: usize) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     for index in 0..count {
         app.projects.push(Project::new(
-            std::env::temp_dir().join(format!("morrow-project-status-{index}")),
+            std::env::temp_dir().join(format!("vedit-project-status-{index}")),
         ));
         app.projects[index].last_git_indicator_refresh =
             Instant::now() - Duration::from_secs(40 + index as u64);
@@ -12,7 +12,7 @@ fn fixture(count: usize) -> MorrowApp {
     app
 }
 
-fn pending(app: &mut MorrowApp, index: usize, id: u64) -> PathBuf {
+fn pending(app: &mut VEditApp, index: usize, id: u64) -> PathBuf {
     let root = app.projects[index].root.clone();
     app.projects[index].git_indicator_request = Some(id);
     app.git_indicator_requests.insert(id, root.clone());
@@ -147,7 +147,7 @@ fn stale_full_status_cannot_overwrite_a_reopened_projects_badge_or_loading_state
 fn real_repository_reports_untracked_staged_modified_and_clean_status() {
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
     let root = std::env::temp_dir().join(format!(
-        "morrow-project-tabs-git-{}-{}",
+        "vedit-project-tabs-git-{}-{}",
         std::process::id(),
         NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
     ));
@@ -157,8 +157,8 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
     let hooks = root.join(".git").join("isolated-test-hooks");
     fs::create_dir_all(&hooks).unwrap();
     for (key, value) in [
-        ("user.name", "Morrow Test"),
-        ("user.email", "morrow@example.invalid"),
+        ("user.name", "vEdit Test"),
+        ("user.email", "vedit@example.invalid"),
         ("commit.gpgsign", "false"),
         ("core.hooksPath", hooks.to_str().unwrap()),
     ] {
@@ -217,7 +217,7 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
         root.file_name()
             .unwrap()
             .to_string_lossy()
-            .starts_with("morrow-project-tabs-git-")
+            .starts_with("vedit-project-tabs-git-")
     );
     fs::remove_dir_all(root).unwrap();
 }

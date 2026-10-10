@@ -339,7 +339,7 @@ fn collect_moves(events: &mut Vec<egui::Event>, swap_jk: bool) -> Vec<Move> {
     result
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn explorer_keyboard_focused(&self) -> bool {
         self.sidebar_view_visible(SidebarView::Explorer)
             && self.project().is_some_and(|project| {
@@ -699,10 +699,10 @@ mod tests {
     struct Fixture(PathBuf);
 
     impl Fixture {
-        fn new(extra_files: usize) -> (Self, MorrowApp) {
+        fn new(extra_files: usize) -> (Self, VEditApp) {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "morrow-explorer-navigation-{}-{}",
+                "vedit-explorer-navigation-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
@@ -717,7 +717,7 @@ mod tests {
                 fs::write(root.join(format!("row{number:03}.txt")), "row\n").unwrap();
             }
             let root = fs::canonicalize(root).unwrap();
-            let mut app = MorrowApp::empty(egui::Context::default());
+            let mut app = VEditApp::empty(egui::Context::default());
             app.settings.autosave = false;
             let mut project = Project::new(root.clone());
             project.index = Some(Arc::new(
@@ -760,12 +760,12 @@ mod tests {
         }
     }
 
-    fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+    fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
         let mut screen = Harness::builder()
             .with_size([440.0, 320.0])
             .with_os(egui::os::OperatingSystem::Windows)
             .build_ui_state(
-                |ui, app: &mut MorrowApp| {
+                |ui, app: &mut VEditApp| {
                     app.ctx = ui.ctx().clone();
                     app.poll();
                     app.explorer_navigation_keys();
@@ -783,7 +783,7 @@ mod tests {
         screen
     }
 
-    fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+    fn key(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
         screen.input_mut().events.extend([
             egui::Event::ModifiersChanged(modifiers),
             egui::Event::Key {
@@ -805,12 +805,12 @@ mod tests {
         screen.run_steps(3);
     }
 
-    fn selected(app: &MorrowApp) -> Option<PathBuf> {
+    fn selected(app: &VEditApp) -> Option<PathBuf> {
         let root = &app.project()?.root;
         app.explorer_navigation.projects.get(root)?.selected.clone()
     }
 
-    fn selected_row_is_filled(screen: &Harness<'_, MorrowApp>, label: &str) -> bool {
+    fn selected_row_is_filled(screen: &Harness<'_, VEditApp>, label: &str) -> bool {
         let row = screen.get_by_label(label).rect();
         let visuals = &screen.ctx.style_of(screen.ctx.theme()).visuals;
         let fill = visuals

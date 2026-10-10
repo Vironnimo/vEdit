@@ -12,7 +12,7 @@ impl Fixture {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "morrow-polyglot-{}-{stamp} spaces ü",
+            "vedit-polyglot-{}-{stamp} spaces ü",
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
@@ -28,7 +28,7 @@ impl Drop for Fixture {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-polyglot-")
+                .starts_with("vedit-polyglot-")
         );
         for _ in 0..20 {
             if fs::remove_dir_all(&self.0).is_ok() {
@@ -80,7 +80,7 @@ fn exercise_with_environment(
         assert!(output.status.success());
         let site_packages = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         assert!(site_packages.starts_with(&fixture.0));
-        let module = site_packages.join("morrow_venv_only/__init__.py");
+        let module = site_packages.join("vedit_venv_only/__init__.py");
         fs::create_dir_all(module.parent().unwrap()).unwrap();
         fs::write(
             &module,
@@ -95,7 +95,7 @@ fn exercise_with_environment(
     if extension == "dart" {
         fs::write(
             fixture.0.join("pubspec.yaml"),
-            "name: morrow_language_smoke\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
+            "name: vedit_language_smoke\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
         )
         .unwrap();
     }
@@ -131,7 +131,7 @@ fn exercise_with_environment(
                     assert!(
                         !diagnostics
                             .iter()
-                            .any(|item| item.message.contains("morrow_venv_only")),
+                            .any(|item| item.message.contains("vedit_venv_only")),
                         "The selected venv's module was not resolved: {diagnostics:?}"
                     );
                 }
@@ -218,10 +218,10 @@ fn live_python_diagnostics_completion_and_definition() {
 }
 
 #[test]
-#[ignore = "requires Dart SDK executable in MORROW_TEST_DART_SERVER; run explicitly"]
+#[ignore = "requires Dart SDK executable in VEDIT_TEST_DART_SERVER; run explicitly"]
 fn live_dart_diagnostics_completion_and_definition() {
-    std::env::var("MORROW_TEST_DART_SERVER")
-        .expect("Set MORROW_TEST_DART_SERVER to the Dart SDK dart.exe");
+    std::env::var("VEDIT_TEST_DART_SERVER")
+        .expect("Set VEDIT_TEST_DART_SERVER to the Dart SDK dart.exe");
     exercise(
         "dart",
         "int doubleValue(int value) => value * 2;\nvoid main() { final result = doubl; print(result); }\n",
@@ -235,8 +235,8 @@ fn live_dart_diagnostics_completion_and_definition() {
 fn live_python_project_venv_resolves_its_own_imports() {
     exercise_with_environment(
         "py",
-        "from morrow_venv_only import double\nresult = doubl\n",
-        "from morrow_venv_only import double\nresult = double(4)\n",
+        "from vedit_venv_only import double\nresult = doubl\n",
+        "from vedit_venv_only import double\nresult = double(4)\n",
         "double",
         true,
     );

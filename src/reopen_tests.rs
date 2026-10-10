@@ -8,7 +8,7 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-reopen-{}-{}",
+            "vedit-reopen-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -17,8 +17,8 @@ impl Fixture {
         Self(fs::canonicalize(root).unwrap())
     }
 
-    fn app(&self) -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn app(&self) -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         app.recovery_session_path = self.0.join("session.json");
         for name in ["A", "B"] {
@@ -30,7 +30,7 @@ impl Fixture {
         app
     }
 
-    fn open(&self, app: &mut MorrowApp, name: &str) -> u64 {
+    fn open(&self, app: &mut VEditApp, name: &str) -> u64 {
         let path = app.project().unwrap().root.join(name);
         fs::write(&path, "# α🦀\n\nSaved text\n").unwrap();
         app.open_file(path);
@@ -49,7 +49,7 @@ impl Drop for Fixture {
     }
 }
 
-fn loaded(app: &mut MorrowApp) {
+fn loaded(app: &mut VEditApp) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.tab().is_some_and(|tab| tab.loading) {
         assert!(Instant::now() < deadline, "file did not load");
@@ -212,7 +212,7 @@ fn keyboard_and_file_menu_reopen_saved_documents() {
         .with_size([1000.0, 640.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.poll();
                 app.draw_ui(ui);

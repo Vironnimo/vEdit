@@ -2,10 +2,10 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
-    let root = std::env::temp_dir().join("morrow-search-ui-render-only");
+    let root = std::env::temp_dir().join("vedit-search-ui-render-only");
     let mut project = Project::new(root.clone());
     let mut tab = EditorTab::new(Some(root.join("source.rs")), "source.rs".into());
     tab.text = "first line\n🙂 needle here\nlast line\n".into();
@@ -17,9 +17,9 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder().with_size([420.0, 850.0]).build_ui_state(
-        |ui, app: &mut MorrowApp| {
+        |ui, app: &mut VEditApp| {
             app.ctx = ui.ctx().clone();
             egui::CentralPanel::default().show(ui, |ui| app.project_search_ui(ui));
         },
@@ -39,7 +39,7 @@ fn result(count: usize) -> workspace::SearchResults {
     }
 }
 
-fn publish(app: &mut MorrowApp, generation: u64, query: &str, excludes: Vec<String>, count: usize) {
+fn publish(app: &mut VEditApp, generation: u64, query: &str, excludes: Vec<String>, count: usize) {
     app.sender
         .send(WorkerResult::Search {
             root: app.project().unwrap().root.clone(),
@@ -255,7 +255,7 @@ fn clicking_a_search_result_uses_its_unicode_location_and_requests_centered_line
     let mut screen = Harness::builder()
         .with_size([1200.0, 850.0])
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.syntax.begin_frame(ui);
                 egui::Panel::left("search_result_test")

@@ -29,7 +29,7 @@ uses Windows' suggested physical rectangle directly, preventing the old
 monitor-nudge feedback loop. Other resize behavior is retained.
 
 The patch, upstream evidence and upgrade guidance are documented in
-[MORROW_PATCH.md](../vendor/winit/MORROW_PATCH.md). Four regression tests cover
+[VEDIT_PATCH.md](../vendor/winit/VEDIT_PATCH.md). Four regression tests cover
 both directions, negative monitor coordinates, repeated transfers and the
 noninteractive path. Native titlebar dragging still needs verification on the
 user's monitor arrangement after restarting the new build.

@@ -211,7 +211,7 @@ fn native_history_key(event: &egui::Event) -> bool {
     } if (modifiers.command || modifiers.ctrl) && !modifiers.alt)
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn editor_input_owner(&self) -> Option<Owner> {
         let tab = self.tab()?;
         Some(Owner {

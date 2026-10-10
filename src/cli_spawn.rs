@@ -249,9 +249,9 @@ mod platform {
                 }
             );
             assert_eq!(
-                String::from_utf16(&quoted(OsStr::new("C:\\space name\\morrow.exe")).unwrap())
+                String::from_utf16(&quoted(OsStr::new("C:\\space name\\vedit.exe")).unwrap())
                     .unwrap(),
-                "\"C:\\space name\\morrow.exe\""
+                "\"C:\\space name\\vedit.exe\""
             );
             assert_eq!(
                 String::from_utf16(&quoted(OsStr::new("trailing\\")).unwrap()).unwrap(),
@@ -262,7 +262,7 @@ mod platform {
         #[test]
         #[ignore = "Launches hidden test helpers; run isolated with --ignored --test-threads=1"]
         fn detached_start_does_not_inherit_unrelated_capture_pipe() {
-            // No Morrow window is opened. A hidden, silent PowerShell helper
+            // No vEdit window is opened. A hidden, silent PowerShell helper
             // remains alive while the test observes the actual pipe lifetime.
             let executable = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
                 .join("System32/WindowsPowerShell/v1.0/powershell.exe");

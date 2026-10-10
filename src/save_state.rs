@@ -1,7 +1,7 @@
 //! Visible save state is independent of transient status messages.
 use super::*;
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn save_status_ui(&mut self, ui: &mut egui::Ui, show_autosave: bool) {
         let autosave = self.settings.autosave;
         let save_binding = self.shortcut_label(keybindings::Action::Save);

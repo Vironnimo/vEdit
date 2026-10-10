@@ -1,8 +1,8 @@
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
     app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
     app.move_sidebar(SidebarView::Search, sidebar_layout::Side::Left);
@@ -10,7 +10,7 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp, width: f32, height: f32) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp, width: f32, height: f32) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([width, height])
         .with_theme(egui::Theme::Dark)
@@ -27,7 +27,7 @@ fn harness(app: MorrowApp, width: f32, height: f32) -> Harness<'static, MorrowAp
     screen
 }
 
-fn open_menu(screen: &mut Harness<'_, MorrowApp>, section: &str) {
+fn open_menu(screen: &mut Harness<'_, VEditApp>, section: &str) {
     screen.get_by_label("Main menu").click();
     screen.run_steps(2);
     screen.get_by_label(section).click();
@@ -66,7 +66,7 @@ fn rail_menu_is_the_only_menu_entry_and_panel_navigation_remains_accessible() {
 
 #[test]
 fn welcome_menu_and_file_view_run_actions_work_at_the_native_minimum_size() {
-    let mut welcome = harness(MorrowApp::empty(egui::Context::default()), 500.0, 360.0);
+    let mut welcome = harness(VEditApp::empty(egui::Context::default()), 500.0, 360.0);
     open_menu(&mut welcome, "File");
     welcome.get_by_label_contains("Settings Ctrl").click();
     welcome.run_steps(3);
@@ -132,7 +132,7 @@ fn file_rename_dialog_blocks_titlebar_drag_until_it_is_cancelled() {
             .ctx
             .data(|data| {
                 data.get_temp::<crate::window_chrome::ChromeGeometry>(egui::Id::new(
-                    "morrow_window_chrome",
+                    "vedit_window_chrome",
                 ))
             })
             .unwrap()
@@ -144,7 +144,7 @@ fn file_rename_dialog_blocks_titlebar_drag_until_it_is_cancelled() {
     assert!(screen.state().context_file_dialog.is_none());
     assert!(!screen.state().chrome_blocked());
     let geometry = screen.ctx.data(|data| {
-        data.get_temp::<crate::window_chrome::ChromeGeometry>(egui::Id::new("morrow_window_chrome"))
+        data.get_temp::<crate::window_chrome::ChromeGeometry>(egui::Id::new("vedit_window_chrome"))
     });
     assert!(!geometry.unwrap().drag_regions.is_empty());
     assert_eq!(screen.state().tab().unwrap().text, original);
@@ -186,22 +186,22 @@ fn main_menu_and_nested_file_menu_screenshots() {
     screen.run_steps(3);
     screen.hover_at(screen.get_by_label("Main menu").rect().center());
     screen.run_steps(2);
-    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
         screen.snapshot_options(
-            "morrow_main_menu",
+            "vedit_main_menu",
             &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(&directory)),
         );
     } else {
-        screen.snapshot("morrow_main_menu");
+        screen.snapshot("vedit_main_menu");
     }
     screen.get_by_label("File").hover();
     screen.run_steps(4);
-    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
         screen.snapshot_options(
-            "morrow_file_menu",
+            "vedit_file_menu",
             &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
         );
     } else {
-        screen.snapshot("morrow_file_menu");
+        screen.snapshot("vedit_file_menu");
     }
 }

@@ -415,7 +415,7 @@ impl LanguageSettingsDraft {
         Ok(config)
     }
 }
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn language_settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.label(RichText::new("LANGUAGES").size(11.0).color(ACCENT));
@@ -583,13 +583,13 @@ mod tests {
         python.program = "pylsp".into();
         let config = python.resolve(
             Path::new("C:/workspace"),
-            "morrow-test-nonexistent-python-command",
+            "vedit-test-nonexistent-python-command",
         );
         assert!(config.settings["pylsp"]["plugins"]["jedi"]["environment"].is_null());
         python.settings = json!({"pylsp":{"plugins":{"jedi":{"environment":"C:/my-environment"}}}});
         let config = python.resolve(
             Path::new("C:/workspace"),
-            "morrow-test-nonexistent-python-command",
+            "vedit-test-nonexistent-python-command",
         );
         assert_eq!(
             config.settings["pylsp"]["plugins"]["jedi"]["environment"],
@@ -602,10 +602,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "morrow-python-path-{}-{unique}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vedit-python-path-{}-{unique}", std::process::id()));
         let fake = root.join(if cfg!(windows) {
             ".venv/Scripts/python.exe"
         } else {
@@ -631,7 +629,7 @@ mod tests {
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with("morrow-python-path-")
+                    .starts_with("vedit-python-path-")
         );
         fs::remove_dir_all(root).unwrap();
     }

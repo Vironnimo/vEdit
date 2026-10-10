@@ -9,7 +9,7 @@ impl RecoveryFixture {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let base = std::env::temp_dir().join(format!(
-            "morrow-recovery-audit-{label}-{}-{}",
+            "vedit-recovery-audit-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
@@ -25,21 +25,21 @@ impl RecoveryFixture {
         path
     }
 
-    fn empty_app(&self) -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn empty_app(&self) -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.recovery_session_path = self.base.join("recovery/session.json");
         app.settings.autosave = false;
         app
     }
 
-    fn app(&self) -> MorrowApp {
+    fn app(&self) -> VEditApp {
         let mut app = self.empty_app();
         // These tests exercise document workers, not indexing or Git discovery.
         app.projects.push(Project::new(self.root.clone()));
         app
     }
 
-    fn open(&self, app: &mut MorrowApp, path: PathBuf) -> u64 {
+    fn open(&self, app: &mut VEditApp, path: PathBuf) -> u64 {
         app.open_file(path);
         wait_for(app, |app| !app.tab().unwrap().loading);
         let tab = app.tab_mut().unwrap();
@@ -51,7 +51,7 @@ impl RecoveryFixture {
         serde_json::from_slice(&fs::read(self.base.join("recovery/session.json")).unwrap()).unwrap()
     }
 
-    fn restore(&self, mut session: Session) -> MorrowApp {
+    fn restore(&self, mut session: Session) -> VEditApp {
         let mut app = self.empty_app();
         app.settings = session.settings.take().unwrap_or_default();
         if let Some(autosave) = session.autosave {
@@ -77,13 +77,13 @@ impl Drop for RecoveryFixture {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-recovery-audit-")
+                .starts_with("vedit-recovery-audit-")
         );
         let _ = fs::remove_dir_all(&self.base);
     }
 }
 
-fn wait_for(app: &mut MorrowApp, condition: impl Fn(&MorrowApp) -> bool) {
+fn wait_for(app: &mut VEditApp, condition: impl Fn(&VEditApp) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         app.poll();
@@ -95,14 +95,14 @@ fn wait_for(app: &mut MorrowApp, condition: impl Fn(&MorrowApp) -> bool) {
     }
 }
 
-fn edit(app: &mut MorrowApp, text: &str) {
+fn edit(app: &mut VEditApp, text: &str) {
     let tab = app.tab_mut().unwrap();
     tab.vim.begin_external_edit(&tab.text);
     tab.text = text.into();
     tab.changed();
 }
 
-fn settle_document_writes(app: &mut MorrowApp) {
+fn settle_document_writes(app: &mut VEditApp) {
     wait_for(app, |app| {
         app.projects
             .iter()
@@ -111,7 +111,7 @@ fn settle_document_writes(app: &mut MorrowApp) {
     });
 }
 
-fn hold_save_completion(app: &mut MorrowApp) -> WorkerResult {
+fn hold_save_completion(app: &mut VEditApp) -> WorkerResult {
     let (sender, receiver) = mpsc::channel();
     let normal_sender = std::mem::replace(&mut app.sender, sender);
     app.save_current();
@@ -700,7 +700,7 @@ fn save_completion_rebases_newer_recovery_and_rejects_a_late_old_baseline() {
     assert!(restored.tab().unwrap().dirty);
     assert!(
         restored.tab().unwrap().error.is_none(),
-        "Morrow's own save is not an external conflict"
+        "vEdit's own save is not an external conflict"
     );
     restored.save_current();
     settle_document_writes(&mut restored);
@@ -720,7 +720,7 @@ fn unreadable_recovery_survives_disk_reload_and_new_recovery_writes() {
     edit(&mut app, "Previous recoverable draft\n");
     app.flush_recovery();
     let original_recovery_path = app.tab().unwrap().recovery_path.clone();
-    let damaged = b"Morrow recovery v1\0{incomplete metadata\nvaluable remaining draft bytes\n";
+    let damaged = b"vEdit recovery v1\0{incomplete metadata\nvaluable remaining draft bytes\n";
     fs::write(&original_recovery_path, damaged).unwrap();
     let session = fixture.saved_session();
     drop(app);

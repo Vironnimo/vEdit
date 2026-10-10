@@ -1,4 +1,4 @@
-//! Versioned, bounded controls for presenting work in a running Morrow window.
+//! Versioned, bounded controls for presenting work in a running vEdit window.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -593,57 +593,57 @@ impl Response {
     }
 }
 
-pub const HELP: &str = r#"Morrow CLI — read, edit and arrange the running editor. Commands return JSON.
+pub const HELP: &str = r#"vEdit CLI — read, edit and arrange the running editor. Commands return JSON.
 
-  morrow-cli open PATH... [--line N] [--column N] [--preview|--source]
-  morrow-cli review MANIFEST.json
-  morrow-cli status
-  morrow-cli tabs [--limit N] [--offset N]
-  morrow-cli focus TAB_ID [--line N] [--column N] [--preview|--source]
-  morrow-cli close TAB_ID...
-  morrow-cli clear-marks [TAB_ID...]
-  morrow-cli workspace DIRECTORY
-  morrow-cli panel explorer|search|source_control|review|left_sidebar|right_sidebar|output|problems|settings [--hide]
-  morrow-cli read TAB_ID [--line N] [--count N]
-  morrow-cli save TAB_ID...
-  morrow-cli selection TAB_ID
-  morrow-cli settings [PATCH.json]
-  morrow-cli settings leader-key space|comma|backslash|CHAR
-  morrow-cli settings swap-jk true|false
-  morrow-cli settings font jetbrains-mono|consolas|cascadia-mono
-  morrow-cli bookmarks [list] [--limit N] [--offset N]
-  morrow-cli bookmarks toggle [--tab ID] [--label TEXT]
-  morrow-cli bookmarks remove|jump ID
-  morrow-cli bookmarks rename ID --label TEXT
-  morrow-cli agent-marks [list] [--limit N] [--offset N]
-  morrow-cli agent-marks take [--request-id TOKEN] [--limit N]
-  morrow-cli agent-marks batch [BATCH_ID] [--limit N] [--offset N]
-  morrow-cli agent-marks text MARK_ID [--batch BATCH_ID] [--offset N] [--count N]
-  morrow-cli agent-marks ack BATCH_ID
-  morrow-cli agent-marks restore [BATCH_ID]
-  morrow-cli agent-marks clear
-  morrow-cli agent-marks remove MARK_ID
-  morrow-cli agent-marks note MARK_ID TEXT
-  morrow-cli agent-marks add [--tab TAB_ID] [--note TEXT]
-  morrow-cli command TAB_ID undo|redo|select_all|clear_selection|indent|outdent|toggle_comment|duplicate_line|delete_line|reload|find_next|find_previous|source|preview --revision N
-  morrow-cli find TAB_ID QUERY [--case-sensitive] [--whole-word] [--limit N] [--offset N]
-  morrow-cli replace TAB_ID QUERY REPLACEMENT --revision N [--case-sensitive] [--whole-word] [--first]
-  morrow-cli diff TAB_ID [--count N]
-  morrow-cli diagnostics TAB_ID [--limit N] [--offset N]
-  morrow-cli search QUERY [WORKSPACE] [--case-sensitive] [--whole-word] [--limit N]
+  vedit-cli open PATH... [--line N] [--column N] [--preview|--source]
+  vedit-cli review MANIFEST.json
+  vedit-cli status
+  vedit-cli tabs [--limit N] [--offset N]
+  vedit-cli focus TAB_ID [--line N] [--column N] [--preview|--source]
+  vedit-cli close TAB_ID...
+  vedit-cli clear-marks [TAB_ID...]
+  vedit-cli workspace DIRECTORY
+  vedit-cli panel explorer|search|source_control|review|left_sidebar|right_sidebar|output|problems|settings [--hide]
+  vedit-cli read TAB_ID [--line N] [--count N]
+  vedit-cli save TAB_ID...
+  vedit-cli selection TAB_ID
+  vedit-cli settings [PATCH.json]
+  vedit-cli settings leader-key space|comma|backslash|CHAR
+  vedit-cli settings swap-jk true|false
+  vedit-cli settings font jetbrains-mono|consolas|cascadia-mono
+  vedit-cli bookmarks [list] [--limit N] [--offset N]
+  vedit-cli bookmarks toggle [--tab ID] [--label TEXT]
+  vedit-cli bookmarks remove|jump ID
+  vedit-cli bookmarks rename ID --label TEXT
+  vedit-cli agent-marks [list] [--limit N] [--offset N]
+  vedit-cli agent-marks take [--request-id TOKEN] [--limit N]
+  vedit-cli agent-marks batch [BATCH_ID] [--limit N] [--offset N]
+  vedit-cli agent-marks text MARK_ID [--batch BATCH_ID] [--offset N] [--count N]
+  vedit-cli agent-marks ack BATCH_ID
+  vedit-cli agent-marks restore [BATCH_ID]
+  vedit-cli agent-marks clear
+  vedit-cli agent-marks remove MARK_ID
+  vedit-cli agent-marks note MARK_ID TEXT
+  vedit-cli agent-marks add [--tab TAB_ID] [--note TEXT]
+  vedit-cli command TAB_ID undo|redo|select_all|clear_selection|indent|outdent|toggle_comment|duplicate_line|delete_line|reload|find_next|find_previous|source|preview --revision N
+  vedit-cli find TAB_ID QUERY [--case-sensitive] [--whole-word] [--limit N] [--offset N]
+  vedit-cli replace TAB_ID QUERY REPLACEMENT --revision N [--case-sensitive] [--whole-word] [--first]
+  vedit-cli diff TAB_ID [--count N]
+  vedit-cli diagnostics TAB_ID [--limit N] [--offset N]
+  vedit-cli search QUERY [WORKSPACE] [--case-sensitive] [--whole-word] [--limit N]
                     [--exclude PATTERN ...|--no-excludes]
-  morrow-cli output [--line N] [--count N]
-  morrow-cli git-status [WORKSPACE] [--limit N] [--offset N]
-  morrow-cli new [TITLE]
-  morrow-cli task check|test|build|run_file|stop
-  morrow-cli file ACTION.json
-  morrow-cli file-job JOB_ID
-  morrow-cli layout [CHANGE.json]
-  morrow-cli raise
-  morrow-cli request JSON_FILE       ('-' reads standard input)
-  morrow-cli schema
+  vedit-cli output [--line N] [--count N]
+  vedit-cli git-status [WORKSPACE] [--limit N] [--offset N]
+  vedit-cli new [TITLE]
+  vedit-cli task check|test|build|run_file|stop
+  vedit-cli file ACTION.json
+  vedit-cli file-job JOB_ID
+  vedit-cli layout [CHANGE.json]
+  vedit-cli raise
+  vedit-cli request JSON_FILE       ('-' reads standard input)
+  vedit-cli schema
 
-Open/review/workspace start the sibling morrow.exe if needed. --no-start prevents
+Open/review/workspace start the sibling vedit.exe if needed. --no-start prevents
 startup. Other commands require a running app. Relative paths resolve against
 your working directory; review paths resolve against the manifest's directory.
 Coordinates are 1-based lines and Unicode character columns, never byte offsets.
@@ -2117,29 +2117,25 @@ pub fn execute(request: &Request, start: bool) -> Result<Response, String> {
             .map_err(|e| e.to_string())?
             .parent()
             .ok_or("CLI executable has no parent")?
-            .join(if cfg!(windows) {
-                "morrow.exe"
-            } else {
-                "morrow"
-            });
+            .join(if cfg!(windows) { "vedit.exe" } else { "vedit" });
         if !executable.is_file() {
             return Err(format!(
-                "Morrow is not running and {} was not found. Start the app, or put both executables in the same directory.",
+                "vEdit is not running and {} was not found. Start the app, or put both executables in the same directory.",
                 executable.display()
             ));
         }
         let mut child =
-            spawn::spawn(&executable).map_err(|e| format!("Cannot start Morrow: {e}"))?;
+            spawn::spawn(&executable).map_err(|e| format!("Cannot start vEdit: {e}"))?;
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             if transport::endpoint_alive() {
                 return send(request);
             }
             if child.has_exited().map_err(|e| e.to_string())? {
-                return Err("Morrow exited before its controls became ready. An older open version may not support the CLI; close it normally and start the new version.".into());
+                return Err("vEdit exited before its controls became ready. An older open version may not support the CLI; close it normally and start the new version.".into());
             }
             if Instant::now() >= deadline {
-                return Err("Morrow started but controls are not ready after 12 seconds. Inspect the app before retrying.".into());
+                return Err("vEdit started but controls are not ready after 12 seconds. Inspect the app before retrying.".into());
             }
             std::thread::sleep(Duration::from_millis(80));
         }
@@ -3063,7 +3059,7 @@ mod tests {
     #[test]
     fn layout_change_file_parser_preserves_local_tab_close() {
         let path = std::env::temp_dir().join(format!(
-            "morrow-layout-close-tab-{}-{}.json",
+            "vedit-layout-close-tab-{}-{}.json",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3155,7 +3151,7 @@ mod tests {
     #[test]
     fn layout_change_file_parser_preserves_zero_based_tab_move() {
         let path = std::env::temp_dir().join(format!(
-            "morrow-layout-move-tab-{}-{}.json",
+            "vedit-layout-move-tab-{}-{}.json",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -52,12 +52,12 @@ fn agent_inserted_crlf_supports_vim_line_end_search_and_editing() {
     assert_eq!(screen.state().tab().unwrap().text, original);
 }
 
-fn fixture(text: &str) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(text: &str) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-vim-search-render-only");
+    let root = std::env::temp_dir().join("vedit-vim-search-render-only");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     let mut tab = EditorTab::new(Some(root.join("search.txt")), "search.txt".into());
@@ -69,12 +69,12 @@ fn fixture(text: &str) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -98,7 +98,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn input(screen: &mut Harness<'_, MorrowApp>, text: &str) {
+fn input(screen: &mut Harness<'_, VEditApp>, text: &str) {
     screen.event(egui::Event::Text(text.into()));
     screen.run_steps(2);
 }
@@ -111,7 +111,7 @@ fn key_event(key: Key, pressed: bool) -> egui::Event {
         modifiers: egui::Modifiers::NONE,
     }
 }
-fn key(screen: &mut Harness<'_, MorrowApp>, key: Key) {
+fn key(screen: &mut Harness<'_, VEditApp>, key: Key) {
     screen
         .input_mut()
         .events
@@ -121,7 +121,7 @@ fn key(screen: &mut Harness<'_, MorrowApp>, key: Key) {
 fn matches(text: &str, query: &str) -> Vec<Range<usize>> {
     crate::search::search(text, query, true, false, false).unwrap()
 }
-fn assert_unedited(screen: &Harness<'_, MorrowApp>, text: &str) {
+fn assert_unedited(screen: &Harness<'_, VEditApp>, text: &str) {
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, text);
     assert!(!tab.dirty);
@@ -576,8 +576,10 @@ fn regex_unicode_case_override_and_all_hit_highlights_use_character_ranges() {
         .iter()
         .filter_map(|shape| match &shape.shape {
             egui::Shape::Rect(rect)
-                if rect.fill == Color32::from_rgba_unmultiplied(237, 191, 126, 85)
-                    || rect.fill == Color32::from_rgba_unmultiplied(147, 174, 255, 38) =>
+                if rect.fill
+                    == Color32::from_rgba_unmultiplied(ORANGE.r(), ORANGE.g(), ORANGE.b(), 85)
+                    || rect.fill
+                        == Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), 38) =>
             {
                 Some(rect)
             }
@@ -816,9 +818,9 @@ fn changing_tabs_cancels_draft_without_moving_original_or_new_tab() {
 
 #[test]
 fn vim_search_prompt_and_highlights_snapshot() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     super::super::visual_tests::workspace(&mut app);
     let mut screen = super::super::visual_tests::harness(app);
     input(&mut screen, "/Path\\w*");
-    super::super::visual_tests::snapshot(&mut screen, "morrow_vim_search");
+    super::super::visual_tests::snapshot(&mut screen, "vedit_vim_search");
 }

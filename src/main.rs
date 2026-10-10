@@ -14,7 +14,9 @@ mod git_diff_view;
 mod git_graph;
 mod lsp;
 mod markdown;
+mod palette;
 mod paths;
+mod profile;
 mod recovery;
 mod render;
 mod screen_jump;
@@ -27,7 +29,7 @@ mod vim;
 mod window_chrome;
 mod workspace;
 
-// Exercise the exact dependency fix in the normal Morrow regression suite.
+// Exercise the exact dependency fix in the normal vEdit regression suite.
 #[cfg(test)]
 #[path = "../vendor/winit/src/platform_impl/windows/dpi_change.rs"]
 mod window_dpi_tests;
@@ -46,7 +48,7 @@ fn main() -> eframe::Result {
         Ok(None) => {}
         Err(error) => {
             let _ = rfd::MessageDialog::new()
-                .set_title("Morrow")
+                .set_title("vEdit")
                 .set_description(error)
                 .show();
             return Ok(());
@@ -57,9 +59,9 @@ fn main() -> eframe::Result {
         Ok(None) => return Ok(()),
         Err(error) => {
             let _ = rfd::MessageDialog::new()
-                .set_title("Morrow")
+                .set_title("vEdit")
                 .set_description(format!(
-                    "Morrow could not verify that this is the only open window.\n\n{error}"
+                    "vEdit could not verify that this is the only open window.\n\n{error}"
                 ))
                 .show();
             return Ok(());
@@ -67,20 +69,21 @@ fn main() -> eframe::Result {
     };
 
     let options = eframe::NativeOptions {
+        persistence_path: profile::persistence_path(),
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Morrow")
+            .with_title("vEdit")
             .with_icon(app_icon())
             .with_decorations(!cfg!(windows))
             .with_inner_size([1440.0, 920.0])
             .with_min_inner_size([500.0, 360.0])
-            .with_app_id("morrow-editor"),
+            .with_app_id("vedit-editor"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Morrow",
+        "vEdit",
         options,
-        Box::new(|cc| Ok(Box::new(app::MorrowApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::VEditApp::new(cc)))),
     )
 }
 
@@ -98,9 +101,9 @@ fn app_icon() -> eframe::egui::IconData {
                 let sample = if rounded > 24.0 {
                     [0.0, 0.0, 0.0, 0.0]
                 } else if (diamond - 44.0).abs() < 2.5 || diamond < 12.0 {
-                    [119.0, 218.0, 192.0, 255.0]
+                    palette::ACCENT.to_array().map(f32::from)
                 } else {
-                    [21.0, 26.0, 34.0, 255.0]
+                    palette::BG.to_array().map(f32::from)
                 };
                 for i in 0..4 {
                     color[i] += sample[i] * 0.25;

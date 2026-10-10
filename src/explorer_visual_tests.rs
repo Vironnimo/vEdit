@@ -24,8 +24,8 @@ impl Selection {
 }
 "#;
 
-fn fixture(sidebar_width: f32) -> MorrowApp {
-    let root = PathBuf::from("C:/workspaces/morrow");
+fn fixture(sidebar_width: f32) -> VEditApp {
+    let root = PathBuf::from("C:/workspaces/vedit");
     let mut tree = workspace::ExplorerTree::new(root.clone());
     for (directory, children) in [
         (
@@ -94,7 +94,7 @@ fn fixture(sidebar_width: f32) -> MorrowApp {
             })
         ));
     }
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     let mut project = Project::new(root.clone());
@@ -124,7 +124,7 @@ fn fixture(sidebar_width: f32) -> MorrowApp {
     app
 }
 
-fn row_rect(screen: &Harness<'_, MorrowApp>, label: &str) -> egui::Rect {
+fn row_rect(screen: &Harness<'_, VEditApp>, label: &str) -> egui::Rect {
     screen
         .query_all_by_label(label)
         .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
@@ -132,7 +132,7 @@ fn row_rect(screen: &Harness<'_, MorrowApp>, label: &str) -> egui::Rect {
         .rect()
 }
 
-fn assert_readable_hierarchy(screen: &Harness<'_, MorrowApp>) {
+fn assert_readable_hierarchy(screen: &Harness<'_, VEditApp>) {
     let sidebar = screen
         .state()
         .sidebar_region_rect(sidebar_layout::Side::Left)
@@ -178,7 +178,7 @@ fn assert_readable_hierarchy(screen: &Harness<'_, MorrowApp>) {
 #[test]
 fn dense_explorer_hierarchy_screenshots() {
     let mut screen = visual_tests::harness(fixture(292.0));
-    visual_tests::snapshot(&mut screen, "morrow_dense_explorer");
+    visual_tests::snapshot(&mut screen, "vedit_dense_explorer");
     assert_readable_hierarchy(&screen);
 
     // Windows native DPI is independent of the editor's own zoom preference.
@@ -188,13 +188,13 @@ fn dense_explorer_hierarchy_screenshots() {
         .get_mut(&egui::ViewportId::ROOT)
         .expect("root viewport")
         .native_pixels_per_point = Some(1.25);
-    visual_tests::snapshot(&mut screen, "morrow_dense_explorer_125");
+    visual_tests::snapshot(&mut screen, "vedit_dense_explorer_125");
     assert!((screen.ctx.pixels_per_point() - 1.25).abs() < 0.001);
     assert_readable_hierarchy(&screen);
 
     let mut compact = visual_tests::harness(fixture(200.0));
     compact.set_size(Vec2::new(840.0, 840.0));
-    visual_tests::snapshot(&mut compact, "morrow_dense_explorer_compact");
+    visual_tests::snapshot(&mut compact, "vedit_dense_explorer_compact");
     assert_readable_hierarchy(&compact);
 
     // The snapshot runner requires one aggregate per test, even when multiple

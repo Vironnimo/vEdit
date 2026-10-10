@@ -402,7 +402,7 @@ impl SyntaxCache {
     pub fn begin_frame(&self, ui: &egui::Ui) {
         let probe = ui.fonts_mut(|fonts| {
             fonts.layout_no_wrap(
-                "morrow atlas generation".into(),
+                "vedit atlas generation".into(),
                 FontId::monospace(1.0),
                 Color32::WHITE,
             )
@@ -684,7 +684,7 @@ impl SyntaxCache {
             let (sender, receiver) = mpsc::sync_channel(1);
             let shared = Arc::downgrade(&self.shared);
             if std::thread::Builder::new()
-                .name("morrow-syntax".into())
+                .name("vedit-syntax".into())
                 .spawn(move || worker(shared, receiver))
                 .is_ok()
             {

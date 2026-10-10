@@ -8,7 +8,7 @@ use crate::cli::{
 use serde_json::{Value, json};
 
 struct Fixture {
-    app: MorrowApp,
+    app: VEditApp,
     root: PathBuf,
     first: u64,
     second: u64,
@@ -26,7 +26,7 @@ impl Fixture {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         fs::create_dir_all(&root).unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         app.recovery_session_path = root.join("recovery/session.json");
         let mut first_project = Project::new(root.join("one"));
@@ -108,11 +108,11 @@ fn fixture_tab(root: &Path, workspace: &Path, title: &str, text: &str) -> Editor
     tab
 }
 
-fn request(app: &mut MorrowApp, action: AgentMarksAction) -> Response {
+fn request(app: &mut VEditApp, action: AgentMarksAction) -> Response {
     app.control_request(Request::AgentMarks { action })
 }
 
-fn list(app: &mut MorrowApp, limit: usize, offset: usize) -> Value {
+fn list(app: &mut VEditApp, limit: usize, offset: usize) -> Value {
     let response = request(app, AgentMarksAction::List { limit, offset });
     assert!(response.ok, "{response:?}");
     response.result
@@ -120,7 +120,7 @@ fn list(app: &mut MorrowApp, limit: usize, offset: usize) -> Value {
 
 /// Compare editor-owned state rather than merely checking the receiver's JSON.
 /// Marks and the session write flag are deliberately outside this invariant.
-fn editor_state(app: &MorrowApp) -> Value {
+fn editor_state(app: &VEditApp) -> Value {
     let projects: Vec<_> = app
         .projects
         .iter()
@@ -156,11 +156,11 @@ fn batch_id(response: &Response) -> u64 {
     response.result["batch_id"].as_u64().unwrap()
 }
 
-fn mark_ids(app: &MorrowApp) -> Vec<u64> {
+fn mark_ids(app: &VEditApp) -> Vec<u64> {
     app.agent_marks.items.iter().map(|mark| mark.id).collect()
 }
 
-fn saved_marks(app: &MorrowApp) -> Value {
+fn saved_marks(app: &VEditApp) -> Value {
     serde_json::to_value(&app.agent_marks).unwrap()
 }
 
@@ -609,7 +609,7 @@ fn production_session_preserves_frozen_batches_retry_receipts_and_legacy_empty_d
     let newer = fixture.capture(first, 12..18, "still waiting");
     let encoded = serde_json::to_vec(&fixture.app.session()).unwrap();
     let restored: Session = serde_json::from_slice(&encoded).unwrap();
-    let mut next_app = MorrowApp::empty(egui::Context::default());
+    let mut next_app = VEditApp::empty(egui::Context::default());
     next_app.recovery_session_path = fixture.root.join("restart/session.json");
     next_app.agent_marks = restored.agent_marks;
     let retry = request(
@@ -669,7 +669,7 @@ fn recovered_untitled_snapshot_cannot_claim_or_navigate_a_tab_with_a_reused_seri
         false
     );
     let workspace = recovered.projects[0].root.clone();
-    let mut next_app = MorrowApp::empty(egui::Context::default());
+    let mut next_app = VEditApp::empty(egui::Context::default());
     next_app.recovery_session_path = fixture.root.join("untitled-restart/session.json");
     next_app.agent_marks = recovered.agent_marks;
     let mut project = Project::new(workspace);

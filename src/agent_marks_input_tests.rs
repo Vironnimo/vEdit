@@ -23,14 +23,14 @@ fn same_batch_search_prefix_keeps_capture_shortcut_out_of_the_search_prompt() {
     assert!(app.register.is_none());
 }
 
-fn fixture(mode: VimMode) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(mode: VimMode) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.settings.vim = true;
     app.settings.leader_key = " ".into();
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-agent-marks-input-render");
+    let root = std::env::temp_dir().join("vedit-agent-marks-input-render");
     let mut project = Project::new(root.clone());
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root)));
     project.last_git_refresh = Instant::now();
@@ -61,12 +61,12 @@ fn fixture(mode: VimMode) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1100.0, 740.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -111,7 +111,7 @@ fn capture_shortcut() -> egui::Event {
     )
 }
 
-fn assert_prefix_mark_and_suffix_motion(screen: &Harness<'_, MorrowApp>) {
+fn assert_prefix_mark_and_suffix_motion(screen: &Harness<'_, VEditApp>) {
     let app = screen.state();
     assert_eq!(app.agent_marks.items.len(), 1);
     let mark = &app.agent_marks.items[0];
@@ -263,7 +263,7 @@ fn one_batch_native_selection_capture_excludes_the_later_selection_extension() {
     assert!(!app.agent_marks_modal_open());
 }
 
-fn split_fixture() -> (MorrowApp, u64, u64, u64, u64) {
+fn split_fixture() -> (VEditApp, u64, u64, u64, u64) {
     let mut app = fixture(VimMode::Visual);
     let left_pane = app.current_pane_id();
     let left_id = app.tab().unwrap().id;

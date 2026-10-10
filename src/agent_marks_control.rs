@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 const PAGE_BYTES: usize = 256 * 1024;
 const PREVIEW_CHARS: usize = 4096;
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn sync_agent_marks(&mut self) {
         if self.agent_marks.items.is_empty() {
             return;
@@ -477,7 +477,7 @@ fn new_request_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
     format!(
-        "morrow-{}-{time}-{}",
+        "vedit-{}-{time}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )

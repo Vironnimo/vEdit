@@ -3,12 +3,12 @@
 use super::*;
 use egui_kittest::Harness;
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-split-in-memory");
+    let root = std::env::temp_dir().join("vedit-split-in-memory");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     for (name, text) in [
@@ -26,12 +26,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1360.0, 900.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // UI-only fixtures must never run disk polling, Git, autosave,
                 // recovery writes, or session writes into the user's app data.
@@ -58,7 +58,7 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn click_source(screen: &mut Harness<'_, MorrowApp>, pane: u64) {
+fn click_source(screen: &mut Harness<'_, VEditApp>, pane: u64) {
     let rect = screen.state().editor_layout.rects[&pane];
     // Tabs occupy the first 37 points; the first source line starts below it.
     let position = rect.left_top() + Vec2::new(70.0, 60.0);
@@ -84,12 +84,12 @@ fn click_source(screen: &mut Harness<'_, MorrowApp>, pane: u64) {
     assert!(screen.ctx.memory(|memory| memory.has_focus(id)));
 }
 
-fn type_text(screen: &mut Harness<'_, MorrowApp>, text: &str) {
+fn type_text(screen: &mut Harness<'_, VEditApp>, text: &str) {
     screen.event(egui::Event::Text(text.into()));
     screen.run_steps(2);
 }
 
-fn painted_text_y(screen: &Harness<'_, MorrowApp>, pane: u64, text: &str) -> f32 {
+fn painted_text_y(screen: &Harness<'_, VEditApp>, pane: u64, text: &str) -> f32 {
     fn find(shape: &egui::Shape, rect: egui::Rect, text: &str) -> Option<f32> {
         match shape {
             egui::Shape::Text(shape)
@@ -118,7 +118,7 @@ fn painted_text_y(screen: &Harness<'_, MorrowApp>, pane: u64, text: &str) -> f32
 }
 
 fn painted_tab_center(
-    screen: &Harness<'_, MorrowApp>,
+    screen: &Harness<'_, VEditApp>,
     pane: u64,
     title: &str,
 ) -> Option<egui::Pos2> {
@@ -146,7 +146,7 @@ fn painted_tab_center(
 }
 
 fn click_tab(
-    screen: &mut Harness<'_, MorrowApp>,
+    screen: &mut Harness<'_, VEditApp>,
     pane: u64,
     title: &str,
     button: egui::PointerButton,
@@ -170,7 +170,7 @@ fn click_tab(
     screen.run_steps(2);
 }
 
-fn pane_documents(app: &MorrowApp, pane: u64) -> Vec<u64> {
+fn pane_documents(app: &VEditApp, pane: u64) -> Vec<u64> {
     app.editor_layout
         .panes
         .iter()

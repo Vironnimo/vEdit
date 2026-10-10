@@ -4,12 +4,12 @@ use egui_kittest::{Harness, kittest::Queryable};
 
 const DOCUMENT: &str = "before: target after\nSecond block · β🦀\nThird block for the agent\n";
 
-fn fixture(vim: bool) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(vim: bool) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.vim = vim;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-agent-marks-render-only");
+    let root = std::env::temp_dir().join("vedit-agent-marks-render-only");
     let mut project = Project::new(root.clone());
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
     project.last_git_refresh = Instant::now();
@@ -22,7 +22,7 @@ fn fixture(vim: bool) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
     let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
     if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
         options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
@@ -33,7 +33,7 @@ fn harness(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
         .with_os(egui::os::OperatingSystem::Windows)
         .wgpu_setup(setup)
         .build_ui_state(
-            move |ui, app: &mut MorrowApp| {
+            move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 if !styled {
                     set_style(&app.ctx);
@@ -61,7 +61,7 @@ fn harness(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn source_shape(screen: &Harness<'_, MorrowApp>) -> egui::epaint::TextShape {
+fn source_shape(screen: &Harness<'_, VEditApp>) -> egui::epaint::TextShape {
     let current_text = &screen.state().tab().unwrap().text;
     screen
         .output()
@@ -76,7 +76,7 @@ fn source_shape(screen: &Harness<'_, MorrowApp>) -> egui::epaint::TextShape {
         .expect("The actual source document must be painted")
 }
 
-fn character_point(screen: &Harness<'_, MorrowApp>, character: usize) -> egui::Pos2 {
+fn character_point(screen: &Harness<'_, VEditApp>, character: usize) -> egui::Pos2 {
     let shape = source_shape(screen);
     let cursor = shape
         .galley
@@ -84,7 +84,7 @@ fn character_point(screen: &Harness<'_, MorrowApp>, character: usize) -> egui::P
     shape.pos + egui::vec2(cursor.left() + 1.0, cursor.center().y)
 }
 
-fn select(screen: &mut Harness<'_, MorrowApp>, start: usize, end: usize) {
+fn select(screen: &mut Harness<'_, VEditApp>, start: usize, end: usize) {
     let from = character_point(screen, start);
     let to = character_point(screen, end);
     screen.hover_at(from);
@@ -100,7 +100,7 @@ fn select(screen: &mut Harness<'_, MorrowApp>, start: usize, end: usize) {
     );
 }
 
-fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn key(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     screen.input_mut().events.extend([
         egui::Event::ModifiersChanged(modifiers),
         egui::Event::Key {
@@ -122,7 +122,7 @@ fn key(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers
     screen.run_steps(3);
 }
 
-fn add_selection(screen: &mut Harness<'_, MorrowApp>) {
+fn add_selection(screen: &mut Harness<'_, VEditApp>) {
     key(
         screen,
         Key::A,
@@ -130,7 +130,7 @@ fn add_selection(screen: &mut Harness<'_, MorrowApp>) {
     );
 }
 
-fn tab_to(screen: &mut Harness<'_, MorrowApp>, label: &str) {
+fn tab_to(screen: &mut Harness<'_, VEditApp>, label: &str) {
     for _ in 0..40 {
         let node = if label.ends_with('·') {
             screen.query_by_label_contains(label)
@@ -146,7 +146,7 @@ fn tab_to(screen: &mut Harness<'_, MorrowApp>, label: &str) {
 }
 
 fn original_selection(
-    screen: &Harness<'_, MorrowApp>,
+    screen: &Harness<'_, VEditApp>,
 ) -> (Range<usize>, usize, VimMode, String, u64) {
     let tab = screen.state().tab().unwrap();
     (
@@ -608,10 +608,12 @@ fn marked_source_and_collection_screenshots() {
         .state_mut()
         .agent_marks_set_note(id, "Simplify this condition without changing behavior");
     key(&mut screen, Key::Escape, egui::Modifiers::NONE);
-    super::super::visual_tests::snapshot(&mut screen, "morrow_agent_marks_source");
+    super::super::visual_tests::snapshot(&mut screen, "vedit_agent_marks_source");
+    // The first GPU capture can outlive the transient status message.
+    screen.state_mut().status = None;
     screen.state_mut().open_agent_marks();
     screen.run_steps(4);
-    super::super::visual_tests::snapshot(&mut screen, "morrow_agent_marks_collection");
+    super::super::visual_tests::snapshot(&mut screen, "vedit_agent_marks_collection");
 }
 
 #[test]
@@ -621,5 +623,5 @@ fn narrow_collection_screenshot() {
     add_selection(&mut narrow);
     narrow.state_mut().open_agent_marks();
     narrow.run_steps(4);
-    super::super::visual_tests::snapshot(&mut narrow, "morrow_narrow_agent_marks_collection");
+    super::super::visual_tests::snapshot(&mut narrow, "vedit_narrow_agent_marks_collection");
 }

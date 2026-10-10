@@ -6,9 +6,9 @@ fn flexible_sidebars_and_zoom_screenshots() {
     let mut app = git_workspace();
     app.explorer_git_layout();
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_two_sidebars");
+    visual_tests::snapshot(&mut screen, "vedit_two_sidebars");
     screen.set_size(Vec2::new(960.0, 640.0));
-    visual_tests::snapshot(&mut screen, "morrow_two_sidebars_compact");
+    visual_tests::snapshot(&mut screen, "vedit_two_sidebars_compact");
     screen.state_mut().settings.ui_scale = 2.0;
     screen.ctx.set_zoom_factor(2.0);
     screen.run_steps(4);
@@ -30,10 +30,10 @@ fn flexible_sidebars_and_zoom_screenshots() {
         screen.get_by_label("src").rect().bottom() < screen.ctx.content_rect().bottom() - 27.0,
         "the Explorer must retain visible file rows at high zoom"
     );
-    visual_tests::snapshot(&mut screen, "morrow_zoomed_workspace");
+    visual_tests::snapshot(&mut screen, "vedit_zoomed_workspace");
     screen.state_mut().settings_open = true;
     screen.run_steps(4);
-    visual_tests::snapshot(&mut screen, "morrow_zoomed_settings");
+    visual_tests::snapshot(&mut screen, "vedit_zoomed_settings");
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn independently_arranged_sidebar_screenshots() {
     app.move_sidebar(SidebarView::Explorer, sidebar_layout::Side::Left);
     app.move_sidebar(SidebarView::Search, sidebar_layout::Side::Right);
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_sidebar_panels");
+    visual_tests::snapshot(&mut screen, "vedit_sidebar_panels");
     assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
     assert!(
         !screen
@@ -73,15 +73,15 @@ fn independently_arranged_sidebar_screenshots() {
     screen
         .state_mut()
         .set_sidebar_visible(sidebar_layout::Side::Left, false);
-    visual_tests::snapshot(&mut screen, "morrow_search_right_only");
+    visual_tests::snapshot(&mut screen, "vedit_search_right_only");
     screen
         .state_mut()
         .set_sidebar_visible(sidebar_layout::Side::Right, false);
-    visual_tests::snapshot(&mut screen, "morrow_no_sidebars");
+    visual_tests::snapshot(&mut screen, "vedit_no_sidebars");
 }
 
-fn git_workspace() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn git_workspace() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
     app.set_sidebar_view_visible(SidebarView::Explorer, false);
     app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
@@ -242,14 +242,14 @@ fn git_changes_history_commit_and_diff_snapshots() {
     );
     project.git_view.hover_stats_order.push_back(key);
     let mut screen = visual_tests::harness(app);
-    visual_tests::snapshot(&mut screen, "morrow_git_changes");
+    visual_tests::snapshot(&mut screen, "vedit_git_changes");
     screen.get_by_label("History").click();
     screen.run_steps(3);
     assert_eq!(
         screen.state().projects[0].git_view.section,
         git_panel::GitSection::History
     );
-    visual_tests::snapshot(&mut screen, "morrow_git_history");
+    visual_tests::snapshot(&mut screen, "vedit_git_history");
     screen.ctx.all_styles_mut(|style| {
         style.interaction.tooltip_delay = 0.0;
         style.interaction.tooltip_grace_time = 0.0;
@@ -275,13 +275,13 @@ fn git_changes_history_commit_and_diff_snapshots() {
             .is_empty()
     );
     // The shared helper moves the pointer away. Keep this tooltip open in its reference.
-    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
         screen.snapshot_options(
-            "morrow_git_history_hover",
+            "vedit_git_history_hover",
             &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
         );
     } else {
-        screen.snapshot("morrow_git_history_hover");
+        screen.snapshot("vedit_git_history_hover");
     }
     screen.hover_at(egui::pos2(-20.0, -20.0));
     screen.run_steps(3);
@@ -295,9 +295,9 @@ fn git_changes_history_commit_and_diff_snapshots() {
             .query_by_label_contains("Group changed files by folder")
             .is_some()
     );
-    visual_tests::snapshot(&mut screen, "morrow_git_commit");
+    visual_tests::snapshot(&mut screen, "vedit_git_commit");
     screen.state_mut().diff = Some(("src/git_panel.rs · aaaaaaaa".into(), "diff --git a/src/git_panel.rs b/src/git_panel.rs\nindex 1234567..abcdef0 100644\n--- a/src/git_panel.rs\n+++ b/src/git_panel.rs\n@@ -4,5 +4,7 @@ impl RepositoryView {\n     fn refresh(&mut self) {\n-        self.files = load_changes();\n-        self.show_flat_list();\n+        self.staged = load_staged_changes();\n+        self.working = load_working_changes();\n+        self.show_folder_tree();\n+        self.show_line_statistics();\n     }\n }\n".into()));
-    visual_tests::snapshot(&mut screen, "morrow_git_diff");
+    visual_tests::snapshot(&mut screen, "vedit_git_diff");
 }
 
 #[test]
@@ -393,7 +393,7 @@ fn bookmarks_and_visible_jump_snapshots() {
     let mut screen = visual_tests::harness(app);
     screen.run_steps(3);
     screen.state_mut().open_bookmarks();
-    visual_tests::snapshot(&mut screen, "morrow_bookmarks");
+    visual_tests::snapshot(&mut screen, "vedit_bookmarks");
     screen.state_mut().cancel_navigation();
     screen.run_steps(3);
     screen.state_mut().start_screen_jump();
@@ -405,7 +405,7 @@ fn bookmarks_and_visible_jump_snapshots() {
         .unwrap()
         .state
         .set_query("wo");
-    visual_tests::snapshot(&mut screen, "morrow_screen_jump");
+    visual_tests::snapshot(&mut screen, "vedit_screen_jump");
     let jump = screen.state().screen_jump.as_ref().unwrap();
     assert!(jump.state.targets.len() >= 3);
     assert_eq!(

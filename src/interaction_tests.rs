@@ -4,10 +4,10 @@ use super::*;
 use crate::cli::DocumentView;
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
-    let root = std::env::temp_dir().join("morrow-interaction-in-memory");
+    let root = std::env::temp_dir().join("vedit-interaction-in-memory");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     for (name, text) in [
@@ -23,13 +23,13 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 let reading_key = app.ctx.input(|input| input.key_pressed(Key::J));
                 app.shortcuts();
@@ -278,7 +278,7 @@ fn loaded_disk_replacement_invalidates_review_marks_and_old_undo_history() {
     assert_eq!(tab.lines.line_col(&tab.text, tab.revision, 0), (1, 1));
 }
 
-fn document_shape(screen: &Harness<'static, MorrowApp>) -> egui::epaint::TextShape {
+fn document_shape(screen: &Harness<'static, VEditApp>) -> egui::epaint::TextShape {
     let text = &screen.state().tab().unwrap().text;
     screen
         .output()
@@ -291,7 +291,7 @@ fn document_shape(screen: &Harness<'static, MorrowApp>) -> egui::epaint::TextSha
         .expect("Editor should paint its document")
 }
 
-fn point_at_character(screen: &Harness<'static, MorrowApp>, character: usize) -> egui::Pos2 {
+fn point_at_character(screen: &Harness<'static, VEditApp>, character: usize) -> egui::Pos2 {
     let document = document_shape(screen);
     let rect = document
         .galley
@@ -299,7 +299,7 @@ fn point_at_character(screen: &Harness<'static, MorrowApp>, character: usize) ->
     document.pos + egui::vec2(rect.left() + 1.0, rect.center().y)
 }
 
-fn painted_selection_rows(screen: &Harness<'static, MorrowApp>) -> Vec<usize> {
+fn painted_selection_rows(screen: &Harness<'static, VEditApp>) -> Vec<usize> {
     let fill = screen
         .ctx
         .style_of(screen.ctx.theme())
@@ -388,7 +388,7 @@ fn wrapped_document_keeps_logical_gutter_numbers_and_font() {
     assert_eq!(numbers, ["1", "2", "3"]);
 }
 
-fn pointer_click(screen: &mut Harness<'static, MorrowApp>, point: egui::Pos2) {
+fn pointer_click(screen: &mut Harness<'static, VEditApp>, point: egui::Pos2) {
     screen.hover_at(point);
     screen.drag_at(point);
     screen.run_steps(1);
@@ -633,7 +633,7 @@ fn editor_wheel_frames_accumulate_reverse_and_clamp_at_document_boundaries() {
     let initial = document_shape(&screen).pos.y;
     let pointer = screen.state().editor_rect.unwrap().center();
     screen.hover_at(pointer);
-    let wheel = |screen: &mut Harness<'static, MorrowApp>, delta| {
+    let wheel = |screen: &mut Harness<'static, VEditApp>, delta| {
         screen.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, delta),
@@ -693,7 +693,7 @@ fn editor_horizontal_wheel_frames_accumulate_reverse_and_clamp_at_line_boundarie
     let initial = document_shape(&screen).pos.x;
     let pointer = screen.state().editor_rect.unwrap().center();
     screen.hover_at(pointer);
-    let wheel = |screen: &mut Harness<'static, MorrowApp>, delta| {
+    let wheel = |screen: &mut Harness<'static, VEditApp>, delta| {
         screen.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(delta, 0.0),
@@ -887,7 +887,7 @@ fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
     tab.error = Some("Save failed; use Save As".into());
     let mut screen = harness(app);
 
-    let choose = |screen: &mut Harness<'static, MorrowApp>, label: &str| {
+    let choose = |screen: &mut Harness<'static, VEditApp>, label: &str| {
         let point = point_at_character(screen, 1);
         screen
             .input_mut()

@@ -20,6 +20,8 @@ use std::{
 // The NUL distinguishes a recovery record from any supported legacy text file.
 // Metadata and unescaped buffer bytes are committed in one atomic write, so a
 // newer session cannot accidentally pair an older buffer with a new baseline.
+// This is a persisted format identifier, not a display name. Keep it readable
+// by both releases so an upgrade cannot turn recovery metadata into user text.
 const DOCUMENT_HEADER: &[u8] = b"Morrow recovery v1\0";
 const MAX_METADATA_BYTES: usize = 4096;
 
@@ -158,7 +160,7 @@ impl RecoveryWriter {
             let mut name = OsString::from(".");
             name.push(file_name);
             name.push(format!(
-                ".morrow-{}-{}.tmp",
+                ".vedit-{}-{}.tmp",
                 std::process::id(),
                 self.stamp()
             ));
@@ -240,7 +242,7 @@ mod tests {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "morrow-recovery-test-{}-{}-{}",
+                "vedit-recovery-test-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

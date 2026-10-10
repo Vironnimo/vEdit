@@ -169,7 +169,7 @@ fn altgr_emitted_text_wins_without_disabling_actual_ctrl_alt_shortcuts() {
 
 #[test]
 fn recording_altgr_text_does_not_create_a_shortcut_or_stop_recording() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.keybinding_ui.capture = Some(Action::Save);
     let chord = egui::Modifiers::CTRL.plus(egui::Modifiers::ALT);
     app.ctx.input_mut(|input| {
@@ -187,7 +187,7 @@ fn recording_altgr_text_does_not_create_a_shortcut_or_stop_recording() {
 
 #[test]
 fn invalid_recorded_chord_can_be_corrected_by_pressing_another_without_reclicking() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.keybinding_ui.capture = Some(Action::Save);
     app.ctx
         .input_mut(|input| input.events.push(event(Key::A, egui::Modifiers::NONE)));
@@ -205,7 +205,7 @@ fn invalid_recorded_chord_can_be_corrected_by_pressing_another_without_reclickin
 
 #[test]
 fn deferred_widget_shortcuts_are_cancelled_when_a_vim_command_prompt_opens() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.ctx
         .run_ui(Default::default(), |_| {})
         .textures_delta
@@ -293,7 +293,7 @@ fn native_editing_modifier_only_and_typing_keys_are_rejected() {
 
 #[test]
 fn recording_ignores_modifier_press_cancels_without_escape_leak_and_does_not_zoom() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings_open = true;
     app.keybinding_ui.capture = Some(Action::Save);
     app.ctx.input_mut(|input| {
@@ -321,7 +321,7 @@ fn recording_ignores_modifier_press_cancels_without_escape_leak_and_does_not_zoo
 
 #[test]
 fn custom_binding_executes_old_binding_stops_and_modals_own_their_input() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings
         .keybindings
         .insert(Action::ToggleWrap.id().into(), Some("F8".into()));
@@ -343,7 +343,7 @@ fn custom_binding_executes_old_binding_stops_and_modals_own_their_input() {
 
 #[test]
 fn shortcut_patch_is_atomic_and_session_round_trip_preserves_disabled_actions() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     let response = app.control_request(crate::cli::Request::Settings {
         patch: Some(crate::cli::SettingsPatch {
             font_size: Some(22.0),
@@ -371,7 +371,7 @@ fn shortcut_patch_is_atomic_and_session_round_trip_preserves_disabled_actions() 
 
 #[test]
 fn alt_shortcut_consumes_only_its_immediately_generated_character() {
-    let app = MorrowApp::empty(egui::Context::default());
+    let app = VEditApp::empty(egui::Context::default());
     app.ctx.input_mut(|input| {
         input.events = vec![
             event(Key::Z, egui::Modifiers::ALT),
@@ -388,7 +388,7 @@ fn alt_shortcut_consumes_only_its_immediately_generated_character() {
 
 #[test]
 fn native_clipboard_event_gives_recording_feedback_without_touching_a_document() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.keybinding_ui.capture = Some(Action::Save);
     app.ctx.input_mut(|input| {
         input
@@ -412,13 +412,13 @@ fn native_clipboard_event_gives_recording_feedback_without_touching_a_document()
 #[test]
 fn settings_search_record_disable_and_reset_are_operable_through_widgets() {
     use egui_kittest::{Harness, kittest::Queryable};
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.keybinding_ui.query = "Save current file".into();
     let mut screen = Harness::builder()
         .with_size([650.0, 600.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.capture_shortcut_input();
                 app.keyboard_settings_ui(ui);

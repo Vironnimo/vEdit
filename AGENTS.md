@@ -1,14 +1,14 @@
-# Working in Morrow
+# Working in vEdit
 
-Morrow is a native Windows code editor written in Rust (edition 2024), using
-eframe/egui. It has two binaries: `morrow` (GUI) and `morrow-cli` (local editor
+vEdit is a native Windows code editor written in Rust (edition 2024), using
+eframe/egui. It has two binaries: `vedit` (GUI) and `vedit-cli` (local editor
 control). The product UI is English; the user README is German. Start with
 `README.md` for the intended user behavior. `docs/development.md` describes build,
 test, snapshot and packaging workflows. Older versioned review documents are
 historical evidence, not current requirements or current test counts.
 
 Paths and build/test commands below refer to a source checkout. A portable bundle
-contains documentation and `skills/morrow/SKILL.md` for live editor control, but
+contains documentation and `skills/vedit/SKILL.md` for live editor control, but
 does not contain the Rust sources or development scripts.
 
 ## Find the owner
@@ -29,9 +29,9 @@ does not contain the Rust sources or development scripts.
 - `src/git.rs` owns Git subprocesses; `git_panel.rs`, `git_graph.rs` and
   `git_diff_view.rs` present their results. `src/markdown.rs` owns Markdown preview.
 - `src/cli.rs`, `cli_schema.json`, `cli_transport.rs` and `control*.rs`: CLI and GUI
-  receiver. Agent usage lives in `.agents/skills/morrow/`; protocol rationale and
+  receiver. Agent usage lives in `.agents/skills/vedit/`; protocol rationale and
   past evaluations live in `docs/agent-interface.md`.
-- `vendor/winit` is intentionally patched. Read `vendor/winit/MORROW_PATCH.md`
+- `vendor/winit` is intentionally patched. Read `vendor/winit/VEDIT_PATCH.md`
   before window/backend changes or dependency upgrades; preserve the patch until
   its behavior has a verified replacement.
 
@@ -53,8 +53,8 @@ remain drafts until explicitly saved. Recovery preserves the original comparison
 baseline; reading newer disk content is not permission to overwrite it. Save As
 uses the source for formatting and the destination only for overwrite checks.
 
-For live Morrow interaction use `.agents/skills/morrow/SKILL.md`; ordinary repo
-changes can use file tools. In a portable bundle use `skills/morrow/SKILL.md`
+For live vEdit interaction use `.agents/skills/vedit/SKILL.md`; ordinary repo
+changes can use file tools. In a portable bundle use `skills/vedit/SKILL.md`
 instead. Never kill or restart the user's editor merely to run
 tests or package a release. The release script preserves a running editor; a
 restart is a separate user action. Tests should use isolated temporary fixtures,

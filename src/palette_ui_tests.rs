@@ -14,10 +14,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(count: usize) -> (Self, MorrowApp) {
+    fn new(count: usize) -> (Self, VEditApp) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-palette-ui-{}-{}",
+            "vedit-palette-ui-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -29,7 +29,7 @@ impl Fixture {
         for file in &files {
             fs::write(file, DOCUMENT).unwrap();
         }
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         app.settings.smooth_scroll = false;
         let mut project = Project::new(root.clone());
@@ -59,12 +59,12 @@ impl Drop for Fixture {
     }
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1360.0, 900.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // All buffers are already loaded. Rendering these isolated fixtures
                 // must not write sessions, poll disk, refresh Git, or autosave.
@@ -91,20 +91,20 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn open(screen: &mut Harness<'_, MorrowApp>, palette: Palette) {
+fn open(screen: &mut Harness<'_, VEditApp>, palette: Palette) {
     screen.state_mut().open_palette(palette);
     screen.run_steps(3);
     assert!(screen.state().palette == Some(palette));
     assert_query_focus(screen);
 }
 
-fn assert_query_focus(screen: &Harness<'_, MorrowApp>) {
+fn assert_query_focus(screen: &Harness<'_, VEditApp>) {
     let query = egui::Id::new("palette_input");
     assert_eq!(screen.ctx.memory(|memory| memory.focused()), Some(query));
     assert!(screen.ctx.read_response(query).is_some());
 }
 
-fn assert_source_focus(screen: &Harness<'_, MorrowApp>) {
+fn assert_source_focus(screen: &Harness<'_, VEditApp>) {
     let id = screen
         .state()
         .document_widget_id(screen.state().tab().unwrap().id);
@@ -112,7 +112,7 @@ fn assert_source_focus(screen: &Harness<'_, MorrowApp>) {
     assert!(screen.state().editor_focused);
 }
 
-fn click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2, button: egui::PointerButton) {
+fn click(screen: &mut Harness<'_, VEditApp>, point: egui::Pos2, button: egui::PointerButton) {
     screen.hover_at(point);
     screen.event(egui::Event::PointerButton {
         pos: point,
@@ -130,12 +130,12 @@ fn click(screen: &mut Harness<'_, MorrowApp>, point: egui::Pos2, button: egui::P
     screen.run_steps(3);
 }
 
-fn text(screen: &mut Harness<'_, MorrowApp>, value: &str) {
+fn text(screen: &mut Harness<'_, VEditApp>, value: &str) {
     screen.event(egui::Event::Text(value.into()));
     screen.run_steps(2);
 }
 
-fn prepare_source(screen: &mut Harness<'_, MorrowApp>, mode: VimMode) {
+fn prepare_source(screen: &mut Harness<'_, VEditApp>, mode: VimMode) {
     let tab = screen.state_mut().tab_mut().unwrap();
     let at = editor::go_to_line(&tab.text, 3) + 2;
     tab.set_cursor(at..at);
@@ -154,7 +154,7 @@ fn prepare_source(screen: &mut Harness<'_, MorrowApp>, mode: VimMode) {
     assert_eq!(screen.state().tab().unwrap().vim.mode, mode);
 }
 
-fn source_click_point(screen: &Harness<'_, MorrowApp>) -> egui::Pos2 {
+fn source_click_point(screen: &Harness<'_, VEditApp>) -> egui::Pos2 {
     let rect = screen.state().editor_rect.unwrap();
     let point = rect.left_top() + Vec2::new(6.0, 5.0);
     assert!(rect.contains(point));
@@ -175,7 +175,7 @@ struct EditorState {
     revision: u64,
 }
 
-fn editor_state(app: &MorrowApp) -> EditorState {
+fn editor_state(app: &VEditApp) -> EditorState {
     let tab = app.tab().unwrap();
     EditorState {
         id: tab.id,
@@ -243,7 +243,7 @@ fn outside_source_click_preserves_visual_lines_and_the_next_vim_motion() {
     }
 }
 
-fn row_point(screen: &Harness<'_, MorrowApp>, title: &str, explorer: bool) -> egui::Pos2 {
+fn row_point(screen: &Harness<'_, VEditApp>, title: &str, explorer: bool) -> egui::Pos2 {
     let rect = screen
         .query_all_by_label(title)
         .map(|node| node.rect())
@@ -257,7 +257,7 @@ fn row_point(screen: &Harness<'_, MorrowApp>, title: &str, explorer: bool) -> eg
     rect.center()
 }
 
-fn active_activity_point(screen: &Harness<'_, MorrowApp>) -> egui::Pos2 {
+fn active_activity_point(screen: &Harness<'_, VEditApp>) -> egui::Pos2 {
     fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
         match shape {
             egui::Shape::Rect(shape)
@@ -390,7 +390,7 @@ fn preview_dismissal_keeps_reading_view_without_source_focus() {
     }
 }
 
-fn palette_scrollbar(screen: &Harness<'_, MorrowApp>) -> egui::Rect {
+fn palette_scrollbar(screen: &Harness<'_, VEditApp>) -> egui::Rect {
     let query = screen
         .ctx
         .read_response(egui::Id::new("palette_input"))
@@ -416,7 +416,7 @@ struct PaintedRect {
     fill: Color32,
 }
 
-fn rect_paints(screen: &Harness<'_, MorrowApp>) -> Vec<PaintedRect> {
+fn rect_paints(screen: &Harness<'_, VEditApp>) -> Vec<PaintedRect> {
     fn visit(shape: &egui::Shape, clip: egui::Rect, output: &mut Vec<PaintedRect>) {
         match shape {
             egui::Shape::Rect(shape) => output.push(PaintedRect {
@@ -439,7 +439,7 @@ fn rect_paints(screen: &Harness<'_, MorrowApp>) -> Vec<PaintedRect> {
     paints
 }
 
-fn painted_scrollbar(screen: &Harness<'_, MorrowApp>) -> (egui::Rect, egui::Rect) {
+fn painted_scrollbar(screen: &Harness<'_, VEditApp>) -> (egui::Rect, egui::Rect) {
     let bar = palette_scrollbar(screen);
     let paints = rect_paints(screen);
     let bars: Vec<_> = paints
@@ -470,7 +470,7 @@ fn painted_scrollbar(screen: &Harness<'_, MorrowApp>) -> (egui::Rect, egui::Rect
     bars[0]
 }
 
-fn assert_row_visible(screen: &Harness<'_, MorrowApp>, label: &str) {
+fn assert_row_visible(screen: &Harness<'_, VEditApp>, label: &str) {
     let node = screen.get_by_label(label);
     // egui's selectable buttons expose selection as AccessKit's toggled state.
     assert_eq!(

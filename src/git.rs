@@ -1531,7 +1531,7 @@ mod tests {
                 .unwrap()
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "morrow-git-tests-{}-{timestamp}-{} with spaces",
+                "vedit-git-tests-{}-{timestamp}-{} with spaces",
                 std::process::id(),
                 NEXT_REPOSITORY.fetch_add(1, Ordering::Relaxed)
             ));
@@ -1543,8 +1543,8 @@ mod tests {
             let repository = Self::empty_directory();
             initialize(&repository.0).unwrap();
             repository.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
-            repository.git(&["config", "user.name", "Morrow Git Test"]);
-            repository.git(&["config", "user.email", "morrow-tests@example.invalid"]);
+            repository.git(&["config", "user.name", "vEdit Git Test"]);
+            repository.git(&["config", "user.email", "vedit-tests@example.invalid"]);
             repository.git(&["config", "commit.gpgsign", "false"]);
             repository.git(&["config", "core.autocrlf", "false"]);
             let hooks = repository.0.join("test-hooks");
@@ -1588,7 +1588,7 @@ mod tests {
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with("morrow-git-tests-")
+                    .starts_with("vedit-git-tests-")
             );
             for _ in 0..3 {
                 if fs::remove_dir_all(&self.0).is_ok() {
@@ -1704,7 +1704,7 @@ mod tests {
         for mark in 1..=137 {
             let message = format!("History {mark}\n");
             let contents = format!("Revision {mark}\n");
-            input.push_str(&format!("commit refs/heads/main\nmark :{mark}\ncommitter Morrow Test <test@example.invalid> {} +0000\ndata {}\n{}",
+            input.push_str(&format!("commit refs/heads/main\nmark :{mark}\ncommitter vEdit Test <test@example.invalid> {} +0000\ndata {}\n{}",
                 1_700_000_000 + mark, message.len(), message));
             if mark > 1 {
                 input.push_str(&format!("from :{}\n", mark - 1));
@@ -1892,11 +1892,11 @@ mod tests {
         repository.write(".gitattributes", "code.txt diff=custom\n");
         repository.write("code.txt", "original\n");
         repository.commit_all("Initial");
-        repository.git(&["config", "diff.external", "morrow-nonexistent-diff-program"]);
+        repository.git(&["config", "diff.external", "vedit-nonexistent-diff-program"]);
         repository.git(&[
             "config",
             "diff.custom.textconv",
-            "morrow-nonexistent-textconv-program",
+            "vedit-nonexistent-textconv-program",
         ]);
         repository.write("code.txt", "changed\n");
         let patch = diff(&repository.0, Path::new("code.txt"), false).unwrap();
@@ -1963,7 +1963,7 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].subject, "Rename with a literal $(shell) message");
         assert_eq!(log[1].subject, "Initial subject with spaces and ü");
-        assert_eq!(log[0].author, "Morrow Git Test");
+        assert_eq!(log[0].author, "vEdit Git Test");
         assert_eq!(log[0].hash.len(), 40);
         assert_eq!(log[0].date.len(), 10);
         repository.git(&["checkout", "--detach"]);
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn root_commit_details_include_full_metadata_message_files_and_line_counts() {
         let repository = TestRepository::new();
-        repository.git(&["config", "user.name", "Morrow Göß Test"]);
+        repository.git(&["config", "user.name", "vEdit Göß Test"]);
         repository.write("root ü.txt", "one\ntwo\n");
         fs::write(repository.0.join("asset.bin"), b"binary\0content").unwrap();
         repository.commit_all(
@@ -2099,8 +2099,8 @@ mod tests {
         );
         assert_eq!(details.hash, hash);
         assert!(details.parents.is_empty());
-        assert_eq!(details.author, "Morrow Göß Test");
-        assert_eq!(details.author_email, "morrow-tests@example.invalid");
+        assert_eq!(details.author, "vEdit Göß Test");
+        assert_eq!(details.author_email, "vedit-tests@example.invalid");
         assert!(details.date.contains('T') && details.date.len() >= 20);
         assert!(
             details

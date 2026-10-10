@@ -1316,10 +1316,7 @@ fn check_expected(path: &Path, expected: Option<&FileFingerprint>) -> Result<(),
 fn create_temporary(parent: &Path) -> io::Result<(PathBuf, File)> {
     for _ in 0..64 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = parent.join(format!(
-            ".morrow-save-{}-{sequence}.tmp",
-            std::process::id()
-        ));
+        let path = parent.join(format!(".vedit-save-{}-{sequence}.tmp", std::process::id()));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -1483,7 +1480,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "morrow-workspace-{name}-{}-{sequence}",
+                "vedit-workspace-{name}-{}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();
@@ -2262,7 +2259,7 @@ mod tests {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".morrow-save")
+                .starts_with(".vedit-save")
         }));
     }
 

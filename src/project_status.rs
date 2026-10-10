@@ -19,7 +19,7 @@ fn read_uncommitted_count(root: &Path) -> Result<Option<usize>, String> {
         .transpose()
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn inactive_git_indicator_candidates(&self) -> Vec<usize> {
         if self.git_busy.is_some() {
             return Vec::new();

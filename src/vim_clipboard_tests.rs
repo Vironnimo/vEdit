@@ -6,11 +6,11 @@ use egui_kittest::Harness;
 
 const UNNAMED: &str = "KEEP🦀";
 
-fn fixture(document: &str) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(document: &str) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-vim-clipboard-render-only");
+    let root = std::env::temp_dir().join("vedit-vim-clipboard-render-only");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
@@ -28,13 +28,13 @@ fn fixture(document: &str) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.shortcuts();
                 app.handle_vim();
@@ -48,12 +48,12 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn events(screen: &mut Harness<'_, MorrowApp>, events: impl IntoIterator<Item = egui::Event>) {
+fn events(screen: &mut Harness<'_, VEditApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
 }
 
-fn text(screen: &mut Harness<'_, MorrowApp>, value: &str) {
+fn text(screen: &mut Harness<'_, VEditApp>, value: &str) {
     events(screen, [egui::Event::Text(value.into())]);
 }
 
@@ -77,7 +77,7 @@ fn release(key: Key) -> egui::Event {
     }
 }
 
-fn assert_unnamed(app: &MorrowApp, expected: &str, linewise: bool) {
+fn assert_unnamed(app: &VEditApp, expected: &str, linewise: bool) {
     let global = app.register.as_ref().expect("global unnamed register");
     let local = app
         .tab()
@@ -91,7 +91,7 @@ fn assert_unnamed(app: &MorrowApp, expected: &str, linewise: bool) {
     }
 }
 
-fn assert_no_clipboard_write(screen: &Harness<'_, MorrowApp>) {
+fn assert_no_clipboard_write(screen: &Harness<'_, VEditApp>) {
     assert!(
         screen
             .output()
@@ -103,7 +103,7 @@ fn assert_no_clipboard_write(screen: &Harness<'_, MorrowApp>) {
     );
 }
 
-fn assert_system_copy(screen: &Harness<'_, MorrowApp>, expected: &str) {
+fn assert_system_copy(screen: &Harness<'_, VEditApp>, expected: &str) {
     assert!(
         screen.output().platform_output.commands.iter().any(
             |command| matches!(command, egui::OutputCommand::CopyText(text) if text == expected)
@@ -113,7 +113,7 @@ fn assert_system_copy(screen: &Harness<'_, MorrowApp>, expected: &str) {
     assert_unnamed(screen.state(), UNNAMED, false);
 }
 
-fn select_native(screen: &mut Harness<'_, MorrowApp>, mode: VimMode) {
+fn select_native(screen: &mut Harness<'_, VEditApp>, mode: VimMode) {
     match mode {
         VimMode::Visual => text(screen, "lvl"),
         VimMode::Insert => {

@@ -92,7 +92,7 @@ Keep the next steps close to the code. Each row has enough detail to read withou
 This paragraph starts after the last complete row. It should never overlap the table, even in a narrow pane.
 "#;
 
-pub(super) fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+pub(super) fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
     if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
         options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
@@ -104,7 +104,7 @@ pub(super) fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
         .with_os(egui::os::OperatingSystem::Windows)
         .wgpu_setup(setup)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 // Rendering fixtures must never schedule disk, Git, or
                 // recovery work while waiting for background highlighting.
@@ -141,7 +141,7 @@ fn document(root: &Path, relative: &str, text: &str) -> EditorTab {
     tab
 }
 
-pub(super) fn workspace(app: &mut MorrowApp) {
+pub(super) fn workspace(app: &mut VEditApp) {
     let root = fs::canonicalize(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-project"),
     )
@@ -167,7 +167,7 @@ pub(super) fn workspace(app: &mut MorrowApp) {
     );
 }
 
-pub(super) fn settle_render(screen: &mut Harness<'_, MorrowApp>) {
+pub(super) fn settle_render(screen: &mut Harness<'_, VEditApp>) {
     // Keep periodic disk/Git/session work out of render-only review fixtures.
     let app = screen.state_mut();
     app.last_disk_check = Instant::now();
@@ -190,9 +190,9 @@ pub(super) fn settle_render(screen: &mut Harness<'_, MorrowApp>) {
     screen.run_steps(2);
 }
 
-pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
+pub(super) fn snapshot(screen: &mut Harness<'_, VEditApp>, name: &str) {
     settle_render(screen);
-    if let Some(directory) = std::env::var_os("MORROW_SNAPSHOT_DIR") {
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
         screen.snapshot_options(
             name,
             &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
@@ -202,7 +202,7 @@ pub(super) fn snapshot(screen: &mut Harness<'_, MorrowApp>, name: &str) {
     }
 }
 
-fn source_highlighting_pending(app: &MorrowApp) -> bool {
+fn source_highlighting_pending(app: &VEditApp) -> bool {
     // The focused pane can be a preview while another pane renders source.
     // Settle every visible source, rather than only the globally active tab.
     app.layout_status()["panes"]
@@ -229,7 +229,7 @@ fn source_highlighting_pending(app: &MorrowApp) -> bool {
 
 #[test]
 fn project_switcher_screenshot() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     for (folder, dirty) in [
         ("agent-plans", true),
@@ -253,12 +253,12 @@ fn project_switcher_screenshot() {
     screen.get_by_label("Switch project").click();
     screen.run_steps(3);
     assert!(screen.state().workspace_picker_open());
-    snapshot(&mut screen, "morrow_project_picker");
+    snapshot(&mut screen, "vedit_project_picker");
 }
 
 #[test]
 fn project_tabs_and_git_indicators_screenshots() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     app.projects[0].git_indicator_count = Some(2);
     for (name, count) in [("vBot", 7), ("notes", 0), ("game-client", 0)] {
@@ -268,20 +268,20 @@ fn project_tabs_and_git_indicators_screenshots() {
         app.projects.push(project);
     }
     let mut screen = harness(app);
-    snapshot(&mut screen, "morrow_project_tabs");
+    snapshot(&mut screen, "vedit_project_tabs");
     screen.set_size(Vec2::new(500.0, 360.0));
-    snapshot(&mut screen, "morrow_project_tabs_compact");
+    snapshot(&mut screen, "vedit_project_tabs_compact");
 }
 
 #[test]
 fn polished_screenshots() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     app.recovery_session_path = recovery_directory().join("visual-session.json");
     let mut screen = harness(app);
-    snapshot(&mut screen, "morrow_welcome");
+    snapshot(&mut screen, "vedit_welcome");
 
     workspace(screen.state_mut());
-    snapshot(&mut screen, "morrow_workspace");
+    snapshot(&mut screen, "vedit_workspace");
     screen
         .query_all_by_label("main.rs")
         .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
@@ -293,11 +293,11 @@ fn polished_screenshots() {
             .query_by_label_contains("Copy relative path")
             .is_some()
     );
-    snapshot(&mut screen, "morrow_tab_context_menu");
+    snapshot(&mut screen, "vedit_tab_context_menu");
     screen.key_press(Key::Escape);
     screen.run_steps(2);
     screen.set_size(Vec2::new(1040.0, 720.0));
-    snapshot(&mut screen, "morrow_compact_workspace");
+    snapshot(&mut screen, "vedit_compact_workspace");
     screen.set_size(Vec2::new(1440.0, 920.0));
 
     let tab = screen.state_mut().tab_mut().unwrap();
@@ -308,7 +308,7 @@ fn polished_screenshots() {
     tab.focus = true;
     tab.pending_selection = tab.vim.selection(&tab.text);
     assert_eq!(tab.vim.mode, VimMode::VisualLine);
-    snapshot(&mut screen, "morrow_visual");
+    snapshot(&mut screen, "vedit_visual");
 
     let tab = screen.state_mut().tab_mut().unwrap();
     tab.vim.handle_key(&mut tab.text, VimKey::Escape);
@@ -320,28 +320,28 @@ fn polished_screenshots() {
             .into();
     app.command = "cargo check".into();
     app.task_status = "Completed".into();
-    snapshot(&mut screen, "morrow_output");
+    snapshot(&mut screen, "vedit_output");
 
     let app = screen.state_mut();
     app.output_visible = false;
     app.open_palette(Palette::Commands);
     app.palette_query = "show".into();
-    snapshot(&mut screen, "morrow_command_palette");
+    snapshot(&mut screen, "vedit_command_palette");
 
     let app = screen.state_mut();
     app.palette = None;
     app.settings_open = true;
-    snapshot(&mut screen, "morrow_settings");
+    snapshot(&mut screen, "vedit_settings");
 
     let app = screen.state_mut();
     app.settings_open = false;
     app.activate_tab(0, 1);
     app.set_document_view(crate::cli::DocumentView::Preview);
-    snapshot(&mut screen, "morrow_markdown_preview");
+    snapshot(&mut screen, "vedit_markdown_preview");
 
     let app = screen.state_mut();
     review(app);
-    snapshot(&mut screen, "morrow_review");
+    snapshot(&mut screen, "vedit_review");
 
     let app = screen.state_mut();
     app.clear_review_sidebar();
@@ -357,7 +357,7 @@ fn polished_screenshots() {
         view: Some(crate::cli::DocumentView::Preview),
     })
     .expect("in-memory source and preview split");
-    snapshot(&mut screen, "morrow_source_preview_split");
+    snapshot(&mut screen, "vedit_source_preview_split");
 
     let app = screen.state_mut();
     let focused = app.layout_status()["focused_pane"].as_u64().unwrap();
@@ -367,9 +367,9 @@ fn polished_screenshots() {
     app.projects[0].tabs[1] = document(&root, "README.md", TABLE_DOCUMENT);
     app.activate_tab(0, 1);
     app.set_document_view(crate::cli::DocumentView::Preview);
-    snapshot(&mut screen, "morrow_markdown_table");
+    snapshot(&mut screen, "vedit_markdown_table");
     screen.set_size(Vec2::new(840.0, 1120.0));
-    snapshot(&mut screen, "morrow_narrow_markdown_table");
+    snapshot(&mut screen, "vedit_narrow_markdown_table");
 
     screen.set_size(Vec2::new(1040.0, 920.0));
     let app = screen.state_mut();
@@ -381,10 +381,10 @@ fn polished_screenshots() {
         view: Some(crate::cli::DocumentView::Source),
     })
     .expect("narrow source and table preview split");
-    snapshot(&mut screen, "morrow_narrow_source_preview_split");
+    snapshot(&mut screen, "vedit_narrow_source_preview_split");
 }
 
-fn review(app: &mut MorrowApp) {
+fn review(app: &mut VEditApp) {
     use crate::cli::{Annotation, AnnotationSeverity, Location, ReviewSummary};
     app.activate_tab(0, 0);
     let tab = &mut app.projects[0].tabs[0];
@@ -429,7 +429,7 @@ fn review(app: &mut MorrowApp) {
 
 #[test]
 fn menu_hover_explains_actions_and_keyboard_navigation_preserves_the_document() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     let original_text = app.tab().unwrap().text.clone();
     let original_cursor = app.tab().unwrap().vim.cursor;
@@ -490,7 +490,7 @@ fn menu_hover_explains_actions_and_keyboard_navigation_preserves_the_document() 
 
 #[test]
 fn markdown_preview_toggle_preserves_source_and_shift_v_keeps_selecting_lines() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     app.projects[0].active_tab = 1;
     let mut screen = harness(app);
@@ -558,7 +558,7 @@ fn markdown_preview_toggle_preserves_source_and_shift_v_keeps_selecting_lines() 
 
 #[test]
 fn tab_toolbar_pointer_actions_and_context_split_preserve_the_source() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     app.activate_tab(0, 1);
     let document_id = app.tab().unwrap().id;
@@ -694,7 +694,7 @@ fn tab_toolbar_pointer_actions_and_context_split_preserve_the_source() {
 
 #[test]
 fn review_note_reveals_source_and_clear_keeps_documents_open() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     review(&mut app);
     let mut screen = harness(app);
@@ -729,7 +729,7 @@ fn review_note_reveals_source_and_clear_keeps_documents_open() {
 
 #[test]
 fn tab_strip_reveals_new_active_tabs_and_preserves_manual_scrolling() {
-    let mut app = MorrowApp::empty(egui::Context::default());
+    let mut app = VEditApp::empty(egui::Context::default());
     workspace(&mut app);
     let root = app.projects[0].root.clone();
     let titles: Vec<_> = (0..10)
@@ -753,7 +753,7 @@ fn tab_strip_reveals_new_active_tabs_and_preserves_manual_scrolling() {
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.tabs_ui(ui);
             },
@@ -766,7 +766,7 @@ fn tab_strip_reveals_new_active_tabs_and_preserves_manual_scrolling() {
     });
     strip.run_steps(3);
 
-    let visible = |strip: &Harness<'_, MorrowApp>, title: &str| {
+    let visible = |strip: &Harness<'_, VEditApp>, title: &str| {
         let rect = strip.get_by_label(title).rect();
         // The scroll bar exposes the actual tab viewport, excluding the fixed
         // controls on the right. This also survives nested UI id changes.
@@ -774,9 +774,8 @@ fn tab_strip_reveals_new_active_tabs_and_preserves_manual_scrolling() {
         rect.left() >= viewport.left() - 0.5 && rect.right() <= viewport.right() + 0.5
     };
     let initial_left = strip.get_by_label(&titles[0]).rect().left();
-    let offset = |strip: &Harness<'_, MorrowApp>| {
-        initial_left - strip.get_by_label(&titles[0]).rect().left()
-    };
+    let offset =
+        |strip: &Harness<'_, VEditApp>| initial_left - strip.get_by_label(&titles[0]).rect().left();
     assert!(visible(&strip, &titles[0]));
     assert!(!visible(&strip, &titles[9]));
 

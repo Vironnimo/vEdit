@@ -177,7 +177,7 @@ fn detect(text: &str) -> Option<Detected> {
     })
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn indentation_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
         editor_preferences::preference_heading(ui, "INDENTATION");

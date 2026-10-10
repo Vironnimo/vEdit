@@ -1,12 +1,12 @@
 use super::*;
 use egui_kittest::Harness;
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.settings.vim = false;
-    let root = std::env::temp_dir().join("morrow-spatial-navigation-ui");
+    let root = std::env::temp_dir().join("vedit-spatial-navigation-ui");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
@@ -22,16 +22,16 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     harness_size(app, [1560.0, 1000.0])
 }
 
-fn harness_size(app: MorrowApp, size: [f32; 2]) -> Harness<'static, MorrowApp> {
+fn harness_size(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.last_disk_check = Instant::now();
                 app.last_session_save = Instant::now();
@@ -556,7 +556,7 @@ fn region_cycle_skips_sidebars_after_the_last_project_is_closed() {
     assert!(screen.state().output_keyboard_focused());
 }
 
-fn focused_git_composer() -> Harness<'static, MorrowApp> {
+fn focused_git_composer() -> Harness<'static, VEditApp> {
     let mut app = fixture();
     app.projects[0].git_root = Some(app.projects[0].root.clone());
     app.projects[0].git_loading = false;

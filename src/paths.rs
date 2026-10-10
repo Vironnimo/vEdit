@@ -56,7 +56,7 @@ mod tests {
             r"C:\projects\main.rs",
             r"\\server\share",
             r"\\?\Volume{1234}\file",
-            r"\\.\pipe\morrow",
+            r"\\.\pipe\vedit",
             "/tmp/notes.md",
         ] {
             assert_eq!(display(Path::new(path)), path);

@@ -1,4 +1,4 @@
-//! Private, bounded control transport for one running Morrow window.
+//! Private, bounded control transport for one running vEdit window.
 //!
 //! Only the GUI thread applies requests. A network acknowledgement is therefore
 //! an application result, never merely an acknowledgement of socket delivery.
@@ -143,18 +143,18 @@ impl Server {
 
     fn start_in(ctx: egui::Context, directory: PathBuf) -> Result<Self, String> {
         private_directory(&directory)
-            .map_err(|error| format!("Could not create the Morrow control directory: {error}"))?;
+            .map_err(|error| format!("Could not create the vEdit control directory: {error}"))?;
         let endpoint_path = directory.join("control.json");
         if let Ok(endpoint) = read_endpoint(&endpoint_path)
             && TcpStream::connect_timeout(&endpoint_address(&endpoint), CONNECT_TIMEOUT).is_ok()
         {
-            return Err("Another Morrow control server is already running.".into());
+            return Err("Another vEdit control server is already running.".into());
         }
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .map_err(|error| format!("Could not bind the Morrow control server: {error}"))?;
+            .map_err(|error| format!("Could not bind the vEdit control server: {error}"))?;
         socket
             .set_nonblocking(true)
-            .map_err(|error| format!("Could not configure the Morrow control server: {error}"))?;
+            .map_err(|error| format!("Could not configure the vEdit control server: {error}"))?;
         let token = random_token()
             .map_err(|error| format!("Could not create a private control token: {error}"))?;
         let endpoint = Endpoint {
@@ -167,13 +167,13 @@ impl Server {
             token: token.clone(),
         };
         write_endpoint(&endpoint_path, &endpoint)
-            .map_err(|error| format!("Could not publish the Morrow control endpoint: {error}"))?;
+            .map_err(|error| format!("Could not publish the vEdit control endpoint: {error}"))?;
         let (sender, receiver) = mpsc::sync_channel(32);
         let stop = Arc::new(AtomicBool::new(false));
         let listener_stop = stop.clone();
         let active = Arc::new(AtomicUsize::new(0));
         let listener = thread::Builder::new()
-            .name("morrow-control".into())
+            .name("vedit-control".into())
             .spawn(move || {
                 while !listener_stop.load(Ordering::Acquire) {
                     match socket.accept() {
@@ -192,7 +192,7 @@ impl Server {
                             let worker_token = endpoint.token.clone();
                             let worker_ctx = ctx.clone();
                             let result = thread::Builder::new()
-                                .name("morrow-control-request".into())
+                                .name("vedit-control-request".into())
                                 .spawn(move || {
                                     let _connection = ConnectionCount(worker_active);
                                     serve_connection(
@@ -216,7 +216,7 @@ impl Server {
             })
             .map_err(|error| {
                 let _ = fs::remove_file(&endpoint_path);
-                format!("Could not start the Morrow control server: {error}")
+                format!("Could not start the vEdit control server: {error}")
             })?;
         Ok(Self {
             receiver,
@@ -255,15 +255,10 @@ impl Drop for ConnectionCount {
 }
 
 pub fn endpoint_directory() -> PathBuf {
-    std::env::var_os("MORROW_CONTROL_DIR")
+    std::env::var_os("VEDIT_CONTROL_DIR")
+        .or_else(|| std::env::var_os("MORROW_CONTROL_DIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("APPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir)
-                .join("Morrow")
-                .join("recovery")
-        })
+        .unwrap_or_else(crate::profile::recovery_directory)
 }
 
 pub fn send(request: &Request) -> Result<Response, String> {
@@ -283,7 +278,7 @@ fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
     let mut stream = TcpStream::connect_timeout(&endpoint_address(&endpoint), CONNECT_TIMEOUT)
         .map_err(|error| {
             format!(
-                "The Morrow window is not reachable ({error}). Start Morrow and try again. The request was not sent."
+                "The vEdit window is not reachable ({error}). Start vEdit and try again. The request was not sent."
             )
         })?;
     configure_stream(&stream).map_err(|error| {
@@ -304,17 +299,17 @@ fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
     bytes.push(b'\n');
     stream.write_all(&bytes).map_err(|error| {
         format!(
-            "The connection failed while sending the request: {error}. Its outcome is unknown. Inspect Morrow's status before retrying a change."
+            "The connection failed while sending the request: {error}. Its outcome is unknown. Inspect vEdit's status before retrying a change."
         )
     })?;
     let response = read_frame(&mut stream, MAX_RESPONSE_BYTES).map_err(|error| {
         format!(
-            "Morrow did not return a complete result: {error}. The request may have been applied. Inspect Morrow's status before retrying a change."
+            "vEdit did not return a complete result: {error}. The request may have been applied. Inspect vEdit's status before retrying a change."
         )
     })?;
     from_unique_json(&response).map_err(|error| {
         format!(
-            "Morrow returned an invalid result: {error}. The request may have been applied. Inspect Morrow's status before retrying a change."
+            "vEdit returned an invalid result: {error}. The request may have been applied. Inspect vEdit's status before retrying a change."
         )
     })
 }
@@ -326,23 +321,23 @@ fn endpoint_address(endpoint: &Endpoint) -> SocketAddr {
 fn read_endpoint(path: &Path) -> Result<Endpoint, String> {
     let file = fs::File::open(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            "No Morrow control endpoint exists. Start Morrow 0.3 or newer, then run the command again.".into()
+            "No vEdit control endpoint exists. Start vEdit 0.3 or newer, then run the command again.".into()
         } else {
-            format!("Could not read the Morrow control endpoint: {error}")
+            format!("Could not read the vEdit control endpoint: {error}")
         }
     })?;
     let mut bytes = Vec::new();
     file.take(4097)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read the Morrow control endpoint: {error}"))?;
+        .map_err(|error| format!("Could not read the vEdit control endpoint: {error}"))?;
     if bytes.len() > 4096 {
-        return Err("The Morrow control endpoint is invalid. Restart Morrow.".into());
+        return Err("The vEdit control endpoint is invalid. Restart vEdit.".into());
     }
     let endpoint: Endpoint = from_unique_json(&bytes)
-        .map_err(|_| "The Morrow control endpoint is invalid. Restart Morrow.".to_owned())?;
+        .map_err(|_| "The vEdit control endpoint is invalid. Restart vEdit.".to_owned())?;
     if endpoint.version != PROTOCOL_VERSION {
         return Err(format!(
-            "Morrow's control protocol is version {}; this CLI supports version {PROTOCOL_VERSION}. Use the CLI packaged with the running editor.",
+            "vEdit's control protocol is version {}; this CLI supports version {PROTOCOL_VERSION}. Use the CLI packaged with the running editor.",
             endpoint.version
         ));
     }
@@ -350,7 +345,7 @@ fn read_endpoint(path: &Path) -> Result<Endpoint, String> {
         || endpoint.token.len() != 64
         || !endpoint.token.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err("The Morrow control endpoint is invalid. Restart Morrow.".into());
+        return Err("The vEdit control endpoint is invalid. Restart vEdit.".into());
     }
     Ok(endpoint)
 }
@@ -376,11 +371,11 @@ fn serve_connection(
                     }
                     Err(mpsc::TrySendError::Full(_)) => Response::failure(
                         "busy",
-                        "Morrow's control queue is full. This request was not applied.",
+                        "vEdit's control queue is full. This request was not applied.",
                     ),
                     Err(mpsc::TrySendError::Disconnected(_)) => Response::failure(
                         "server_closed",
-                        "The Morrow window closed before the request was queued. This request was not applied.",
+                        "The vEdit window closed before the request was queued. This request was not applied.",
                     ),
                 }
             }
@@ -433,7 +428,7 @@ fn wait_for_application(receiver: mpsc::Receiver<Response>, stop: &AtomicBool) -
         if stop.load(Ordering::Acquire) {
             return Response::failure(
                 "server_closed",
-                "Morrow closed before returning a result. The request may have been applied.",
+                "vEdit closed before returning a result. The request may have been applied.",
             );
         }
         match receiver.recv_timeout(Duration::from_millis(50)) {
@@ -447,7 +442,7 @@ fn wait_for_application(receiver: mpsc::Receiver<Response>, stop: &AtomicBool) -
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
                 return Response::failure(
                     "timeout",
-                    "Morrow did not return a result within ten seconds. Its outcome is unknown. Inspect status before retrying a change.",
+                    "vEdit did not return a result within ten seconds. Its outcome is unknown. Inspect status before retrying a change.",
                 );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -684,7 +679,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let directory = std::env::temp_dir().join(format!(
-                "morrow-control-test-{}-{}",
+                "vedit-control-test-{}-{}",
                 std::process::id(),
                 random_token().unwrap()
             ));
@@ -893,7 +888,7 @@ mod tests {
         assert!(
             send_to(&Request::Status {}, &missing)
                 .unwrap_err()
-                .contains("Start Morrow")
+                .contains("Start vEdit")
         );
 
         let mut endpoint = fixture.endpoint();

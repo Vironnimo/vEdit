@@ -20,7 +20,7 @@ pub(crate) fn fonts(choice: EditorFont) -> FontDefinitions {
 }
 
 pub(crate) fn tab_family(width: usize) -> FontFamily {
-    FontFamily::Name(format!("morrow-tabs-{}", width.clamp(1, 8)).into())
+    FontFamily::Name(format!("vedit-tabs-{}", width.clamp(1, 8)).into())
 }
 
 fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
@@ -46,33 +46,31 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
         }),
         ..Default::default()
     });
-    fonts
-        .font_data
-        .insert("morrow-code".into(), selected.into());
+    fonts.font_data.insert("vedit-code".into(), selected.into());
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
-        .insert(0, "morrow-code".into());
+        .insert(0, "vedit-code".into());
     // These families are only used for tab glyphs, so each document can have
     // its own tab width without replacing text or rebuilding the font atlas.
     for width in 1..=8 {
-        let name = format!("morrow-tabs-{width}");
-        let mut data = (*fonts.font_data["morrow-code"]).clone();
+        let name = format!("vedit-tabs-{width}");
+        let mut data = (*fonts.font_data["vedit-code"]).clone();
         data.tweak.tab_size = width as f32;
         fonts.font_data.insert(name.clone(), data.into());
         fonts.families.insert(tab_family(width), vec![name]);
     }
 
     for (name, file) in [
-        ("morrow-ui", "segoeui.ttf"),
-        ("morrow-symbols", "seguisym.ttf"),
+        ("vedit-ui", "segoeui.ttf"),
+        ("vedit-symbols", "seguisym.ttf"),
     ] {
         if let Ok(bytes) = fs::read(directory.join(file)) {
             fonts
                 .font_data
                 .insert(name.into(), FontData::from_owned(bytes).into());
-            if name == "morrow-symbols" {
+            if name == "vedit-symbols" {
                 for family in [FontFamily::Proportional, FontFamily::Monospace] {
                     fonts.families.entry(family).or_default().push(name.into());
                 }
@@ -88,8 +86,8 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
     if let Ok(bytes) = fs::read(directory.join("seguisb.ttf")) {
         fonts
             .font_data
-            .insert("morrow-semibold".into(), FontData::from_owned(bytes).into());
-        let mut family = vec!["morrow-semibold".into()];
+            .insert("vedit-semibold".into(), FontData::from_owned(bytes).into());
+        let mut family = vec!["vedit-semibold".into()];
         family.extend(
             fonts
                 .families
@@ -99,7 +97,7 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
         );
         fonts
             .families
-            .insert(FontFamily::Name("morrow-semibold".into()), family);
+            .insert(FontFamily::Name("vedit-semibold".into()), family);
     }
     fonts
 }
@@ -110,20 +108,20 @@ mod tests {
 
     #[test]
     fn missing_system_fonts_retain_bundled_regular_code_and_unicode_fallbacks() {
-        let missing = std::env::temp_dir().join("morrow-no-system-fonts-typography");
+        let missing = std::env::temp_dir().join("vedit-no-system-fonts-typography");
         for choice in [
             EditorFont::JetBrainsMono,
             EditorFont::Consolas,
             EditorFont::CascadiaMono,
         ] {
             let fonts = fonts_from(&missing, choice);
-            let code = &fonts.font_data["morrow-code"];
+            let code = &fonts.font_data["vedit-code"];
             assert_eq!(
                 code.font.as_ref(),
                 include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf")
             );
             let family = &fonts.families[&FontFamily::Monospace];
-            assert_eq!(family[0], "morrow-code");
+            assert_eq!(family[0], "vedit-code");
             assert!(family.len() > 1);
         }
     }

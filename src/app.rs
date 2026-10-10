@@ -76,17 +76,9 @@ mod tab_drag;
 #[path = "workspace_ui.rs"]
 mod workspace_ui;
 
-const BG: Color32 = Color32::from_rgb(17, 20, 27);
-const PANEL: Color32 = Color32::from_rgb(22, 26, 34);
-const SURFACE: Color32 = Color32::from_rgb(29, 34, 44);
-const HOVER: Color32 = Color32::from_rgb(39, 47, 60);
-const BORDER: Color32 = Color32::from_rgb(43, 50, 63);
-const TEXT: Color32 = Color32::from_rgb(224, 230, 240);
-const MUTED: Color32 = Color32::from_rgb(139, 150, 172);
-const ACCENT: Color32 = Color32::from_rgb(126, 211, 182);
-const BLUE: Color32 = Color32::from_rgb(147, 174, 255);
-const ORANGE: Color32 = Color32::from_rgb(237, 191, 126);
-const RED: Color32 = Color32::from_rgb(240, 136, 148);
+use crate::palette::{
+    ACCENT, BG, BLUE, BORDER, GREEN, HOVER, MUTED, ORANGE, PANEL, RED, SURFACE, TEXT,
+};
 const MAX_DOCUMENT: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,7 +589,7 @@ struct CompletionPopup {
     items: Vec<crate::lsp::CompletionItem>,
     selected: usize,
 }
-pub struct MorrowApp {
+pub struct VEditApp {
     projects: Vec<Project>,
     active_project: usize,
     workspace_ui: workspace_ui::WorkspaceUiState,
@@ -698,7 +690,7 @@ pub struct MorrowApp {
     render_pane: u64,
     rendering_panes: bool,
 }
-impl MorrowApp {
+impl VEditApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let stored: Session = cc
             .storage
@@ -1955,7 +1947,7 @@ impl MorrowApp {
                             match result {
                                 Ok(doc) if doc.fingerprint.hash != baseline.hash => {
                                     if t.dirty {
-                                        t.error=Some("This file changed outside Morrow. Save your edits as another file, or close and reopen it.".into());
+                                        t.error=Some("This file changed outside vEdit. Save your edits as another file, or close and reopen it.".into());
                                     } else {
                                         context_actions::reset_native_history(&ctx, id);
                                         let cursor = t
@@ -3089,7 +3081,7 @@ impl MorrowApp {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn shortcuts(&mut self) {
         use keybindings::Action;
         self.resume_editor_input();
@@ -3853,7 +3845,7 @@ impl MorrowApp {
             self.request_close(CloseAction::Exit);
         }
         ui.ctx().data_mut(|data| {
-            data.insert_temp(egui::Id::new("morrow_window_chrome"), geometry);
+            data.insert_temp(egui::Id::new("vedit_window_chrome"), geometry);
         });
     }
 
@@ -4140,7 +4132,7 @@ impl MorrowApp {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").exact_size(27.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 2)))
@@ -4371,7 +4363,7 @@ impl MorrowApp {
         let error = self.tab().and_then(|t| t.error.clone());
         if let Some(error) = error {
             egui::Frame::new()
-                .fill(Color32::from_rgb(57, 34, 38))
+                .fill(PANEL.lerp_to_gamma(RED, 0.12))
                 .inner_margin(10)
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -6112,7 +6104,7 @@ impl MorrowApp {
                         });
                     ui.add_space(if compact { 8.0 } else { 25.0 });
                     ui.label(
-                        RichText::new(format!("MORROW  /  {}", env!("CARGO_PKG_VERSION")))
+                        RichText::new(format!("VEDIT  /  {}", env!("CARGO_PKG_VERSION")))
                             .size(10.0)
                             .color(MUTED.linear_multiply(0.6)),
                     );
@@ -6122,7 +6114,7 @@ impl MorrowApp {
 }
 
 use keybindings::COMMANDS;
-impl MorrowApp {
+impl VEditApp {
     fn command_action(&mut self, label: &str) {
         match label {
             "Command palette" => self.open_palette(Palette::Commands),
@@ -6927,7 +6919,7 @@ impl MorrowApp {
         }
     }
 }
-impl eframe::App for MorrowApp {
+impl eframe::App for VEditApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(windows)]
         let window = frame.winit_window().cloned();
@@ -6954,7 +6946,7 @@ impl eframe::App for MorrowApp {
         if let Some(window) = window {
             let geometry = self.ctx.data(|data| {
                 data.get_temp::<crate::window_chrome::ChromeGeometry>(egui::Id::new(
-                    "morrow_window_chrome",
+                    "vedit_window_chrome",
                 ))
             });
             if !self.chrome_blocked()
@@ -6996,11 +6988,7 @@ fn recovery_directory() -> PathBuf {
 
 #[cfg(not(test))]
 fn recovery_directory() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Morrow")
-        .join("recovery")
+    crate::profile::recovery_directory()
 }
 fn file_title(path: &Path) -> String {
     path.file_name()
@@ -7059,19 +7047,28 @@ fn set_style(ctx: &egui::Context) {
     style.visuals.extreme_bg_color = BG;
     style.visuals.faint_bg_color = SURFACE;
     style.visuals.override_text_color = Some(TEXT);
+    style.visuals.weak_text_color = Some(MUTED);
+    style.visuals.hyperlink_color = ACCENT;
+    style.visuals.warn_fg_color = ORANGE;
+    style.visuals.error_fg_color = RED;
+    style.visuals.code_bg_color = SURFACE;
+    style.visuals.window_stroke = Stroke::new(1.0, BORDER);
     style.visuals.widgets.inactive.bg_fill = SURFACE;
     style.visuals.widgets.inactive.weak_bg_fill = SURFACE;
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
     style.visuals.widgets.hovered.bg_fill = HOVER;
     style.visuals.widgets.hovered.weak_bg_fill = HOVER;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(62, 78, 87));
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, crate::palette::BORDER_STRONG);
     style.visuals.widgets.active.bg_fill = HOVER;
     style.visuals.widgets.active.weak_bg_fill = HOVER;
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    style.visuals.widgets.noninteractive.bg_fill = SURFACE;
+    style.visuals.widgets.noninteractive.weak_bg_fill = SURFACE;
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);
     style.visuals.menu_corner_radius = egui::CornerRadius::same(6);
-    style.visuals.selection.bg_fill = Color32::from_rgb(54, 76, 78);
+    style.visuals.selection.bg_fill = HOVER;
     style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
     style.spacing.item_spacing = Vec2::new(7.0, 5.0);
     style.spacing.button_padding = Vec2::new(9.0, 5.0);
@@ -7285,7 +7282,7 @@ mod selection_scroll_tests;
 #[path = "typography_ui_tests.rs"]
 mod typography_ui_tests;
 
-impl MorrowApp {
+impl VEditApp {
     fn poll_languages(&mut self) {
         if let Some((request, revision, cursor, widget)) = self.definition_origin
             && self
@@ -8061,7 +8058,7 @@ pub(crate) fn builtin_language_smoke_config(
         .find(|config| config.language_id == language)
         .expect("known built-in test language");
     if language == "dart"
-        && let Ok(program) = std::env::var("MORROW_TEST_DART_SERVER")
+        && let Ok(program) = std::env::var("VEDIT_TEST_DART_SERVER")
     {
         config.program = program;
     }

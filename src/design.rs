@@ -1,4 +1,4 @@
-//! Shared interaction and painting for Morrow's quiet controls.
+//! Shared interaction and painting for vEdit's quiet controls.
 //!
 //! Keep colors in the active theme so hover, selection, and keyboard focus stay
 //! consistent across the explorer, palettes, and toolbars.
@@ -67,7 +67,7 @@ pub(crate) fn menu<R>(
 
     let state_id = egui::containers::menu::find_menu_root(ui)
         .id
-        .with("morrow_active_menu");
+        .with("vedit_active_menu");
     let response = ui.add(button);
     let popup_id = egui::Popup::default_response_id(&response);
     let ctx = ui.ctx().clone();
@@ -107,7 +107,7 @@ pub(crate) fn menu<R>(
 /// The main action in a dialog, with themed hover and pressed states.
 pub(crate) fn primary_button(ui: &mut Ui, label: &str, min_size: Vec2) -> Response {
     let accent = ui.visuals().selection.stroke.color;
-    let text = ui.visuals().extreme_bg_color;
+    let text = crate::palette::ON_ACCENT;
     ui.scope(|ui| {
         let visuals = ui.visuals_mut();
         visuals.override_text_color = Some(text);

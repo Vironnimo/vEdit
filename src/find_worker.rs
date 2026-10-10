@@ -50,7 +50,7 @@ impl Worker {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let worker_shared = shared.clone();
         std::thread::Builder::new()
-            .name("morrow-find".into())
+            .name("vedit-find".into())
             .spawn(move || {
                 loop {
                     let (mutex, ready) = &*worker_shared;

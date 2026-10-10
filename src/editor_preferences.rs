@@ -21,7 +21,7 @@ impl Settings {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     /// Configured zoom commands also work in Settings, except during recording.
     pub(super) fn preference_shortcuts(&mut self) {
         use keybindings::Action;

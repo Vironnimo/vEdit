@@ -2,7 +2,7 @@
 use super::*;
 use crate::cli::{EditorCommand, SettingsPatch, TaskAction, TextEdit, TextRange};
 
-impl MorrowApp {
+impl VEditApp {
     fn control_bookmarks(&mut self, change: cli::BookmarkAction) -> Response {
         match change {
             cli::BookmarkAction::List { limit, offset } => {
@@ -1110,8 +1110,8 @@ fn compact_item(index: usize, item: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn app_with_text(text: &str) -> (MorrowApp, u64) {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn app_with_text(text: &str) -> (VEditApp, u64) {
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "fixture.rs".into());
         tab.text = text.into();
@@ -1893,7 +1893,7 @@ mod tests {
     fn temporary_directory(label: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let path = std::env::temp_dir().join(format!(
-            "morrow-document-control-{label}-{}-{}",
+            "vedit-document-control-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

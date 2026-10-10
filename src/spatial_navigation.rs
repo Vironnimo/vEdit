@@ -57,7 +57,7 @@ fn neighbor(
         .map(|candidate| candidate.0)
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(in crate::app) fn begin_region_focus_frame(&mut self) {
         self.region_focus.rendered_focus_widgets.clear();
     }

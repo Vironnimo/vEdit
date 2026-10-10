@@ -8,7 +8,7 @@ mod documents;
 #[path = "control_queries.rs"]
 mod queries;
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn start_control(&mut self) {
         match cli::Server::start(self.ctx.clone()) {
             Ok(server) => self.control = Some(server),
@@ -753,7 +753,7 @@ mod tests {
     }
     #[test]
     fn unknown_tab_never_uses_active_tab() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.projects.push(Project::new(std::env::temp_dir()));
         app.projects[0]
             .tabs
@@ -768,7 +768,7 @@ mod tests {
     }
     #[test]
     fn close_batch_preserves_dirty_buffer_and_closes_clean() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut dirty = EditorTab::new(None, "dirty".into());
         dirty.text = "valuable".into();
@@ -787,7 +787,7 @@ mod tests {
     }
     #[test]
     fn focus_outside_document_leaves_cursor_and_tab_unchanged() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "text".into());
         tab.text = "hello".into();
@@ -805,7 +805,7 @@ mod tests {
     }
     #[test]
     fn pending_loaded_location_is_observed_and_validated() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "text".into());
         tab.loading = true;
@@ -824,7 +824,7 @@ mod tests {
     }
     #[test]
     fn loaded_invalid_marks_are_reported_separately_from_editor_error() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "text".into());
         tab.text = "one".into();
@@ -843,7 +843,7 @@ mod tests {
     }
     #[test]
     fn showing_problems_also_reveals_output_container() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.control_request(Request::Panel {
             panel: Panel::Problems,
             visible: true,
@@ -853,7 +853,7 @@ mod tests {
     }
     #[test]
     fn unrelated_close_preserves_review_and_last_review_close_restores_explorer() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let plan = EditorTab::new(None, "plan.md".into());
         let plan_id = plan.id;
@@ -880,7 +880,7 @@ mod tests {
     }
     #[test]
     fn settings_overlay_blocks_presentation_and_is_reported() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings_open = true;
         let response = app.control_request(Request::Workspace {
             path: std::env::temp_dir(),
@@ -897,7 +897,7 @@ mod tests {
     }
     #[test]
     fn vim_search_allows_observation_but_preserves_user_state_against_control_mutations() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "search fixture".into());
         tab.text = "abc foo 😀 bar\n".into();
@@ -985,14 +985,14 @@ mod tests {
     fn canonical_duplicates_preserve_first_marks_and_batch_order() {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
-            "morrow-cli-test-{}-{}",
+            "vedit-cli-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("a.rs");
         fs::write(&path, "fn main() {}\n").unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut first = OpenFile::source(path.clone());
         first.annotations.push(Annotation {
             id: "first".into(),
@@ -1028,7 +1028,7 @@ mod tests {
     }
     #[test]
     fn current_tab_navigation_commits_insert_as_one_undo_transaction() {
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         let mut project = Project::new(std::env::temp_dir());
         let mut tab = EditorTab::new(None, "text".into());
         tab.text = "ab".into();
@@ -1054,12 +1054,11 @@ mod tests {
     }
     #[test]
     fn fresh_review_reloads_clean_file_before_validating_marks() {
-        let root =
-            std::env::temp_dir().join(format!("morrow-review-reload-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vedit-review-reload-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("plan.md");
         fs::write(&path, "old\n").unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.control_request(Request::Open {
             files: vec![OpenFile::source(path.clone())],
         });
@@ -1099,7 +1098,7 @@ mod tests {
         drop(app);
         fs::remove_dir_all(root).unwrap();
     }
-    fn await_file(app: &mut MorrowApp) {
+    fn await_file(app: &mut VEditApp) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while app.tab().is_some_and(|t| t.loading) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));

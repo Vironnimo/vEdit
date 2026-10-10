@@ -171,7 +171,7 @@ struct OverlayPointer {
     owned: bool,
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn agent_marks_modal_open(&self) -> bool {
         self.agent_marks_ui.open
     }
@@ -666,7 +666,7 @@ fn mark_row(ui: &mut egui::Ui, row: &MarkRow, selected: bool, enabled: bool) -> 
             rect,
             4.0,
             if selected {
-                Color32::from_rgb(48, 41, 65)
+                PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.12)
             } else {
                 SURFACE
             },
@@ -1006,9 +1006,9 @@ pub(super) fn paint_agent_mark_overlays(
             badge,
             4.0,
             if response.hovered() {
-                Color32::from_rgb(62, 47, 84)
+                PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.22)
             } else {
-                Color32::from_rgb(38, 32, 51)
+                PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.08)
             },
         );
         paint_cross(ui, badge, false, AGENT_MARK_COLOR);

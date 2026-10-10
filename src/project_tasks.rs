@@ -194,17 +194,23 @@ impl TaskConfiguration {
         file: Option<&Path>,
     ) -> Vec<(OsString, OsString)> {
         let python_program = self.python_program(root);
-        let mut environment = vec![
-            ("MORROW_ROOT".into(), root.as_os_str().into()),
+        let mut environment: Vec<(OsString, OsString)> = vec![
+            ("VEDIT_ROOT".into(), root.as_os_str().into()),
             (
-                "MORROW_FILE".into(),
+                "VEDIT_FILE".into(),
                 file.map_or_else(OsString::new, |file| file.as_os_str().into()),
             ),
-            ("MORROW_PYTHON".into(), python_program.clone().into()),
+            ("VEDIT_PYTHON".into(), python_program.clone().into()),
             // Python pipes otherwise buffer prints for long-running programs.
             ("PYTHONUNBUFFERED".into(), "1".into()),
             ("PYTHONIOENCODING".into(), "utf-8".into()),
         ];
+        // Keep saved Morrow task commands working with the renamed variables.
+        for (name, value) in environment.clone() {
+            if let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix("VEDIT_")) {
+                environment.push((format!("MORROW_{suffix}").into(), value));
+            }
+        }
         let mut executable_directories = Vec::new();
         if let Some(bin) = Path::new(&python_program).parent()
             && !bin.as_os_str().is_empty()
@@ -335,7 +341,7 @@ impl TaskConfiguration {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn inherited_dart_executable(&self) -> String {
         self.settings
             .language_servers
@@ -557,11 +563,11 @@ impl MorrowApp {
             );
         }
         ui.label(RichText::new(if cfg!(windows) {
-            "Custom commands use PowerShell. Example: & $env:MORROW_PYTHON -u $env:MORROW_FILE --verbose"
+            "Custom commands use PowerShell. Example: & $env:VEDIT_PYTHON -u $env:VEDIT_FILE --verbose"
         } else {
-            "Custom commands use /bin/sh. Example: \"$MORROW_PYTHON\" -u \"$MORROW_FILE\" --verbose"
+            "Custom commands use /bin/sh. Example: \"$VEDIT_PYTHON\" -u \"$VEDIT_FILE\" --verbose"
         }).size(10.5).color(MUTED));
-        ui.label(RichText::new("MORROW_ROOT, MORROW_FILE and MORROW_PYTHON are environment variables. Working directory: this project. Python Test uses pytest; Build uses the build module (install in your environment if needed). Rust Run uses cargo run.").size(10.5).color(MUTED));
+        ui.label(RichText::new("VEDIT_ROOT, VEDIT_FILE and VEDIT_PYTHON are environment variables. Working directory: this project. Python Test uses pytest; Build uses the build module (install in your environment if needed). Rust Run uses cargo run.").size(10.5).color(MUTED));
         if ui.button("Reset project task commands").clicked() {
             let python_interpreter = project.tasks.python_interpreter.clone();
             let dart_executable = project.tasks.dart_executable.clone();

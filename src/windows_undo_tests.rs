@@ -6,13 +6,13 @@ use egui_kittest::Harness;
 
 const PRESERVED_REGISTER: &str = "KEEP🦀";
 
-fn fixture(document: &str) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(document: &str) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.vim = true;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let root = std::env::temp_dir().join("morrow-windows-undo-render-only");
+    let root = std::env::temp_dir().join("vedit-windows-undo-render-only");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now();
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root)));
@@ -31,13 +31,13 @@ fn fixture(document: &str) -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1200.0, 760.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.draw_ui(ui);
             },
@@ -53,13 +53,13 @@ fn harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn events(screen: &mut Harness<'_, MorrowApp>, events: impl IntoIterator<Item = egui::Event>) {
+fn events(screen: &mut Harness<'_, VEditApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
     super::editor_input_tests::settle(screen);
 }
 
-fn text(screen: &mut Harness<'_, MorrowApp>, value: &str) {
+fn text(screen: &mut Harness<'_, VEditApp>, value: &str) {
     events(screen, [egui::Event::Text(value.into())]);
 }
 
@@ -80,7 +80,7 @@ fn key_event(key: Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event
     }
 }
 
-fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modifiers) {
+fn shortcut(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers) {
     let modifiers = windows_modifiers(modifiers);
     events(
         screen,
@@ -98,16 +98,16 @@ fn shortcut(screen: &mut Harness<'_, MorrowApp>, key: Key, modifiers: egui::Modi
     );
 }
 
-fn escape(screen: &mut Harness<'_, MorrowApp>) {
+fn escape(screen: &mut Harness<'_, VEditApp>) {
     shortcut(screen, Key::Escape, egui::Modifiers::NONE);
 }
 
-fn insert_transaction(screen: &mut Harness<'_, MorrowApp>, value: &str) {
+fn insert_transaction(screen: &mut Harness<'_, VEditApp>, value: &str) {
     text(screen, &format!("i{value}"));
     escape(screen);
 }
 
-fn assert_registers_preserved(app: &MorrowApp) {
+fn assert_registers_preserved(app: &VEditApp) {
     let register = app.register.as_ref().expect("global unnamed register");
     assert_eq!(register.text, PRESERVED_REGISTER);
     assert!(!register.linewise);
@@ -118,12 +118,12 @@ fn assert_registers_preserved(app: &MorrowApp) {
     }
 }
 
-fn assert_document(screen: &Harness<'_, MorrowApp>, expected: &str) {
+fn assert_document(screen: &Harness<'_, VEditApp>, expected: &str) {
     assert_eq!(screen.state().tab().unwrap().text, expected);
     assert_registers_preserved(screen.state());
 }
 
-fn document_by_id(app: &MorrowApp, id: u64) -> &EditorTab {
+fn document_by_id(app: &VEditApp, id: u64) -> &EditorTab {
     app.projects
         .iter()
         .flat_map(|project| &project.tabs)
@@ -372,7 +372,7 @@ enum InputOwner {
     VimCommand,
 }
 
-fn focus_input_owner(screen: &mut Harness<'_, MorrowApp>, owner: InputOwner) {
+fn focus_input_owner(screen: &mut Harness<'_, VEditApp>, owner: InputOwner) {
     match owner {
         InputOwner::Settings => shortcut(screen, Key::Comma, egui::Modifiers::CTRL),
         InputOwner::Palette => shortcut(
@@ -454,7 +454,7 @@ fn dialog_and_query_undo_redo_never_consume_source_history() {
     }
 }
 
-fn focus_pane(screen: &mut Harness<'_, MorrowApp>, pane_id: u64) {
+fn focus_pane(screen: &mut Harness<'_, VEditApp>, pane_id: u64) {
     let response = screen
         .state_mut()
         .control_request(crate::cli::Request::Layout {

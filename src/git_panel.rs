@@ -582,7 +582,7 @@ enum GitUiAction {
     Initialize,
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn git_content_has_focus(&self) -> bool {
         let Some(focused) = self.ctx.memory(|memory| memory.focused()) else {
             return false;
@@ -2124,7 +2124,7 @@ fn tree_row(
         let color = if heading || row.hovered() || selected {
             TEXT
         } else {
-            Color32::from_rgb(196, 205, 221)
+            TEXT.lerp_to_gamma(MUTED, 0.35)
         };
         let available = (content_rect.right() - stats_width - 12.0 - x).max(1.0);
         let galley = truncated_text(
@@ -2231,7 +2231,7 @@ fn paint_stats(
         ui,
         &format!("+{}", compact_number(stats.added)),
         font,
-        ACCENT,
+        GREEN,
         55.0,
     );
     let removed_width = removed.size().x;
@@ -2244,7 +2244,7 @@ fn paint_stats(
     painter.galley(
         egui::pos2(right.x - width, right.y - added.size().y * 0.5),
         added,
-        ACCENT,
+        GREEN,
     );
     width
 }
@@ -2260,7 +2260,7 @@ fn stats_labels(ui: &mut egui::Ui, stats: StatsSummary) {
         RichText::new(format!("+{}", stats.added))
             .monospace()
             .size(11.0)
-            .color(ACCENT),
+            .color(GREEN),
     );
     if stats.binary > 0 {
         ui.label(
@@ -2451,7 +2451,7 @@ fn history_hover(
                             "files"
                         }
                     ));
-                    ui.label(RichText::new(format!("+{}", stats.lines.added)).color(ACCENT));
+                    ui.label(RichText::new(format!("+{}", stats.lines.added)).color(GREEN));
                     ui.label(RichText::new(format!("−{}", stats.lines.removed)).color(RED));
                 });
                 if stats.lines.binary {
@@ -2494,11 +2494,11 @@ fn change_marker(
         return ("!", RED, "Merge conflict");
     }
     match change {
-        git::FileChange::Added => ("A", ACCENT, "Added"),
+        git::FileChange::Added => ("A", GREEN, "Added"),
         git::FileChange::Deleted => ("D", RED, "Deleted"),
         git::FileChange::Renamed => ("R", BLUE, "Renamed"),
         git::FileChange::Copied => ("C", BLUE, "Copied"),
-        git::FileChange::Untracked => ("U", ACCENT, "Untracked"),
+        git::FileChange::Untracked => ("U", GREEN, "Untracked"),
         git::FileChange::Unmerged => ("!", RED, "Merge conflict"),
         git::FileChange::Modified => ("M", ORANGE, "Modified"),
         git::FileChange::None | git::FileChange::Other(_) => ("·", MUTED, "Changed"),

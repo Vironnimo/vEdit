@@ -2,10 +2,10 @@ use super::*;
 use crate::cli::{Panel, Request};
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn fixture() -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
-    let root = std::env::temp_dir().join("morrow-sidebar-layout-in-memory");
+    let root = std::env::temp_dir().join("vedit-sidebar-layout-in-memory");
     let mut project = Project::new(root.clone());
     project.last_git_refresh = Instant::now() + Duration::from_secs(3600);
     let mut tab = EditorTab::new(Some(root.join("source.rs")), "source.rs".into());
@@ -17,12 +17,12 @@ fn fixture() -> MorrowApp {
     app
 }
 
-fn harness(app: MorrowApp, width: f32) -> Harness<'static, MorrowApp> {
+fn harness(app: VEditApp, width: f32) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([width, 720.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 if !app.sidebar_drag_keys() {
                     app.shortcuts();
@@ -706,13 +706,13 @@ fn opening_another_project_preserves_empty_and_hidden_sides() {
             app.set_sidebar_visible(Side::Right, false);
         }
         let before = app.sidebars_status();
-        app.add_project(std::env::temp_dir().join("morrow-sidebar-preserve-project-in-memory"));
+        app.add_project(std::env::temp_dir().join("vedit-sidebar-preserve-project-in-memory"));
         assert_eq!(app.sidebars_status(), before);
         assert!(app.visible_sidebar_sides().is_empty());
     }
 }
 
-fn overflowing_explorer_fixture(side: Side, width: f32) -> MorrowApp {
+fn overflowing_explorer_fixture(side: Side, width: f32) -> VEditApp {
     let mut app = fixture();
     let root = app.projects[0].root.clone();
     let mut tree = workspace::ExplorerTree::new(root.clone());
@@ -752,7 +752,7 @@ fn overflowing_explorer_fixture(side: Side, width: f32) -> MorrowApp {
     app
 }
 
-fn assert_sidebar_edge_painted(screen: &mut Harness<'_, MorrowApp>, side: Side, width: f32) {
+fn assert_sidebar_edge_painted(screen: &mut Harness<'_, VEditApp>, side: Side, width: f32) {
     let rect = screen.state().sidebar_region_rect(side).unwrap();
     assert!(
         (rect.width() - width).abs() <= 1.0,

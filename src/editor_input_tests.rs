@@ -2,13 +2,13 @@
 use super::*;
 use egui_kittest::Harness;
 
-fn fixture(text: &str, vim: bool) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn fixture(text: &str, vim: bool) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     app.settings.vim = vim;
     app.settings.autosave = false;
     app.settings.smooth_scroll = false;
     app.sidebar_visible = false;
-    let mut project = Project::new(std::env::temp_dir().join("morrow-editor-input-unit"));
+    let mut project = Project::new(std::env::temp_dir().join("vedit-editor-input-unit"));
     let mut tab = EditorTab::new(None, "input.txt".into());
     tab.text = text.into();
     tab.saved_text = text.into();
@@ -18,12 +18,12 @@ fn fixture(text: &str, vim: bool) -> MorrowApp {
     app
 }
 
-fn harness(text: &str, vim: bool) -> Harness<'static, MorrowApp> {
+fn harness(text: &str, vim: bool) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1100.0, 740.0])
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.shortcuts();
                 app.handle_vim();
@@ -51,7 +51,7 @@ fn key(key: Key, modifiers: egui::Modifiers) -> egui::Event {
 
 /// Custom commands resume only after their native prefix has been rendered.
 /// Wait for that explicit state transition, never for animation or wall time.
-pub(super) fn settle(screen: &mut Harness<'_, MorrowApp>) {
+pub(super) fn settle(screen: &mut Harness<'_, VEditApp>) {
     for _ in 0..32 {
         if !screen.state().editor_input_pending() {
             return;
@@ -61,13 +61,13 @@ pub(super) fn settle(screen: &mut Harness<'_, MorrowApp>) {
     panic!("source input continuation did not drain");
 }
 
-fn events(screen: &mut Harness<'_, MorrowApp>, events: impl IntoIterator<Item = egui::Event>) {
+fn events(screen: &mut Harness<'_, VEditApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
     settle(screen);
 }
 
-fn text<'a>(screen: &'a Harness<'_, MorrowApp>) -> &'a str {
+fn text<'a>(screen: &'a Harness<'_, VEditApp>) -> &'a str {
     &screen.state().tab().unwrap().text
 }
 
@@ -255,7 +255,7 @@ fn remapped_save_writes_text_before_its_key_and_keeps_trailing_text_unsaved() {
     let mut screen = harness("tail", false);
     let id = screen.state().tab().unwrap().id;
     let path = std::env::temp_dir().join(format!(
-        "morrow-shortcut-save-{}-{id}.txt",
+        "vedit-shortcut-save-{}-{id}.txt",
         std::process::id()
     ));
     fs::write(&path, "tail").unwrap();

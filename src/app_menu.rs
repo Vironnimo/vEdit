@@ -1,6 +1,6 @@
 use super::*;
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn main_menu_button(&mut self, ui: &mut egui::Ui) {
         let response = icon_button(ui, Icon::Menu, false, "File, View and Run actions");
         egui::Popup::menu(&response).show(|ui| {

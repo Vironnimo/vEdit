@@ -1,3 +1,3 @@
 # Tiny project
 
-A small fixture used in Morrow's interface snapshots.
+A small fixture used in vEdit's interface snapshots.

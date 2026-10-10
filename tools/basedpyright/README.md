@@ -1,9 +1,9 @@
 # Portable Python language support
 
-Morrow's release includes basedpyright 1.40.1 and the build machine's Node runtime.
+vEdit's release includes basedpyright 1.40.1 and the build machine's Node runtime.
 The pinned package and lockfile make the language server installation reproducible.
 `scripts/package-language-tools.ps1` installs it locally with npm lifecycle scripts
-disabled, then copies it into `dist/Morrow/tools`. No global Python or npm packages
+disabled, then copies it into `dist/vEdit/tools`. No global Python or npm packages
 are changed. The Node version and its matching license are included beside node.exe;
 basedpyright's license remains inside its package.
 

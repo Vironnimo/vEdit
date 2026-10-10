@@ -12,8 +12,8 @@ fn commit(index: usize) -> git::CommitSummary {
     }
 }
 
-fn history_workspace(count: usize) -> MorrowApp {
-    let mut app = MorrowApp::empty(egui::Context::default());
+fn history_workspace(count: usize) -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
     app.set_sidebar_view_visible(SidebarView::Explorer, false);
     app.move_sidebar(SidebarView::SourceControl, sidebar_layout::Side::Left);
@@ -32,7 +32,7 @@ fn history_workspace(count: usize) -> MorrowApp {
 }
 
 fn deliver_page(
-    app: &mut MorrowApp,
+    app: &mut VEditApp,
     generation: u64,
     offset: usize,
     result: Result<git::HistoryPage, String>,
@@ -49,7 +49,7 @@ fn deliver_page(
 }
 
 fn deliver_refresh(
-    app: &mut MorrowApp,
+    app: &mut VEditApp,
     snapshot: git::HistorySnapshot,
     page: Option<git::HistoryPage>,
 ) {
@@ -72,7 +72,7 @@ fn deliver_refresh(
     app.poll();
 }
 
-fn history_screen(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn history_screen(app: VEditApp) -> Harness<'static, VEditApp> {
     // Paint the actual Git panel without draw_ui's background-result polling.
     // A dispatched page stays pending across frames so its request guard can
     // be tested independently of worker scheduling and the rest of the editor.
@@ -81,7 +81,7 @@ fn history_screen(app: MorrowApp) -> Harness<'static, MorrowApp> {
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.git_ui(ui);
             },
@@ -95,7 +95,7 @@ fn history_screen(app: MorrowApp) -> Harness<'static, MorrowApp> {
     screen
 }
 
-fn immediate_history_tooltips(screen: &mut Harness<'_, MorrowApp>) {
+fn immediate_history_tooltips(screen: &mut Harness<'_, VEditApp>) {
     screen.ctx.all_styles_mut(|style| {
         style.interaction.tooltip_delay = 0.0;
         style.interaction.tooltip_grace_time = 0.0;
@@ -109,7 +109,7 @@ impl HoverRepository {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-git-hover-ui-{}-{}",
+            "vedit-git-hover-ui-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -139,7 +139,7 @@ impl HoverRepository {
         Self(root)
     }
 
-    fn app(&self) -> MorrowApp {
+    fn app(&self) -> VEditApp {
         let mut app = history_workspace(0);
         let snapshot = git::history_snapshot(&self.0).unwrap();
         let page = git::history_page(&self.0, &snapshot, 0, 10).unwrap();
@@ -163,7 +163,7 @@ impl Drop for HoverRepository {
             root.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-git-hover-ui-")
+                .starts_with("vedit-git-hover-ui-")
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -210,7 +210,7 @@ fn history_hover_loads_statistics_once_then_reuses_cached_colored_totals() {
     assert!(screen.query_by_label("+3").is_some());
     assert!(screen.query_by_label("−1").is_some());
     assert!(screen.query_by_label(&commit.hash).is_some());
-    for (label, expected) in [("+3", ACCENT), ("−1", RED)] {
+    for (label, expected) in [("+3", GREEN), ("−1", RED)] {
         assert!(screen.output().shapes.iter().any(|shape| {
             let egui::Shape::Text(text) = &shape.shape else {
                 return false;

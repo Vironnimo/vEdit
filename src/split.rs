@@ -312,7 +312,7 @@ impl SessionLayout {
     }
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn allocate_pane_id(&mut self) -> u64 {
         let id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.saturating_add(1);

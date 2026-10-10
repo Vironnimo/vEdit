@@ -1,4 +1,4 @@
-//! Keep Windows launches of Morrow in one editor window.
+//! Keep Windows launches of vEdit in one editor window.
 
 #[cfg(windows)]
 mod platform {
@@ -43,11 +43,12 @@ mod platform {
     }
 
     pub fn acquire() -> io::Result<Option<SingleInstanceGuard>> {
+        // Share the lock with Morrow while an old installed build is still open.
         let name: Vec<u16> = std::ffi::OsStr::new("Local\\Morrow.Editor.SingleInstance")
             .encode_wide()
             .chain(Some(0))
             .collect();
-        // A named mutex is shared by every Morrow process in the current logon session.
+        // A named mutex is shared by every vEdit process in the current logon session.
         unsafe { SetLastError(0) };
         let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
@@ -63,13 +64,22 @@ mod platform {
     }
 
     fn activate_existing_window() {
-        let title: Vec<u16> = std::ffi::OsStr::new("Morrow")
-            .encode_wide()
-            .chain(Some(0))
+        let titles: Vec<Vec<u16>> = ["vEdit", "Morrow"]
+            .into_iter()
+            .map(|title| {
+                std::ffi::OsStr::new(title)
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect()
+            })
             .collect();
         // The first process can own the mutex before eframe has created its window.
         for _ in 0..60 {
-            let window = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
+            let window = titles
+                .iter()
+                .map(|title| unsafe { FindWindowW(ptr::null(), title.as_ptr()) })
+                .find(|window| !window.is_null())
+                .unwrap_or(ptr::null_mut());
             if !window.is_null() {
                 unsafe {
                     ShowWindow(window, SW_RESTORE);
@@ -91,14 +101,14 @@ mod platform {
             static TEST_ID: AtomicU64 = AtomicU64::new(1);
             let suffix = TEST_ID.fetch_add(1, Ordering::Relaxed);
             let first = acquire_named(&format!(
-                "Local\\Morrow.Test.{}.{}",
+                "Local\\vEdit.Test.{}.{}",
                 std::process::id(),
                 suffix
             ))
             .expect("first mutex acquisition");
             assert!(first.is_some());
             let second = acquire_named(&format!(
-                "Local\\Morrow.Test.{}.{}",
+                "Local\\vEdit.Test.{}.{}",
                 std::process::id(),
                 suffix
             ))

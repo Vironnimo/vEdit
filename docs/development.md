@@ -1,4 +1,4 @@
-# Developing Morrow
+# Developing vEdit
 
 Commands and source paths in this guide require the source checkout. The portable
 application includes this guide for reference, but not the Rust sources or scripts.
@@ -6,12 +6,12 @@ application includes this guide for reference, but not the Rust sources or scrip
 Use the stable Windows Rust toolchain with the MSVC build prerequisites. Git must
 be on PATH for repository functionality and its integration tests. The normal
 test suite uses temporary fixtures and headless egui harnesses; it does not need
-to control a running Morrow window.
+to control a running vEdit window.
 
 ```powershell
 cargo build
-cargo test --bin morrow reopen::tests -- --test-threads=8
-cargo test --bin morrow-cli cli::transport::tests -- --test-threads=8
+cargo test --bin vedit reopen::tests -- --test-threads=8
+cargo test --bin vedit-cli cli::transport::tests -- --test-threads=8
 ```
 
 The latter commands are examples of focused test filters. For a complete check:
@@ -25,7 +25,7 @@ git diff --check
 
 `cargo run --release` starts the actual editor and can forward files to an
 existing instance. Use it intentionally, not as an isolated test command.
-`morrow-cli` controls that same live instance unless an isolated test profile has
+`vedit-cli` controls that same live instance unless an isolated test profile has
 been configured. Never use the live session for destructive test fixtures.
 
 ## Visual references
@@ -62,14 +62,14 @@ A deliberate UI change can invalidate snapshots. First run normally, inspect the
 reported image differences, then generate candidates separately. For example:
 
 ```powershell
-$env:MORROW_SNAPSHOT_DIR = Join-Path $PWD 'target/snapshot-candidates'
+$env:VEDIT_SNAPSHOT_DIR = Join-Path $PWD 'target/snapshot-candidates'
 $env:UPDATE_SNAPSHOTS = '1'
 try {
-    cargo test --bin morrow app::visual_tests -- --test-threads=8
+    cargo test --bin vedit app::visual_tests -- --test-threads=8
     if ($LASTEXITCODE -ne 0) { throw 'Candidate rendering failed.' }
 }
 finally {
-    Remove-Item Env:MORROW_SNAPSHOT_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:VEDIT_SNAPSHOT_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:UPDATE_SNAPSHOTS -ErrorAction SilentlyContinue
 }
 ```
@@ -86,13 +86,13 @@ The ignored tests document their prerequisites beside `#[ignore]`. Run individua
 filters only after the relevant tool is available, for example:
 
 ```powershell
-cargo test --bin morrow live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
-cargo test --bin morrow live_python_diagnostics_completion_and_definition -- --ignored --nocapture
+cargo test --bin vedit live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
+cargo test --bin vedit live_python_diagnostics_completion_and_definition -- --ignored --nocapture
 ```
 
 Rust needs `rust-analyzer` and `rust-src`. Python server tests use Node and the
 pinned `tools/basedpyright` package; the virtual-environment test also needs Python.
-The Dart test reads `MORROW_TEST_DART_SERVER`. Other ignored tests include task
+The Dart test reads `VEDIT_TEST_DART_SERVER`. Other ignored tests include task
 execution, hidden process-start helpers and manual performance measurements.
 
 ## Portable Windows build
@@ -101,22 +101,39 @@ execution, hidden process-start helpers and manual performance measurements.
 .\scripts\build-release.ps1
 ```
 
-The script builds both release binaries and prepares `dist/Morrow/` plus
-`Morrow.lnk`. Packaging needs Node and npm on PATH. It installs the pinned Python
+The script builds both release binaries and prepares `dist/vEdit/` plus
+`vEdit.lnk`. Packaging needs Node and npm on PATH. It installs the pinned Python
 language server with `npm ci` when needed, and obtains the license for the bundled
 Node version if it is not cached. The bundle includes user/developer documentation,
-the repository Morrow skill, visual references and third-party licenses.
+the repository vEdit skill, visual references and third-party licenses.
 
 A running editor is preserved under a process-specific filename if it locks an
 output binary. Its window and documents remain open; it continues using the old
-code until the user closes and starts Morrow again. Do not terminate it to force a
+code until the user closes and starts vEdit again. Do not terminate it to force a
 build. Verify both packaged binaries and relevant copied files against the build
 outputs. `target/`, `dist/`, local backups and the shortcut are ignored by Git.
+
+## vEdit branding and compatibility
+
+The product, binaries, CLI help, skill and package use vEdit (`vedit` for command
+and crate names). Version 0.4.17 adopts the shared dark colors from vBot's
+`webui/src/styles/app/foundation.css` and Watchtower's `ui/app.css`.
+`src/palette.rs` owns the editor palette; green success/diff additions are
+independent of the orange action/selection accent.
+
+Existing `%APPDATA%/Morrow/recovery` and `morrow-editor/data` profiles are reused
+in place because recovery manifests include absolute paths. Fresh profiles use
+`vEdit/recovery` and `vedit-editor/data`. The recovery format signature and Windows
+single-instance lock keep their original identifiers so an older running editor
+and its unsaved documents remain safe. `VEDIT_CONTROL_DIR` takes precedence over
+the accepted `MORROW_CONTROL_DIR` alias. Task processes export both `VEDIT_*` and
+`MORROW_*` path variables so saved custom commands continue working. Historical
+review/evaluation results retain their original product names and versions.
 
 ## Documentation ownership
 
 `README.md` describes current user behavior. `AGENTS.md` provides repository
-working instructions. `.agents/skills/morrow/` teaches control of a live editor;
+working instructions. `.agents/skills/vedit/` teaches control of a live editor;
 update its references, CLI help and schema together when that interface changes.
 `docs/agent-interface.md` separates the current observable contract from historical
 evaluations. Versioned review notes retain their original results and scope.

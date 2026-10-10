@@ -498,7 +498,7 @@ struct WidgetContinuation {
     owner: Option<WidgetOwner>,
 }
 
-impl MorrowApp {
+impl VEditApp {
     fn shortcut_widget_owner(&self) -> WidgetOwner {
         WidgetOwner {
             project: self.active_project,

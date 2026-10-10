@@ -465,7 +465,7 @@ pub(super) fn tab_menu(
     action
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn control_file_action(
         &mut self,
         action: crate::cli::FileAction,
@@ -1810,10 +1810,10 @@ mod explorer_menu_tests;
 mod tests {
     use super::*;
 
-    fn filesystem_fixture() -> (MorrowApp, PathBuf) {
+    fn filesystem_fixture() -> (VEditApp, PathBuf) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
-            "morrow-file-jobs-{}-{}",
+            "vedit-file-jobs-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1821,7 +1821,7 @@ mod tests {
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         fs::create_dir(base.join("outside")).unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         let mut project = Project::new(fs::canonicalize(root).unwrap());
         project.last_git_refresh = Instant::now();
@@ -1836,7 +1836,7 @@ mod tests {
         (app, base)
     }
 
-    fn wait_file_job(app: &mut MorrowApp, id: u64) -> serde_json::Value {
+    fn wait_file_job(app: &mut VEditApp, id: u64) -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
             app.poll();
@@ -1999,8 +1999,8 @@ mod tests {
         }
     }
 
-    fn fixture() -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn fixture() -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         let mut project = Project::new(PathBuf::from("C:/context-fixture"));
         for (name, text) in [
@@ -2178,7 +2178,7 @@ mod tests {
 
     #[test]
     fn filename_validation_rejects_escape_and_windows_reserved_names() {
-        let root = std::env::temp_dir().join("morrow-context-name-validation");
+        let root = std::env::temp_dir().join("vedit-context-name-validation");
         for invalid in [
             "",
             "..",
@@ -2210,7 +2210,7 @@ mod tests {
     fn rename_cannot_replace_existing_file() {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "morrow-context-{}-{}",
+            "vedit-context-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

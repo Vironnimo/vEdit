@@ -7,7 +7,7 @@ const TEXT_BYTES: usize = 32_768;
 const MAX_SEARCH_WORKERS: usize = 4;
 static SEARCH_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn control_query(&self, request: &Request) -> Option<Response> {
         if !matches!(
             request,
@@ -104,7 +104,7 @@ impl MorrowApp {
         };
         let worker_reply = reply.clone();
         let spawn = std::thread::Builder::new()
-            .name("morrow-cli-search".into())
+            .name("vedit-cli-search".into())
             .spawn(move || {
                 let _permit = permit;
                 let response =
@@ -539,9 +539,9 @@ impl Drop for SearchPermit {
 mod tests {
     use super::*;
 
-    fn app_with_tab(text: &str, saved: &str) -> (MorrowApp, u64) {
-        let mut app = MorrowApp::empty(egui::Context::default());
-        let mut project = Project::new(std::env::temp_dir().join("morrow-query-fixture"));
+    fn app_with_tab(text: &str, saved: &str) -> (VEditApp, u64) {
+        let mut app = VEditApp::empty(egui::Context::default());
+        let mut project = Project::new(std::env::temp_dir().join("vedit-query-fixture"));
         let mut tab = EditorTab::new(Some(project.root.join("code.rs")), "code.rs".into());
         tab.text = text.into();
         tab.saved_text = saved.into();
@@ -808,7 +808,7 @@ mod tests {
     fn asynchronous_search_reads_disk_files_without_an_index_and_preserves_gui_search() {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "morrow-query-test-{}-{}",
+            "vedit-query-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -847,7 +847,7 @@ mod tests {
      {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "morrow-query-excludes-{}-{}",
+            "vedit-query-excludes-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

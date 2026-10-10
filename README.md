@@ -1,35 +1,37 @@
-# Morrow 0.4.16
+# vEdit 0.4.17
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
-Version 0.4.16 bringt **Ctrl+Shift+T** zum Wiederöffnen geschlossener Tabs und korrigiert Fehler bei CRLF-Bearbeitung, Suche, Speichern unter und der lokalen CLI-Verbindung. Details und Prüfgrenzen stehen im [Wartungsbericht](docs/maintenance-0.4.16.md). Die eigene Windows-Titelleiste und Projekt-Tabs sind in den [Fenster- und Navigationsnotizen](docs/window-chrome-0.4.15.md) beschrieben.
+Version 0.4.17 benennt Morrow in **vEdit** um und übernimmt das Farbschema von vBot und Watchtower: warmes Graphit, helle cremefarbene Schrift und Orange für Aktionen und Auswahl. Grün, Gelb, Blau und Rot kennzeichnen weiterhin Erfolg, Warnungen, Informationen und Fehler.
 
-![Morrow mit geöffnetem Projekt](tests/snapshots/morrow_workspace.png)
+Bestehende Sitzungen mit Projekten, Einstellungen, Fensterpositionen und ungespeicherten Entwürfen werden weiterverwendet. Die Programme heißen jetzt `vedit.exe` und `vedit-cli.exe`; der Starter heißt **vEdit.lnk**. Eine bereits laufende Morrow-Version bleibt bis zum normalen Schließen geöffnet. Beim nächsten Start über den neuen Starter erscheint vEdit.
+
+![vEdit mit geöffnetem Projekt](tests/snapshots/vedit_workspace.png)
 
 ## Starten
 
-Zum direkten Start **Morrow.lnk** im Projektordner doppelklicken. Die portable Anwendung liegt unter **`dist/Morrow/morrow.exe`** und lässt sich auch dort direkt starten. Zum Bearbeiten von Textdateien ist keine Rust-Installation erforderlich. Für Git-Funktionen muss `git` im `PATH` liegen; Rust-Werkzeuge werden für Rust-Projekte benötigt.
+Zum direkten Start **vEdit.lnk** im Projektordner doppelklicken. Die portable Anwendung liegt unter **`dist/vEdit/vedit.exe`** und lässt sich auch dort direkt starten. Zum Bearbeiten von Textdateien ist keine Rust-Installation erforderlich. Für Git-Funktionen muss `git` im `PATH` liegen; Rust-Werkzeuge werden für Rust-Projekte benötigt.
 
 Zum Bauen aus dem Quellcode: Rust mit dem stabilen Windows-Toolchain installieren und im Projektordner ausführen:
 
 ```powershell
 cargo build --release
-.\target\release\morrow.exe
+.\target\release\vedit.exe
 ```
 
 Alternativ startet `cargo run --release` die Anwendung. Ein Ordner oder eine Datei kann beim Start als Argument übergeben werden:
 
 ```powershell
-.\dist\Morrow\morrow.exe "C:\Code\MeinProjekt"
+.\dist\vEdit\vedit.exe "C:\Code\MeinProjekt"
 ```
 
 Beim ersten Start mit **Ctrl+Shift+O** Projektordner hinzufügen. **Ctrl+O**, das Hinzufügen von Projekten und **Save as…** verwenden die nativen Windows-Dialoge. Beim Öffnen können mehrere Dateien beziehungsweise Projektordner ausgewählt werden. Links oben zwischen Projekten wechseln, im Explorer Dateien öffnen oder mit **Ctrl+P** nach Dateinamen und Pfaden suchen. Die Dateiauswahl hat eine dauerhaft sichtbare Scrollleiste; Pfeiltasten, **Home**, **End** und **Page Up/Down** bewegen die Auswahl. **Esc** oder ein Klick außerhalb schließt die Auswahl. **Ctrl+Shift+P** öffnet die Befehlspalette; dort sind auch Aktionen ohne Tastenkürzel erreichbar.
 
-Die Projekt-Tabs sitzen oben neben dem Namen der App und wechseln per Klick direkt zum Projekt. Ein orangefarbener Punkt zeigt uncommittete Git-Änderungen; der Tooltip nennt die Anzahl. Saubere Projekte erhalten keinen Punkt. Auch inaktive Projekte werden im Hintergrund aktualisiert. Viele Projekte lassen sich horizontal durchscrollen; Tastenkürzel machen den aktiven Tab sichtbar. Der **+**-Knopf beziehungsweise **Ctrl+Alt+P** öffnet die durchsuchbare Projektliste; Namen, Pfade sowie offene und geänderte Dateien helfen bei der Auswahl. Pfeiltasten und **Enter** wechseln direkt zum Projekt, **Esc** schließt die Liste. **Ctrl+Alt+PageDown** / **Ctrl+Alt+PageUp** wechseln zum nächsten beziehungsweise vorherigen offenen Projekt. Jedes Projekt besitzt eigene Tab-Leisten, Ansichten und Splits, die beim Wechsel zusammen mitwechseln und nach einem Neustart wiederhergestellt werden. Die Dateien bleiben geöffnet und ungespeicherte Änderungen erhalten. Weitere Projektordner lassen sich über die Liste mit dem nativen Dialog hinzufügen. Im Explorer steht der aktive Projektname als feste Überschrift über seinem Dateibaum.
+Die Projekt-Tabs sitzen oben neben dem Namen der App und wechseln per Klick direkt zum Projekt. Ein gelber Punkt zeigt uncommittete Git-Änderungen; der Tooltip nennt die Anzahl. Saubere Projekte erhalten keinen Punkt. Auch inaktive Projekte werden im Hintergrund aktualisiert. Viele Projekte lassen sich horizontal durchscrollen; Tastenkürzel machen den aktiven Tab sichtbar. Der **+**-Knopf beziehungsweise **Ctrl+Alt+P** öffnet die durchsuchbare Projektliste; Namen, Pfade sowie offene und geänderte Dateien helfen bei der Auswahl. Pfeiltasten und **Enter** wechseln direkt zum Projekt, **Esc** schließt die Liste. **Ctrl+Alt+PageDown** / **Ctrl+Alt+PageUp** wechseln zum nächsten beziehungsweise vorherigen offenen Projekt. Jedes Projekt besitzt eigene Tab-Leisten, Ansichten und Splits, die beim Wechsel zusammen mitwechseln und nach einem Neustart wiederhergestellt werden. Die Dateien bleiben geöffnet und ungespeicherte Änderungen erhalten. Weitere Projektordner lassen sich über die Liste mit dem nativen Dialog hinzufügen. Im Explorer steht der aktive Projektname als feste Überschrift über seinem Dateibaum.
 
 ## Arbeiten im Editor
 
-Der Knopf mit drei Strichen ganz links über dem Explorer öffnet das Hauptmenü mit **File**, **View** und **Run**. Er bleibt auch ohne geöffnetes Projekt erreichbar. Windows verwendet eine einzelne Morrow-Titelleiste: freie Flächen ziehen das Fenster, ein Doppelklick maximiert beziehungsweise stellt es wieder her. Rechts liegen Minimieren, Maximieren/Wiederherstellen und Schließen; bei ungespeicherten Änderungen fragt Morrow vor dem Schließen nach. Die Fensterränder lassen sich weiterhin ziehen, **Alt+Space** öffnet das Windows-Fenstermenü, und der Maximieren-Knopf unterstützt die Windows-Snap-Auswahl.
+Der Knopf mit drei Strichen ganz links über dem Explorer öffnet das Hauptmenü mit **File**, **View** und **Run**. Er bleibt auch ohne geöffnetes Projekt erreichbar. Windows verwendet eine einzelne vEdit-Titelleiste: freie Flächen ziehen das Fenster, ein Doppelklick maximiert beziehungsweise stellt es wieder her. Rechts liegen Minimieren, Maximieren/Wiederherstellen und Schließen; bei ungespeicherten Änderungen fragt vEdit vor dem Schließen nach. Die Fensterränder lassen sich weiterhin ziehen, **Alt+Space** öffnet das Windows-Fenstermenü, und der Maximieren-Knopf unterstützt die Windows-Snap-Auswahl.
 
 - Gleichnamige Tabs erhalten einen kurzen Ordnerzusatz, etwa `lib.rs — client\src`; eindeutig benannte Dateien bleiben kompakt. Auch gleichnamige offene Projekte lassen sich im Projektwechsel links oben anhand ihres Ordners unterscheiden.
 - Der Speicherzustand bleibt in der Statusleiste sichtbar: **Saved**, **Unsaved**, **Saving…**, **Agent draft** oder ein Dateifehler. **Auto save on/off** schaltet das automatische Speichern für alle Projekte um. Neue Dateien und Agent-Entwürfe warten weiter auf **Ctrl+S**; der Tooltip erklärt die jeweilige Situation.
@@ -57,7 +59,7 @@ Der Explorer sortiert Ordner vor Dateien und macht die Hierarchie mit dezenten V
 
 Explorer, Suche, Source control und Review lassen sich unabhängig links oder rechts anordnen. Jede Seite zeigt genau einen aktiven Inhalt. Die Symbole ganz links wechseln zur jeweiligen Ansicht auf ihrer zugeordneten Seite. Explorer und Git können nebeneinander oder beide auf derselben Seite liegen; auf derselben Seite ersetzt ein Wechsel den sichtbaren Inhalt. Der Seitenleistenkopf zeigt nur den Namen der aktiven Ansicht und ihre Aktionen. Beide Seiten können auch leer oder ausgeblendet bleiben. **Ctrl+Alt+B** blendet nur rechts aus oder ein; **Ctrl+Alt+E** tut dasselbe links. Beide Kürzel funktionieren auch im Vim-Normalmodus. Das **×** im Seitenleistenkopf blendet die ganze Seite aus, ohne die Zuordnung zu verändern. Ziehen an der Innenkante ändert ihre Breite.
 
-Das **⋯**-Menü des aktiven Panels bietet **Move panel to left/right**, **Hide panel** und **Show …** für weitere Ansichten derselben Seite. **View → Arrange sidebar panels…** und **Settings → Layout** bieten dieselbe Zuordnung und Sichtbarkeit. Zuordnung, aktive Ansicht und Breiten werden gespeichert; bisherige Sitzungen werden übernommen. Bei schmalen Fenstern begrenzt Morrow die Breiten zugunsten des Editors. Reicht der Platz nicht für beide Seiten, erscheint ein Hinweis zum Wechseln der vorübergehend ausgeblendeten Seite; das gespeicherte Layout bleibt erhalten.
+Das **⋯**-Menü des aktiven Panels bietet **Move panel to left/right**, **Hide panel** und **Show …** für weitere Ansichten derselben Seite. **View → Arrange sidebar panels…** und **Settings → Layout** bieten dieselbe Zuordnung und Sichtbarkeit. Zuordnung, aktive Ansicht und Breiten werden gespeichert; bisherige Sitzungen werden übernommen. Bei schmalen Fenstern begrenzt vEdit die Breiten zugunsten des Editors. Reicht der Platz nicht für beide Seiten, erscheint ein Hinweis zum Wechseln der vorübergehend ausgeblendeten Seite; das gespeicherte Layout bleibt erhalten.
 
 ## Bereiche für Agenten markieren
 
@@ -67,7 +69,7 @@ Die Markierung enthält den Text zum Zeitpunkt der Auswahl, einschließlich unge
 
 Die Übersicht zeigt die tatsächlich enthaltenen Zeilen und die Zeichenanzahl. Bei **Restore last** steht sichtbar, wie viele entfernte oder von einem Agenten abgeholte Bereiche zurückkommen. Die letzte Entfernung, **Clear all** oder Abholung bestimmt das Ziel; neue Markierungen und Notizen bleiben beim Wiederherstellen erhalten.
 
-Agenten lesen die Sammlung mit `morrow-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](.agents/skills/morrow/SKILL.md), der auch im portablen Paket enthalten ist.
+Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](.agents/skills/vedit/SKILL.md), der auch im portablen Paket enthalten ist.
 
 ## Tastenkürzel
 
@@ -188,7 +190,7 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 
 Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
 
-Morrow implementiert einen eigenen Vim-Kern. Visual-Block, Makros, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+vEdit implementiert einen eigenen Vim-Kern. Visual-Block, Makros, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Markdown lesen
 
@@ -208,20 +210,20 @@ Tabs lassen sich mit der Maus innerhalb einer Tab-Leiste umsortieren oder in ein
 
 ## Mit Agenten arbeiten
 
-**`dist/Morrow/morrow-cli.exe`** steuert das laufende Fenster und startet Morrow bei `open`, `review` oder `workspace`, falls es geschlossen ist. Befehle liefern JSON mit echten Tab-IDs, Revisionen, Ladezustand und Fehlern. Agenten können die offenen Dokumente lesen und bearbeiten, Ansichten anordnen und ihre Ergebnisse zeigen:
+**`dist/vEdit/vedit-cli.exe`** steuert das laufende Fenster und startet vEdit bei `open`, `review` oder `workspace`, falls es geschlossen ist. Befehle liefern JSON mit echten Tab-IDs, Revisionen, Ladezustand und Fehlern. Agenten können die offenen Dokumente lesen und bearbeiten, Ansichten anordnen und ihre Ergebnisse zeigen:
 
 ```powershell
-.\dist\Morrow\morrow-cli.exe open "C:\Code\Projekt\plan.md" --preview
-.\dist\Morrow\morrow-cli.exe review "C:\Code\Projekt\review.json"
-.\dist\Morrow\morrow-cli.exe tabs
-.\dist\Morrow\morrow-cli.exe focus 12 --line 42 --source
-.\dist\Morrow\morrow-cli.exe bookmarks
-.\dist\Morrow\morrow-cli.exe bookmarks toggle --tab 12 --label "Review this section"
-.\dist\Morrow\morrow-cli.exe bookmarks jump 1
-.\dist\Morrow\morrow-cli.exe read 12 --line 1 --count 50
-.\dist\Morrow\morrow-cli.exe request ".\editor-action.json"
-.\dist\Morrow\morrow-cli.exe --help
-.\dist\Morrow\morrow-cli.exe schema
+.\dist\vEdit\vedit-cli.exe open "C:\Code\Projekt\plan.md" --preview
+.\dist\vEdit\vedit-cli.exe review "C:\Code\Projekt\review.json"
+.\dist\vEdit\vedit-cli.exe tabs
+.\dist\vEdit\vedit-cli.exe focus 12 --line 42 --source
+.\dist\vEdit\vedit-cli.exe bookmarks
+.\dist\vEdit\vedit-cli.exe bookmarks toggle --tab 12 --label "Review this section"
+.\dist\vEdit\vedit-cli.exe bookmarks jump 1
+.\dist\vEdit\vedit-cli.exe read 12 --line 1 --count 50
+.\dist\vEdit\vedit-cli.exe request ".\editor-action.json"
+.\dist\vEdit\vedit-cli.exe --help
+.\dist\vEdit\vedit-cli.exe schema
 ```
 
 Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App-Prozess. Die oben gezeigte `12` ist ein Beispiel. `request` führt strukturierte JSON-Aktionen aus; `schema` zeigt deren aktuelle Formen und Vorgaben.
@@ -269,13 +271,13 @@ Die Seitenleiste **Review** zeigt die Dateien und Hinweise mit ausgeschriebener 
 
 `open` und `review` erhalten ungespeicherten Text. Unveränderte offene Dateien werden dabei im Hintergrund vom Datenträger aktualisiert. `close` lehnt geänderte oder noch speichernde Tabs ab. Öffnen, Laden und Speichern sind getrennte Zustände; eine erfolgreiche Anfrage allein bedeutet nicht, dass eine Datei bereits geladen oder geschrieben wurde. Die Verbindung bleibt lokal und ist pro Sitzung authentifiziert.
 
-Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/morrow/SKILL.md](.agents/skills/morrow/SKILL.md). Die portable Anwendung enthält eine Kopie unter `skills/morrow/`. Er erklärt die Bedienung und wie der Agent prüft, ob die angeforderten Änderungen und Dokumente tatsächlich bereit sind; eine persönliche Installation ist nicht erforderlich.
+Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/vedit/SKILL.md](.agents/skills/vedit/SKILL.md). Die portable Anwendung enthält eine Kopie unter `skills/vedit/`. Er erklärt die Bedienung und wie der Agent prüft, ob die angeforderten Änderungen und Dokumente tatsächlich bereit sind; eine persönliche Installation ist nicht erforderlich.
 
 ## Speichern und Wiederherstellung
 
 **Ctrl+S** speichert die aktive Datei, **Ctrl+Shift+S** alle geänderten Dateien. Neue Dateien und **File → Save as…** öffnen den Windows-Speicherdialog, auch außerhalb des Projekts. Eine vorhandene Zieldatei wird erst nach der Windows-Bestätigung ersetzt; spätere Änderungen auf dem Datenträger bleiben durch die Konfliktprüfung geschützt. Eine Datei, die bereits in einem anderen Tab offen ist, lässt sich nicht als Ziel überschreiben. Abbrechen erhält den ungespeicherten Text.
 
-Automatisches Speichern schreibt benannte Dateien standardmäßig nach **850 ms Schreibpause**. In Settings lässt sich die Verzögerung auf **300–5000 ms** ändern oder Autosave ausschalten. Wiederherstellungskopien werden unabhängig davon weiterhin nach 850 ms für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\Morrow\recovery` und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt Morrow nach ungespeicherten Änderungen.
+Automatisches Speichern schreibt benannte Dateien standardmäßig nach **850 ms Schreibpause**. In Settings lässt sich die Verzögerung auf **300–5000 ms** ändern oder Autosave ausschalten. Wiederherstellungskopien werden unabhängig davon weiterhin nach 850 ms für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\vEdit\recovery` (bei bestehenden Installationen weiterhin `%APPDATA%\Morrow\recovery`) und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt vEdit nach ungespeicherten Änderungen.
 
 Dateien werden über eine temporäre Datei im selben Ordner atomar gespeichert. Änderungen auf dem Datenträger werden vor dem Ersetzen geprüft; ein Konflikt überschreibt die externe Version nicht. Unveränderte offene Dateien werden bei externen Änderungen aktualisiert. Bei eigenen Änderungen den Inhalt mit **Save as…** sichern, bevor die externe Fassung erneut geöffnet wird. **Reload file from disk** in der Befehlspalette lädt eine unveränderte Datei neu.
 
@@ -291,7 +293,7 @@ Die portable Ausgabe bringt **basedpyright und Node** für Python mit. Ein vorha
 
 **Settings → Editing** steuert Einrückung. Neue Python-Dateien verwenden vier, Dart-Dateien zwei Leerzeichen. Vorhandene Einrückung wird automatisch erkannt; diese Erkennung lässt sich ausschalten. Breite und Tab-Verwendung sind je Sprache überschreibbar. Die Statusleiste zeigt die tatsächlich verwendete Einstellung und öffnet sie per Klick. Einstellungen ändern zukünftige Eingaben; vorhandener Text wird nicht automatisch umformatiert.
 
-**Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; Morrow zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben.
+**Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; vEdit zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben.
 
 ## Git und Befehle
 
@@ -303,11 +305,11 @@ Ein Klick auf eine Änderung öffnet ihren Diff mit alten und neuen Zeilennummer
 
 **History** zeigt einen Commit-Graphen mit Verzweigungen und Zusammenführungen. Jede Zeile enthält die Commit-Nachricht und dahinter den dezenten Autor; lange Nachrichten dürfen den Autor aus dem sichtbaren Bereich schieben. Im Hover stehen vollständige Metadaten, Branch-Bezeichnungen, die Anzahl geänderter Dateien und hinzugefügte/entfernte Zeilen in Grün/Rot. Diese Zahlen werden im Hintergrund geladen und zwischengespeichert; bei Merge-Commits beziehen sie sich auf den ersten Eltern-Commit. Ein Klick auf einen Commit öffnet Autor, Datum, vollständige Nachricht, Hash, Eltern und einen Dateibaum mit Zeilenzahlen. Beim Scrollen werden ältere Einträge automatisch nachgeladen. Die Historie bleibt beim Lesen stabil; bei neuen Commits oder verschobenen Branches bietet **History changed · Refresh** den Wechsel zum neuen Stand an. Die Dateien in den Commit-Details öffnen den historischen Diff dieses Commits. Ein Klick außerhalb oder **Esc** schließt jeweils die oberste Ansicht. Alle Git-Abfragen laufen im Hintergrund. Commit-Details werden zwischengespeichert und große Diffs rendern nur ihre sichtbaren Zeilen.
 
-Im Bereich **Output** lassen sich zusätzlich eigene Befehle im aktiven Projektordner starten. Sie verwenden die ausgewählte Python-Umgebung. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Eigene Befehle können `MORROW_ROOT`, `MORROW_FILE` und `MORROW_PYTHON` als Umgebungsvariablen verwenden; Dateipfade werden nicht in Shellcode interpoliert.
+Im Bereich **Output** lassen sich zusätzlich eigene Befehle im aktiven Projektordner starten. Sie verwenden die ausgewählte Python-Umgebung. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Eigene Befehle können `VEDIT_ROOT`, `VEDIT_FILE` und `VEDIT_PYTHON` als Umgebungsvariablen verwenden; Dateipfade werden nicht in Shellcode interpoliert.
 
 Der Ausgabebereich ist ein Befehlsstarter mit Ausgabeanzeige. Interaktive Eingabe, Terminal-Anwendungen und Passwortabfragen sind dort nicht unterstützt. Befehle haben ein Zeitlimit von zehn Minuten; die Ausgabe wird begrenzt. **Run → Open terminal** öffnet für interaktive Arbeit ein separates PowerShell-Fenster im aktiven Projektordner. **Open terminal** ist ebenfalls in der Befehlspalette verfügbar.
 
-Morrow bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt, Mehrfachcursor oder vollständigen VS-Code-Funktionsumfang.
+vEdit bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt, Mehrfachcursor oder vollständigen VS-Code-Funktionsumfang.
 
 ## Prüfen
 
@@ -321,4 +323,4 @@ Die Tests decken Bearbeitung, Vim, Dateizugriffe, Wiederherstellung, Git, CLI, B
 cargo test live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
 ```
 
-Build, gezielte Tests, Bildreferenzen und portable Pakete beschreibt die [Entwicklungsanleitung](docs/development.md). Repository-Agenten beginnen mit [AGENTS.md](AGENTS.md); die Bedienung einer laufenden Morrow-Instanz erklärt der separate [Morrow-Skill](.agents/skills/morrow/SKILL.md).
+Build, gezielte Tests, Bildreferenzen und portable Pakete beschreibt die [Entwicklungsanleitung](docs/development.md). Repository-Agenten beginnen mit [AGENTS.md](AGENTS.md); die Bedienung einer laufenden vEdit-Instanz erklärt der separate [vEdit-Skill](.agents/skills/vedit/SKILL.md).

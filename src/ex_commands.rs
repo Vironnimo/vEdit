@@ -335,7 +335,7 @@ fn regex_case_overrides(query: &str, mut insensitive: bool) -> (String, bool) {
     (pattern, insensitive)
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn begin_ex_command(&mut self, mut command: String) {
         let visual_lines = self.tab().and_then(|tab| {
             tab.vim.selection(&tab.text).map(|selection| {
@@ -804,12 +804,12 @@ mod tests {
         assert!(substitute("'<,'>s/x/y/", "x", 0, Some(&(3..5)), None).is_err());
     }
 
-    fn fixture(document: &str) -> MorrowApp {
-        let mut app = MorrowApp::empty(egui::Context::default());
+    fn fixture(document: &str) -> VEditApp {
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         app.settings.smooth_scroll = false;
         app.sidebar_visible = false;
-        let root = std::env::temp_dir().join("morrow-ex-render-only");
+        let root = std::env::temp_dir().join("vedit-ex-render-only");
         let mut project = Project::new(root.clone());
         project.last_git_refresh = Instant::now();
         let mut tab = EditorTab::new(Some(root.join("notes.txt")), "notes.txt".into());
@@ -821,12 +821,12 @@ mod tests {
         app
     }
 
-    fn harness(app: MorrowApp) -> egui_kittest::Harness<'static, MorrowApp> {
+    fn harness(app: VEditApp) -> egui_kittest::Harness<'static, VEditApp> {
         let mut screen = egui_kittest::Harness::builder()
             .with_size([1100.0, 700.0])
             .with_os(egui::os::OperatingSystem::Windows)
             .build_ui_state(
-                |ui, app: &mut MorrowApp| {
+                |ui, app: &mut VEditApp| {
                     app.ctx = ui.ctx().clone();
                     app.last_disk_check = Instant::now();
                     app.last_session_save = Instant::now();
@@ -847,12 +847,12 @@ mod tests {
         screen
     }
 
-    fn text(screen: &mut egui_kittest::Harness<'_, MorrowApp>, input: &str) {
+    fn text(screen: &mut egui_kittest::Harness<'_, VEditApp>, input: &str) {
         screen.event(egui::Event::Text(input.into()));
         screen.run_steps(2);
     }
 
-    fn key(screen: &mut egui_kittest::Harness<'_, MorrowApp>, key: Key) {
+    fn key(screen: &mut egui_kittest::Harness<'_, VEditApp>, key: Key) {
         screen
             .input_mut()
             .events

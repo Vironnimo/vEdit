@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$releaseDirectory = Join-Path $projectRoot 'dist/Morrow'
+$releaseDirectory = Join-Path $projectRoot 'dist/vEdit'
 $preservedBinaries = [System.Collections.Generic.List[object]]::new()
 
 function Preserve-RunningEditor([string]$BinaryPath) {
@@ -17,11 +17,11 @@ function Preserve-RunningEditor([string]$BinaryPath) {
         return
     }
     catch [System.IO.IOException] {
-        $runningEditor = Get-Process -Name 'morrow' -ErrorAction SilentlyContinue |
+        $runningEditor = Get-Process -Name 'vedit' -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -and [System.IO.Path]::GetFullPath($_.Path) -eq $absoluteBinary } |
             Select-Object -First 1
         if (-not $runningEditor) { throw }
-        $backup = Join-Path (Split-Path -Parent $absoluteBinary) "morrow-running-$($runningEditor.Id).exe"
+        $backup = Join-Path (Split-Path -Parent $absoluteBinary) "vedit-running-$($runningEditor.Id).exe"
         if (Test-Path -LiteralPath $backup) { throw "The running editor backup already exists: $backup" }
         Move-Item -LiteralPath $absoluteBinary -Destination $backup -ErrorAction Stop
         $preservedBinaries.Add([pscustomobject]@{ Original = $absoluteBinary; Backup = $backup })
@@ -31,27 +31,27 @@ function Preserve-RunningEditor([string]$BinaryPath) {
 
 Push-Location $projectRoot
 try {
-    Preserve-RunningEditor (Join-Path $projectRoot 'target/release/morrow.exe')
+    Preserve-RunningEditor (Join-Path $projectRoot 'target/release/vedit.exe')
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
     New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-    $executable = Join-Path $releaseDirectory 'morrow.exe'
+    $executable = Join-Path $releaseDirectory 'vedit.exe'
     Preserve-RunningEditor $executable
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/morrow.exe') -Destination $executable -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/morrow-cli.exe') -Destination $releaseDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/vedit.exe') -Destination $executable -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/vedit-cli.exe') -Destination $releaseDirectory -Force
     & (Join-Path $PSScriptRoot 'package-language-tools.ps1') -ReleaseDirectory $releaseDirectory
-    $packagedReadme = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'README.md')).Replace('(.agents/skills/morrow/SKILL.md)', '(skills/morrow/SKILL.md)')
+    $packagedReadme = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'README.md')).Replace('(.agents/skills/vedit/SKILL.md)', '(skills/vedit/SKILL.md)')
     [System.IO.File]::WriteAllText((Join-Path $releaseDirectory 'README.md'), $packagedReadme, [System.Text.UTF8Encoding]::new($false))
     $previewDirectory = Join-Path $releaseDirectory 'tests/snapshots'
     New-Item -ItemType Directory -Path $previewDirectory -Force | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'tests/snapshots') -File |
-        Where-Object { $_.Name -match '^morrow_[a-z0-9_]+\.png$' } |
+        Where-Object { $_.Name -match '^vedit_[a-z0-9_]+\.png$' } |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $previewDirectory -Force }
-    $skillDirectory = Join-Path $releaseDirectory 'skills/morrow'
+    $skillDirectory = Join-Path $releaseDirectory 'skills/vedit'
     New-Item -ItemType Directory -Path $skillDirectory -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/morrow/SKILL.md') -Destination $skillDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/morrow/agents') -Destination $skillDirectory -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/morrow/references') -Destination $skillDirectory -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/vedit/SKILL.md') -Destination $skillDirectory -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/vedit/agents') -Destination $skillDirectory -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/vedit/references') -Destination $skillDirectory -Recurse -Force
     $documentationDirectory = Join-Path $releaseDirectory 'docs'
     New-Item -ItemType Directory -Path $documentationDirectory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
@@ -62,10 +62,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/code-review-0.4.10.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/usability-review-0.4.11.md') -Destination $documentationDirectory -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/polyglot-keyboard-review-0.4.12.md') -Destination $documentationDirectory -Force
-    $packagedPolish = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/interaction-polish-0.4.13.md')).Replace('../vendor/winit/MORROW_PATCH.md', '../licenses/winit/MORROW_PATCH.md')
+    $packagedPolish = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/interaction-polish-0.4.13.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
     [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'interaction-polish-0.4.13.md'), $packagedPolish, [System.Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/ux-fixes-0.4.14.md') -Destination $documentationDirectory -Force
-    $packagedChrome = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/window-chrome-0.4.15.md')).Replace('../vendor/winit/MORROW_PATCH.md', '../licenses/winit/MORROW_PATCH.md')
+    $packagedChrome = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/window-chrome-0.4.15.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
     [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'window-chrome-0.4.15.md'), $packagedChrome, [System.Text.UTF8Encoding]::new($false))
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
     New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
@@ -79,18 +79,27 @@ try {
     }
     $windowLicenseDirectory = Join-Path $releaseDirectory 'licenses/winit'
     New-Item -ItemType Directory -Path $windowLicenseDirectory -Force | Out-Null
-    foreach ($windowDocumentation in @('LICENSE', 'MORROW_PATCH.md')) {
+    foreach ($windowDocumentation in @('LICENSE', 'VEDIT_PATCH.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/winit/$windowDocumentation") -Destination $windowLicenseDirectory -Force
     }
     if ($env:OS -eq 'Windows_NT') {
         $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut((Join-Path $projectRoot 'Morrow.lnk'))
+        $shortcut = $shell.CreateShortcut((Join-Path $projectRoot 'vEdit.lnk'))
         $shortcut.TargetPath = $executable
         $shortcut.WorkingDirectory = $projectRoot
-        $shortcut.Description = 'Morrow - Vim editor'
+        $shortcut.Description = 'vEdit - Vim editor'
         $shortcut.Save()
+        # Retire only this checkout's former launcher, after the new one exists.
+        $legacyShortcutPath = Join-Path $projectRoot 'Morrow.lnk'
+        if (Test-Path -LiteralPath $legacyShortcutPath -PathType Leaf) {
+            $legacyShortcut = $shell.CreateShortcut($legacyShortcutPath)
+            $legacyExecutable = Join-Path $projectRoot 'dist/Morrow/morrow.exe'
+            if ($legacyShortcut.TargetPath -eq $legacyExecutable) {
+                Remove-Item -LiteralPath $legacyShortcutPath
+            }
+        }
     }
-    Write-Output "Morrow is ready: $executable"
+    Write-Output "vEdit is ready: $executable"
 }
 catch {
     $releaseFailure = $_

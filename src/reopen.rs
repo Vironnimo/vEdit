@@ -10,7 +10,7 @@ pub(super) struct ClosedTab {
     view: crate::cli::DocumentView,
 }
 
-impl MorrowApp {
+impl VEditApp {
     pub(super) fn closed_tab_for_action(&self, action: CloseAction) -> Option<(usize, ClosedTab)> {
         let (id, pane) = match action {
             CloseAction::Tab(id) => (id, None),

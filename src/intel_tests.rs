@@ -8,7 +8,7 @@ impl IntelFixture {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let path = std::env::temp_dir().join(format!(
-            "morrow-intel-{label}-{}-{}",
+            "vedit-intel-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -16,10 +16,10 @@ impl IntelFixture {
         Self(fs::canonicalize(path).unwrap())
     }
 
-    fn app(&self, text: &str) -> (MorrowApp, PathBuf) {
+    fn app(&self, text: &str) -> (VEditApp, PathBuf) {
         let path = self.0.join("source.rs");
         fs::write(&path, text).unwrap();
-        let mut app = MorrowApp::empty(egui::Context::default());
+        let mut app = VEditApp::empty(egui::Context::default());
         app.settings.autosave = false;
         app.recovery_session_path = self.0.join("recovery/session.json");
         app.add_project(self.0.clone());
@@ -44,7 +44,7 @@ impl Drop for IntelFixture {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("morrow-intel-")
+                .starts_with("vedit-intel-")
         );
         let _ = fs::remove_dir_all(&self.0);
     }
@@ -73,7 +73,7 @@ fn range(line: u32, start: u32, end: u32) -> TextRange {
     }
 }
 
-fn popup(app: &mut MorrowApp, items: Vec<CompletionItem>) {
+fn popup(app: &mut VEditApp, items: Vec<CompletionItem>) {
     let tab = app.tab().unwrap();
     let path = tab.path.clone().unwrap();
     let id = tab.id;
@@ -92,7 +92,7 @@ fn popup(app: &mut MorrowApp, items: Vec<CompletionItem>) {
     });
 }
 
-fn fake_language(app: &mut MorrowApp) -> mpsc::SyncSender<LspEvent> {
+fn fake_language(app: &mut VEditApp) -> mpsc::SyncSender<LspEvent> {
     let (server, sender) = crate::lsp::LanguageServer::test_channel();
     app.projects[0].rust_language_mut().server = Some(server);
     app.projects[0].rust_language_mut().ready = true;
@@ -107,7 +107,7 @@ fn fake_language(app: &mut MorrowApp) -> mpsc::SyncSender<LspEvent> {
     sender
 }
 
-fn completion_event(app: &MorrowApp) -> LspEvent {
+fn completion_event(app: &VEditApp) -> LspEvent {
     let tab = app.tab().unwrap();
     LspEvent::Completions {
         request_id: 41,
@@ -128,11 +128,11 @@ fn key(key: Key) -> egui::Event {
     }
 }
 
-fn keyboard_harness(app: MorrowApp) -> Harness<'static, MorrowApp> {
+fn keyboard_harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut harness = Harness::builder()
         .with_size([1200.0, 760.0])
         .build_ui_state(
-            |ui, app: &mut MorrowApp| {
+            |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.shortcuts();
                 app.handle_vim();
