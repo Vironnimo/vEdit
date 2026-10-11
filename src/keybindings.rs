@@ -688,6 +688,7 @@ impl VEditApp {
                 }
             }
             Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                self.interface_zoom_draft = None;
                 self.settings.ui_scale = match action {
                     Action::ZoomIn => (self.settings.ui_scale + 0.1).min(2.0),
                     Action::ZoomOut => (self.settings.ui_scale - 0.1).max(0.75),

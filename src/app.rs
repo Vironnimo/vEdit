@@ -659,6 +659,7 @@ pub struct VEditApp {
     context_file_jobs: context_actions::FileJobRegistry,
     native_dialog_builder: Option<rfd::FileDialog>,
     settings_open: bool,
+    interface_zoom_draft: Option<f32>,
     keybinding_ui: keybindings::State,
     project_tasks_settings_requested: bool,
     project_tasks_interpreter_pending: Option<usize>,
@@ -914,6 +915,7 @@ impl VEditApp {
             context_file_jobs: context_actions::FileJobRegistry::default(),
             native_dialog_builder: None,
             settings_open: false,
+            interface_zoom_draft: None,
             keybinding_ui: keybindings::State::default(),
             project_tasks_settings_requested: false,
             project_tasks_interpreter_pending: None,
@@ -6726,6 +6728,7 @@ impl VEditApp {
             self.ctx.set_zoom_factor(self.settings.ui_scale);
             self.apply_editor_font();
             if !self.settings_open {
+                self.interface_zoom_draft = None;
                 self.apply_pending_project_interpreter();
                 self.keybinding_ui = keybindings::State::default();
                 ctx.memory_mut(|memory| {
@@ -6959,6 +6962,9 @@ impl VEditApp {
         self.poll();
         self.sync_agent_marks();
         self.poll_control();
+        if !self.settings_open {
+            self.interface_zoom_draft = None;
+        }
         self.ctx.set_zoom_factor(self.settings.ui_scale);
         self.apply_editor_font();
         self.syntax.begin_frame(ui);

@@ -36,17 +36,31 @@ impl VEditApp {
     pub(super) fn reading_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
         preference_heading(ui, "READING & APPEARANCE");
-        let mut percent = self.settings.ui_scale * 100.0;
-        if ui
+        let cancelling = ui.input(|input| input.key_pressed(Key::Escape));
+        let mut percent = self
+            .interface_zoom_draft
+            .filter(|_| !cancelling)
+            .unwrap_or(self.settings.ui_scale * 100.0);
+        let zoom = ui
             .add(
                 egui::Slider::new(&mut percent, 75.0..=200.0)
                     .text("Interface zoom")
                     .suffix("%"),
             )
-            .changed()
-        {
-            self.settings.ui_scale = percent / 100.0;
-            changed = true;
+            .on_hover_text("Release the mouse to apply the zoom. You can also enter a percentage.");
+        // Resizing a held slider moves its track beneath the pointer and feeds
+        // that new position back into the value. Keep its geometry fixed until
+        // release, including when dragging the numeric value beside the track.
+        if cancelling {
+            self.interface_zoom_draft = None;
+        } else if zoom.is_pointer_button_down_on() {
+            self.interface_zoom_draft = Some(percent);
+        } else {
+            let finishing_drag = self.interface_zoom_draft.take().is_some();
+            if (zoom.changed() || finishing_drag) && self.settings.ui_scale != percent / 100.0 {
+                self.settings.ui_scale = percent / 100.0;
+                changed = true;
+            }
         }
         ui.label(
             RichText::new(format!(

@@ -20,6 +20,7 @@ impl VEditApp {
     }
 
     pub(super) fn open_settings_section(&mut self, section: &str) {
+        self.interface_zoom_draft = None;
         if SECTIONS.contains(&section) {
             self.ctx.data_mut(|data| {
                 data.insert_temp(egui::Id::new("settings_section"), section.to_owned())
@@ -37,6 +38,7 @@ impl VEditApp {
             }
         });
         if selected != previous {
+            self.interface_zoom_draft = None;
             if previous == "Tasks" {
                 self.apply_pending_project_interpreter();
             }

@@ -1,6 +1,9 @@
 //! Font preferences must change painted text without disturbing editor state.
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 
 const DOCUMENT: &str = "before: target after\nSecond line · β🦀\n";
 
@@ -109,6 +112,122 @@ fn key(screen: &mut Harness<'_, VEditApp>, key: Key, modifiers: egui::Modifiers)
         egui::Event::ModifiersChanged(egui::Modifiers::NONE),
     ]);
     screen.run_steps(3);
+}
+
+#[test]
+fn interface_zoom_drag_keeps_geometry_stable_until_release() {
+    let slider_rect = |screen: &Harness<'_, VEditApp>| {
+        screen
+            .get_all_by_label("Interface zoom")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Slider)
+            .unwrap()
+            .rect()
+    };
+    for initial_zoom in [0.75, 1.0, 2.0] {
+        let mut app = fixture();
+        app.settings.ui_scale = initial_zoom;
+        app.open_settings_section("Appearance");
+        let mut screen = harness(app);
+        let slider = slider_rect(&screen);
+        let start = egui::pos2(slider.center().x, slider.center().y);
+        let target = egui::pos2(slider.left() + slider.width() * 0.45, slider.center().y);
+        screen.hover_at(start);
+        screen.drag_at(start);
+        screen.run_steps(2);
+        screen.hover_at(target);
+        screen.run_steps(2);
+        assert_eq!(
+            screen.ctx.zoom_factor(),
+            initial_zoom,
+            "do not resize a held slider"
+        );
+        assert_eq!(slider_rect(&screen), slider);
+        // A stationary mouse must not make the selection run towards an endpoint.
+        for _ in 0..6 {
+            screen.hover_at(target);
+            screen.run_steps(1);
+            assert_eq!(screen.ctx.zoom_factor(), initial_zoom);
+            assert_eq!(slider_rect(&screen), slider);
+        }
+        screen.drop_at(target);
+        screen.run_steps(4);
+        let chosen = screen.state().settings.ui_scale;
+        assert!(
+            (1.2..1.5).contains(&chosen),
+            "an intermediate zoom must be selectable: {chosen}"
+        );
+        assert!((screen.ctx.zoom_factor() - chosen).abs() < 0.001);
+        screen.run_steps(4);
+        assert_eq!(
+            screen.state().settings.ui_scale,
+            chosen,
+            "the released value stays put"
+        );
+        let saved = screen.state().session();
+        assert_eq!(saved.settings.unwrap().ui_scale, chosen);
+        assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
+        assert_eq!(screen.state().tab().unwrap().revision, 0);
+    }
+}
+
+#[test]
+fn interface_zoom_numeric_drag_commits_the_displayed_percentage_on_release() {
+    let mut app = fixture();
+    app.open_settings_section("Appearance");
+    let mut screen = harness(app);
+    let number = screen
+        .get_all_by_label("Interface zoom")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::SpinButton)
+        .unwrap()
+        .rect();
+    let start = number.center();
+    let target = start + Vec2::new(12.0, 0.0);
+    screen.hover_at(start);
+    screen.drag_at(start);
+    screen.run_steps(1);
+    screen.hover_at(target);
+    screen.run_steps(3);
+    let displayed = screen
+        .get_all_by_label("Interface zoom")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::SpinButton)
+        .unwrap()
+        .accesskit_node()
+        .numeric_value()
+        .unwrap() as f32
+        / 100.0;
+    assert!(
+        (1.01..1.8).contains(&displayed),
+        "numeric drag updates the displayed value: {displayed}"
+    );
+    assert_eq!(screen.ctx.zoom_factor(), 1.0);
+    assert_eq!(screen.state().settings.ui_scale, 1.0);
+    screen.drop_at(target);
+    screen.run_steps(4);
+    assert!((screen.state().settings.ui_scale - displayed).abs() < 0.001);
+    assert!((screen.ctx.zoom_factor() - displayed).abs() < 0.001);
+}
+
+#[test]
+fn interface_zoom_dismissed_drag_is_not_applied_when_settings_reopens() {
+    let mut app = fixture();
+    app.open_settings_section("Appearance");
+    let mut screen = harness(app);
+    let slider = screen
+        .get_all_by_label("Interface zoom")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Slider)
+        .unwrap()
+        .rect();
+    screen.hover_at(slider.center());
+    screen.drag_at(slider.center());
+    screen.run_steps(2);
+    key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+    assert!(!screen.state().settings_open);
+    screen.drop_at(slider.center());
+    screen.run_steps(2);
+    key(&mut screen, Key::Comma, egui::Modifiers::COMMAND);
+    assert!(screen.state().settings_open);
+    assert_eq!(screen.state().settings.ui_scale, 1.0);
+    assert_eq!(screen.ctx.zoom_factor(), 1.0);
 }
 
 #[test]
