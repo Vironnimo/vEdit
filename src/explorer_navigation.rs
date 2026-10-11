@@ -953,6 +953,7 @@ mod tests {
                 path: path.clone(),
                 name,
                 is_dir: true,
+                ignored: false,
             });
             let entries = (0..500)
                 .map(|file| {
@@ -961,6 +962,7 @@ mod tests {
                         path: path.join(&name),
                         name,
                         is_dir: false,
+                        ignored: false,
                     }
                 })
                 .collect();

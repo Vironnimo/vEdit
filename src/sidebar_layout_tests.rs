@@ -722,12 +722,14 @@ fn overflowing_explorer_fixture(side: Side, width: f32) -> VEditApp {
             path: root.join(format!("file{index:03}.rs")),
             name: format!("file{index:03}.rs"),
             is_dir: false,
+            ignored: false,
         })
         .collect();
     entries.push(workspace::WorkspaceEntry {
         path: root.join("source.rs"),
         name: "source.rs".into(),
         is_dir: false,
+        ignored: false,
     });
     assert!(tree.complete(
         &root,

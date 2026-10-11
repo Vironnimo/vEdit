@@ -175,6 +175,9 @@ impl VEditApp {
                     active_file
                 };
                 let mut tooltip = crate::paths::display(&entry.path);
+                if entry.ignored {
+                    tooltip.push_str("\nIgnored by Git");
+                }
                 if let Some(explorer) = self.project().and_then(|project| project.explorer.as_ref())
                 {
                     if explorer.is_loading(&entry.path) {
@@ -196,6 +199,7 @@ impl VEditApp {
                         // while menu items temporarily own keyboard focus.
                         selected: emphasized,
                         active_file,
+                        ignored: entry.ignored,
                         tooltip: &tooltip,
                     },
                 );

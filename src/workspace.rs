@@ -50,6 +50,7 @@ pub struct WorkspaceEntry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+    pub ignored: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +253,19 @@ pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<Explorer
         entries: Vec::new(),
         warnings: Vec::new(),
     };
+    // Evaluate Git rules without filtering or recursively walking the tree.
+    // A fresh matcher observes edits on refresh; ancestors are cached within
+    // this listing, including the inherited status of ignored directories.
+    let mut ignored = WalkBuilder::new(root)
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .require_git(false)
+        .build_matchers()
+        .pop()
+        .expect("one Explorer root has one ignore matcher");
     for result in reader {
         let entry = match result {
             Ok(entry) => entry,
@@ -284,7 +298,22 @@ pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<Explorer
                 false
             }
         };
-        listing.entries.push(WorkspaceEntry { path, name, is_dir });
+        let (matched, error) = ignored.matched_with_errors(
+            path.strip_prefix(root)
+                .expect("entry belongs to the listed folder"),
+            is_dir,
+        );
+        if let Some(error) = error
+            && listing.warnings.len() < MAX_WARNINGS
+        {
+            listing.warnings.push(error.to_string());
+        }
+        listing.entries.push(WorkspaceEntry {
+            path,
+            name,
+            is_dir,
+            ignored: matched.is_ignore(),
+        });
     }
     listing.entries.sort_unstable_by(|a, b| {
         b.is_dir
@@ -585,6 +614,7 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
             path: entry.path().to_path_buf(),
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: file_type.is_dir(),
+            ignored: false,
         });
     }
     index.entries.sort_unstable_by(|a, b| {
@@ -1534,6 +1564,50 @@ mod tests {
     }
 
     #[test]
+    fn explorer_marks_gitignored_entries_without_hiding_them() {
+        let fixture = Fixture::new("explorer-ignored-status");
+        fixture.write(".gitignore", "ignored/\n*.log\n!keep.log\n");
+        fixture.write("ignored/nested/.gitignore", "!secret.txt\n");
+        fixture.write("ignored/nested/secret.txt", "ignored parent wins");
+        fixture.write(
+            "target/generated.txt",
+            "not ignored just because it is generated",
+        );
+        fixture.write("output.log", "ignored");
+        fixture.write("keep.log", "exception");
+        fixture.write(".hidden", "hidden is not ignored");
+        fixture.write(".ignore", "search-only.txt\n");
+        fixture.write("search-only.txt", "not a Git ignore rule");
+        fixture.write("src/.gitignore", "generated.rs\n!nested.log\n");
+        fixture.write("src/generated.rs", "ignored nested rule");
+        fixture.write("src/nested.log", "nested exception");
+        fixture.write("src/main.rs", "normal");
+        for (relative, ignored) in [
+            ("ignored", true),
+            ("ignored/nested", true),
+            ("ignored/nested/secret.txt", true),
+            ("output.log", true),
+            ("keep.log", false),
+            ("target", false),
+            ("target/generated.txt", false),
+            (".hidden", false),
+            ("search-only.txt", false),
+            ("src/generated.rs", true),
+            ("src/nested.log", false),
+            ("src/main.rs", false),
+        ] {
+            let path = fixture.0.join(relative);
+            let listing = read_explorer_directory(&fixture.0, path.parent().unwrap()).unwrap();
+            let entry = listing
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap_or_else(|| panic!("ignored entries must remain visible: {relative}"));
+            assert_eq!(entry.ignored, ignored, "{relative}");
+        }
+    }
+
+    #[test]
     fn explorer_lists_ignored_and_generated_entries_without_recursing() {
         let fixture = Fixture::new("explorer-complete-directory");
         fixture.write(".gitignore", "ignored/\n*.log\n");
@@ -2086,6 +2160,7 @@ mod tests {
             index.entries.push(WorkspaceEntry {
                 name: format!("module_{file:06}.rs"),
                 is_dir: false,
+                ignored: false,
                 path: path.clone(),
             });
             index.files.push(path);

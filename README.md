@@ -2,7 +2,7 @@
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
-Version 0.4.22 beruhigt die Darstellung im Explorer und im Markdown-Quelltext: Die Auswahl bleibt auf der Datei- oder Ordnerzeile, ohne Rahmen um den gesamten Explorer und ohne linken Akzentstrich. Markdown-Listen verwenden normale helle Schrift und dezente blaue Aufzählungszeichen.
+Version 0.4.22 beruhigt die Darstellung im Explorer und im Markdown-Quelltext: Die Auswahl bleibt auf der Datei- oder Ordnerzeile, ohne Rahmen um den gesamten Explorer und ohne linken Akzentstrich. Git-ignorierte Dateien und Ordner erscheinen grau und bleiben vollständig bedienbar. Markdown-Listen verwenden normale helle Schrift und dezente blaue Aufzählungszeichen.
 
 Version 0.4.21 stellt den Repository-Stand oben in Source control dar: geänderte Dateien, Abstand zum Tracking-Branch und Vergleich mit dem lokalen `main` (ersatzweise `master`). **Fetch**, **Pull** und **Push** sind direkt sichtbar. Ein Repository oberhalb des geöffneten Projektordners wird erst nach ausdrücklicher Auswahl verwendet.
 
@@ -61,7 +61,7 @@ Rechtsklick auf Dateien und Ordner markiert den betroffenen Eintrag über die ga
 
 Im fokussierten Explorer navigieren Pfeiltasten oder `h j k l`; **Enter** öffnet die Datei, **Home/End** und **Page Up/Down** bewegen sich durch längere Listen. **F2** startet Umbenennen mit ausgewähltem Dateinamen ohne Erweiterung; bei Ordnern wird der ganze Name ausgewählt. **Shift+F10** öffnet das Kontextmenü des ausgewählten Eintrags.
 
-Der Explorer sortiert Ordner vor Dateien und macht die Hierarchie mit dezenten Verbindungslinien sichtbar. Dateinamen stehen in einheitlichen Spalten; Auswahl und aktive Datei bleiben über die gesamte Zeilenbreite lesbar. Ignorierte Dateien benötigen keinen Sichtbarkeitsschalter. **Ctrl+O** öffnet Dateien direkt; **Ctrl+P** verwendet einen eigenen Suchindex.
+Der Explorer sortiert Ordner vor Dateien und macht die Hierarchie mit dezenten Verbindungslinien sichtbar. Dateinamen stehen in einheitlichen Spalten; Auswahl und aktive Datei bleiben über die gesamte Zeilenbreite lesbar. Git-ignorierte Dateien und Ordner erscheinen grau, bleiben aber ganz normal aufklappbar, auswählbar und bearbeitbar. Der Tooltip nennt **Ignored by Git**. Regeln aus untergeordneten `.gitignore`-Dateien und deren Ausnahmen werden berücksichtigt. Nach dem Speichern einer `.gitignore` im Editor oder **Refresh** wird die Darstellung aktualisiert. **Ctrl+O** öffnet Dateien direkt; **Ctrl+P** verwendet einen eigenen Suchindex.
 
 ## Seitenleisten einrichten
 

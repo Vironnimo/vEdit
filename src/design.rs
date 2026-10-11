@@ -325,6 +325,7 @@ pub(crate) struct ExplorerRow<'a> {
     pub file_color: Color32,
     pub selected: bool,
     pub active_file: bool,
+    pub ignored: bool,
     pub tooltip: &'a str,
 }
 
@@ -345,6 +346,9 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
     });
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
+        let ignored_color = visuals
+            .weak_text_color()
+            .lerp_to_gamma(visuals.panel_fill, 0.2);
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         let highlighted = row.selected
             || response.has_focus()
@@ -419,7 +423,14 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             );
         }
 
-        let muted = enabled_color(ui, visuals.weak_text_color());
+        let muted = enabled_color(
+            ui,
+            if row.ignored {
+                ignored_color
+            } else {
+                visuals.weak_text_color()
+            },
+        );
         if let Some(expanded) = row.expanded {
             let center = egui::pos2(disclosure_x, rect.center().y);
             let points = if expanded {
@@ -440,7 +451,9 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
         let icon_center = egui::pos2(disclosure_x + 18.0, rect.center().y);
         let icon_color = enabled_color(
             ui,
-            if row.expanded.is_some() {
+            if row.ignored {
+                ignored_color
+            } else if row.expanded.is_some() {
                 visuals
                     .weak_text_color()
                     .lerp_to_gamma(visuals.text_color(), 0.2)
@@ -452,7 +465,9 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
         paint_explorer_icon(&painter, icon_center, row.expanded, icon_color);
 
         let left = icon_center.x + 13.0;
-        let color = if highlighted || response.hovered() || row.expanded.is_some() {
+        let color = if row.ignored {
+            enabled_color(ui, ignored_color)
+        } else if highlighted || response.hovered() || row.expanded.is_some() {
             enabled_color(ui, visuals.text_color())
         } else {
             enabled_color(

@@ -81,6 +81,7 @@ fn fixture(sidebar_width: f32) -> VEditApp {
                 path: path.join(name),
                 name: name.into(),
                 is_dir,
+                ignored: name == "target" || name == "Cargo.lock",
             })
             .collect();
         let generation = tree.begin(&path).expect("reserve fixture listing");

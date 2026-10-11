@@ -90,6 +90,111 @@ fn ignored_and_generated_entries_are_visible_without_changing_quick_open_policy(
 }
 
 #[test]
+fn ignored_rows_stay_dimmed_while_hovered_selected_and_opened() {
+    let fixture = Fixture::new(0);
+    fs::write(fixture.0.join(".gitignore"), "secret.txt\ntarget/\n").unwrap();
+    let mut app = fixture.app();
+    app.index_project(0);
+    finish(&mut app, &fixture.0);
+    let mut screen = visual_tests::harness(app);
+    visual_tests::settle_render(&mut screen);
+    let style = screen.ctx.style_of(egui::Theme::Dark);
+    let ignored_color = style
+        .visuals
+        .weak_text_color()
+        .lerp_to_gamma(style.visuals.panel_fill, 0.2);
+    let assert_dimmed = |screen: &Harness<'_, VEditApp>, label: &str| {
+        let label = screen
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => Some(text),
+                _ => None,
+            })
+            .expect("ignored row label is painted");
+        for section in &label.galley.job.sections {
+            assert_eq!(
+                section.format.color, ignored_color,
+                "{}",
+                label.galley.job.text
+            );
+        }
+    };
+    assert_dimmed(&screen, "secret.txt");
+    assert_dimmed(&screen, "target");
+    screen.get_by_label("target").click();
+    screen.run_steps(3);
+    finish(screen.state_mut(), &fixture.0.join("target"));
+    screen.run_steps(3);
+    assert!(screen.state().explorer_selected(&fixture.0.join("target")));
+    assert_dimmed(&screen, "target");
+    assert_dimmed(&screen, "generated.txt");
+    let row = screen.get_by_label("generated.txt").rect();
+    screen.hover_at(row.center());
+    screen.run_steps(2);
+    assert_dimmed(&screen, "generated.txt");
+    screen.get_by_label("generated.txt").click();
+    screen.run_steps(3);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while screen.state().tab().is_none_or(|tab| tab.loading) {
+        assert!(Instant::now() < deadline, "ignored file did not load");
+        screen.state_mut().poll();
+        screen.run_steps(1);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(
+        tab.path.as_ref(),
+        Some(&fixture.0.join("target/generated.txt"))
+    );
+    assert_eq!(tab.text, "generated");
+    assert!(tab.error.is_none());
+}
+
+#[test]
+fn saving_gitignore_refreshes_explorer_colors_and_quick_open() {
+    let fixture = Fixture::new(0);
+    let mut app = fixture.app();
+    app.index_project(0);
+    finish(&mut app, &fixture.0);
+    assert!(
+        app.explorer_index()
+            .unwrap()
+            .entry(&fixture.0.join("secret.txt"))
+            .unwrap()
+            .ignored
+    );
+    let path = fixture.0.join(".gitignore");
+    let loaded = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
+    let mut tab = EditorTab::new(Some(path), ".gitignore".into());
+    tab.saved_text = loaded.text;
+    tab.fingerprint = Some(loaded.fingerprint);
+    tab.text = "visible.txt\n".into();
+    tab.changed();
+    app.projects[0].tabs.push(tab);
+    app.bind_current_pane();
+    app.save_current();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.tab().unwrap().saving {
+        assert!(Instant::now() < deadline, "ignore file did not save");
+        app.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.tab().unwrap().error.is_none());
+    finish(&mut app, &fixture.0);
+    let index = app.explorer_index().unwrap();
+    assert!(!index.entry(&fixture.0.join("secret.txt")).unwrap().ignored);
+    assert!(index.entry(&fixture.0.join("visible.txt")).unwrap().ignored);
+    let quick_open = app.project().unwrap().index.as_ref().unwrap();
+    assert_eq!(
+        quick_open.quick_open("secret.txt", 40),
+        [fixture.0.join("secret.txt")]
+    );
+    assert!(quick_open.quick_open("visible.txt", 40).is_empty());
+}
+
+#[test]
 fn explorer_lists_complete_root_when_the_quick_open_index_is_truncated() {
     let fixture = Fixture::new(64);
     let mut app = fixture.app();
@@ -154,6 +259,7 @@ fn app_poll_rejects_directory_results_from_a_closed_and_reopened_project() {
             path: fixture.0.join(name),
             name: name.into(),
             is_dir: false,
+            ignored: false,
         }],
         warnings: Vec::new(),
     };

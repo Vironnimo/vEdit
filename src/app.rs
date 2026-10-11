@@ -1659,7 +1659,8 @@ impl VEditApp {
                         }
                     }
                     self.session_dirty = true;
-                    if new_document
+                    if (new_document
+                        || (saved && path.file_name().is_some_and(|name| name == ".gitignore")))
                         && let Some(index) = self
                             .projects
                             .iter()
