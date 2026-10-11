@@ -110,6 +110,7 @@ struct Settings {
     line_numbers: crate::cli::LineNumbers,
     highlight_current_line: bool,
     show_ignored_files: bool,
+    explorer_preview_tabs: bool,
     editor_font: crate::cli::EditorFont,
     tab_width: usize,
     detect_indentation: bool,
@@ -136,6 +137,7 @@ impl Default for Settings {
             line_numbers: crate::cli::LineNumbers::default(),
             highlight_current_line: true,
             show_ignored_files: true,
+            explorer_preview_tabs: true,
             editor_font: crate::cli::EditorFont::default(),
             tab_width: 4,
             detect_indentation: true,
@@ -292,6 +294,8 @@ struct EditorTab {
     text: String,
     saved_text: String,
     dirty: bool,
+    /// Explorer browsing may replace this buffer until it is edited or kept.
+    preview_tab: bool,
     agent_unsaved: bool,
     recovery_path: PathBuf,
     recovery_revision: u64,
@@ -335,6 +339,7 @@ impl EditorTab {
             text: String::new(),
             saved_text: String::new(),
             dirty: false,
+            preview_tab: false,
             agent_unsaved: false,
             recovery_path,
             recovery_revision: 0,
@@ -368,6 +373,7 @@ impl EditorTab {
         }
     }
     fn changed(&mut self) {
+        self.preview_tab = false;
         self.revision += 1;
         self.dirty = self.text != self.saved_text;
         self.last_edit = Instant::now();
@@ -1058,6 +1064,12 @@ impl VEditApp {
         });
     }
     fn open_file(&mut self, path: PathBuf) {
+        self.open_file_in_mode(path, false);
+    }
+    fn open_explorer_file(&mut self, path: PathBuf, keep_open: bool) {
+        self.open_file_in_mode(path, self.settings.explorer_preview_tabs && !keep_open);
+    }
+    fn open_file_in_mode(&mut self, path: PathBuf, preview: bool) {
         if self.context_path_busy(&path) {
             self.status("Wait for the file rename to finish before opening it", true);
             return;
@@ -1066,6 +1078,10 @@ impl VEditApp {
             .project()
             .and_then(|p| p.tabs.iter().position(|t| t.path.as_ref() == Some(&path)))
         {
+            let id = self.projects[self.active_project].tabs[index].id;
+            if !preview || !self.current_pane_tab_ids().contains(&id) {
+                self.keep_tab_open(id);
+            }
             self.activate_tab(self.active_project, index);
             return;
         }
@@ -1083,19 +1099,58 @@ impl VEditApp {
             .project()
             .and_then(|p| p.tabs.iter().position(|t| t.path.as_ref() == Some(&path)))
         {
+            let id = self.projects[self.active_project].tabs[index].id;
+            if !preview || !self.current_pane_tab_ids().contains(&id) {
+                self.keep_tab_open(id);
+            }
             self.activate_tab(self.active_project, index);
             return;
         }
+        let previous_preview = preview
+            .then(|| {
+                self.current_pane_tab_ids().into_iter().find(|id| {
+                    self.project().is_some_and(|project| {
+                        project
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.id == *id && tab.preview_tab)
+                    })
+                })
+            })
+            .flatten();
         let Some(project) = self.projects.get_mut(self.active_project) else {
             return;
         };
         let mut tab = EditorTab::new(Some(path.clone()), file_title(&path));
+        tab.preview_tab = preview;
         tab.loading = true;
         let id = tab.id;
         project.tabs.push(tab);
         let index = project.tabs.len() - 1;
         self.activate_tab(self.active_project, index);
+        // Switching first finishes any pending Vim edit and keeps the pane alive.
+        if let Some(previous) = previous_preview {
+            self.replace_pane_preview(previous, id);
+        }
         self.load_tab(id, Some(path), None);
+    }
+    fn keep_tab_open(&mut self, id: u64) {
+        if let Some(tab) = self.tab_by_id_mut(id) {
+            tab.preview_tab = false;
+        }
+    }
+    fn set_explorer_preview_tabs(&mut self, enabled: bool) {
+        self.settings.explorer_preview_tabs = enabled;
+        if !enabled {
+            for tab in self
+                .projects
+                .iter_mut()
+                .flat_map(|project| &mut project.tabs)
+            {
+                tab.preview_tab = false;
+            }
+        }
+        self.session_dirty = true;
     }
     fn activate_tab(&mut self, project_index: usize, tab_index: usize) {
         if self
@@ -1199,6 +1254,7 @@ impl VEditApp {
         target: Option<PathBuf>,
         overwrite: Option<workspace::FileFingerprint>,
     ) {
+        self.keep_tab_open(id);
         if target
             .as_deref()
             .is_some_and(|path| self.context_file_path_pending(path))
@@ -4792,6 +4848,7 @@ impl VEditApp {
                     t.saving,
                     pi,
                     ti,
+                    t.preview_tab,
                 )
             })
             .collect();
@@ -4824,13 +4881,14 @@ impl VEditApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
-                    for ((id, original_title, dirty, loading, path, marks, saving, project_index, tab_index), title) in tabs.iter().zip(&tab_labels) {
+                    for ((id, original_title, dirty, loading, path, marks, saving, project_index, tab_index, preview), title) in tabs.iter().zip(&tab_labels) {
                         let selected = Some(*id) == active_id;
                         let font = FontId::proportional(12.0);
-                        let title_galley = ui.painter().layout_no_wrap(
-                            title.clone(),
+                        let title_galley = design::document_tab_galley(
+                            ui, title,
                             font.clone(),
                             if selected { TEXT } else { MUTED },
+                            f32::INFINITY, *preview,
                         );
                         let width = (title_galley.size().x + 65.0).clamp(125.0, if title == original_title { 230.0 } else { 300.0 });
                         let (rect, response) =
@@ -4874,7 +4932,7 @@ impl VEditApp {
                             // a long shared filename must be shortened.
                             let suffix = title.strip_prefix(original_title).unwrap_or_default();
                             let suffix = design::truncated_galley(ui, suffix, FontId::proportional(10.5), MUTED, clip.width() * 0.7);
-                            let filename = design::truncated_galley(ui, original_title, font, if selected { TEXT } else { MUTED }, (clip.width() - suffix.size().x - 4.0).max(1.0));
+                            let filename = design::document_tab_galley(ui, original_title, font, if selected { TEXT } else { MUTED }, (clip.width() - suffix.size().x - 4.0).max(1.0), *preview);
                             painter.galley(egui::pos2(clip.left(), rect.center().y - filename.size().y * 0.5), filename, TEXT);
                             painter.galley(egui::pos2(clip.right() - suffix.size().x, rect.center().y - suffix.size().y * 0.5), suffix, MUTED);
                         } else {
@@ -4952,12 +5010,18 @@ impl VEditApp {
                             )
                         {
                             select = Some((*project_index, *tab_index));
+                            if response.double_clicked() {
+                                self.keep_tab_open(*id);
+                            }
                         }
                         let mut tooltip = path.as_ref()
                             .map(|p| crate::paths::display(p))
                             .unwrap_or_else(|| "Untitled document".into());
                         if *dirty {
                             tooltip.push_str("\nUnsaved changes");
+                        }
+                        if *preview {
+                            tooltip.push_str("\nPreview — double-click this tab to keep it open");
                         }
                         if *marks > 0 {
                             tooltip.push_str(&format!("\n{marks} review note{}", if *marks == 1 { "" } else { "s" }));

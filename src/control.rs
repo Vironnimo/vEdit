@@ -467,6 +467,7 @@ impl VEditApp {
                 self.add_project(parent.to_owned());
             }
             if let Some((project, index)) = existing {
+                self.keep_tab_open(self.projects[project].tabs[index].id);
                 self.focus_existing_project_tab(project, index);
                 self.activate_tab(project, index);
             } else {

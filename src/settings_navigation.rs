@@ -75,6 +75,16 @@ impl VEditApp {
             "Layout" => {
                 editor_preferences::preference_heading(ui, "LAYOUT & EXPLORER");
                 self.sidebar_settings_ui(ui);
+                ui.add_space(12.0);
+                let mut preview = self.settings.explorer_preview_tabs;
+                if ui
+                    .checkbox(&mut preview, "Preview files from Explorer")
+                    .changed()
+                {
+                    self.set_explorer_preview_tabs(preview);
+                    changed = true;
+                }
+                ui.label(RichText::new("Single-click reuses a preview tab in this pane. Double-click a file or its tab, or edit it, to keep it open.").small().color(MUTED));
             }
             "Vim" => {
                 editor_preferences::preference_heading(ui, "VIM");

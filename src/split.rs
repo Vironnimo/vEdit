@@ -696,6 +696,43 @@ impl VEditApp {
     pub(super) fn current_pane_id(&self) -> u64 {
         self.pane_context()
     }
+    pub(super) fn replace_pane_preview(&mut self, previous: u64, replacement: u64) {
+        let replaceable = self
+            .projects
+            .iter()
+            .flat_map(|project| &project.tabs)
+            .any(|tab| {
+                tab.id == previous
+                    && tab.preview_tab
+                    && !tab.dirty
+                    && !tab.saving
+                    && !tab.agent_unsaved
+                    && tab.annotations.is_empty()
+            });
+        if !replaceable {
+            self.keep_tab_open(previous);
+            return;
+        }
+        let pane_id = self.current_pane_id();
+        if let Some(pane) = self
+            .editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            && let Some(position) = pane.documents.iter().position(|id| *id == previous)
+        {
+            pane.documents.retain(|id| *id != replacement);
+            pane.documents.insert(position, replacement);
+        }
+        // Browsing is not an explicit close: do not flood Reopen Closed Tab.
+        if let Ok(unreferenced) = self.detach_pane_tab(pane_id, previous) {
+            if unreferenced {
+                self.remove_closed_document(previous);
+            }
+            self.control_prune_review();
+            self.reconcile_layout_after_close();
+        }
+    }
     pub(super) fn focus_existing_project_tab(&mut self, project: usize, index: usize) {
         let Some(id) = self
             .projects
@@ -872,6 +909,7 @@ impl VEditApp {
                 "Tab position must be between 0 and {length}; no pane changed"
             ));
         }
+        self.keep_tab_open(tab_id);
         self.cancel_vim_search(false);
         // Validation precedes capture or finishing Insert: rejected requests have no effect.
         let changes_document_focus =
@@ -1385,6 +1423,9 @@ impl VEditApp {
         if self.tab().is_none() {
             return Err("Open a document before splitting".into());
         }
+        if let Some(tab) = self.tab_mut() {
+            tab.preview_tab = false;
+        }
         if let Some(tab) = self.tab_mut()
             && tab.vim.finish_insert(&mut tab.text).text_changed
         {
@@ -1625,6 +1666,7 @@ impl VEditApp {
             return Err("Preview requires a Markdown document".into());
         }
         self.focus_editor_pane(pane_id)?;
+        self.keep_tab_open(tab_id);
         self.activate_tab(pi, ti);
         if let Some(view) = view {
             self.set_document_view(view);

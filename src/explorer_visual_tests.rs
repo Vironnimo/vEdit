@@ -250,6 +250,63 @@ fn explorer_tooltip_stays_beside_the_pointer_and_inside_the_window() {
 }
 
 #[test]
+fn explorer_preview_double_click_keeps_the_file_from_tree_or_tab() {
+    for tree in [true, false] {
+        let mut app = fixture(292.0);
+        app.tab_mut().unwrap().preview_tab = true;
+        let mut screen = visual_tests::harness(app);
+        visual_tests::settle_render(&mut screen);
+        let pointer = if tree {
+            row_rect(&screen, "selection.rs").center()
+        } else {
+            screen
+                .get_all_by_label("selection.rs")
+                .find(|node| node.rect().height() > design::EXPLORER_ROW_HEIGHT)
+                .unwrap()
+                .rect()
+                .center()
+        };
+        screen.hover_at(pointer);
+        screen.run_steps(1);
+        let started = screen.ctx.input(|input| input.time);
+        for click in 0..2 {
+            // The snapshot harness advances 250 ms per queued event. Supply a
+            // real double-click interval, with press/release in one input frame.
+            screen.input_mut().time = Some(started + 0.1 * (click + 1) as f64);
+            for pressed in [true, false] {
+                screen.input_mut().events.push(egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+            screen.step();
+            assert_eq!(
+                screen.state().tab().unwrap().preview_tab,
+                click == 0,
+                "only the double-click keeps the file (tree={tree})"
+            );
+        }
+    }
+}
+
+#[test]
+fn explorer_preview_tab_and_option_screenshots() {
+    let mut app = fixture(292.0);
+    app.tab_mut().unwrap().preview_tab = true;
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "vedit_explorer_preview_tab");
+    screen.state_mut().open_settings_section("Layout");
+    screen.run_steps(3);
+    visual_tests::snapshot(&mut screen, "vedit_explorer_preview_settings");
+    screen.get_by_label("Preview files from Explorer").click();
+    screen.run_steps(2);
+    assert!(!screen.state().settings.explorer_preview_tabs);
+    assert!(!screen.state().tab().unwrap().preview_tab);
+}
+
+#[test]
 fn dense_explorer_hierarchy_screenshots() {
     let mut screen = visual_tests::harness(fixture(292.0));
     visual_tests::snapshot(&mut screen, "vedit_dense_explorer");

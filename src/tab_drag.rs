@@ -182,6 +182,7 @@ impl VEditApp {
     }
     pub(super) fn start_tab_drag(&mut self, response: &egui::Response, id: u64, title: &str) {
         if !self.tab_drag.cancelled && response.drag_started_by(egui::PointerButton::Primary) {
+            self.keep_tab_open(id);
             self.tab_drag.active = Some(DraggedTab {
                 pane: self.current_pane_id(),
                 tab: id,

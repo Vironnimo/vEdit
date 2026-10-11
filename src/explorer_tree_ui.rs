@@ -206,7 +206,7 @@ impl VEditApp {
                 self.explorer_row_interaction(&response, &entry.path, entry.is_dir);
                 self.file_context_menu(&response, &entry.path, entry.is_dir);
                 if response.clicked() && !entry.is_dir {
-                    self.open_file(entry.path.clone());
+                    self.open_explorer_file(entry.path.clone(), response.double_clicked());
                     self.focus_explorer();
                 }
             });

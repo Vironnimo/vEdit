@@ -179,6 +179,25 @@ fn enabled_color(ui: &Ui, color: Color32) -> Color32 {
     }
 }
 
+pub(crate) fn document_tab_galley(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    preview: bool,
+) -> std::sync::Arc<egui::Galley> {
+    ui.fonts_mut(|fonts| {
+        let mut job = egui::text::LayoutJob::simple(text.into(), font, color, width.max(1.0));
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        for section in &mut job.sections {
+            section.format.italics = preview;
+        }
+        fonts.layout_job(job)
+    })
+}
+
 pub(crate) fn truncated_galley(
     ui: &Ui,
     text: &str,

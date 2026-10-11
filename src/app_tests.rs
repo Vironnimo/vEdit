@@ -80,6 +80,160 @@ fn change_tab(app: &mut VEditApp, text: &str) {
     tab.changed();
 }
 
+#[test]
+fn explorer_preview_reuses_one_tab_and_ignores_late_loads() {
+    let fixture = Fixture::new("preview-browse");
+    let first = fixture.write("first.txt", "first");
+    let second = fixture.write("second.txt", "second");
+    let permanent = fixture.write("keep.txt", "keep");
+    let mut app = fixture.app();
+    app.open_explorer_file(first, false);
+    let old = app.tab().unwrap().id;
+    fixture.open(&mut app, permanent);
+    app.open_explorer_file(second.clone(), false);
+    let current = app.tab().unwrap().id;
+    assert_ne!(old, current);
+    assert!(app.tab_by_id_mut(old).is_none());
+    assert_eq!(
+        app.current_pane_tab_ids()[0],
+        current,
+        "reuse the preview's position"
+    );
+    assert_eq!(app.projects[0].tabs.len(), 2);
+    assert!(
+        app.projects[0].closed_tabs.is_empty(),
+        "browsing is not an explicit close"
+    );
+    app.sender
+        .send(WorkerResult::Loaded {
+            id: old,
+            result: workspace::read_document(&second, MAX_DOCUMENT),
+            recovery: None,
+        })
+        .unwrap();
+    wait_until(&mut app, |app| !app.tab().unwrap().loading);
+    assert_eq!(app.tab().unwrap().text, "second");
+    assert!(app.tab().unwrap().preview_tab);
+}
+
+#[test]
+fn explorer_preview_edits_stay_open_after_save_or_undo() {
+    let fixture = Fixture::new("preview-edit");
+    let first = fixture.write("edit.txt", "first");
+    let second = fixture.write("second.txt", "second");
+    let third = fixture.write("third.txt", "third");
+    let mut app = fixture.app();
+    app.open_explorer_file(first, false);
+    wait_until(&mut app, |app| !app.tab().unwrap().loading);
+    let edited = app.tab().unwrap().id;
+    change_tab(&mut app, "edited");
+    app.save_tab(edited, None);
+    wait_until(&mut app, |app| !app.tab().unwrap().saving);
+    assert!(!app.tab().unwrap().dirty);
+    app.open_explorer_file(second, false);
+    wait_until(&mut app, |app| !app.tab().unwrap().loading);
+    let undone = app.tab().unwrap().id;
+    change_tab(&mut app, "temporary");
+    change_tab(&mut app, "second");
+    assert!(!app.tab().unwrap().dirty);
+    app.open_explorer_file(third, false);
+    assert_eq!(app.projects[0].tabs.len(), 3);
+    assert!(!app.tab_by_id_mut(edited).unwrap().preview_tab);
+    assert!(!app.tab_by_id_mut(undone).unwrap().preview_tab);
+}
+
+#[test]
+fn explorer_preview_double_click_and_explicit_open_keep_existing_tabs() {
+    let fixture = Fixture::new("preview-keep");
+    let first = fixture.write("first.txt", "first");
+    let second = fixture.write("second.txt", "second");
+    let third = fixture.write("third.txt", "third");
+    let mut app = fixture.app();
+    app.open_explorer_file(first.clone(), false);
+    app.open_explorer_file(first, true);
+    assert!(!app.tab().unwrap().preview_tab);
+    app.open_explorer_file(second.clone(), false);
+    app.open_file(second);
+    assert!(!app.tab().unwrap().preview_tab);
+    app.open_explorer_file(third.clone(), false);
+    let preview = app.tab().unwrap().id;
+    let first_path = app.projects[0].tabs[0].path.clone().unwrap();
+    app.open_explorer_file(first_path, false);
+    assert!(
+        !app.tab().unwrap().preview_tab,
+        "permanent tabs never become previews again"
+    );
+    app.open_explorer_file(third, false);
+    assert_eq!(app.tab().unwrap().id, preview);
+    assert_eq!(app.projects[0].tabs.len(), 3);
+}
+
+#[test]
+fn explorer_preview_disable_keeps_tabs_and_setting_round_trips() {
+    let fixture = Fixture::new("preview-setting");
+    let first = fixture.write("first.txt", "first");
+    let second = fixture.write("second.txt", "second");
+    let mut app = fixture.app();
+    app.open_explorer_file(first, false);
+    app.set_explorer_preview_tabs(false);
+    app.open_explorer_file(second, false);
+    assert!(app.projects[0].tabs.iter().all(|tab| !tab.preview_tab));
+    assert_eq!(app.projects[0].tabs.len(), 2);
+    let restored: Settings =
+        serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    assert!(!restored.explorer_preview_tabs);
+    let legacy: Settings = serde_json::from_str("{}").unwrap();
+    assert!(legacy.explorer_preview_tabs);
+}
+
+#[test]
+fn explorer_previews_are_local_to_each_pane_and_preserve_shared_documents() {
+    let fixture = Fixture::new("preview-panes");
+    let shared = fixture.write("shared.txt", "shared");
+    let left = fixture.write("left.txt", "left");
+    let right = fixture.write("right.txt", "right");
+    let next = fixture.write("next.txt", "next");
+    let mut app = fixture.app();
+    app.open_explorer_file(shared, false);
+    wait_until(&mut app, |app| !app.tab().unwrap().loading);
+    let shared_id = app.tab().unwrap().id;
+    let left_pane = app.current_pane_id();
+    let right_pane = app.split_active(split::SplitOrientation::Vertical).unwrap();
+    assert!(!app.tab().unwrap().preview_tab);
+    app.open_explorer_file(right, false);
+    let right_preview = app.tab().unwrap().id;
+    app.control_layout(crate::cli::LayoutAction::Focus { pane_id: left_pane })
+        .unwrap();
+    app.open_explorer_file(left, false);
+    let left_preview = app.tab().unwrap().id;
+    app.open_explorer_file(next, false);
+    assert!(app.tab_by_id_mut(left_preview).is_none());
+    assert!(app.pane_contains_tab(right_pane, right_preview));
+    assert!(app.pane_contains_tab(left_pane, shared_id));
+    assert!(app.pane_contains_tab(right_pane, shared_id));
+    assert_eq!(app.current_pane_tab_ids().len(), 2);
+}
+
+#[test]
+fn explorer_preview_never_discards_a_draft_or_pending_save() {
+    for state in ["draft", "save"] {
+        let fixture = Fixture::new("preview-protection");
+        let first = fixture.write("first.txt", "first");
+        let second = fixture.write("second.txt", "second");
+        let mut app = fixture.app();
+        app.open_explorer_file(first, false);
+        let id = app.tab().unwrap().id;
+        if state == "draft" {
+            app.tab_mut().unwrap().agent_unsaved = true;
+        } else {
+            app.tab_mut().unwrap().saving = true;
+        }
+        app.open_explorer_file(second, false);
+        assert!(app.tab_by_id_mut(id).is_some());
+        assert!(!app.tab_by_id_mut(id).unwrap().preview_tab);
+    }
+}
+
 fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,
