@@ -221,6 +221,35 @@ fn explorer_selection_stays_on_the_row_without_an_accent_bar() {
 }
 
 #[test]
+fn explorer_tooltip_stays_beside_the_pointer_and_inside_the_window() {
+    for side in [Side::Left, Side::Right] {
+        let mut app = fixture(292.0);
+        app.move_sidebar(SidebarView::Explorer, side);
+        let tooltip = crate::paths::display(&app.projects[0].root.join("assets"));
+        let mut screen = visual_tests::harness(app);
+        visual_tests::settle_render(&mut screen);
+        screen.ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.tooltip_grace_time = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let pointer = row_rect(&screen, "assets").center();
+        screen.hover_at(pointer);
+        screen.run_steps(4);
+        let tooltip_rect = screen.get_by_label(&tooltip).rect();
+        assert!(
+            tooltip_rect.y_range().contains(pointer.y),
+            "tooltip must stay beside the pointer"
+        );
+        match side {
+            Side::Left => assert!(tooltip_rect.left() > pointer.x + 8.0),
+            Side::Right => assert!(tooltip_rect.right() < pointer.x - 8.0),
+        }
+        assert!(screen.ctx.content_rect().contains_rect(tooltip_rect));
+    }
+}
+
+#[test]
 fn dense_explorer_hierarchy_screenshots() {
     let mut screen = visual_tests::harness(fixture(292.0));
     visual_tests::snapshot(&mut screen, "vedit_dense_explorer");

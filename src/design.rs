@@ -490,9 +490,17 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             color,
         );
     }
-    response
-        .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(row.tooltip)
+    let mut tooltip = egui::Tooltip::for_enabled(&response).at_pointer().gap(12.0);
+    // Keep path tooltips beside the pointer so rows below it remain visible.
+    // At the right window edge, prefer the opposite side over dropping below.
+    tooltip.popup = tooltip
+        .popup
+        .align(egui::emath::RectAlign::RIGHT)
+        .align_alternatives(&[egui::emath::RectAlign::LEFT]);
+    tooltip.show(|ui| {
+        ui.label(row.tooltip);
+    });
+    response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn paint_explorer_icon(
