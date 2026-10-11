@@ -365,32 +365,14 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
                     .weak_bg_fill
                     .lerp_to_gamma(visuals.panel_fill, 0.42),
             )
+        } else if row.active_file {
+            Some(visuals.widgets.inactive.weak_bg_fill)
         } else {
             None
         };
         if let Some(fill) = fill {
             painter.rect_filled(rect.shrink2(Vec2::new(2.0, 0.0)), 3.0, fill);
         }
-        if highlighted || row.active_file {
-            let color = if highlighted {
-                visuals.selection.stroke.color
-            } else {
-                visuals
-                    .selection
-                    .stroke
-                    .color
-                    .lerp_to_gamma(visuals.weak_text_color(), 0.5)
-            };
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    rect.left_top() + Vec2::new(3.0, 6.0),
-                    rect.left_bottom() + Vec2::new(5.0, -6.0),
-                ),
-                1.0,
-                enabled_color(ui, color),
-            );
-        }
-
         let tree_left = rect.left() + 9.0;
         // Keep names usable in narrow sidebars and unusually deep paths. The
         // tooltip always exposes the complete path; ordinary levels stay exact.

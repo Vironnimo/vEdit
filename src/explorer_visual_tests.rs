@@ -1,5 +1,6 @@
 //! Review hierarchy and density with a representative tree, without disk or
 //! background Explorer work. Native DPI and a narrow sidebar share the fixture.
+use super::sidebar_layout::Side;
 use super::*;
 use egui_kittest::{Harness, kittest::Queryable};
 
@@ -176,6 +177,49 @@ fn assert_readable_hierarchy(screen: &Harness<'_, VEditApp>) {
 }
 
 #[test]
+fn explorer_selection_stays_on_the_row_without_an_accent_bar() {
+    for side in [Side::Left, Side::Right] {
+        let mut app = fixture(292.0);
+        app.move_sidebar(SidebarView::Explorer, side);
+        let root = app.projects[0].root.clone();
+        let mut screen = visual_tests::harness(app);
+        visual_tests::settle_render(&mut screen);
+        for (label, relative) in [
+            ("selection.rs", "src/editor/view/selection.rs"),
+            ("assets", "assets"),
+        ] {
+            screen
+                .query_all_by_label(label)
+                .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+                .unwrap()
+                .click();
+            visual_tests::settle_render(&mut screen);
+            assert!(screen.state().explorer_keyboard_focused());
+            assert!(screen.state().explorer_selected(&root.join(relative)));
+            let row = row_rect(&screen, label);
+            let sidebar = screen.state().sidebar_region_rect(side).unwrap();
+            let mut selected_fill = false;
+            for shape in &screen.output().shapes {
+                if let egui::Shape::Rect(rect) = &shape.shape {
+                    assert!(
+                        rect.stroke.color != ACCENT || rect.rect.height() < sidebar.height() * 0.9,
+                        "Explorer focus must not outline the entire sidebar"
+                    );
+                    if row.contains_rect(rect.rect) && rect.fill.a() > 0 {
+                        assert!(
+                            rect.rect.width() > 3.0 || rect.rect.height() <= 6.0,
+                            "Explorer selection must not have a narrow accent bar"
+                        );
+                        selected_fill |= rect.rect.width() > row.width() * 0.8;
+                    }
+                }
+            }
+            assert!(selected_fill, "the selected row must remain visible");
+        }
+    }
+}
+
+#[test]
 fn dense_explorer_hierarchy_screenshots() {
     let mut screen = visual_tests::harness(fixture(292.0));
     visual_tests::snapshot(&mut screen, "vedit_dense_explorer");
@@ -196,6 +240,15 @@ fn dense_explorer_hierarchy_screenshots() {
     compact.set_size(Vec2::new(840.0, 840.0));
     visual_tests::snapshot(&mut compact, "vedit_dense_explorer_compact");
     assert_readable_hierarchy(&compact);
+
+    screen
+        .input_mut()
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .native_pixels_per_point = Some(1.0);
+    screen.get_by_label("assets").click();
+    visual_tests::snapshot(&mut screen, "vedit_explorer_selection");
 
     // The snapshot runner requires one aggregate per test, even when multiple
     // independent window-size fixtures are intentionally compared.

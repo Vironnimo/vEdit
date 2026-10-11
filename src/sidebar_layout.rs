@@ -748,12 +748,15 @@ impl VEditApp {
             {
                 self.sidebar_layout.last_widgets[view.index()] = Some(widget);
             }
-            ui.painter().rect_stroke(
-                result.response.rect.shrink(1.0),
-                0.0,
-                Stroke::new(1.5, ACCENT),
-                egui::StrokeKind::Inside,
-            );
+            // Explorer already shows focus on its selected row.
+            if self.sidebar_selected_view(side) != Some(SidebarView::Explorer) {
+                ui.painter().rect_stroke(
+                    result.response.rect.shrink(1.0),
+                    0.0,
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         let actual_width = result.response.rect.width();
         let stored = match side {

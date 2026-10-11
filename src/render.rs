@@ -1133,6 +1133,34 @@ fn syntax_settings() -> &'static SyntectSettings {
             .expect("the bundled Dart syntax must parse"),
         );
         settings.ps = builder.build();
+        // List bodies are prose, not errors. Keep inline code, links and other
+        // nested syntax on their own scopes; only list markers get an accent.
+        for theme in settings.ts.themes.values_mut() {
+            use syntect::highlighting::{Color, StyleModifier, ThemeItem};
+            for (scope, foreground) in [
+                (
+                    "markup.list.unnumbered.markdown, markup.list.numbered.markdown",
+                    theme.settings.foreground,
+                ),
+                (
+                    "markup.list.unnumbered.bullet.markdown, markup.list.numbered.bullet.markdown",
+                    Some(Color {
+                        r: crate::palette::BLUE.r(),
+                        g: crate::palette::BLUE.g(),
+                        b: crate::palette::BLUE.b(),
+                        a: 255,
+                    }),
+                ),
+            ] {
+                theme.scopes.push(ThemeItem {
+                    scope: scope.parse().expect("valid Markdown theme scope"),
+                    style: StyleModifier {
+                        foreground,
+                        ..Default::default()
+                    },
+                });
+            }
+        }
         settings
     })
 }
@@ -1143,10 +1171,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn dart_scopes_at(source: &str, needle: &str) -> Vec<String> {
+        syntax_scopes_at(source, needle, "dart")
+    }
+
+    fn syntax_scopes_at(source: &str, needle: &str, extension: &str) -> Vec<String> {
         use syntect::easy::ScopeRegionIterator;
         use syntect::parsing::{ParseState, ScopeStack};
         let settings = syntax_settings();
-        let syntax = settings.ps.find_syntax_by_extension("dart").unwrap();
+        let syntax = settings.ps.find_syntax_by_extension(extension).unwrap();
         let mut parser = ParseState::new(syntax);
         let mut stack = ScopeStack::new();
         let wanted = source.find(needle).expect("sample token exists");
@@ -1265,6 +1297,63 @@ mod tests {
         assert_ne!(color_at("final"), color_at("hello"));
         assert_ne!(color_at("hello"), color_at("a comment"));
         assert_ne!(color_at("final"), color_at("a comment"));
+    }
+
+    #[test]
+    fn markdown_lists_use_readable_text_and_calm_markers() {
+        let source = concat!(
+            "A paragraph.\n\n",
+            "1. First item\n2. Second item\n3. Third item\n\n",
+            "- Bullet item\n  - Nested item\n- [ ] Task item\n\n",
+            "* Star item\n+ Plus item\n\n",
+            "Plain `outside_code` and [outside_link](https://example.com).\n\n",
+            "- With `inside_code` and [inside_link](https://example.com).\n",
+        );
+        let cache = SyntaxCache::new();
+        let ctx = egui::Context::default();
+        let request = || {
+            cache.layout(
+                &ctx,
+                712,
+                1,
+                source,
+                "md",
+                14.0,
+                crate::palette::TEXT,
+                f32::INFINITY,
+            )
+        };
+        let _ = request();
+        settle(&cache, 712, source, "md", 14.0);
+        let job = request();
+        let color_at = |needle: &str| {
+            let offset = source.find(needle).unwrap();
+            job.sections
+                .iter()
+                .find(|section| {
+                    section.byte_range.start.0 <= offset && offset < section.byte_range.end.0
+                })
+                .unwrap()
+                .format
+                .color
+        };
+        for word in [
+            "First", "Second", "Third", "Bullet", "Nested", "Task", "Star", "Plus",
+        ] {
+            assert_eq!(color_at(word), color_at("A paragraph"), "list text: {word}");
+        }
+        for marker in [
+            "1.", "2.", "3.", "- Bullet", "- Nested", "- [ ]", "* Star", "+ Plus",
+        ] {
+            assert_eq!(
+                color_at(marker),
+                crate::palette::BLUE,
+                "list marker: {marker}, scopes: {:?}",
+                syntax_scopes_at(source, marker, "md")
+            );
+        }
+        assert_eq!(color_at("inside_code"), color_at("outside_code"));
+        assert_eq!(color_at("inside_link"), color_at("outside_link"));
     }
 
     fn settle(cache: &SyntaxCache, document: u64, text: &str, language: &str, font: f32) {

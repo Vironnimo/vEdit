@@ -1,6 +1,8 @@
-# vEdit 0.4.21
+# vEdit 0.4.22
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.22 beruhigt die Darstellung im Explorer und im Markdown-Quelltext: Die Auswahl bleibt auf der Datei- oder Ordnerzeile, ohne Rahmen um den gesamten Explorer und ohne linken Akzentstrich. Markdown-Listen verwenden normale helle Schrift und dezente blaue Aufzählungszeichen.
 
 Version 0.4.21 stellt den Repository-Stand oben in Source control dar: geänderte Dateien, Abstand zum Tracking-Branch und Vergleich mit dem lokalen `main` (ersatzweise `master`). **Fetch**, **Pull** und **Push** sind direkt sichtbar. Ein Repository oberhalb des geöffneten Projektordners wird erst nach ausdrücklicher Auswahl verwendet.
 
