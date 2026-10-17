@@ -89,18 +89,7 @@ impl VEditApp {
             self.settings.autosave_delay_ms,
             if autosave { "off" } else { "on" }
         );
-        let response = ui
-            .add(
-                egui::Button::new(RichText::new(label).size(11.0).color(if autosave {
-                    ACCENT
-                } else {
-                    MUTED
-                }))
-                .frame_when_inactive(false)
-                .corner_radius(3.0),
-            )
-            .on_hover_text(hint)
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = design::status_item(ui, label, MUTED, &hint);
         if response.clicked() {
             self.settings.autosave = !autosave;
             self.session_dirty = true;

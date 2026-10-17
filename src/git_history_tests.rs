@@ -856,7 +856,7 @@ fn scrolling_near_the_end_requests_one_page_without_a_load_more_button() {
     screen.state_mut().projects[0].git_history_loading = false;
     screen.state_mut().projects[0].git_history_has_more = false;
     screen.run_steps(3);
-    assert!(screen.query_by_label("End of available history").is_some());
+    // The end of history needs no footer; only loading is announced.
     assert!(screen.query_by_label("Loading commits…").is_none());
 }
 

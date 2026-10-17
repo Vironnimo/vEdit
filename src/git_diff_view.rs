@@ -325,8 +325,25 @@ impl DiffView {
                         );
                         let display = self.patch.display(index);
                         let color = palette.foreground(kind);
-                        let galley = ui.fonts_mut(|fonts| {
-                            fonts.layout_delayed_color(display, font.clone(), text_width)
+                        let galley = ui.fonts_mut(|fonts| match palette.marker(kind) {
+                            // Changed code stays readable in the text color; the
+                            // tint and the +/− marker carry the change.
+                            Some(marker) if !display.is_empty() => {
+                                let split = display.chars().next().map_or(0, char::len_utf8);
+                                let mut job = egui::text::LayoutJob::default();
+                                for (range, section_color) in
+                                    [(0..split, marker), (split..display.len(), color)]
+                                {
+                                    job.append(
+                                        &display[range],
+                                        0.0,
+                                        egui::TextFormat::simple(font.clone(), section_color),
+                                    );
+                                }
+                                job.wrap.max_width = text_width;
+                                fonts.layout_job(job)
+                            }
+                            _ => fonts.layout_delayed_color(display, font.clone(), text_width),
                         });
                         let position =
                             egui::pos2(divider + TEXT_INSET, rect.top() + ROW_PADDING * 0.5);
@@ -1234,11 +1251,19 @@ impl Palette {
 
     fn foreground(&self, kind: RowKind) -> Color32 {
         match kind {
-            RowKind::Added => self.added,
-            RowKind::Removed => self.removed,
+            RowKind::Added | RowKind::Removed => self.normal,
             RowKind::Hunk => self.hunk,
             RowKind::Context | RowKind::FileHeader => self.normal,
             RowKind::Metadata | RowKind::Note | RowKind::Binary => self.muted,
+        }
+    }
+
+    /// The leading +/− of a changed line keeps the change color.
+    fn marker(&self, kind: RowKind) -> Option<Color32> {
+        match kind {
+            RowKind::Added => Some(self.added),
+            RowKind::Removed => Some(self.removed),
+            _ => None,
         }
     }
 
@@ -1254,7 +1279,7 @@ impl Palette {
             tint.r(),
             tint.g(),
             tint.b(),
-            24,
+            if kind == RowKind::Hunk { 24 } else { 34 },
         ))
     }
 }

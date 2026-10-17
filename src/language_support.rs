@@ -276,15 +276,7 @@ impl VEditApp {
         let Some(status) = self.rust_analysis_status() else {
             return;
         };
-        if ui
-            .add(
-                egui::Button::new(RichText::new(status.label).size(11.0).color(status.color))
-                    .frame_when_inactive(false)
-                    .corner_radius(3.0),
-            )
-            .on_hover_text(status.hint)
-            .clicked()
-        {
+        if design::status_item(ui, &status.label, status.color, &status.hint).clicked() {
             self.output_visible = true;
             self.problems_visible = true;
         }

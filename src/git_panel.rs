@@ -305,12 +305,14 @@ fn git_row_keyboard(ui: &egui::Ui, response: &egui::Response) {
             response.scroll_to_me(Some(Align::Center));
         }
         // Same quiet focus ring as the Explorer's selected row.
-        ui.painter().rect_stroke(
-            response.rect.shrink(1.0),
-            4.0,
-            Stroke::new(1.0, ACCENT.gamma_multiply(0.7)),
-            egui::StrokeKind::Inside,
-        );
+        if crate::design::focus_visible(ui.ctx()) {
+            ui.painter().rect_stroke(
+                response.rect.shrink(1.0),
+                4.0,
+                Stroke::new(1.0, ACCENT.gamma_multiply(0.7)),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
 }
 
@@ -513,7 +515,7 @@ impl ChangeGroup {
     fn label(self) -> &'static str {
         match self {
             Self::Staged => "Staged",
-            Self::Changes => "Changes",
+            Self::Changes => "Unstaged",
             Self::Untracked => "Untracked",
         }
     }
@@ -922,7 +924,7 @@ impl VEditApp {
                             return ui.label(RichText::new(label).strong().color(MUTED));
                         }
                         let button = egui::Button::new(
-                            RichText::new(format!("{label} ▾")).size(12.5).color(ACCENT),
+                            RichText::new(format!("{label} ▾")).size(12.5).color(TEXT),
                         )
                         .frame_when_inactive(false)
                         .min_size(Vec2::new(0.0, 24.0));
@@ -1061,7 +1063,6 @@ impl VEditApp {
             }
         } else {
             ui.add_space(7.0);
-            let changed_count = project.git_changes.len();
             let total_height = ui.available_height().max(420.0);
             let ratio = state.split_ratio.unwrap_or(0.5).clamp(0.25, 0.75);
             let changes_height =
@@ -1073,7 +1074,7 @@ impl VEditApp {
             state.changes_rect = Some(changes_rect);
             ui.scope_builder(egui::UiBuilder::new().max_rect(changes_rect), |ui| {
                 ui.set_clip_rect(changes_rect.intersect(ui.clip_rect()));
-                let header = region_header(ui, &format!("Changes  {changed_count}"), ());
+                let header = region_header(ui, "Changes", ());
                 state.keyboard_header = Some(header.id);
                 state.keyboard_controls.push(header.id);
                 if header.clicked() {
@@ -1194,22 +1195,27 @@ impl VEditApp {
                             if staged_count == 1 { "file" } else { "files" }
                         )
                     };
-                    let commit = ui
-                        .add_enabled_ui(
-                            !busy
-                                && staged_count > 0
-                                && !conflicted
-                                && !project.commit_message.trim().is_empty(),
-                            |ui| {
-                                design::primary_button(
-                                    ui,
-                                    &label,
-                                    Vec2::new(ui.available_width(), 26.0),
-                                )
-                            },
+                    let ready = !busy
+                        && staged_count > 0
+                        && !conflicted
+                        && !project.commit_message.trim().is_empty();
+                    let size = Vec2::new(ui.available_width(), 26.0);
+                    let commit = if ready {
+                        design::primary_button(ui, &label, size)
+                    } else {
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(RichText::new(&label).size(12.5)).min_size(size),
                         )
-                        .inner
-                        .on_hover_text("Create a local commit from the staged files");
+                    }
+                    .on_hover_text("Create a local commit from the staged files")
+                    .on_disabled_hover_text(if staged_count == 0 {
+                        "Stage files with + to commit them"
+                    } else if conflicted {
+                        "Resolve conflicts before committing"
+                    } else {
+                        "Write a commit message"
+                    });
                     state.keyboard_controls.push(commit.id);
                     if commit.gained_focus() {
                         commit.scroll_to_me(None);
@@ -1260,7 +1266,10 @@ impl VEditApp {
                 [divider_rect.left_center(), divider_rect.right_center()],
                 Stroke::new(
                     1.0,
-                    if divider.hovered() || divider.dragged() || divider.has_focus() {
+                    if divider.hovered()
+                        || divider.dragged()
+                        || crate::design::keyboard_focus(&divider)
+                    {
                         ACCENT
                     } else {
                         crate::palette::BORDER_STRONG
@@ -1271,16 +1280,7 @@ impl VEditApp {
             state.history_rect = Some(history_rect);
             ui.scope_builder(egui::UiBuilder::new().max_rect(history_rect), |ui| {
                 ui.set_clip_rect(history_rect.intersect(ui.clip_rect()));
-                // The graph legend shares the title row instead of taking its own.
-                let header = region_header(
-                    ui,
-                    "History",
-                    (
-                        RichText::new("● local").size(10.5).color(GRAPH_LOCAL),
-                        RichText::new("● remote").size(10.5).color(GRAPH_REMOTE),
-                    ),
-                )
-                .on_hover_text(
+                let header = region_header(ui, "History", ()).on_hover_text(
                     "The current branch's line is blue while its commits exist only locally and purple where they are on a remote branch, based on the last fetch. Merged side branches keep their own colors.",
                 );
                 state.keyboard_controls.push(header.id);
@@ -1413,8 +1413,8 @@ impl VEditApp {
                                 .max(1.0) as usize;
                     }
                 });
-                ui.add_space(7.0);
                 if project.git_history_loading || (project.recent_commits.is_empty() && loading) {
+                    ui.add_space(7.0);
                     ui.horizontal(|ui| {
                         if project.git_history_loading {
                             ui.add(egui::Spinner::new().size(14.0).color(MUTED));
@@ -1423,17 +1423,6 @@ impl VEditApp {
                         }
                         ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                     });
-                } else if project.git_history_error.is_none() && !project.recent_commits.is_empty()
-                {
-                    ui.label(
-                        RichText::new(if project.git_history_has_more {
-                            "Scroll for earlier commits"
-                        } else {
-                            "End of available history"
-                        })
-                        .size(10.5)
-                        .color(MUTED),
-                    );
                 }
                 if near_end
                     && project.git_history_has_more
@@ -1953,7 +1942,7 @@ fn sync_status(ui: &mut egui::Ui, project: &Project) {
             } else {
                 (
                     format!("↑{} ↓{}", tracking.ahead, tracking.behind),
-                    if tracking.behind > 0 { ORANGE } else { ACCENT },
+                    MUTED,
                     format!(
                         "Tracking {upstream}\n{} commits to push · {} to pull\nRemote status as of last fetch",
                         tracking.ahead, tracking.behind
@@ -2428,6 +2417,9 @@ fn queue_file_diff(file: &TreeFile, context: TreeContext<'_>, actions: &mut Vec<
     });
 }
 
+/// Change rows match the one-line history rows.
+const TREE_ROW_HEIGHT: f32 = 24.0;
+
 struct TreeResponse {
     row: egui::Response,
     action: Option<egui::Response>,
@@ -2448,7 +2440,7 @@ fn tree_row(
     action_enabled: bool,
 ) -> TreeResponse {
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(1.0), 27.0),
+        Vec2::new(ui.available_width().max(1.0), TREE_ROW_HEIGHT),
         egui::Sense::hover(),
     );
     let action_width = if action.is_some() { 24.0 } else { 0.0 };
@@ -2487,7 +2479,7 @@ fn tree_row(
     });
     if ui.is_rect_visible(rect) {
         let hovering = row.hovered() || button.as_ref().is_some_and(egui::Response::hovered);
-        if selected || hovering || row.has_focus() {
+        if selected || hovering || crate::design::keyboard_focus(&row) {
             ui.painter().rect_filled(
                 rect,
                 4.0,
@@ -2496,16 +2488,6 @@ fn tree_row(
                 } else {
                     HOVER
                 },
-            );
-        }
-        if selected {
-            ui.painter().rect_filled(
-                egui::Rect::from_min_max(
-                    rect.left_top() + Vec2::new(0.0, 5.0),
-                    rect.left_bottom() + Vec2::new(2.0, -5.0),
-                ),
-                1.0,
-                ACCENT,
             );
         }
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -2581,8 +2563,15 @@ fn tree_row(
             galley,
             color,
         );
-        if let (Some(label), Some(response)) = (action, &button) {
-            if (response.hovered() || response.has_focus()) && action_enabled {
+        // Stage and unstage appear where the pointer or keyboard is, like
+        // other editors' inline actions, so a long list stays readable.
+        if let (Some(label), Some(response)) = (action, &button)
+            && (hovering
+                || selected
+                || crate::design::keyboard_focus(&row)
+                || crate::design::keyboard_focus(response))
+        {
+            if (response.hovered() || crate::design::keyboard_focus(response)) && action_enabled {
                 painter.rect_filled(action_rect.shrink(2.0), 4.0, SURFACE);
             }
             painter.text(
@@ -2591,7 +2580,7 @@ fn tree_row(
                 label,
                 FontId::proportional(15.0),
                 if action_enabled {
-                    if response.hovered() { ACCENT } else { MUTED }
+                    if response.hovered() { TEXT } else { MUTED }
                 } else {
                     MUTED.gamma_multiply(0.35)
                 },
@@ -2790,7 +2779,7 @@ fn history_row(
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         let background = if selected {
             ui.visuals().selection.bg_fill
-        } else if response.hovered() || response.has_focus() {
+        } else if response.hovered() || crate::design::keyboard_focus(&response) {
             HOVER
         } else {
             PANEL

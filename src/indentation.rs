@@ -27,6 +27,15 @@ impl Indent {
             if self.detected { " · detected" } else { "" }
         )
     }
+
+    /// The status bar names only the unit; detection is in the tooltip.
+    pub fn short_label(self) -> String {
+        format!(
+            "{}: {}",
+            if self.tabs { "Tabs" } else { "Spaces" },
+            self.width
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,8 +327,13 @@ impl VEditApp {
             return;
         };
         let indent = tab.indentation(&self.settings);
-        if design::ghost_button(ui, &indent.label(),
-            "Indentation for this document. Click to configure detection, language widths and tabs. Preferences affect new edits only.").clicked() {
+        let source = if indent.detected {
+            "Detected from this document"
+        } else {
+            "From settings"
+        };
+        if design::status_item(ui, &indent.short_label(), MUTED,
+            &format!("Indentation: {}. {source}. Click to configure detection, language widths and tabs. Preferences affect new edits only.", indent.label())).clicked() {
             self.open_settings_section("Editing");
         }
     }

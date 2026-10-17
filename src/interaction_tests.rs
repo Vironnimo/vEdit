@@ -300,12 +300,7 @@ fn point_at_character(screen: &Harness<'static, VEditApp>, character: usize) -> 
 }
 
 fn painted_selection_rows(screen: &Harness<'static, VEditApp>) -> Vec<usize> {
-    let fill = screen
-        .ctx
-        .style_of(screen.ctx.theme())
-        .visuals
-        .selection
-        .bg_fill;
+    let fill = EDITOR_SELECTION;
     document_shape(screen)
         .galley
         .rows

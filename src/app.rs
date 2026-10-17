@@ -4290,23 +4290,24 @@ impl VEditApp {
 
 impl VEditApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").exact_size(34.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 4)))
+        egui::Panel::bottom("status").exact_size(28.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 2)))
             .show(ui, |ui| {
                 let compact = ui.available_width() < 820.0;
                 let narrow = ui.available_width() < 360.0;
                 let status_error = self.status.as_ref().is_some_and(|(_, error, _)| *error);
                 let right_budget = if narrow { 125.0 } else if compact { 300.0 } else { 650.0 };
                 ui.spacing_mut().item_spacing.x = 12.0;
-                ui.spacing_mut().interact_size.y = 24.0;
+                ui.spacing_mut().interact_size.y = 20.0;
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 ui.horizontal_centered(|ui| {
-                    let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", BLUE) } else if self.settings.vim {
+                    // Resting modes stay muted; color marks modes that change what keys do.
+                    let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
-                            VimMode::Normal => ("NORMAL", ACCENT), VimMode::Insert => ("INSERT", BLUE),
+                            VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                         }
-                    } else { ("EDIT", BLUE) };
+                    } else { ("EDIT", MUTED) };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
                         .on_hover_text("Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
                     if let Some(tab) = self.tab() {
@@ -4318,7 +4319,7 @@ impl VEditApp {
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
                         let budget = (ui.available_width() - if compact { 290.0 } else { 650.0 }).clamp(30.0, 180.0);
-                        if ui.add_sized([width.min(budget), 24.0], egui::Button::new(RichText::new(&branch).size(11.0)).truncate().frame_when_inactive(false)).on_hover_text(&hint).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if let Some(jump) = &self.screen_jump {
                         let hint = if jump.state.query.is_empty() {
@@ -4332,7 +4333,7 @@ impl VEditApp {
                     } else if let Some((message, error, time)) = &self.status
                         && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);
-                        ui.add_sized([width, 24.0], egui::Label::new(RichText::new(message).size(11.0).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
+                        ui.add_sized([width, 20.0], egui::Label::new(RichText::new(message).size(11.0).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(t) = self.tab() {
@@ -4341,7 +4342,7 @@ impl VEditApp {
                             let position = if narrow { format!("{line}:{col}") } else { format!("Ln {line}/{total}, Col {col}") };
                             ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
                             let selected = t.selection.end.saturating_sub(t.selection.start);
-                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(11.0).color(ORANGE)).on_hover_text("Selected characters"); }
+                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(11.0).color(MUTED)).on_hover_text("Selected characters"); }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
                             if !compact { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
                         }
@@ -4349,7 +4350,7 @@ impl VEditApp {
                         self.save_status_ui(ui, !narrow);
                         if !compact && let Some(project) = self.project() {
                             let problem_count = project.diagnostics.values().map(Vec::len).sum::<usize>();
-                            if problem_count > 0 && design::ghost_button(ui, &format!("{problem_count} problems"), &format!("Show errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems))).clicked() { self.problems_visible = true; self.output_visible = true; }
+                            if problem_count > 0 && design::status_item(ui, &format!("{problem_count} problems"), ORANGE, &format!("Show errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems))).clicked() { self.problems_visible = true; self.output_visible = true; }
                         }
                         if !compact { self.rust_analysis_status_ui(ui); }
                     });
@@ -5356,6 +5357,9 @@ impl VEditApp {
                 })
                 .flatten();
             let indent_width = tab.indentation(&settings).width;
+            // The last syntax galley handed to the editor, before native
+            // selection painting recolors its glyphs.
+            let laid_out = std::cell::RefCell::new(None::<std::sync::Arc<egui::Galley>>);
             let mut layouter =
                 |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, available_width: f32| {
                     let width = if settings.word_wrap {
@@ -5363,7 +5367,7 @@ impl VEditApp {
                     } else {
                         f32::INFINITY
                     };
-                    syntax.galley_with_preferences(
+                    let galley = syntax.galley_with_preferences(
                         ui,
                         document_id,
                         revision,
@@ -5374,9 +5378,13 @@ impl VEditApp {
                         width,
                         settings.line_height,
                         indent_width,
-                    )
+                    );
+                    *laid_out.borrow_mut() = Some(galley.clone());
+                    galley
                 };
             let native_caret = ui.visuals().text_cursor.stroke;
+            let native_selection = ui.visuals().selection;
+            editor_selection(ui.visuals_mut());
             if modal {
                 // Modal navigation paints one block at Vim's active
                 // character, rather than a second insertion caret at the
@@ -5417,6 +5425,17 @@ impl VEditApp {
                 .layouter(&mut layouter)
                 .show(ui);
             ui.visuals_mut().text_cursor.stroke = native_caret;
+            ui.visuals_mut().selection = native_selection;
+            if let Some(original) = laid_out.take()
+                && !std::sync::Arc::ptr_eq(&original, &output.galley)
+            {
+                // Selected code keeps its syntax colors on the selection wash.
+                let mut restored = output.galley.clone();
+                crate::render::keep_glyph_colors(&mut restored, &original);
+                if crate::render::replace_text_shape(ui, &output, restored.clone()) {
+                    output.galley = restored;
+                }
+            }
             if tab.pending_navigation_feedback && !tab.loading && tab.pending_agent_location.is_none() {
                 tab.pending_navigation_feedback = false;
                 if tab.agent_location_error.is_none() && tab.error.is_none() {
@@ -5509,7 +5528,16 @@ impl VEditApp {
                 && (context_selection.is_some()
                     || context_menu_was_open
                     || output.response.context_menu_opened())
-                && crate::render::paint_retained_text_selection(ui, &output, tab.selection.clone());
+                && crate::render::paint_retained_text_selection(
+                    ui,
+                    &{
+                        let mut visuals = ui.visuals().clone();
+                        editor_selection(&mut visuals);
+                        visuals
+                    },
+                    &output,
+                    tab.selection.clone(),
+                );
             let cursor = egui::text::CCursor::new(tab.vim.cursor);
             let local = output.galley.pos_from_cursor(cursor);
             let cursor_rect = local.translate(output.galley_pos.to_vec2());
@@ -5571,7 +5599,7 @@ impl VEditApp {
                         ui.painter().rect_filled(
                             selected.translate(output.galley_pos.to_vec2()),
                             0.0,
-                            ui.visuals().selection.bg_fill.linear_multiply(0.35),
+                            EDITOR_SELECTION.linear_multiply(0.6),
                         );
                     }
                 }
@@ -6954,6 +6982,7 @@ impl VEditApp {
         }
     }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        design::focus_visible(&self.ctx);
         self.begin_region_focus_frame();
         self.capture_shortcut_input();
         self.preference_shortcuts();
@@ -7245,6 +7274,15 @@ fn set_style(ctx: &egui::Context) {
     ctx.set_style_of(egui::Theme::Dark, style);
     ctx.set_theme(egui::Theme::Dark);
 }
+/// Code selection: a blue wash that leaves syntax colors readable.
+const EDITOR_SELECTION: Color32 = Color32::from_rgba_premultiplied(0x20, 0x30, 0x43, 0x47);
+
+/// Selected code keeps its own color on the blue wash, instead of egui's
+/// accent-colored selection glyphs.
+fn editor_selection(visuals: &mut egui::Visuals) {
+    visuals.selection.bg_fill = EDITOR_SELECTION;
+    visuals.selection.stroke.color = TEXT;
+}
 fn brand(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
     let c = rect.center();
@@ -7314,7 +7352,7 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
     if selected || response.hovered() {
         painter.rect_filled(rect, 5.0, if selected { SURFACE } else { HOVER });
     }
-    if response.has_focus() {
+    if design::keyboard_focus(&response) {
         painter.rect_stroke(
             rect.shrink(1.0),
             5.0,
@@ -8102,7 +8140,7 @@ impl VEditApp {
                     );
                     let tooltip = format!("{}\n{}", crate::paths::display(&path), d.message);
                     self.output_problem_focus_target(&response);
-                    if response.has_focus() {
+                    if design::keyboard_focus(&response) {
                         ui.painter().rect_stroke(response.rect.expand(2.0), 2.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Outside);
                     }
                     if response.clicked() {

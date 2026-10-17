@@ -378,9 +378,10 @@ impl VEditApp {
             self.region_focus.output_widget_problems = Some(self.problems_visible);
             // Focused lines and tabs show their own focus; the panel frame only
             // marks keyboard focus on the region before an item has taken it.
-            if self
-                .ctx
-                .memory(|memory| memory.has_focus(output_focus_id()))
+            if crate::design::focus_visible(&self.ctx)
+                && self
+                    .ctx
+                    .memory(|memory| memory.has_focus(output_focus_id()))
             {
                 ui.painter().rect_stroke(
                     rect.shrink(1.0),

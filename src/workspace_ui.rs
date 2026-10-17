@@ -779,7 +779,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-        if tab.current || response.hovered() || response.has_focus() {
+        if tab.current || response.hovered() || crate::design::keyboard_focus(&response) {
             painter.rect_filled(rect, 5.0, if response.hovered() { HOVER } else { SURFACE });
         }
         if tab.current {
@@ -791,7 +791,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
                 Stroke::new(1.5, ACCENT.gamma_multiply(0.85)),
             );
         }
-        if response.has_focus() {
+        if crate::design::keyboard_focus(&response) {
             painter.rect_stroke(
                 rect.shrink(1.0),
                 4.0,
@@ -895,10 +895,10 @@ fn project_list_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Switch project")
     });
-    if response.hovered() || response.has_focus() {
+    if response.hovered() || crate::design::keyboard_focus(&response) {
         ui.painter().rect_filled(rect, 5.0, HOVER);
     }
-    if response.has_focus() {
+    if crate::design::keyboard_focus(&response) {
         ui.painter().rect_stroke(
             rect.shrink(1.0),
             4.0,
@@ -948,7 +948,7 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
         )
     });
     if ui.is_rect_visible(rect) {
-        if selected || response.hovered() || response.has_focus() {
+        if selected || response.hovered() || crate::design::keyboard_focus(&response) {
             let color = if selected {
                 ui.visuals().selection.bg_fill
             } else {

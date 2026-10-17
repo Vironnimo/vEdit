@@ -151,23 +151,59 @@ pub fn visual_rows(galley: &egui::Galley) -> impl Iterator<Item = VisualRow> + '
 /// Keep the cached syntax galley and the widget's original clip rectangle intact.
 pub fn paint_retained_text_selection(
     ui: &egui::Ui,
+    visuals: &egui::Visuals,
     output: &egui::text_edit::TextEditOutput,
     selection: std::ops::Range<usize>,
 ) -> bool {
     if selection.is_empty() {
         return false;
     }
-    let position = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
     let mut selected = output.galley.clone();
     egui::text_selection::visuals::paint_text_selection(
         &mut selected,
-        ui.visuals(),
+        visuals,
         &egui::text::CCursorRange::two(
             egui::text::CCursor::new(selection.start),
             egui::text::CCursor::new(selection.end),
         ),
         None,
     );
+    keep_glyph_colors(&mut selected, &output.galley);
+    replace_text_shape(ui, output, selected)
+}
+
+/// egui recolors selected glyphs with one selection color. Copy the syntax
+/// colors back from the unselected galley; only rows that selection painting
+/// touched are cloned.
+pub fn keep_glyph_colors(selected: &mut Arc<egui::Galley>, original: &egui::Galley) {
+    if selected.rows.len() != original.rows.len() {
+        return;
+    }
+    let galley = Arc::make_mut(selected);
+    for (placed, source) in galley.rows.iter_mut().zip(&original.rows) {
+        if Arc::ptr_eq(&placed.row, &source.row) {
+            continue;
+        }
+        let range = source.row.visuals.glyph_vertex_range.clone();
+        let colors = &source.row.visuals.mesh.vertices;
+        let row = Arc::make_mut(&mut placed.row);
+        if row.visuals.mesh.vertices.len() < range.end || colors.len() < range.end {
+            continue;
+        }
+        for index in range {
+            row.visuals.mesh.vertices[index].color = colors[index].color;
+        }
+    }
+}
+
+/// Swap the editor's painted text shape for `galley`, keeping its position,
+/// clip rectangle and paint order.
+pub fn replace_text_shape(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    galley: Arc<egui::Galley>,
+) -> bool {
+    let position = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
     ui.ctx().graphics_mut(|graphics| {
         let Some(shapes) = graphics.get_mut(ui.layer_id()) else {
             return false;
@@ -182,7 +218,7 @@ pub fn paint_retained_text_selection(
         };
         shapes.mutate_shape(index, |shape| {
             if let egui::Shape::Text(text) = &mut shape.shape {
-                text.galley = selected;
+                text.galley = galley;
             }
         });
         true

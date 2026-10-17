@@ -752,6 +752,7 @@ impl VEditApp {
             // lights up the whole panel. The frame only marks keyboard focus
             // on the region itself, before any item inside has taken it.
             if self.sidebar_selected_view(side) != Some(SidebarView::Explorer)
+                && crate::design::focus_visible(&self.ctx)
                 && self
                     .ctx
                     .memory(|memory| memory.has_focus(sidebar_focus_id(side)))

@@ -405,7 +405,7 @@ fn stacked_git_regions_resize_and_keep_both_contents_visible() {
     let mut screen = harness(app, 360.0, false);
     screen.run_steps(3);
     assert!(
-        screen.get_by_label("Changes  0").rect().bottom()
+        screen.get_by_label("Changes").rect().bottom()
             < screen.get_by_label("History").rect().top()
     );
     assert!(screen.query_by_label("Working tree is clean").is_some());
@@ -449,7 +449,7 @@ fn stacked_git_regions_resize_and_keep_both_contents_visible() {
         GitSection::History
     );
     assert!(screen.query_by_label("Working tree is clean").is_some());
-    screen.get_by_label("Changes  0").click();
+    screen.get_by_label("Changes").click();
     screen.run_steps(2);
     assert_eq!(
         screen.state().projects[0].git_view.section,

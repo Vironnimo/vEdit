@@ -312,7 +312,7 @@ fn window_control(
         };
         ui.painter().rect_filled(rect, 0.0, fill);
     }
-    if response.has_focus() {
+    if crate::design::keyboard_focus(&response) {
         ui.painter().rect_stroke(
             rect.shrink(3.0),
             3.0,

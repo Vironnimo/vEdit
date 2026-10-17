@@ -8,6 +8,32 @@ use eframe::egui::{
     WidgetType,
 };
 
+/// Whether focus came from the keyboard, like CSS `:focus-visible`: a key
+/// press shows focus rings, a pointer press hides them again. Clicking a row
+/// still focuses it for arrow keys without painting a ring around it.
+pub(crate) fn focus_visible(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("vedit_focus_visible");
+    let latest = ctx.input(|input| {
+        input.events.iter().rev().find_map(|event| match event {
+            egui::Event::PointerButton { pressed: true, .. } => Some(false),
+            egui::Event::Key { pressed: true, .. } => Some(true),
+            _ => None,
+        })
+    });
+    match latest {
+        Some(visible) => {
+            ctx.data_mut(|data| data.insert_temp(id, visible));
+            visible
+        }
+        None => ctx.data(|data| data.get_temp(id)).unwrap_or(false),
+    }
+}
+
+/// The response has keyboard focus that should be drawn.
+pub(crate) fn keyboard_focus(response: &Response) -> bool {
+    focus_visible(&response.ctx) && response.has_focus()
+}
+
 /// A toolbar action with a visible hover/focus treatment and no resting box.
 pub(crate) fn ghost_button(ui: &mut Ui, label: &str, tooltip: &str) -> Response {
     ui.scope(|ui| {
@@ -27,6 +53,19 @@ pub(crate) fn ghost_button(ui: &mut Ui, label: &str, tooltip: &str) -> Response 
         )
     })
     .inner
+    .on_hover_cursor(CursorIcon::PointingHand)
+    .on_hover_text(tooltip)
+}
+
+/// A status bar entry: small muted text that is clickable without a frame.
+/// Color is reserved for states that need attention.
+pub(crate) fn status_item(ui: &mut Ui, label: &str, color: Color32, tooltip: &str) -> Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).size(11.0).color(color))
+            .frame_when_inactive(false)
+            .corner_radius(3.0)
+            .min_size(Vec2::new(0.0, 20.0)),
+    )
     .on_hover_cursor(CursorIcon::PointingHand)
     .on_hover_text(tooltip)
 }
@@ -140,7 +179,7 @@ pub(crate) fn primary_button(ui: &mut Ui, label: &str, min_size: Vec2) -> Respon
 
 fn paint_row_background(ui: &Ui, rect: egui::Rect, response: &Response, selected: bool) {
     let visual = ui.visuals();
-    if selected || response.hovered() || response.has_focus() {
+    if selected || response.hovered() || keyboard_focus(response) {
         let fill = if selected {
             visual.selection.bg_fill
         } else {
@@ -148,20 +187,10 @@ fn paint_row_background(ui: &Ui, rect: egui::Rect, response: &Response, selected
         };
         ui.painter().rect_filled(rect, 4.0, fill);
     }
-    if selected {
-        ui.painter().rect_filled(
-            egui::Rect::from_min_max(
-                rect.left_top() + Vec2::new(0.0, 5.0),
-                rect.left_bottom() + Vec2::new(2.0, -5.0),
-            ),
-            1.0,
-            visual.selection.stroke.color,
-        );
-    }
 }
 
 fn row_text_color(ui: &Ui, response: &Response, selected: bool) -> Color32 {
-    let color = if selected || response.hovered() || response.has_focus() {
+    let color = if selected || response.hovered() || keyboard_focus(response) {
         ui.visuals().text_color()
     } else {
         ui.visuals()
@@ -370,7 +399,7 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             .lerp_to_gamma(visuals.panel_fill, 0.2);
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         let highlighted = row.selected
-            || response.has_focus()
+            || keyboard_focus(&response)
             || response.clicked()
             || response.secondary_clicked();
         let fill = if highlighted {
