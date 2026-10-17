@@ -1,6 +1,8 @@
-# vEdit 0.4.24
+# vEdit 0.4.25
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.25 richtet vEdit auf das Begleiten von KI-Agenten aus. Die neue **Änderungsübersicht** zeigt alle Änderungen des Arbeitsverzeichnisses, eines Commits oder eines Branches gegenüber `main` als durchgehenden Diff mit abhakbaren Dateien (Absatz **Änderungen durchsehen** unter „Git und Befehle“). Source control listet oben alle Repositories und Worktrees mit Branch, offenen Änderungen, ↑↓ und Alter des letzten Commits; ein Klick wechselt zum Projekt. Der Explorer färbt geänderte Dateien und Ordner nach Git-Status. Der Git-Verlauf ähnelt VS Code, Auswahllisten zeigen eine Zeile pro Eintrag, und Fokusrahmen erscheinen nur noch bei Tastaturbedienung. Leerlauf, Git-Aktualisierung und Tippen in großen Dateien sind deutlich sparsamer; Details stehen in der [Performance-Untersuchung](docs/performance-audit-0.4.25.md).
 
 Version 0.4.24 macht die Oberfläche ruhiger: Die Codeschrift ist leichter (JetBrains Mono Light statt Regular). Source control zeigt oben nur noch Branch, Commits zu pushen/pullen, geänderte Dateien mit hinzugefügten/entfernten Zeilen und den Abstand zu `main`; **Fetch**, **Pull** und **Push** stehen im **⋯**-Menü des Panels. Seitenleistenköpfe haben kein **×** mehr, und ihr **⋯**-Menü erscheint ohne Rahmen.
 
