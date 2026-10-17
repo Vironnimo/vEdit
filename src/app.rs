@@ -615,6 +615,14 @@ enum WorkerResult {
         )>,
     ),
 }
+impl WorkerResult {
+    /// A periodic disk check that found nothing waits for the next scheduled
+    /// frame, which also starts the following check. Every other result is
+    /// shown right away.
+    fn wakes_window(&self) -> bool {
+        !matches!(self, WorkerResult::DiskChanges(changes) if changes.is_empty())
+    }
+}
 #[derive(Clone)]
 enum GitAction {
     Initialize,
@@ -1058,8 +1066,11 @@ impl VEditApp {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let result = work();
+            let wake = result.wakes_window();
             let _ = sender.send(result);
-            ctx.request_repaint();
+            if wake {
+                ctx.request_repaint();
+            }
         });
     }
     fn project(&self) -> Option<&Project> {

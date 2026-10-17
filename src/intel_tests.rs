@@ -333,6 +333,61 @@ fn disk_reload_updates_a_clean_document_and_preserves_encoding() {
 }
 
 #[test]
+fn unchanged_disk_checks_wait_for_the_next_frame_and_changes_wake_the_window() {
+    use std::sync::atomic::AtomicUsize;
+    let fixture = IntelFixture::new("quiet-disk-check");
+    let (mut app, path) = fixture.app("original\n");
+    let ctx = app.ctx.clone();
+    // Settle pending repaints so only new immediate requests are counted.
+    for _ in 0..3 {
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+    }
+    let wakeups = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&wakeups);
+    ctx.set_request_repaint_callback(move |info| {
+        if info.delay.is_zero() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let start_check = |app: &mut VEditApp| {
+        app.last_disk_check = Instant::now() - Duration::from_secs(3);
+        app.watch_disk();
+        assert!(app.disk_check_running);
+    };
+    start_check(&mut app);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let result = loop {
+        if let Ok(result) = app.receiver.try_recv() {
+            break result;
+        }
+        assert!(Instant::now() < deadline, "disk check timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(matches!(&result, WorkerResult::DiskChanges(changes) if changes.is_empty()));
+    // The worker requests any wakeup right after delivering its result.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(wakeups.load(Ordering::Relaxed), 0);
+    app.sender.send(result).unwrap();
+    app.poll();
+    assert!(!app.disk_check_running);
+
+    fs::write(&path, "changed on disk\n").unwrap();
+    start_check(&mut app);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while wakeups.load(Ordering::Relaxed) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "a changed file must wake the window"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.poll();
+    assert!(!app.disk_check_running);
+    assert_eq!(app.tab().unwrap().text, "changed on disk\n");
+}
+
+#[test]
 fn disk_reload_never_overwrites_a_dirty_buffer_or_adopts_the_external_baseline() {
     let fixture = IntelFixture::new("dirty-reload");
     let (mut app, path) = fixture.app("original");
