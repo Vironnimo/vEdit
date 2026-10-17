@@ -748,8 +748,14 @@ impl VEditApp {
             {
                 self.sidebar_layout.last_widgets[view.index()] = Some(widget);
             }
-            // Explorer already shows focus on its selected row.
-            if self.sidebar_selected_view(side) != Some(SidebarView::Explorer) {
+            // Focused rows and fields show their own focus, so a click never
+            // lights up the whole panel. The frame only marks keyboard focus
+            // on the region itself, before any item inside has taken it.
+            if self.sidebar_selected_view(side) != Some(SidebarView::Explorer)
+                && self
+                    .ctx
+                    .memory(|memory| memory.has_focus(sidebar_focus_id(side)))
+            {
                 ui.painter().rect_stroke(
                     result.response.rect.shrink(1.0),
                     0.0,

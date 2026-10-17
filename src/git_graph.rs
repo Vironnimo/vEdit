@@ -3,6 +3,10 @@
 //! The frontier contains the distinct commits that visible children still need
 //! to reach. Rows retain their layout when another page is appended; only the
 //! frontier continues into that page.
+//!
+//! The checked-out commit and its first-parent ancestry form the HEAD line.
+//! The UI paints it in local and remote colors, like other editors' graphs,
+//! while merged side branches keep their own track colors.
 
 use crate::git::CommitSummary;
 use std::collections::HashMap;
@@ -13,6 +17,10 @@ pub(crate) struct GraphEdge {
     pub from_lane: usize,
     pub to_lane: usize,
     pub color: usize,
+    /// The segment belongs to the HEAD line.
+    pub head: bool,
+    /// The child commit that starts this segment is on a fetched remote.
+    pub remote: bool,
 }
 
 /// Incoming segments run from the row's top to its midpoint. Outgoing segments
@@ -21,6 +29,8 @@ pub(crate) struct GraphEdge {
 pub(crate) struct GraphRow {
     pub node_lane: usize,
     pub node_color: usize,
+    /// The commit is HEAD or one of its first-parent ancestors.
+    pub node_head: bool,
     pub lane_count: usize,
     pub incoming: Vec<GraphEdge>,
     pub outgoing: Vec<GraphEdge>,
@@ -30,6 +40,20 @@ pub(crate) struct GraphRow {
 struct Track {
     hash: String,
     color: usize,
+    head: bool,
+    remote: bool,
+}
+
+impl Track {
+    fn edge(&self, from_lane: usize, to_lane: usize) -> GraphEdge {
+        GraphEdge {
+            from_lane,
+            to_lane,
+            color: self.color,
+            head: self.head,
+            remote: self.remote,
+        }
+    }
 }
 
 /// Layout for a history whose commits occur once, with children before parents.
@@ -63,18 +87,20 @@ impl Graph {
     fn append_commit(&mut self, commit: &CommitSummary) {
         // Most histories spend long stretches on one lane. Keep that common
         // case free of frontier copies and lane lookups altogether.
+        let current = commit.refs.iter().any(|reference| reference.current);
         if self.frontier.len() == 1
             && self.frontier[0].hash == commit.hash
             && commit.parents.len() <= 1
         {
-            let color = self.frontier[0].color;
-            let edge = GraphEdge {
-                from_lane: 0,
-                to_lane: 0,
-                color,
-            };
+            let track = &mut self.frontier[0];
+            let incoming = track.edge(0, 0);
+            let node_head = track.head || current;
+            track.head = node_head;
+            track.remote = commit.on_remote;
+            let color = track.color;
             let outgoing = if let Some(parent) = commit.parents.first() {
-                self.frontier[0].hash.clone_from(parent);
+                let edge = track.edge(0, 0);
+                track.hash.clone_from(parent);
                 vec![edge]
             } else {
                 self.frontier.clear();
@@ -83,8 +109,9 @@ impl Graph {
             self.rows.push(GraphRow {
                 node_lane: 0,
                 node_color: color,
+                node_head,
                 lane_count: 1,
-                incoming: vec![edge],
+                incoming: vec![incoming],
                 outgoing,
             });
             return;
@@ -97,15 +124,12 @@ impl Graph {
         let node_color = tracked_lane
             .map(|lane| self.frontier[lane].color)
             .unwrap_or_else(|| self.new_color());
+        let node_head = current || tracked_lane.is_some_and(|lane| self.frontier[lane].head);
         let incoming = self
             .frontier
             .iter()
             .enumerate()
-            .map(|(lane, track)| GraphEdge {
-                from_lane: lane,
-                to_lane: lane,
-                color: track.color,
-            })
+            .map(|(lane, track)| track.edge(lane, lane))
             .collect();
 
         let before = std::mem::take(&mut self.frontier);
@@ -124,7 +148,13 @@ impl Graph {
                 continue;
             }
             parents.push(hash.clone());
-            if after.iter().any(|track| track.hash == *hash) {
+            if let Some(track) = after.iter_mut().find(|track| track.hash == *hash) {
+                // The HEAD line continues through a parent that a side branch
+                // reached first, so the shared lane below takes its colors.
+                if parent_index == 0 && node_head {
+                    track.head = true;
+                    track.remote = commit.on_remote;
+                }
                 continue;
             }
             let color = if parent_index == 0 {
@@ -137,6 +167,8 @@ impl Graph {
                 Track {
                     hash: hash.clone(),
                     color,
+                    head: parent_index == 0 && node_head,
+                    remote: commit.on_remote,
                 },
             );
             insertion_lane += 1;
@@ -162,18 +194,13 @@ impl Graph {
             }
             let to_lane =
                 find_lane(&track.hash).expect("an unrelated frontier track survives the row");
-            outgoing.push(GraphEdge {
-                from_lane: lane,
-                to_lane,
-                color: track.color,
-            });
+            outgoing.push(after[to_lane].edge(lane, to_lane));
         }
         for parent in parents {
             let to_lane = find_lane(&parent).expect("every parent has a frontier track");
             outgoing.push(GraphEdge {
-                from_lane: node_lane,
-                to_lane,
-                color: after[to_lane].color,
+                remote: commit.on_remote,
+                ..after[to_lane].edge(node_lane, to_lane)
             });
         }
 
@@ -182,6 +209,7 @@ impl Graph {
         self.rows.push(GraphRow {
             node_lane,
             node_color,
+            node_head,
             lane_count,
             incoming,
             outgoing,
@@ -212,6 +240,8 @@ mod tests {
             from_lane,
             to_lane,
             color,
+            head: false,
+            remote: false,
         }
     }
 
@@ -220,14 +250,14 @@ mod tests {
             let mut bottoms: Vec<_> = pair[0]
                 .outgoing
                 .iter()
-                .map(|edge| (edge.to_lane, edge.color))
+                .map(|edge| (edge.to_lane, edge.color, edge.head))
                 .collect();
             bottoms.sort_unstable();
             bottoms.dedup();
             let mut tops: Vec<_> = pair[1]
                 .incoming
                 .iter()
-                .map(|edge| (edge.from_lane, edge.color))
+                .map(|edge| (edge.from_lane, edge.color, edge.head))
                 .collect();
             tops.sort_unstable();
             assert_eq!(bottoms, tops, "adjacent row boundaries must match");
@@ -379,6 +409,53 @@ mod tests {
             assert_eq!(row.node_lane, lane);
             assert_eq!(row.node_color, lane);
         }
+    }
+
+    #[test]
+    fn head_line_follows_first_parents_and_turns_remote_where_the_remote_starts() {
+        let mut head = commit("head", &["merge"]);
+        head.refs.push(crate::git::CommitRef {
+            hash: "head".into(),
+            name: "main".into(),
+            kind: crate::git::RefKind::Local,
+            current: true,
+        });
+        let mut merge = commit("merge", &["base", "side"]);
+        merge.on_remote = true;
+        let mut side = commit("side", &["base"]);
+        side.on_remote = true;
+        let mut base = commit("base", &[]);
+        base.on_remote = true;
+        let mut graph = Graph::default();
+        // An unrelated branch tip reaches the shared base before the HEAD line.
+        graph.append(&[commit("other", &["base"]), head, merge, side, base]);
+
+        assert!(!graph.rows[0].node_head);
+        assert!(graph.rows[1].node_head);
+        assert!(graph.rows[2].node_head);
+        assert!(
+            !graph.rows[3].node_head,
+            "a merged side branch keeps its own color"
+        );
+        assert!(
+            graph.rows[4].node_head,
+            "the HEAD line takes over a shared lane"
+        );
+        let head_edge = |row: &GraphRow, lane: usize| {
+            *row.outgoing
+                .iter()
+                .find(|edge| edge.from_lane == lane && edge.head)
+                .unwrap()
+        };
+        assert!(!head_edge(&graph.rows[1], graph.rows[1].node_lane).remote);
+        assert!(head_edge(&graph.rows[2], graph.rows[2].node_lane).remote);
+        assert!(
+            graph.rows[2]
+                .outgoing
+                .iter()
+                .any(|edge| !edge.head && edge.from_lane == graph.rows[2].node_lane)
+        );
+        assert_continuous(&graph.rows);
     }
 
     #[test]

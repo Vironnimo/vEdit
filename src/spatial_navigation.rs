@@ -376,12 +376,19 @@ impl VEditApp {
         if self.output_keyboard_focused() {
             self.region_focus.output_widget = self.ctx.memory(|memory| memory.focused());
             self.region_focus.output_widget_problems = Some(self.problems_visible);
-            ui.painter().rect_stroke(
-                rect.shrink(1.0),
-                0.0,
-                Stroke::new(1.5, ACCENT),
-                egui::StrokeKind::Inside,
-            );
+            // Focused lines and tabs show their own focus; the panel frame only
+            // marks keyboard focus on the region before an item has taken it.
+            if self
+                .ctx
+                .memory(|memory| memory.has_focus(output_focus_id()))
+            {
+                ui.painter().rect_stroke(
+                    rect.shrink(1.0),
+                    0.0,
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
     }
 }

@@ -304,10 +304,11 @@ fn git_row_keyboard(ui: &egui::Ui, response: &egui::Response) {
         {
             response.scroll_to_me(Some(Align::Center));
         }
+        // Same quiet focus ring as the Explorer's selected row.
         ui.painter().rect_stroke(
             response.rect.shrink(1.0),
-            3.0,
-            Stroke::new(1.0, ACCENT),
+            4.0,
+            Stroke::new(1.0, ACCENT.gamma_multiply(0.7)),
             egui::StrokeKind::Inside,
         );
     }
@@ -1275,12 +1276,12 @@ impl VEditApp {
                     ui,
                     "History",
                     (
-                        RichText::new("● local").size(10.5).color(ACCENT),
-                        RichText::new("● remote").size(10.5).color(BLUE),
+                        RichText::new("● local").size(10.5).color(GRAPH_LOCAL),
+                        RichText::new("● remote").size(10.5).color(GRAPH_REMOTE),
                     ),
                 )
                 .on_hover_text(
-                    "Orange commits exist only locally; blue commits are reachable from a remote branch, based on the last fetch",
+                    "The current branch's line is blue while its commits exist only locally and purple where they are on a remote branch, based on the last fetch. Merged side branches keep their own colors.",
                 );
                 state.keyboard_controls.push(header.id);
                 if header.clicked() {
@@ -1327,6 +1328,10 @@ impl VEditApp {
                     );
                 }
                 let mut near_end = false;
+                let upstream = project
+                    .git_tracking
+                    .as_ref()
+                    .and_then(|tracking| tracking.upstream.as_deref());
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.spacing_mut().scroll.floating = false;
@@ -1356,6 +1361,7 @@ impl VEditApp {
                                         state.selected_commit.as_deref() == Some(&commit.hash),
                                         &state.graph.rows[index],
                                         state.graph.lane_count,
+                                        upstream,
                                     );
                                     history_hover(
                                         &response,
@@ -2717,21 +2723,45 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-const HISTORY_ROW_HEIGHT: f32 = 44.0;
+/// One compact line per commit: graph, subject, author and ref badges.
+const HISTORY_ROW_HEIGHT: f32 = 24.0;
+/// The HEAD line before and after the commits reachable from a remote.
+const GRAPH_LOCAL: Color32 = BLUE;
+const GRAPH_REMOTE: Color32 = Color32::from_rgb(0xb4, 0x8e, 0xe8);
 
 fn history_near_end(visible_end: usize, loaded: usize) -> bool {
     loaded > 0 && visible_end.saturating_add(4) >= loaded
 }
 
+/// Side branches avoid the HEAD line's blue and purple.
 fn graph_color(index: usize) -> Color32 {
     [
-        ACCENT,
-        BLUE,
         ORANGE,
+        Color32::from_rgb(0xe0, 0x6c, 0x9f),
+        GREEN,
+        Color32::from_rgb(0x6d, 0xc7, 0xde),
+        ACCENT,
         RED,
-        Color32::from_rgb(191, 155, 238),
-        Color32::from_rgb(109, 199, 222),
     ][index % 6]
+}
+
+fn track_color(color: usize, head: bool, remote: bool) -> Color32 {
+    match (head, remote) {
+        (false, _) => graph_color(color),
+        (true, false) => GRAPH_LOCAL,
+        (true, true) => GRAPH_REMOTE,
+    }
+}
+
+/// Filled badges mark the checked-out branch and its upstream; other refs
+/// are outlined so the row stays calm when a commit has many decorations.
+fn ref_badge_style(reference: &git::CommitRef, upstream: Option<&str>) -> (Color32, bool) {
+    match reference.kind {
+        _ if reference.current => (GRAPH_LOCAL, true),
+        git::RefKind::Remote => (GRAPH_REMOTE, upstream == Some(reference.name.as_str())),
+        git::RefKind::Local => (GRAPH_LOCAL, false),
+        git::RefKind::Tag | git::RefKind::Head => (MUTED, false),
+    }
 }
 
 fn history_row(
@@ -2741,6 +2771,7 @@ fn history_row(
     selected: bool,
     graph: &crate::git_graph::GraphRow,
     lanes: usize,
+    upstream: Option<&str>,
 ) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(1.0), HISTORY_ROW_HEIGHT),
@@ -2757,26 +2788,25 @@ fn history_row(
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        if selected || response.hovered() || response.has_focus() {
-            painter.rect_filled(
-                rect,
-                4.0,
-                if selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    HOVER
-                },
-            );
+        let background = if selected {
+            ui.visuals().selection.bg_fill
+        } else if response.hovered() || response.has_focus() {
+            HOVER
+        } else {
+            PANEL
+        };
+        if background != PANEL {
+            painter.rect_filled(rect, 4.0, background);
         }
         let lanes = lanes.max(graph.lane_count).max(1);
-        let graph_width = (20.0 + lanes.saturating_sub(1) as f32 * 12.0)
-            .min((rect.width() * 0.34).clamp(20.0, 98.0));
+        let graph_width = (18.0 + lanes.saturating_sub(1) as f32 * 11.0)
+            .min((rect.width() * 0.3).clamp(18.0, 90.0));
         let pitch = if lanes > 1 {
-            (graph_width - 16.0) / (lanes - 1) as f32
+            (graph_width - 14.0) / (lanes - 1) as f32
         } else {
             0.0
         };
-        let lane_x = |lane: usize| rect.left() + 9.0 + lane as f32 * pitch;
+        let lane_x = |lane: usize| rect.left() + 8.0 + lane as f32 * pitch;
         let middle = rect.center().y;
         for (edges, top, bottom) in [
             (&graph.incoming, rect.top(), middle),
@@ -2790,35 +2820,101 @@ fn history_row(
                     [from, egui::pos2(from.x, bend), egui::pos2(to.x, bend), to],
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(1.6, graph_color(edge.color)),
+                    Stroke::new(1.5, track_color(edge.color, edge.head, edge.remote)),
                 ));
             }
         }
         let node = egui::pos2(lane_x(graph.node_lane), middle);
-        let color = if commit.on_remote { BLUE } else { ACCENT };
-        painter.circle_filled(
-            node,
-            5.0,
-            if selected {
-                ui.visuals().selection.bg_fill
-            } else {
-                PANEL
-            },
-        );
-        if commit.parents.len() > 1 {
-            painter.circle_stroke(node, 4.0, Stroke::new(1.7, color));
-            painter.circle_filled(node, 1.5, color);
+        let color = track_color(graph.node_color, graph.node_head, commit.on_remote);
+        let head = commit.refs.iter().any(|reference| reference.current);
+        if head {
+            painter.circle_filled(node, 6.0, background);
+            painter.circle_stroke(node, 4.5, Stroke::new(2.0, color));
+        } else if commit.parents.len() > 1 {
+            painter.circle_filled(node, 5.0, background);
+            painter.circle_stroke(node, 3.6, Stroke::new(1.5, color));
+            painter.circle_filled(node, 1.4, color);
         } else {
-            painter.circle_filled(node, 3.5, color);
+            painter.circle_filled(node, 4.5, background);
+            painter.circle_filled(node, 3.0, color);
         }
-        let left = rect.left() + graph_width + 5.0;
+
+        let left = rect.left() + graph_width + 4.0;
+        let right = rect.right() - 4.0;
+        let badge_room = ((right - left) * 0.5).max(0.0);
+        let mut used = 0.0;
+        let mut hidden = 0;
+        for (index, reference) in commit.refs.iter().enumerate() {
+            let (badge_color, filled) = ref_badge_style(reference, upstream);
+            let mut job = egui::text::LayoutJob::single_section(
+                reference.name.clone(),
+                egui::TextFormat {
+                    font_id: FontId::proportional(10.5),
+                    color: if filled { BG } else { badge_color },
+                    ..Default::default()
+                },
+            );
+            // Only the first badge shortens; later ones collapse into "+N".
+            job.wrap.max_width = (badge_room - 10.0).max(12.0);
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            let width = galley.size().x + 10.0;
+            if index > 0 && used + width > badge_room {
+                hidden = commit.refs.len() - index;
+                break;
+            }
+            let badge = egui::Rect::from_min_size(
+                egui::pos2(right - used - width, middle - 8.0),
+                Vec2::new(width, 16.0),
+            );
+            if filled {
+                painter.rect_filled(badge, 8.0, badge_color);
+            } else {
+                painter.rect_stroke(
+                    badge,
+                    8.0,
+                    Stroke::new(1.0, badge_color.gamma_multiply(0.7)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            painter.galley(
+                egui::pos2(badge.left() + 5.0, middle - galley.size().y * 0.5),
+                galley,
+                badge_color,
+            );
+            used += width + 4.0;
+        }
+        if hidden > 0 {
+            let more = ui.painter().layout_no_wrap(
+                format!("+{hidden}"),
+                FontId::proportional(10.5),
+                MUTED,
+            );
+            let width = more.size().x;
+            painter.galley(
+                egui::pos2(right - used - width, middle - more.size().y * 0.5),
+                more,
+                MUTED,
+            );
+            used += width + 4.0;
+        }
+
         let mut line = egui::text::LayoutJob::default();
         line.wrap.max_rows = 1;
+        line.wrap.max_width = (right - used - left - 2.0).max(1.0);
+        line.wrap.break_anywhere = true;
+        let strong = egui::FontFamily::Name("vedit-semibold".into());
+        let family = if head && ui.fonts_mut(|fonts| fonts.families().contains(&strong)) {
+            strong
+        } else {
+            egui::FontFamily::Proportional
+        };
         line.append(
             &commit.subject,
             0.0,
             egui::TextFormat {
-                font_id: FontId::proportional(12.0),
+                font_id: FontId::new(12.0, family),
                 color: TEXT,
                 ..Default::default()
             },
@@ -2832,46 +2928,8 @@ fn history_row(
                 ..Default::default()
             },
         );
-        // Lay out the whole line without an author reservation. Long subjects
-        // keep their space and naturally push the author beyond the row clip.
         let line = ui.fonts_mut(|fonts| fonts.layout_job(line));
-        painter.galley(egui::pos2(left, rect.top() + 4.0), line, TEXT);
-        let mut detail = egui::text::LayoutJob::default();
-        detail.wrap.max_rows = 1;
-        detail.append(
-            if commit.on_remote {
-                "Remote  "
-            } else {
-                "Local  "
-            },
-            0.0,
-            egui::TextFormat {
-                font_id: FontId::proportional(10.5),
-                color,
-                ..Default::default()
-            },
-        );
-        for reference in &commit.refs {
-            detail.append(
-                &format!(
-                    "{}{}  ",
-                    if reference.current { "HEAD → " } else { "" },
-                    reference.name
-                ),
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::proportional(10.5),
-                    color: if reference.kind == git::RefKind::Remote {
-                        BLUE
-                    } else {
-                        ACCENT
-                    },
-                    ..Default::default()
-                },
-            );
-        }
-        let detail = ui.fonts_mut(|fonts| fonts.layout_job(detail));
-        painter.galley(egui::pos2(left, rect.top() + 23.0), detail, MUTED);
+        painter.galley(egui::pos2(left, middle - line.size().y * 0.5), line, TEXT);
     }
     git_row_keyboard(ui, &response);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2911,7 +2969,11 @@ fn history_hover(
             } else {
                 "Local only · not on a fetched remote branch"
             })
-            .color(if commit.on_remote { BLUE } else { ACCENT }),
+            .color(if commit.on_remote {
+                GRAPH_REMOTE
+            } else {
+                GRAPH_LOCAL
+            }),
         );
         ui.label(
             RichText::new(&commit.hash)

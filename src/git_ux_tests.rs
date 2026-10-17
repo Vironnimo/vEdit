@@ -161,13 +161,13 @@ fn git_unsaved_count_includes_other_open_folders_of_the_repository() {
 }
 
 #[test]
-fn history_keeps_subject_author_and_colored_branch_metadata_on_separate_lines() {
+fn history_rows_keep_subject_author_and_ref_badges_on_one_line() {
     for width in [220.0, 360.0] {
         let mut screen = harness(fixture(), width, false);
         screen.run_steps(3);
         let rows = row_rects(&screen);
         for (row, commit) in rows.iter().zip(&screen.state().projects[0].recent_commits) {
-            assert_eq!(row.height(), 44.0);
+            assert_eq!(row.height(), 24.0);
             let history_clip = screen
                 .output()
                 .shapes
@@ -195,39 +195,41 @@ fn history_keeps_subject_author_and_colored_branch_metadata_on_separate_lines() 
                     (shape.clip_rect == history_clip
                         && center_y >= row.top()
                         && center_y < row.bottom())
-                    .then_some((text, shape.clip_rect))
+                    .then_some(text)
                 })
                 .collect();
+            let line = texts
+                .iter()
+                .find(|text| text.galley.text().starts_with(&commit.subject))
+                .unwrap();
             assert_eq!(
-                texts.len(),
-                2,
-                "subject and branch metadata have separate lines: {:?}",
-                texts
-                    .iter()
-                    .map(|(text, _)| text.galley.text())
-                    .collect::<Vec<_>>()
-            );
-            assert!(texts[1].0.galley.text().starts_with("Local  "));
-            for reference in &commit.refs {
-                assert!(texts[1].0.galley.text().contains(&reference.name));
-            }
-            let (text, clip) = texts[0];
-            assert_eq!(
-                text.galley.text(),
+                line.galley.text(),
                 format!("{}  {}", commit.subject, commit.author)
             );
-            assert_eq!(text.galley.rows.len(), 1);
-            assert_eq!(text.galley.job.sections[0].format.color, TEXT);
-            assert_eq!(text.galley.job.sections[1].format.color, MUTED);
-            assert!(text.pos.x >= row.left() + 24.0);
-            assert!(text.pos.y >= row.top());
-            assert!(text.pos.y + text.galley.size().y <= row.bottom());
-            assert!(clip.right() <= row.right() + 0.5);
-            let author_glyph = &text.galley.rows[0].glyphs[commit.subject.chars().count() + 2];
+            assert_eq!(line.galley.rows.len(), 1);
+            assert_eq!(line.galley.job.sections[0].format.color, TEXT);
+            assert_eq!(line.galley.job.sections[1].format.color, MUTED);
+            assert!(line.pos.x >= row.left() + 18.0);
+            assert!(line.pos.x + line.galley.size().x <= row.right() + 0.5);
             assert!(
-                text.pos.x + author_glyph.pos.x > clip.right(),
-                "long subjects must use the row width and push the author outside its clip"
+                texts
+                    .iter()
+                    .all(|text| !text.galley.text().starts_with("Local")
+                        && !text.galley.text().starts_with("Remote")),
+                "local and remote state is shown by color, not by a second line"
             );
+            // Ref badges sit right of the subject on the same line.
+            if let Some(first) = commit.refs.first() {
+                let badge = texts
+                    .iter()
+                    .find(|text| text.galley.text() == first.name)
+                    .unwrap_or_else(|| panic!("missing badge {}", first.name));
+                assert!(badge.pos.x >= line.pos.x + line.galley.size().x);
+                assert!(badge.pos.x + badge.galley.size().x <= row.right());
+            }
+            if commit.refs.len() > 1 && width < 300.0 {
+                assert!(texts.iter().any(|text| text.galley.text().starts_with('+')));
+            }
         }
         for pair in rows.windows(2) {
             assert!((pair[1].top() - pair[0].bottom()).abs() < 0.5);
