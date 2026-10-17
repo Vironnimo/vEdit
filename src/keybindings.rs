@@ -70,6 +70,8 @@ actions! {
     MoveTabDown, "move_tab_down", "Move tab down", "Layout", ["Ctrl+Alt+Shift+ArrowDown"];
     Review, "review", "Show agent review", "Layout", [];
     SourceControl, "source_control", "Show source control", "Layout", [];
+    ReviewWorkingTree, "review_working_tree", "Review working tree changes", "Git", [];
+    ReviewBranch, "review_branch", "Review branch against main", "Git", [];
     Explorer, "explorer", "Show explorer", "Layout", [];
     ToggleLeftSidebar, "toggle_left_sidebar", "Toggle left sidebar", "Layout", ["Ctrl+Alt+E", "Ctrl+B"];
     ToggleRightSidebar, "toggle_right_sidebar", "Toggle right sidebar", "Layout", ["Ctrl+Alt+B"];

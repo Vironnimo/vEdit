@@ -313,6 +313,14 @@ impl SessionLayout {
 }
 
 impl VEditApp {
+    /// A view drawn in place of every pane, such as the change review,
+    /// occupies the whole area as the focused pane's region. The pane tree
+    /// itself stays unchanged so closing the view restores the layout.
+    pub(super) fn cover_editor_panes(&mut self, rect: egui::Rect) {
+        let pane = self.editor_layout.focused;
+        self.editor_layout.rects.clear();
+        self.editor_layout.rects.insert(pane, rect);
+    }
     fn allocate_pane_id(&mut self) -> u64 {
         let id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.saturating_add(1);
@@ -1698,6 +1706,24 @@ impl VEditApp {
         false
     }
     pub(super) fn split_command(&mut self, action: &str) {
+        // The hidden panes keep their arrangement while a change review is open.
+        if self.change_review_visible()
+            && matches!(
+                action,
+                "right"
+                    | "down"
+                    | "close"
+                    | "next"
+                    | "previous"
+                    | "move_left"
+                    | "move_right"
+                    | "move_up"
+                    | "move_down"
+            )
+        {
+            self.status("Close the change review to arrange editor panes", true);
+            return;
+        }
         let result = match action {
             "right" => self.split_active(SplitOrientation::Vertical).map(|_| ()),
             "down" => self.split_active(SplitOrientation::Horizontal).map(|_| ()),

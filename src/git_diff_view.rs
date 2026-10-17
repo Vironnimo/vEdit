@@ -181,26 +181,14 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
             return;
         }
 
-        let font = FontId::monospace(FONT_SIZE);
-        let (character_width, font_height) =
-            ui.fonts_mut(|fonts| (fonts.glyph_width(&font, 'M'), fonts.row_height(&font)));
-        let row_height = (font_height + ROW_PADDING).max(20.0);
-        let number_width = self.patch.number_digits.max(3) as f32 * character_width + 16.0;
-        let gutter_width = number_width * 2.0;
         // Reserve the vertical bar before measuring so its appearance cannot
         // change wrapping. Text never widens this scroll area horizontally.
         let content_width = (ui.available_width() - ui.spacing().scroll.allocated_width())
             .floor()
             .max(1.0);
-        let text_width = (content_width - gutter_width - TEXT_INSET * 2.0).max(1.0);
-        self.wrapped.update(
-            ui,
-            &self.patch,
-            &font,
-            text_width,
-            character_width,
-            font_height,
-        );
+        let metrics = RowMetrics::new(ui, self.patch.number_digits, content_width);
+        let row_height = metrics.row_height;
+        self.wrapped.update(ui, &self.patch, &metrics);
         let salt = ("git_unified_diff", title, self.generation);
         let output = ui
             .scope(|ui| {
@@ -268,9 +256,6 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                     ui.set_min_size(Vec2::new(content_width, self.wrapped.height()));
                     let origin = ui.max_rect().min;
                     for index in self.wrapped.visible(viewport.top()..viewport.bottom()) {
-                        let presentation = &self.patch.presentation[index];
-                        let row = presentation.raw_row.map(|index| &self.patch.rows[index]);
-                        let kind = presentation.kind;
                         let rect = egui::Rect::from_min_max(
                             origin + Vec2::new(0.0, self.wrapped.offsets[index]),
                             origin + Vec2::new(content_width, self.wrapped.offsets[index + 1]),
@@ -278,74 +263,15 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
-                        let response = ui.interact(rect, body_id.with(index), Sense::hover());
-                        if let Some(tooltip) = &presentation.tooltip {
-                            response.on_hover_text(tooltip);
-                        }
-                        if let Some(fill) = palette.background(kind) {
-                            ui.painter().rect_filled(rect, 0.0, fill);
-                        }
-                        let gutter_color = match kind {
-                            RowKind::Added => palette.added.gamma_multiply(0.75),
-                            RowKind::Removed => palette.removed.gamma_multiply(0.75),
-                            _ => palette.muted,
-                        };
-                        for (number, right) in [
-                            (
-                                row.and_then(|row| row.old_line),
-                                rect.left() + number_width - 8.0,
-                            ),
-                            (
-                                row.and_then(|row| row.new_line),
-                                rect.left() + gutter_width - 8.0,
-                            ),
-                        ] {
-                            if let Some(number) = number {
-                                ui.painter().text(
-                                    egui::pos2(
-                                        right,
-                                        rect.top() + ROW_PADDING * 0.5 + font_height * 0.5,
-                                    ),
-                                    Align2::RIGHT_CENTER,
-                                    number.to_string(),
-                                    font.clone(),
-                                    gutter_color,
-                                );
-                            }
-                        }
-                        let divider = rect.left() + gutter_width;
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(divider, rect.top()),
-                                egui::pos2(divider, rect.bottom()),
-                            ],
-                            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                        paint_row(
+                            ui,
+                            &palette,
+                            &self.patch,
+                            index,
+                            rect,
+                            &metrics,
+                            body_id.with(index),
                         );
-                        let display = self.patch.display(index);
-                        let color = palette.foreground(kind);
-                        let galley = ui.fonts_mut(|fonts| match palette.marker(kind) {
-                            // Changed code stays readable in the text color; the
-                            // tint and the +/− marker carry the change.
-                            Some(marker) if !display.is_empty() => {
-                                let split = display.chars().next().map_or(0, char::len_utf8);
-                                let mut job = egui::text::LayoutJob::default();
-                                for (range, section_color) in
-                                    [(0..split, marker), (split..display.len(), color)]
-                                {
-                                    job.append(
-                                        &display[range],
-                                        0.0,
-                                        egui::TextFormat::simple(font.clone(), section_color),
-                                    );
-                                }
-                                job.wrap.max_width = text_width;
-                                fonts.layout_job(job)
-                            }
-                            _ => fonts.layout_delayed_color(display, font.clone(), text_width),
-                        });
-                        let position =
-                            egui::pos2(divider + TEXT_INSET, rect.top() + ROW_PADDING * 0.5);
-                        ui.painter().galley(position, galley, color);
                     }
                 })
             })
@@ -393,7 +319,7 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
 /// Prefix heights virtualize logical rows of different wrapped heights. Keep
 /// only geometry, rather than every off-screen galley's glyphs and meshes.
 #[derive(Default)]
-struct WrappedRows {
+pub(crate) struct WrappedRows {
     offsets: Vec<f32>,
     text_width: f32,
     character_width: f32,
@@ -403,15 +329,13 @@ struct WrappedRows {
 }
 
 impl WrappedRows {
-    fn update(
-        &mut self,
-        ui: &egui::Ui,
-        patch: &ParsedPatch,
-        font: &FontId,
-        text_width: f32,
-        character_width: f32,
-        font_height: f32,
-    ) {
+    pub(crate) fn update(&mut self, ui: &egui::Ui, patch: &ParsedPatch, metrics: &RowMetrics) {
+        let font = &metrics.font;
+        let (text_width, character_width, font_height) = (
+            metrics.text_width,
+            metrics.character_width,
+            metrics.font_height,
+        );
         // Refresh this probe even when geometry is cached: its identity also
         // detects replaced fonts whose ASCII metrics happen to be identical.
         let probe = ui.fonts_mut(|fonts| {
@@ -474,11 +398,19 @@ impl WrappedRows {
         }
     }
 
-    fn height(&self) -> f32 {
+    pub(crate) fn height(&self) -> f32 {
         self.offsets.last().copied().unwrap_or(0.0)
     }
 
-    fn visible(&self, viewport: Range<f32>) -> Range<usize> {
+    /// Top of row `index`; `index == len` is the bottom of the last row.
+    pub(crate) fn offset(&self, index: usize) -> f32 {
+        self.offsets
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| self.height())
+    }
+
+    pub(crate) fn visible(&self, viewport: Range<f32>) -> Range<usize> {
         let count = self.offsets.len().saturating_sub(1);
         let first = self
             .offsets
@@ -587,6 +519,121 @@ fn keyboard_scroll_offset(
         });
     });
     changed.then_some(offset)
+}
+
+/// Font and gutter geometry shared by every row of one diff surface.
+pub(crate) struct RowMetrics {
+    font: FontId,
+    character_width: f32,
+    font_height: f32,
+    pub(crate) row_height: f32,
+    number_width: f32,
+    gutter_width: f32,
+    text_width: f32,
+}
+
+impl RowMetrics {
+    pub(crate) fn new(ui: &egui::Ui, number_digits: usize, content_width: f32) -> Self {
+        let font = FontId::monospace(FONT_SIZE);
+        let (character_width, font_height) =
+            ui.fonts_mut(|fonts| (fonts.glyph_width(&font, 'M'), fonts.row_height(&font)));
+        let number_width = number_digits.max(3) as f32 * character_width + 16.0;
+        let gutter_width = number_width * 2.0;
+        Self {
+            row_height: (font_height + ROW_PADDING).max(20.0),
+            text_width: (content_width - gutter_width - TEXT_INSET * 2.0).max(1.0),
+            font,
+            character_width,
+            font_height,
+            number_width,
+            gutter_width,
+        }
+    }
+}
+
+/// Paint one presentation row: tint, old/new line numbers, divider and text.
+pub(crate) fn paint_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    patch: &ParsedPatch,
+    index: usize,
+    rect: egui::Rect,
+    metrics: &RowMetrics,
+    id: egui::Id,
+) {
+    let RowMetrics {
+        font,
+        font_height,
+        number_width,
+        gutter_width,
+        text_width,
+        ..
+    } = metrics;
+    let presentation = &patch.presentation[index];
+    let row = presentation.raw_row.map(|index| &patch.rows[index]);
+    let kind = presentation.kind;
+    let response = ui.interact(rect, id, Sense::hover());
+    if let Some(tooltip) = &presentation.tooltip {
+        response.on_hover_text(tooltip);
+    }
+    if let Some(fill) = palette.background(kind) {
+        ui.painter().rect_filled(rect, 0.0, fill);
+    }
+    let gutter_color = match kind {
+        RowKind::Added => palette.added.gamma_multiply(0.75),
+        RowKind::Removed => palette.removed.gamma_multiply(0.75),
+        _ => palette.muted,
+    };
+    for (number, right) in [
+        (
+            row.and_then(|row| row.old_line),
+            rect.left() + number_width - 8.0,
+        ),
+        (
+            row.and_then(|row| row.new_line),
+            rect.left() + gutter_width - 8.0,
+        ),
+    ] {
+        if let Some(number) = number {
+            ui.painter().text(
+                egui::pos2(right, rect.top() + ROW_PADDING * 0.5 + font_height * 0.5),
+                Align2::RIGHT_CENTER,
+                number.to_string(),
+                font.clone(),
+                gutter_color,
+            );
+        }
+    }
+    let divider = rect.left() + gutter_width;
+    ui.painter().line_segment(
+        [
+            egui::pos2(divider, rect.top()),
+            egui::pos2(divider, rect.bottom()),
+        ],
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+    let display = patch.display(index);
+    let color = palette.foreground(kind);
+    let galley = ui.fonts_mut(|fonts| match palette.marker(kind) {
+        // Changed code stays readable in the text color; the
+        // tint and the +/− marker carry the change.
+        Some(marker) if !display.is_empty() => {
+            let split = display.chars().next().map_or(0, char::len_utf8);
+            let mut job = egui::text::LayoutJob::default();
+            for (range, section_color) in [(0..split, marker), (split..display.len(), color)] {
+                job.append(
+                    &display[range],
+                    0.0,
+                    egui::TextFormat::simple(font.clone(), section_color),
+                );
+            }
+            job.wrap.max_width = *text_width;
+            fonts.layout_job(job)
+        }
+        _ => fonts.layout_delayed_color(display, font.clone(), *text_width),
+    });
+    let position = egui::pos2(divider + TEXT_INSET, rect.top() + ROW_PADDING * 0.5);
+    ui.painter().galley(position, galley, color);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -718,7 +765,7 @@ impl FileDetail {
 }
 
 #[derive(Default)]
-struct ParsedPatch {
+pub(crate) struct ParsedPatch {
     source: String,
     rows: Vec<DiffRow>,
     additions: usize,
@@ -734,6 +781,28 @@ struct ParsedPatch {
 }
 
 impl ParsedPatch {
+    pub(crate) fn rows(&self) -> usize {
+        self.presentation.len()
+    }
+
+    pub(crate) fn number_digits(&self) -> usize {
+        self.number_digits
+    }
+
+    /// The new-side line shown at presentation row `index`; removed rows and
+    /// hunk headers use the next new-side line, falling back to the previous.
+    pub(crate) fn new_line_at(&self, index: usize) -> Option<usize> {
+        let line = |index: usize| {
+            self.presentation[index]
+                .raw_row
+                .and_then(|raw| self.rows[raw].new_line)
+        };
+        let index = index.min(self.presentation.len());
+        (index..self.presentation.len())
+            .find_map(line)
+            .or_else(|| (0..index).rev().find_map(line))
+    }
+
     fn display(&self, index: usize) -> String {
         let presentation = &self.presentation[index];
         match presentation.raw_row {
@@ -745,7 +814,7 @@ impl ParsedPatch {
         }
     }
 
-    fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Self {
         let mut patch = Self {
             source: text.to_owned(),
             ..Self::default()
@@ -1213,7 +1282,7 @@ fn display_line(text: &str, kind: RowKind) -> String {
     }
 }
 
-struct Palette {
+pub(crate) struct Palette {
     normal: Color32,
     muted: Color32,
     added: Color32,
@@ -1223,7 +1292,7 @@ struct Palette {
 }
 
 impl Palette {
-    fn new(ui: &egui::Ui) -> Self {
+    pub(crate) fn new(ui: &egui::Ui) -> Self {
         let dark = ui.visuals().dark_mode;
         Self {
             normal: ui.visuals().text_color(),

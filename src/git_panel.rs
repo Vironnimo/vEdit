@@ -46,6 +46,8 @@ pub(super) struct GitViewState {
     detail_keyboard_focus: Option<egui::Id>,
     detail_keyboard_focus_pending: bool,
     detail_page_rows: usize,
+    /// The last clicked history row, so a double-click can open its review.
+    history_click: Option<(String, egui::Rect)>,
 }
 
 impl GitViewState {
@@ -693,6 +695,9 @@ enum GitUiAction {
     UseParentRepository,
     StopUsingParentRepository,
     SwitchBranch(String),
+    ReviewCommit(String),
+    ReviewBranch,
+    ReviewWorkingTree,
 }
 
 impl VEditApp {
@@ -1006,8 +1011,8 @@ impl VEditApp {
             );
             ui.add(egui::Label::new(crate::paths::display(parent)).wrap());
         }
-        if repo {
-            repository_overview(ui, project, &state);
+        if repo && repository_overview(ui, project, &state) {
+            actions.push(GitUiAction::ReviewBranch);
         }
         if let Some(error) = &project.git_error {
             error_note(ui, error);
@@ -1370,8 +1375,14 @@ impl VEditApp {
                                         &mut actions,
                                     );
                                     if response.clicked() {
+                                        state.history_click =
+                                            Some((commit.hash.clone(), response.rect));
                                         actions
                                             .push(GitUiAction::SelectCommit(commit.hash.clone()));
+                                    }
+                                    if response.double_clicked() {
+                                        actions
+                                            .push(GitUiAction::ReviewCommit(commit.hash.clone()));
                                     }
                                     git_context_menu(&response, |ui, focus| {
                                         if git_menu_item(
@@ -1384,6 +1395,20 @@ impl VEditApp {
                                         .clicked()
                                         {
                                             actions.push(GitUiAction::SelectCommit(
+                                                commit.hash.clone(),
+                                            ));
+                                            ui.close();
+                                        }
+                                        if git_menu_item(
+                                            ui,
+                                            "Review commit",
+                                            "",
+                                            "Read all changes of this commit in one view",
+                                            false,
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(GitUiAction::ReviewCommit(
                                                 commit.hash.clone(),
                                             ));
                                             ui.close();
@@ -1490,6 +1515,18 @@ impl VEditApp {
                 .map_or_else(String::new, |value| format!("{arrow}{value}"))
         };
         let mut actions = Vec::new();
+        if design::menu_item(
+            ui,
+            "Review all changes",
+            "",
+            "Read staged, unstaged and untracked changes in one view",
+        )
+        .clicked()
+        {
+            actions.push(GitUiAction::ReviewWorkingTree);
+            ui.close();
+        }
+        ui.separator();
         ui.add_enabled_ui(!busy, |ui| {
             for (label, hint, tip, action) in [
                 (
@@ -1720,6 +1757,30 @@ impl VEditApp {
         if !child_open && (modal.inner || modal.should_close()) {
             open = false;
         }
+        // The second click of a double-click on a history row lands on the
+        // backdrop of the details its first click opened: review the commit.
+        let review = (!child_open)
+            .then(|| {
+                self.ctx.input(|input| {
+                    input
+                        .pointer
+                        .button_double_clicked(egui::PointerButton::Primary)
+                        .then(|| input.pointer.interact_pos())
+                        .flatten()
+                })
+            })
+            .flatten()
+            .filter(|position| !modal.response.rect.contains(*position))
+            .and_then(|position| {
+                state
+                    .history_click
+                    .as_ref()
+                    .filter(|(clicked, rect)| *clicked == hash && rect.contains(position))
+                    .map(|(clicked, _)| clicked.clone())
+            });
+        if review.is_some() {
+            open = false;
+        }
         if !child_open {
             if state.detail_keyboard_focus_pending
                 && let Some(id) = state.detail_keyboard_focus
@@ -1755,6 +1816,9 @@ impl VEditApp {
             self.perform_git_ui_actions(index, &root, actions);
         } else {
             self.restore_git_overlay_focus();
+        }
+        if let Some(hash) = review {
+            self.show_change_review(index, git::ReviewSource::Commit(hash));
         }
     }
 
@@ -1819,6 +1883,15 @@ impl VEditApp {
                 GitUiAction::StopUsingParentRepository => {
                     self.set_git_parent_repository(project_index, false);
                 }
+                GitUiAction::ReviewCommit(hash) => {
+                    self.show_change_review(project_index, git::ReviewSource::Commit(hash))
+                }
+                GitUiAction::ReviewBranch => {
+                    self.show_change_review(project_index, git::ReviewSource::Branch { base: None })
+                }
+                GitUiAction::ReviewWorkingTree => {
+                    self.show_change_review(project_index, git::ReviewSource::WorkingTree)
+                }
             }
         }
     }
@@ -1834,7 +1907,9 @@ const SECTION_TEXT_INSET: f32 = 4.0;
 /// One quiet line with what matters for an overview: changed files, their
 /// line delta, and how far the branch has moved from the local main branch.
 /// Remote actions live in the panel menu; agents usually commit and push.
-fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewState) {
+/// Returns true when the main comparison was clicked to review the branch.
+fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewState) -> bool {
+    let mut review = false;
     let inset = egui::Margin {
         left: SECTION_TEXT_INSET as i8,
         ..Default::default()
@@ -1892,20 +1967,23 @@ fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewStat
             match &project.git_main_comparison {
                 Ok(Some(comparison)) if comparison.ahead > 0 || comparison.behind > 0 => {
                     ui.label(RichText::new("·").size(11.5).color(MUTED));
-                    ui.label(
-                    RichText::new(format!(
+                    review |= ui.add(
+                    egui::Label::new(RichText::new(format!(
                         "{} ↑{} ↓{}",
                         comparison.base, comparison.ahead, comparison.behind
                     ))
                     .size(11.5)
-                    .color(MUTED),
+                    .color(MUTED))
+                    .sense(egui::Sense::click()),
                 )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!(
-                    "Compared with local {base}: {} commits only on this branch, {} only on {base}",
+                    "Compared with local {base}: {} commits only on this branch, {} only on {base}\nClick to review this branch's changes",
                     comparison.ahead,
                     comparison.behind,
                     base = comparison.base
-                ));
+                ))
+                .clicked();
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -1920,6 +1998,7 @@ fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewStat
             }
         })
     });
+    review
 }
 
 /// Commits to push and pull, right-aligned beside the branch name.
@@ -2702,7 +2781,7 @@ fn stats_labels(ui: &mut egui::Ui, stats: StatsSummary) {
     }
 }
 
-fn compact_number(value: u64) -> String {
+pub(super) fn compact_number(value: u64) -> String {
     if value >= 10_000 {
         format!("{:.0}k", value as f64 / 1_000.0)
     } else if value >= 1_000 {
@@ -3041,7 +3120,7 @@ fn format_date(date: &str) -> String {
     date.replace('T', " ")
 }
 
-fn change_marker(
+pub(super) fn change_marker(
     change: git::FileChange,
     conflicted: bool,
 ) -> (&'static str, Color32, &'static str) {
