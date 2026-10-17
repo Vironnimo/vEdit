@@ -157,6 +157,21 @@ impl VEditApp {
             });
     }
 
+    /// The Git decoration for an Explorer row of the active project.
+    fn explorer_git_mark(
+        &self,
+        path: &Path,
+        is_dir: bool,
+    ) -> Option<explorer_git::ExplorerGitMark> {
+        let project = self.project()?;
+        let marks = project
+            .explorer_git
+            .as_ref()
+            .filter(|marks| !marks.is_empty())?;
+        let relative = path.strip_prefix(project.git_root.as_ref()?).ok()?;
+        marks.get(relative, is_dir)
+    }
+
     fn explorer_tree_rows(
         &mut self,
         ui: &mut egui::Ui,
@@ -164,6 +179,11 @@ impl VEditApp {
         active: &Option<PathBuf>,
     ) {
         let owns_selection = self.explorer_keyboard_focused() || self.explorer_context_menu_open();
+        if let Some(project) = self.projects.get_mut(self.active_project)
+            && project.explorer_git.is_none()
+        {
+            project.explorer_git = Some(explorer_git::ExplorerGitMarks::new(&project.git_changes));
+        }
         for row in rows {
             let entry = &row.entry;
             ui.push_id(&entry.path, |ui| {
@@ -175,8 +195,16 @@ impl VEditApp {
                     active_file
                 };
                 let mut tooltip = crate::paths::display(&entry.path);
+                let git_mark = self.explorer_git_mark(&entry.path, entry.is_dir);
                 if entry.ignored {
                     tooltip.push_str("\nIgnored by Git");
+                } else if let Some(mark) = git_mark {
+                    tooltip.push('\n');
+                    tooltip.push_str(if entry.is_dir {
+                        "Contains changes"
+                    } else {
+                        mark.label()
+                    });
                 }
                 if let Some(explorer) = self.project().and_then(|project| project.explorer.as_ref())
                 {
@@ -200,6 +228,9 @@ impl VEditApp {
                         selected: emphasized,
                         active_file,
                         ignored: entry.ignored,
+                        git: git_mark
+                            .filter(|_| !entry.ignored)
+                            .map(|mark| (mark.letter(), mark.color())),
                         tooltip: &tooltip,
                     },
                 );

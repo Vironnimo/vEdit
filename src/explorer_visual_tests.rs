@@ -342,3 +342,59 @@ fn dense_explorer_hierarchy_screenshots() {
     let mut results = screen.take_snapshot_results();
     results.extend(compact.take_snapshot_results());
 }
+
+#[test]
+fn explorer_colors_changed_files_and_marks_their_folders() {
+    let mut app = fixture(292.0);
+    let project = &mut app.projects[0];
+    project.git_root = Some(project.root.clone());
+    let change = |path: &str, index, worktree| git::FileStatus {
+        path: path.into(),
+        original_path: None,
+        index,
+        worktree,
+    };
+    project.git_changes = vec![
+        change(
+            "src/editor/document.rs",
+            git::FileChange::None,
+            git::FileChange::Modified,
+        ),
+        change(
+            "src/editor/view/viewport.rs",
+            git::FileChange::None,
+            git::FileChange::Untracked,
+        ),
+        change(
+            "docs/guide.md",
+            git::FileChange::Added,
+            git::FileChange::None,
+        ),
+        change(
+            "Cargo.toml",
+            git::FileChange::Modified,
+            git::FileChange::None,
+        ),
+        change(
+            "tests/smoke.rs",
+            git::FileChange::Unmerged,
+            git::FileChange::Unmerged,
+        ),
+    ];
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "vedit_explorer_git_status");
+    assert_readable_hierarchy(&screen);
+    let marks = screen.state().projects[0]
+        .explorer_git
+        .as_ref()
+        .expect("Explorer derives Git marks while painting");
+    assert_eq!(
+        marks.get(Path::new("src"), true),
+        Some(explorer_git::ExplorerGitMark::Modified)
+    );
+    assert_eq!(
+        marks.get(Path::new("tests"), true),
+        Some(explorer_git::ExplorerGitMark::Conflicted)
+    );
+    assert!(marks.get(Path::new("README.md"), false).is_none());
+}

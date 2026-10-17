@@ -401,6 +401,8 @@ pub(crate) struct ExplorerRow<'a> {
     pub selected: bool,
     pub active_file: bool,
     pub ignored: bool,
+    /// Git status letter and color. Folders show only a dot in that color.
+    pub git: Option<(&'a str, Color32)>,
     pub tooltip: &'a str,
 }
 
@@ -540,8 +542,36 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
         paint_explorer_icon(&painter, icon_center, row.expanded, icon_color);
 
         let left = icon_center.x + 13.0;
+        let mut right = rect.right() - 8.0;
+        if let Some((letter, git_color)) = row.git {
+            let git_color = enabled_color(ui, git_color.lerp_to_gamma(visuals.text_color(), 0.1));
+            if row.expanded.is_some() {
+                painter.circle_filled(
+                    egui::pos2(right - 4.0, rect.center().y),
+                    2.5,
+                    git_color.gamma_multiply(0.8),
+                );
+                right -= 14.0;
+            } else {
+                let badge = painter.layout_no_wrap(
+                    letter.to_owned(),
+                    FontId::proportional(11.0),
+                    git_color,
+                );
+                let width = badge.size().x;
+                painter.galley(
+                    egui::pos2(right - 2.0 - width, rect.center().y - badge.size().y * 0.5),
+                    badge,
+                    git_color,
+                );
+                right -= width + 12.0;
+            }
+        }
         let color = if row.ignored {
             enabled_color(ui, ignored_color)
+        } else if let Some((_, git_color)) = row.git {
+            // Like other editors, a changed name carries its status color.
+            enabled_color(ui, git_color.lerp_to_gamma(visuals.text_color(), 0.25))
         } else if highlighted || response.hovered() || row.expanded.is_some() {
             enabled_color(ui, visuals.text_color())
         } else {
@@ -557,7 +587,7 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             row.label,
             FontId::proportional(12.0),
             color,
-            (rect.right() - left - 8.0).max(1.0),
+            (right - left).max(1.0),
         );
         painter.galley(
             egui::pos2(left, rect.center().y - galley.size().y * 0.5),

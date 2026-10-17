@@ -36,6 +36,8 @@ mod editor_input;
 mod editor_preferences;
 #[path = "ex_commands.rs"]
 mod ex_commands;
+#[path = "explorer_git.rs"]
+mod explorer_git;
 #[path = "explorer_navigation.rs"]
 mod explorer_navigation;
 #[path = "explorer_tree_ui.rs"]
@@ -212,6 +214,8 @@ struct Project {
     git_tracking: Option<git::BranchInfo>,
     git_main_comparison: Result<Option<git::BranchComparison>, String>,
     git_changes: Vec<git::FileStatus>,
+    /// Explorer decorations for `git_changes`, rebuilt on first use after a change.
+    explorer_git: Option<explorer_git::ExplorerGitMarks>,
     git_stats: git::WorkingTreeStats,
     git_stats_error: Option<String>,
     recent_commits: Vec<git::CommitSummary>,
@@ -259,6 +263,7 @@ impl Project {
             git_tracking: None,
             git_main_comparison: Ok(None),
             git_changes: Vec::new(),
+            explorer_git: None,
             git_stats: git::WorkingTreeStats::default(),
             git_stats_error: None,
             recent_commits: Vec::new(),
@@ -1828,6 +1833,9 @@ impl VEditApp {
                                 p.git_tracking = s.tracking;
                                 p.git_main_comparison = s.main_comparison;
                                 p.git_view.update_working_cache(&s.files, &s.stats);
+                                if p.git_changes != s.files {
+                                    p.explorer_git = None;
+                                }
                                 p.git_changes = s.files;
                                 p.git_stats = s.stats;
                                 p.git_stats_error = s.stats_error;
