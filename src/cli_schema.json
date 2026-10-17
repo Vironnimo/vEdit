@@ -361,6 +361,21 @@
       "workspace": "C:/project"
     },
     {
+      "op": "change_review",
+      "source": "working",
+      "workspace": "C:/project"
+    },
+    {
+      "op": "change_review",
+      "source": "commit",
+      "rev": "HEAD~1"
+    },
+    {
+      "op": "change_review",
+      "source": "branch",
+      "base": "main"
+    },
+    {
       "op": "task",
       "action": "check"
     },
@@ -578,7 +593,7 @@
   },
   "batch": {
     "semantics": "Ordered actions, stop_on_error:true default. Reports each completed response, stopping index and remaining count. No rollback. A per-item partial failure stops just like an error. Retry remaining actions only after inspecting state, never replay successful edits.",
-    "restrictions": "No nested batch, background Search, File, GitBranches, GitHistory or GitSwitchBranch inside batch; run them separately. Read-only batches remain available during a user dialog.",
+    "restrictions": "No nested batch, background Search, File, GitBranches, GitHistory, GitSwitchBranch or ChangeReview inside batch; run them separately. Read-only batches remain available during a user dialog.",
     "result_detail": "Results above 128 KiB become compact effect evidence retaining tab IDs/revisions and per-item outcomes, with details_omitted:true. Retrieve omitted text/details separately. If accumulated evidence approaches the transport budget, the batch stops at the next unexecuted action with stopped_reason:result_budget and remaining count; never replay the completed prefix."
   },
   "defaults": {
@@ -592,6 +607,13 @@
     "close": "refuses unsaved/saving tabs",
     "clear_marks_empty": "clears all agent-authored review annotations and review summary; user agent_marks stay intact",
     "relative_paths": "CLI open/request use current directory; review manifest paths use manifest directory"
+  },
+  "change_review": {
+    "purpose": "Shows the user every change as one continuous read-only diff in place of the active project's editor panes, with a file list the user ticks off as seen. Use it to hand finished work to the user for review; it never edits, stages or saves.",
+    "source": "working: staged, unstaged and untracked changes against HEAD (the empty tree before the first commit). commit: rev compared with its first parent (a root commit with the empty tree). branch: HEAD since it left base (base...HEAD); omitted base uses local main, otherwise master.",
+    "fields": "rev is required for and only allowed with commit; base only with branch. Revisions have 1..256 bytes, no leading '-' and no control characters. Omitted workspace uses the active project; an explicit one must be open and have a repository.",
+    "result": "Answers after the comparison loaded: applied, visible, workspace, repository, source, title, detail, files, added, removed, seen, omitted_untracked. Large or binary files are listed with a note instead of a patch. review_closed or review_replaced means the user closed it or another review replaced it first; review_failed reports a Git failure; user_dialog_open applies nothing.",
+    "user_state": "Seen marks belong to the user and stay per comparison in memory; a file that changes again becomes unseen. Opening a document closes the review; the editor panes are unchanged."
   },
   "panels": [
     "left_sidebar",

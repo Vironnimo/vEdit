@@ -34,6 +34,9 @@ impl VEditApp {
             if self.control_git_async(&envelope.request, envelope.reply.clone()) {
                 continue;
             }
+            if self.control_change_review(&envelope.request, envelope.reply.clone()) {
+                continue;
+            }
             if self.control_query_async(&envelope.request, envelope.reply.clone()) {
                 continue;
             }
@@ -609,7 +612,7 @@ impl VEditApp {
             self.session_dirty = true;
         }
     }
-    fn raise_control_window(&self) {
+    pub(super) fn raise_control_window(&self) {
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);

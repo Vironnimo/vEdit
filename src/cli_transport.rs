@@ -450,7 +450,10 @@ fn decode_request(frame: &[u8], token: &str) -> Result<Request, Response> {
 fn request_timeout(request: &Request) -> Duration {
     if matches!(
         request,
-        Request::GitBranches { .. } | Request::GitHistory { .. } | Request::GitSwitchBranch { .. }
+        Request::GitBranches { .. }
+            | Request::GitHistory { .. }
+            | Request::GitSwitchBranch { .. }
+            | Request::ChangeReview { .. }
     ) {
         Duration::from_secs(50)
     } else {

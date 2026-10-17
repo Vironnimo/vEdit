@@ -237,7 +237,12 @@ impl VEditApp {
 
     pub(super) fn cycle_spatial_region(&mut self, backwards: bool) {
         let mut ids = Vec::new();
-        self.editor_layout.root.ids(&mut ids);
+        if self.change_review_visible() {
+            // The review covers every pane; it is one region.
+            ids.push(self.editor_layout.focused);
+        } else {
+            self.editor_layout.root.ids(&mut ids);
+        }
         let mut regions: Vec<_> = ids.into_iter().map(Region::Pane).collect();
         for side in self.visible_sidebar_sides() {
             match side {

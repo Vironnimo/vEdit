@@ -221,7 +221,10 @@ impl VEditApp {
         true
     }
 
-    fn control_query_project(&self, path: Option<&Path>) -> Result<&Project, Response> {
+    pub(in crate::app) fn control_query_project(
+        &self,
+        path: Option<&Path>,
+    ) -> Result<&Project, Response> {
         if let Some(path) = path {
             return self
                 .projects

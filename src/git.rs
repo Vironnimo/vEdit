@@ -234,21 +234,7 @@ pub struct BranchComparison {
 /// Compare HEAD with local main (or master). This reads local objects only;
 /// the independent tracking comparison describes the last fetched remote state.
 pub fn main_comparison(root: &Path) -> GitResult<Option<BranchComparison>> {
-    let output = checked_git(
-        root,
-        &string_args(&[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads/main",
-            "refs/heads/master",
-        ]),
-        "find main branch",
-    )?;
-    let refs = String::from_utf8_lossy(&output.stdout);
-    let Some(base) = ["main", "master"].into_iter().find(|name| {
-        refs.lines()
-            .any(|line| line == format!("refs/heads/{name}"))
-    }) else {
+    let Some(base) = local_main_branch(root)? else {
         return Ok(None);
     };
     compare_with_main(root, base)
@@ -302,6 +288,26 @@ fn compare_with_main(root: &Path, base: &str) -> GitResult<Option<BranchComparis
         base: base.into(),
         ahead: *ahead,
         behind: *behind,
+    }))
+}
+
+/// The local branch that other branches are compared with: `main`, otherwise
+/// `master`. Remote-tracking refs are deliberately ignored.
+fn local_main_branch(root: &Path) -> GitResult<Option<&'static str>> {
+    let output = checked_git(
+        root,
+        &string_args(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/main",
+            "refs/heads/master",
+        ]),
+        "find main branch",
+    )?;
+    let refs = String::from_utf8_lossy(&output.stdout);
+    Ok(["main", "master"].into_iter().find(|name| {
+        refs.lines()
+            .any(|line| line == format!("refs/heads/{name}"))
     }))
 }
 
@@ -1015,19 +1021,24 @@ pub fn commit_file_diff(
 /// attributes, text-conversion programs, or an external diff tool.
 pub fn untracked_diff(root: &Path, path: &Path) -> GitResult<String> {
     let bytes = read_untracked_bytes(root, path, UNTRACKED_FILE_LIMIT)?;
-    let stats = added_file_stats(&bytes);
+    Ok(untracked_patch(path, &bytes))
+}
+
+/// The synthetic addition patch for already read untracked file contents.
+fn untracked_patch(path: &Path, bytes: &[u8]) -> String {
+    let stats = added_file_stats(bytes);
     let display_path = path.to_string_lossy().replace('\\', "/");
     let before = format!("a/{display_path}");
     let after = format!("b/{display_path}");
     let mut patch = format!("diff --git {before:?} {after:?}\nnew file mode 100644\n");
     if stats.binary {
         patch.push_str(&format!("Binary files /dev/null and {after:?} differ\n"));
-        return Ok(patch);
+        return patch;
     }
     patch.push_str(&format!("--- /dev/null\n+++ {after:?}\n"));
     if !bytes.is_empty() {
         patch.push_str(&format!("@@ -0,0 +1,{} @@\n", stats.added));
-        let text = String::from_utf8_lossy(&bytes);
+        let text = String::from_utf8_lossy(bytes);
         for line in text.split_inclusive('\n') {
             patch.push('+');
             patch.push_str(line);
@@ -1036,7 +1047,7 @@ pub fn untracked_diff(root: &Path, path: &Path) -> GitResult<String> {
             patch.push_str("\n\\ No newline at end of file\n");
         }
     }
-    Ok(patch)
+    patch
 }
 
 fn validate_commit_hash(hash: &str) -> GitResult<()> {
@@ -1106,6 +1117,662 @@ fn added_file_stats(bytes: &[u8]) -> LineStats {
         removed: 0,
         binary: false,
     }
+}
+
+/// A file whose added plus removed lines exceed this loads only on request.
+pub const REVIEW_LARGE_FILE_LINES: u64 = 3_000;
+/// Changed lines whose patches load together with the file list. Later files
+/// keep their statistics and load when they are scrolled into view.
+const REVIEW_EAGER_LINES: u64 = 40_000;
+/// Untracked files listed by one working-tree review; the rest are counted.
+const REVIEW_UNTRACKED_LIMIT: usize = 2_000;
+/// One patch command covers at most this many paths and path bytes, which
+/// keeps the command line far below the Windows limit.
+const REVIEW_CHUNK_FILES: usize = 48;
+const REVIEW_CHUNK_PATH_BYTES: usize = 12 * 1024;
+const REVIEW_REVISION_BYTES: usize = 256;
+
+/// What a change review compares. New sources (for example "since last seen")
+/// can be added as variants; consumers only rely on the resolved comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReviewSource {
+    /// Staged, unstaged and untracked changes compared with HEAD.
+    WorkingTree,
+    /// One commit compared with its first parent; a root commit with the empty tree.
+    Commit(String),
+    /// Commits on HEAD since it left `base` (`base...HEAD`). `None` uses the
+    /// local main branch, or master when there is no main.
+    Branch { base: Option<String> },
+}
+
+impl ReviewSource {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkingTree => "working",
+            Self::Commit(_) => "commit",
+            Self::Branch { .. } => "branch",
+        }
+    }
+}
+
+/// A resolved review. Both sides are immutable object IDs (or the working
+/// tree), so a patch loaded later still belongs to the listed files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComparison {
+    pub source: ReviewSource,
+    /// Scope of the seen state. It stays the same across refreshes, also when
+    /// the branch gained commits; per-file content keys detect changed files.
+    pub key: String,
+    pub title: String,
+    pub detail: String,
+    /// Tree-ish compared from: a commit, a merge base or the empty tree.
+    pub old: String,
+    /// Commit compared to; `None` compares with the working tree.
+    pub new: Option<String>,
+}
+
+impl ReviewComparison {
+    fn range_args(&self) -> Vec<OsString> {
+        let mut args = vec![OsString::from(&self.old)];
+        args.extend(self.new.iter().map(OsString::from));
+        args
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewPatch {
+    Loaded(String),
+    /// Above [`REVIEW_LARGE_FILE_LINES`]; loads only when the user asks.
+    Large,
+    /// Beyond the eager budget; loads when the file is shown.
+    Deferred,
+    Binary,
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFile {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub status: FileChange,
+    /// `None` when Git reported no statistics or they were not computed.
+    pub stats: Option<LineStats>,
+    /// Changes whenever the compared content of this file changes: blob IDs
+    /// for committed content, size and modification time for working files.
+    pub content_key: u64,
+    pub patch: ReviewPatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeSet {
+    pub comparison: ReviewComparison,
+    /// Grouped by folder: sorted by parent folder, then by file name.
+    pub files: Vec<ReviewFile>,
+    /// Untracked files beyond the listing limit.
+    pub omitted_untracked: usize,
+}
+
+/// Reject option-like, oversized or control-character revision expressions
+/// before they reach Git. Revisions are always passed as separate arguments.
+pub fn validate_review_revision(revision: &str) -> GitResult<()> {
+    if revision.is_empty()
+        || revision.len() > REVIEW_REVISION_BYTES
+        || revision.starts_with('-')
+        || revision.chars().any(char::is_control)
+    {
+        return Err(GitError::new(
+            "resolve review",
+            "a revision must have 1 to 256 bytes, must not start with '-' and must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_commit(root: &Path, revision: &str, operation: &str) -> GitResult<String> {
+    validate_review_revision(revision)?;
+    let output = raw_git(
+        root,
+        &[
+            OsString::from("rev-parse"),
+            OsString::from("--verify"),
+            OsString::from("--quiet"),
+            OsString::from(format!("{revision}^{{commit}}")),
+        ],
+        operation,
+    )?;
+    if !output.status.success() {
+        return Err(GitError::new(
+            operation,
+            format!("{revision} does not name a commit in this repository"),
+        ));
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    validate_commit_hash(&hash)?;
+    Ok(hash)
+}
+
+/// The empty tree of this repository's object format (SHA-1 or SHA-256).
+fn empty_tree(root: &Path) -> GitResult<String> {
+    let output = raw_git_with_input(
+        root,
+        &string_args(&["hash-object", "-t", "tree", "--stdin"]),
+        "read empty tree",
+        Some(Vec::new()),
+    )?;
+    if !output.status.success() {
+        return Err(command_error("read empty tree", &output));
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    validate_commit_hash(&hash)?;
+    Ok(hash)
+}
+
+/// Resolve a review source to immutable object IDs without reading patches.
+pub fn resolve_review(root: &Path, source: &ReviewSource) -> GitResult<ReviewComparison> {
+    const OPERATION: &str = "resolve review";
+    match source {
+        ReviewSource::WorkingTree => Ok(ReviewComparison {
+            source: source.clone(),
+            key: "working".into(),
+            title: "Working tree".into(),
+            detail: "Staged, unstaged and untracked changes compared with HEAD".into(),
+            old: match read_head(root)? {
+                Some(head) => head,
+                None => empty_tree(root)?,
+            },
+            new: None,
+        }),
+        ReviewSource::Commit(revision) => {
+            let hash = resolve_commit(root, revision, OPERATION)?;
+            let output = checked_git(
+                root,
+                &string_args(&[
+                    "show",
+                    "--no-patch",
+                    "--no-notes",
+                    "--format=%P%x00%s",
+                    &hash,
+                    "--",
+                ]),
+                OPERATION,
+            )?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let (parents, subject) = text
+                .split_once('\0')
+                .ok_or_else(|| GitError::new(OPERATION, "Git returned unexpected commit data"))?;
+            let parents: Vec<_> = parents.split_whitespace().collect();
+            for parent in &parents {
+                validate_commit_hash(parent)?;
+            }
+            let short = &hash[..7];
+            Ok(ReviewComparison {
+                source: source.clone(),
+                key: format!("commit:{hash}"),
+                title: format!("{short} {}", subject.trim_end_matches(['\r', '\n'])),
+                detail: match parents.len() {
+                    0 => format!("Root commit {hash}, compared with an empty tree"),
+                    1 => format!("Commit {hash}, compared with its parent"),
+                    _ => format!("Merge commit {hash}, compared with its first parent"),
+                },
+                old: match parents.first() {
+                    Some(parent) => (*parent).to_owned(),
+                    None => empty_tree(root)?,
+                },
+                new: Some(hash),
+            })
+        }
+        ReviewSource::Branch { base } => {
+            let head = read_head(root)?
+                .ok_or_else(|| GitError::new(OPERATION, "the repository has no commits yet"))?;
+            let (base_name, base_hash) = match base {
+                Some(base) => (base.clone(), resolve_commit(root, base, OPERATION)?),
+                None => {
+                    let name = local_main_branch(root)?.ok_or_else(|| {
+                        GitError::new(OPERATION, "there is no local main or master branch")
+                    })?;
+                    let hash = resolve_commit(root, &format!("refs/heads/{name}"), OPERATION)?;
+                    (name.to_owned(), hash)
+                }
+            };
+            let branch = current_branch(root)?;
+            let name = branch.as_deref().unwrap_or("HEAD");
+            let output = raw_git(
+                root,
+                &string_args(&["merge-base", &head, &base_hash]),
+                OPERATION,
+            )?;
+            if !output.status.success() {
+                return Err(if output.status.code() == Some(1) {
+                    GitError::new(
+                        OPERATION,
+                        format!("{name} and {base_name} have no common history"),
+                    )
+                } else {
+                    command_error(OPERATION, &output)
+                });
+            }
+            let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            validate_commit_hash(&merge_base)?;
+            Ok(ReviewComparison {
+                source: source.clone(),
+                key: format!("branch:{name}\0{base_name}"),
+                title: format!("{name} vs {base_name}"),
+                detail: format!(
+                    "Commits on {name} since it left {base_name} (merge base {})",
+                    &merge_base[..7]
+                ),
+                old: merge_base,
+                new: Some(head),
+            })
+        }
+    }
+}
+
+/// List a review's files and load patches within the eager budget. Large
+/// files, binary files and files beyond the budget keep their statistics.
+pub fn change_set(root: &Path, source: &ReviewSource) -> GitResult<ChangeSet> {
+    let comparison = resolve_review(root, source)?;
+    let (mut files, omitted_untracked) = review_files(root, &comparison)?;
+    let mut budget = REVIEW_EAGER_LINES;
+    let mut untracked_bytes = UNTRACKED_TOTAL_LIMIT;
+    let mut eager = Vec::new();
+    for (index, file) in files.iter_mut().enumerate() {
+        if file.status == FileChange::Untracked {
+            classify_untracked(root, file, &mut untracked_bytes, &mut budget);
+            continue;
+        }
+        file.patch = match file.stats {
+            Some(stats) if stats.binary => ReviewPatch::Binary,
+            Some(stats) if stats.added + stats.removed > REVIEW_LARGE_FILE_LINES => {
+                ReviewPatch::Large
+            }
+            Some(stats) if stats.added + stats.removed <= budget => {
+                budget -= stats.added + stats.removed;
+                eager.push(index);
+                ReviewPatch::Deferred
+            }
+            _ => ReviewPatch::Deferred,
+        };
+    }
+    let requested: Vec<_> = eager.iter().map(|index| files[*index].clone()).collect();
+    for (index, patch) in eager
+        .into_iter()
+        .zip(review_patches(root, &comparison, &requested))
+    {
+        files[index].patch = patch;
+    }
+    Ok(ChangeSet {
+        comparison,
+        files,
+        omitted_untracked,
+    })
+}
+
+fn classify_untracked(
+    root: &Path,
+    file: &mut ReviewFile,
+    bytes_left: &mut usize,
+    budget: &mut u64,
+) {
+    let path = Path::new(&file.path);
+    let metadata = std::fs::symlink_metadata(root.join(path));
+    file.patch = match metadata {
+        Err(error) => ReviewPatch::Unavailable(error.to_string()),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            ReviewPatch::Unavailable("Not a regular file; no preview".into())
+        }
+        Ok(metadata) if metadata.len() > UNTRACKED_FILE_LIMIT as u64 => {
+            ReviewPatch::Unavailable("Untracked files over 1 MiB are not previewed".into())
+        }
+        Ok(metadata) if metadata.len() as usize > *bytes_left => ReviewPatch::Deferred,
+        Ok(_) => match read_untracked_bytes(root, path, UNTRACKED_FILE_LIMIT) {
+            Err(error) => ReviewPatch::Unavailable(error.details),
+            Ok(bytes) => {
+                *bytes_left = bytes_left.saturating_sub(bytes.len());
+                let stats = added_file_stats(&bytes);
+                file.stats = Some(stats);
+                if stats.binary {
+                    ReviewPatch::Binary
+                } else if stats.added > REVIEW_LARGE_FILE_LINES {
+                    ReviewPatch::Large
+                } else if stats.added <= *budget {
+                    *budget -= stats.added;
+                    ReviewPatch::Loaded(untracked_patch(path, &bytes))
+                } else {
+                    ReviewPatch::Deferred
+                }
+            }
+        },
+    };
+}
+
+/// Load the patches of already listed files, one result per requested file.
+/// Each failure is reported for its file; it never discards other patches.
+pub fn review_patches(
+    root: &Path,
+    comparison: &ReviewComparison,
+    files: &[ReviewFile],
+) -> Vec<ReviewPatch> {
+    let mut patches: Vec<Option<ReviewPatch>> = vec![None; files.len()];
+    let mut tracked = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if file.status == FileChange::Untracked {
+            let path = Path::new(&file.path);
+            patches[index] = Some(
+                match read_untracked_bytes(root, path, UNTRACKED_FILE_LIMIT) {
+                    Ok(bytes) if added_file_stats(&bytes).binary => ReviewPatch::Binary,
+                    Ok(bytes) => ReviewPatch::Loaded(untracked_patch(path, &bytes)),
+                    Err(error) => ReviewPatch::Unavailable(error.details),
+                },
+            );
+        } else {
+            tracked.push(index);
+        }
+    }
+    let mut start = 0;
+    while start < tracked.len() {
+        let mut end = start;
+        let mut bytes = 0;
+        while end < tracked.len() && end - start < REVIEW_CHUNK_FILES {
+            let file = &files[tracked[end]];
+            let size = file.path.len() + file.original_path.as_ref().map_or(0, String::len);
+            if end > start && bytes + size > REVIEW_CHUNK_PATH_BYTES {
+                break;
+            }
+            bytes += size;
+            end += 1;
+        }
+        let chunk: Vec<_> = tracked[start..end]
+            .iter()
+            .map(|index| &files[*index])
+            .collect();
+        let results = match tracked_review_patches(root, comparison, &chunk) {
+            Ok(texts) => texts.into_iter().map(ReviewPatch::Loaded).collect(),
+            // One oversized patch must not hide the other files of its chunk.
+            Err(_) if chunk.len() > 1 => chunk
+                .iter()
+                .map(
+                    |file| match tracked_review_patches(root, comparison, &[file]) {
+                        Ok(mut texts) => ReviewPatch::Loaded(texts.remove(0)),
+                        Err(error) => ReviewPatch::Unavailable(error.details),
+                    },
+                )
+                .collect(),
+            Err(error) => vec![ReviewPatch::Unavailable(error.details)],
+        };
+        for (index, patch) in tracked[start..end].iter().zip(results) {
+            patches[*index] = Some(patch);
+        }
+        start = end;
+    }
+    patches
+        .into_iter()
+        .map(|patch| patch.unwrap_or_else(|| ReviewPatch::Unavailable("No patch".into())))
+        .collect()
+}
+
+/// One Git command for several files. Blocks are matched to files by their
+/// exact `diff --git` header, so neither configured diff order nor extra
+/// blocks can attach a patch to the wrong file.
+fn tracked_review_patches(
+    root: &Path,
+    comparison: &ReviewComparison,
+    files: &[&ReviewFile],
+) -> GitResult<Vec<String>> {
+    const OPERATION: &str = "read review patch";
+    let mut paths = Vec::new();
+    for file in files {
+        paths.push(PathBuf::from(&file.path));
+        if let Some(original) = &file.original_path {
+            paths.push(PathBuf::from(original));
+        }
+    }
+    validate_paths(&paths, OPERATION)?;
+    let mut args = string_args(&[
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ]);
+    args.extend(comparison.range_args());
+    args.push(OsString::from("--"));
+    args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    let output = checked_git(root, &args, OPERATION)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let headers: Vec<_> = files
+        .iter()
+        .map(|file| {
+            format!(
+                "diff --git {} {}",
+                quoted_patch_path("a/", file.original_path.as_deref().unwrap_or(&file.path)),
+                quoted_patch_path("b/", &file.path)
+            )
+        })
+        .collect();
+    let mut patches = vec![String::new(); files.len()];
+    let mut assigned = vec![false; files.len()];
+    for block in split_patch_blocks(&text) {
+        let header = block
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('\r');
+        let index = headers
+            .iter()
+            .enumerate()
+            .position(|(index, expected)| !assigned[index] && expected == header);
+        if let Some(index) = index {
+            assigned[index] = true;
+            patches[index] = block.to_owned();
+        }
+    }
+    Ok(patches)
+}
+
+fn split_patch_blocks(text: &str) -> Vec<&str> {
+    let mut starts: Vec<_> = text
+        .match_indices("diff --git ")
+        .map(|(index, _)| index)
+        .filter(|index| *index == 0 || text.as_bytes()[index - 1] == b'\n')
+        .collect();
+    starts.push(text.len());
+    starts
+        .windows(2)
+        .map(|range| &text[range[0]..range[1]])
+        .collect()
+}
+
+/// A path as Git prints it in a patch header with `core.quotePath=false`.
+fn quoted_patch_path(prefix: &str, path: &str) -> String {
+    let full = format!("{prefix}{path}");
+    if !full
+        .bytes()
+        .any(|byte| byte < 0x20 || byte == 0x7f || byte == b'"' || byte == b'\\')
+    {
+        return full;
+    }
+    let mut quoted = vec![b'"'];
+    for byte in full.bytes() {
+        match byte {
+            7 => quoted.extend_from_slice(b"\\a"),
+            8 => quoted.extend_from_slice(b"\\b"),
+            b'\t' => quoted.extend_from_slice(b"\\t"),
+            b'\n' => quoted.extend_from_slice(b"\\n"),
+            11 => quoted.extend_from_slice(b"\\v"),
+            12 => quoted.extend_from_slice(b"\\f"),
+            b'\r' => quoted.extend_from_slice(b"\\r"),
+            b'"' => quoted.extend_from_slice(b"\\\""),
+            b'\\' => quoted.extend_from_slice(b"\\\\"),
+            byte if byte < 0x20 || byte == 0x7f => {
+                quoted.extend_from_slice(format!("\\{byte:03o}").as_bytes())
+            }
+            byte => quoted.push(byte),
+        }
+    }
+    quoted.push(b'"');
+    String::from_utf8_lossy(&quoted).into_owned()
+}
+
+/// Tracked changes from `--raw` (blob IDs) and `--numstat`, plus untracked
+/// files for a working-tree review, in folder order.
+fn review_files(root: &Path, comparison: &ReviewComparison) -> GitResult<(Vec<ReviewFile>, usize)> {
+    const OPERATION: &str = "list review files";
+    let common = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+        "-z",
+    ];
+    let mut raw_args = string_args(&common);
+    raw_args.extend(string_args(&["--raw", "--no-abbrev"]));
+    raw_args.extend(comparison.range_args());
+    raw_args.push(OsString::from("--"));
+    let raw = checked_git(root, &raw_args, OPERATION)?;
+    let mut numstat_args = string_args(&common);
+    numstat_args.push(OsString::from("--numstat"));
+    numstat_args.extend(comparison.range_args());
+    numstat_args.push(OsString::from("--"));
+    let numstat = checked_git(root, &numstat_args, OPERATION)?;
+    let statistics: HashMap<_, _> = parse_numstat(&numstat.stdout)?.into_iter().collect();
+    let working_tree = comparison.new.is_none();
+    let mut seen = std::collections::HashSet::new();
+    let mut files = Vec::new();
+    for change in parse_review_raw(&raw.stdout)? {
+        // Git can report an unmerged path more than once.
+        if !seen.insert(change.path.clone()) {
+            continue;
+        }
+        let unhashed = change.new_blob.bytes().all(|byte| byte == b'0');
+        let identity = (working_tree && unhashed && change.status != b'D')
+            .then(|| working_file_identity(&root.join(&change.path)));
+        let content_key = review_content_key(&(
+            change.status,
+            &change.path,
+            &change.original_path,
+            &change.old_blob,
+            &change.new_blob,
+            identity,
+        ));
+        files.push(ReviewFile {
+            stats: statistics.get(&change.path).copied(),
+            path: change.path,
+            original_path: change.original_path,
+            status: change_from_code(change.status as char),
+            content_key,
+            patch: ReviewPatch::Deferred,
+        });
+    }
+    let mut omitted = 0;
+    if working_tree {
+        let output = checked_git(
+            root,
+            &string_args(&["ls-files", "--others", "--exclude-standard", "-z"]),
+            "list untracked files",
+        )?;
+        let mut listed = 0;
+        for path in nul_records(&output.stdout, "list untracked files")? {
+            let path = String::from_utf8_lossy(path).into_owned();
+            if path.is_empty() || seen.contains(&path) {
+                continue;
+            }
+            if listed == REVIEW_UNTRACKED_LIMIT {
+                omitted += 1;
+                continue;
+            }
+            listed += 1;
+            let identity = working_file_identity(&root.join(&path));
+            files.push(ReviewFile {
+                content_key: review_content_key(&(b'?', &path, identity)),
+                path,
+                original_path: None,
+                status: FileChange::Untracked,
+                stats: None,
+                patch: ReviewPatch::Deferred,
+            });
+        }
+    }
+    files.sort_by(|left, right| review_order(&left.path).cmp(&review_order(&right.path)));
+    Ok((files, omitted))
+}
+
+/// Folder first, then file name; case-insensitive with a byte-order tiebreak.
+fn review_order(path: &str) -> (String, String, &str) {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+    (folder.to_lowercase(), name.to_lowercase(), path)
+}
+
+fn working_file_identity(path: &Path) -> Option<(u64, u128)> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |time| time.as_nanos());
+    Some((metadata.len(), modified))
+}
+
+fn review_content_key(value: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::hash::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+struct RawChange {
+    status: u8,
+    old_blob: String,
+    new_blob: String,
+    path: String,
+    original_path: Option<String>,
+}
+
+/// `--raw -z`: `:old_mode new_mode old_blob new_blob status` NUL path NUL,
+/// with a second path for renames and copies.
+fn parse_review_raw(bytes: &[u8]) -> GitResult<Vec<RawChange>> {
+    const OPERATION: &str = "parse review files";
+    let invalid = || GitError::new(OPERATION, "Git returned an unexpected raw diff record");
+    let records = nul_records(bytes, OPERATION)?;
+    let mut records = records.into_iter();
+    let mut changes = Vec::new();
+    while let Some(header) = records.next() {
+        let header = header.strip_prefix(b":").ok_or_else(invalid)?;
+        let fields: Vec<_> = header.split(|byte| *byte == b' ').collect();
+        let [_, _, old_blob, new_blob, status] = fields.as_slice() else {
+            return Err(invalid());
+        };
+        let code = status.first().copied().ok_or_else(invalid)?;
+        let path = records
+            .next()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(invalid)?;
+        let (original_path, path) = if matches!(code, b'R' | b'C') {
+            let destination = records
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(invalid)?;
+            (
+                Some(String::from_utf8_lossy(path).into_owned()),
+                destination,
+            )
+        } else {
+            (None, path)
+        };
+        changes.push(RawChange {
+            status: code,
+            old_blob: String::from_utf8_lossy(old_blob).into_owned(),
+            new_blob: String::from_utf8_lossy(new_blob).into_owned(),
+            path: String::from_utf8_lossy(path).into_owned(),
+            original_path,
+        });
+    }
+    Ok(changes)
 }
 
 /// Return up to `limit` commits in topological order across repository branches.
@@ -3975,6 +4642,266 @@ mod tests {
         assert_eq!(
             branch_info(&repo.0).unwrap().upstream.as_deref(),
             Some("origin/review")
+        );
+    }
+
+    fn review_paths(set: &ChangeSet) -> Vec<(&str, FileChange)> {
+        set.files
+            .iter()
+            .map(|file| (file.path.as_str(), file.status))
+            .collect()
+    }
+
+    fn loaded(file: &ReviewFile) -> &str {
+        match &file.patch {
+            ReviewPatch::Loaded(text) => text,
+            other => panic!("{} has no loaded patch: {other:?}", file.path),
+        }
+    }
+
+    #[test]
+    fn working_tree_review_combines_staged_unstaged_and_untracked_changes() {
+        let repository = TestRepository::new();
+        repository.write("kept.txt", "one\ntwo\n");
+        repository.write("removed.txt", "gone\n");
+        fs::create_dir(repository.0.join("src")).unwrap();
+        repository.write("src/lib.rs", "fn a() {}\n");
+        repository.commit_all("Initial");
+        repository.write("kept.txt", "one\nchanged\n");
+        repository.write("src/lib.rs", "fn b() {}\n");
+        repository.git(&["add", "src/lib.rs"]);
+        repository.write("src/lib.rs", "fn c() {}\n");
+        fs::remove_file(repository.0.join("removed.txt")).unwrap();
+        repository.write("src/new file.rs", "new\n");
+        repository.write("staged.txt", "staged\n");
+        repository.git(&["add", "staged.txt"]);
+
+        let set = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
+        assert_eq!(set.comparison.title, "Working tree");
+        assert_eq!(set.comparison.new, None);
+        assert_eq!(set.comparison.old, repository.head_hash());
+        assert_eq!(
+            review_paths(&set),
+            [
+                ("kept.txt", FileChange::Modified),
+                ("removed.txt", FileChange::Deleted),
+                ("staged.txt", FileChange::Added),
+                ("src/lib.rs", FileChange::Modified),
+                ("src/new file.rs", FileChange::Untracked),
+            ]
+        );
+        // Staged and unstaged edits are one comparison with HEAD.
+        let library = loaded(&set.files[3]);
+        assert!(library.contains("-fn a() {}\n+fn c() {}\n"), "{library}");
+        assert!(!library.contains("fn b()"));
+        assert!(loaded(&set.files[1]).contains("-gone\n"));
+        assert!(loaded(&set.files[4]).contains("+new\n"));
+        assert_eq!(
+            set.files[4].stats,
+            Some(LineStats {
+                added: 1,
+                removed: 0,
+                binary: false
+            })
+        );
+        assert_eq!(
+            set.files[0].stats.map(|stats| (stats.added, stats.removed)),
+            Some((1, 1))
+        );
+
+        let keys = |set: &ChangeSet| -> Vec<u64> {
+            set.files.iter().map(|file| file.content_key).collect()
+        };
+        let again = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
+        assert_eq!(keys(&set), keys(&again));
+        repository.write("kept.txt", "one\nchanged again\n");
+        let changed = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
+        let (before, after) = (keys(&set), keys(&changed));
+        assert_ne!(before[0], after[0]);
+        assert_eq!(before[1..], after[1..]);
+    }
+
+    #[test]
+    fn working_tree_review_before_the_first_commit_uses_the_empty_tree() {
+        let repository = TestRepository::new();
+        repository.write("first.txt", "hello\n");
+        repository.git(&["add", "first.txt"]);
+        let set = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
+        assert_eq!(
+            review_paths(&set),
+            [
+                (".gitignore", FileChange::Untracked),
+                ("first.txt", FileChange::Added)
+            ]
+        );
+        assert!(loaded(&set.files[1]).contains("+hello\n"));
+        assert!(resolve_review(&repository.0, &ReviewSource::Branch { base: None }).is_err());
+    }
+
+    #[test]
+    fn commit_review_resolves_revisions_and_compares_with_the_first_parent() {
+        let repository = TestRepository::new();
+        repository.write("a.txt", "a\n");
+        repository.commit_all("Root");
+        let root = repository.head_hash();
+        repository.write("a.txt", "a\nb\n");
+        repository.commit_all("Second");
+
+        let first = change_set(&repository.0, &ReviewSource::Commit("HEAD~1".into())).unwrap();
+        assert_eq!(first.comparison.new.as_deref(), Some(root.as_str()));
+        assert_eq!(first.comparison.title, format!("{} Root", &root[..7]));
+        assert_eq!(first.comparison.key, format!("commit:{root}"));
+        assert!(first.comparison.detail.starts_with("Root commit"));
+        assert_eq!(
+            review_paths(&first),
+            [
+                (".gitignore", FileChange::Added),
+                ("a.txt", FileChange::Added)
+            ]
+        );
+        let second = change_set(&repository.0, &ReviewSource::Commit("HEAD".into())).unwrap();
+        assert_eq!(review_paths(&second), [("a.txt", FileChange::Modified)]);
+        assert!(loaded(&second.files[0]).contains(" a\n+b\n"));
+        for revision in ["--output=x", "-", "", "HEAD\n", "missing-branch"] {
+            assert!(
+                resolve_review(&repository.0, &ReviewSource::Commit(revision.into())).is_err(),
+                "{revision:?}"
+            );
+        }
+
+        repository.git(&["switch", "-c", "side"]);
+        repository.write("side.txt", "side\n");
+        repository.commit_all("Side");
+        repository.git(&["switch", "main"]);
+        repository.write("main.txt", "main\n");
+        repository.commit_all("Main");
+        repository.git(&["merge", "--no-ff", "--no-edit", "side"]);
+        let merge = change_set(&repository.0, &ReviewSource::Commit("HEAD".into())).unwrap();
+        assert_eq!(review_paths(&merge), [("side.txt", FileChange::Added)]);
+        assert!(merge.comparison.detail.starts_with("Merge commit"));
+    }
+
+    #[test]
+    fn branch_review_uses_the_merge_base_with_main_or_master() {
+        let repository = TestRepository::new();
+        repository.write("base.txt", "base\n");
+        repository.commit_all("Base");
+        repository.git(&["switch", "-c", "feature/x"]);
+        repository.write("feature.txt", "one\n");
+        repository.commit_all("Feature one");
+        repository.write("feature.txt", "one\ntwo\n");
+        repository.commit_all("Feature two");
+        repository.git(&["switch", "main"]);
+        repository.write("base.txt", "main moved\n");
+        repository.commit_all("Main moved");
+        repository.git(&["switch", "feature/x"]);
+
+        let source = ReviewSource::Branch { base: None };
+        let set = change_set(&repository.0, &source).unwrap();
+        assert_eq!(set.comparison.title, "feature/x vs main");
+        // Commits that only main gained after the branch left it are excluded.
+        assert_eq!(review_paths(&set), [("feature.txt", FileChange::Added)]);
+        assert_eq!(set.files[0].stats.map(|stats| stats.added), Some(2));
+        repository.write("feature.txt", "one\ntwo\nthree\n");
+        repository.commit_all("Feature three");
+        let next = change_set(&repository.0, &source).unwrap();
+        assert_eq!(next.comparison.key, set.comparison.key);
+        assert_ne!(next.files[0].content_key, set.files[0].content_key);
+
+        let explicit = resolve_review(
+            &repository.0,
+            &ReviewSource::Branch {
+                base: Some("HEAD~1".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit.title, "feature/x vs HEAD~1");
+        repository.git(&["branch", "-m", "main", "master"]);
+        assert_eq!(
+            resolve_review(&repository.0, &source).unwrap().title,
+            "feature/x vs master"
+        );
+        repository.git(&["branch", "-m", "master", "trunk"]);
+        assert!(resolve_review(&repository.0, &source).is_err());
+    }
+
+    #[test]
+    fn review_patches_classify_large_and_binary_files_and_match_chunks() {
+        let repository = TestRepository::new();
+        fs::create_dir(repository.0.join("many")).unwrap();
+        for index in 0..60 {
+            repository.write(&format!("many/file {index:02}.txt"), "before\n");
+        }
+        let similar: String = (0..12)
+            .map(|line| format!("shared line {line}\n"))
+            .collect();
+        repository.write("old name.txt", &similar);
+        repository.write("große Datei.txt", "x\n");
+        repository.write("binary.bin", "\0\u{1}binary");
+        repository.commit_all("Initial");
+        for index in 0..60 {
+            repository.write(
+                &format!("many/file {index:02}.txt"),
+                &format!("after {index}\n"),
+            );
+        }
+        repository.write("old name.txt", &format!("{similar}one more\n"));
+        repository.git(&["mv", "old name.txt", "moved [x].txt"]);
+        let large: String = (0..=REVIEW_LARGE_FILE_LINES)
+            .map(|line| format!("line {line}\n"))
+            .collect();
+        repository.write("große Datei.txt", &large);
+        repository.write("binary.bin", "\0\u{2}changed");
+
+        let set = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
+        let find = |path: &str| set.files.iter().find(|file| file.path == path).unwrap();
+        assert_eq!(find("binary.bin").patch, ReviewPatch::Binary);
+        assert_eq!(find("große Datei.txt").patch, ReviewPatch::Large);
+        let moved = find("moved [x].txt");
+        assert_eq!(moved.status, FileChange::Renamed);
+        assert_eq!(moved.original_path.as_deref(), Some("old name.txt"));
+        assert!(loaded(moved).contains("rename from old name.txt"));
+        assert!(loaded(moved).contains("+one more\n"));
+        for index in 0..60 {
+            let file = find(&format!("many/file {index:02}.txt"));
+            assert!(
+                loaded(file).contains(&format!("-before\n+after {index}\n")),
+                "{}",
+                file.path
+            );
+        }
+        let patches = review_patches(
+            &repository.0,
+            &set.comparison,
+            &[find("große Datei.txt").clone()],
+        );
+        let ReviewPatch::Loaded(text) = &patches[0] else {
+            panic!("{patches:?}");
+        };
+        assert!(text.starts_with("diff --git a/große Datei.txt b/große Datei.txt\n"));
+        assert!(text.contains(&format!("+line {REVIEW_LARGE_FILE_LINES}\n")));
+    }
+
+    #[test]
+    fn review_patch_headers_follow_git_quoting() {
+        assert_eq!(
+            quoted_patch_path("a/", "plain ü [x].txt"),
+            "a/plain ü [x].txt"
+        );
+        assert_eq!(
+            quoted_patch_path("b/", "tab\there\"q\\"),
+            "\"b/tab\\there\\\"q\\\\\""
+        );
+        assert_eq!(quoted_patch_path("a/", "bell\u{7}"), "\"a/bell\\a\"");
+        assert_eq!(quoted_patch_path("a/", "escape\u{1b}"), "\"a/escape\\033\"");
+        let blocks =
+            split_patch_blocks("diff --git a/x b/x\n+diff --git inside\ndiff --git a/y b/y\n");
+        assert_eq!(
+            blocks,
+            [
+                "diff --git a/x b/x\n+diff --git inside\n",
+                "diff --git a/y b/y\n"
+            ]
         );
     }
 }

@@ -24,10 +24,10 @@ pub const COMMANDS: &[CommandHelp] = &[
     ),
     command!(
         "review",
-        "MANIFEST.json",
-        "Open files and replace review annotations across projects.",
-        "Manifest: title, optional note, files:[{path,view,location,annotations}]. Relative file paths use the manifest directory.\nAnnotations: start:{line,column}, optional inclusive end, note, severity:info|warning|critical. Omit end for the whole start line.\nReturns per-file outcomes and tab IDs; file loads can remain pending. Unsaved buffers stay intact.\nStarts the sibling vedit.exe if needed. JSON examples: vedit-cli schema review.",
-        []
+        "MANIFEST.json | --working|--commit REV|--branch [--base REF] [WORKSPACE]",
+        "Replace review annotations, or show the user a change review.",
+        "Manifest: title, optional note, files:[{path,view,location,annotations}]. Relative file paths use the manifest directory.\nAnnotations: start:{line,column}, optional inclusive end, note, severity:info|warning|critical. Omit end for the whole start line.\nReturns per-file outcomes and tab IDs; file loads can remain pending. Unsaved buffers stay intact.\nStarts the sibling vedit.exe if needed. JSON examples: vedit-cli schema review.\nWith a source flag, shows every change as one read-only diff in place of the editor panes, for the user to read and tick off. Omit WORKSPACE for the active project; it must be open with a repository. Returns title, file count and line totals once loaded. Never starts vEdit. JSON: schema change-review.",
+        ["--working", "--commit", "--branch", "--base"]
     ),
     command!(
         "status",
@@ -304,6 +304,8 @@ pub fn takes_value(flag: &str) -> bool {
             | "--exclude"
             | "--file"
             | "--path"
+            | "--commit"
+            | "--base"
     )
 }
 
@@ -369,6 +371,14 @@ pub fn render(name: Option<&str>) -> String {
                 "--request-id" => {
                     "TOKEN: take retry identity, 1..128 UTF-8 bytes. Omit to generate one; reuse only for the same take."
                 }
+                "--working" => "Review staged, unstaged and untracked changes against HEAD.",
+                "--commit" => {
+                    "REV: review one commit against its first parent, e.g. HEAD or a hash."
+                }
+                "--branch" => {
+                    "Review the current branch since it left local main, or master without main."
+                }
+                "--base" => "REF: compare --branch with this branch or revision instead.",
                 _ => unreachable!("undocumented flag"),
             };
             text.push_str(&format!("  {flag} {description}\n"));

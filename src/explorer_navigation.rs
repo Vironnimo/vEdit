@@ -434,6 +434,11 @@ impl VEditApp {
             self.ctx
                 .memory_mut(|memory| memory.surrender_focus(focused));
         }
+        // A change review in place of the panes takes the editor's focus.
+        if self.focus_change_review() {
+            self.ctx.request_repaint();
+            return;
+        }
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }

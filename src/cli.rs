@@ -26,6 +26,18 @@ pub const MAX_ANNOTATIONS: usize = 500;
 #[path = "cli_workflow_tests.rs"]
 mod workflow_tests;
 
+/// What `change_review` compares; see `vedit-cli review --help`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeReviewSource {
+    /// Staged, unstaged and untracked changes compared with HEAD.
+    Working,
+    /// The commit `rev` compared with its first parent.
+    Commit,
+    /// HEAD since it left `base`, by default local main or master.
+    Branch,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DocumentView {
@@ -571,6 +583,15 @@ pub enum Request {
         #[serde(default)]
         workspace: Option<PathBuf>,
     },
+    ChangeReview {
+        source: ChangeReviewSource,
+        #[serde(default)]
+        rev: Option<String>,
+        #[serde(default)]
+        base: Option<String>,
+        #[serde(default)]
+        workspace: Option<PathBuf>,
+    },
     Task {
         action: TaskAction,
     },
@@ -792,6 +813,18 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 }
                 set_flag(&mut options.no_excludes, "--no-excludes")?;
             }
+            "--working" => set_flag(&mut options.working, "--working")?,
+            "--branch" => set_flag(&mut options.branch, "--branch")?,
+            "--commit" => set_option(
+                &mut options.commit,
+                iter.next().ok_or("--commit needs a revision")?,
+                "--commit",
+            )?,
+            "--base" => set_option(
+                &mut options.base,
+                iter.next().ok_or("--base needs a branch or revision")?,
+                "--base",
+            )?,
             "--case-sensitive" => set_flag(&mut options.case_sensitive, "--case-sensitive")?,
             "--whole-word" => set_flag(&mut options.whole_word, "--whole-word")?,
             "--first" => set_flag(&mut options.first, "--first")?,
@@ -842,6 +875,31 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 })
                 .collect();
             Request::Open { files }
+        }
+        "review"
+            if options.working
+                || options.branch
+                || options.commit.is_some()
+                || options.base.is_some() =>
+        {
+            let source = match (options.working, options.commit.is_some(), options.branch) {
+                (true, false, false) => ChangeReviewSource::Working,
+                (false, true, false) => ChangeReviewSource::Commit,
+                (false, false, true) => ChangeReviewSource::Branch,
+                (false, false, false) => return Err("--base requires --branch".into()),
+                _ => return Err("Choose one of --working, --commit REV or --branch".into()),
+            };
+            if positional.len() > 1 {
+                return Err(
+                    "review --working|--commit|--branch takes an optional WORKSPACE".into(),
+                );
+            }
+            Request::ChangeReview {
+                source,
+                rev: options.commit.clone(),
+                base: options.base.clone(),
+                workspace: positional.first().map(|path| absolute(path.into())),
+            }
         }
         "review" => {
             let path = absolute(
@@ -1173,6 +1231,10 @@ struct Options {
     whole_word: bool,
     first: bool,
     hide: bool,
+    working: bool,
+    branch: bool,
+    commit: Option<String>,
+    base: Option<String>,
 }
 impl Options {
     fn allowed(&self, command: &str) -> Result<(), String> {
@@ -1199,6 +1261,10 @@ impl Options {
             (self.whole_word, "--whole-word"),
             (self.first, "--first"),
             (self.hide, "--hide"),
+            (self.working, "--working"),
+            (self.branch, "--branch"),
+            (self.commit.is_some(), "--commit"),
+            (self.base.is_some(), "--base"),
         ] {
             if present && !definition.flags.contains(&flag) {
                 return Err(format!(
@@ -1595,6 +1661,10 @@ fn resolve_paths(request: &mut Request) {
         | Request::GitStatus {
             workspace: Some(path),
             ..
+        }
+        | Request::ChangeReview {
+            workspace: Some(path),
+            ..
         } => *path = absolute(path.clone()),
         Request::Batch { actions, .. } => {
             for action in actions {
@@ -1888,6 +1958,41 @@ pub fn validate(request: &Request) -> Result<(), String> {
                 validate_path(path)?;
             }
         }
+        Request::ChangeReview {
+            source,
+            rev,
+            base,
+            workspace,
+        } => {
+            match source {
+                ChangeReviewSource::Commit if rev.is_none() => {
+                    return Err("A commit review needs rev, e.g. HEAD or a commit hash".into());
+                }
+                ChangeReviewSource::Working | ChangeReviewSource::Branch if rev.is_some() => {
+                    return Err("rev applies only to source commit".into());
+                }
+                ChangeReviewSource::Working | ChangeReviewSource::Commit if base.is_some() => {
+                    return Err("base applies only to source branch".into());
+                }
+                _ => {}
+            }
+            for revision in rev.iter().chain(base) {
+                // Mirrors git::validate_review_revision; vedit-cli has no Git layer.
+                if revision.is_empty()
+                    || revision.len() > 256
+                    || revision.starts_with('-')
+                    || revision.chars().any(char::is_control)
+                {
+                    return Err(
+                        "A revision has 1..256 bytes, no leading '-' and no control characters"
+                            .into(),
+                    );
+                }
+            }
+            if let Some(path) = workspace {
+                validate_path(path)?;
+            }
+        }
         Request::GitSwitchBranch { target, workspace } => {
             if !target.starts_with("refs/heads/") && !target.starts_with("refs/remotes/")
                 || target.contains(['\n', '\r', '\0'])
@@ -2054,8 +2159,9 @@ pub fn validate(request: &Request) -> Result<(), String> {
                         | Request::GitBranches { .. }
                         | Request::GitHistory { .. }
                         | Request::GitSwitchBranch { .. }
+                        | Request::ChangeReview { .. }
                 ) {
-                    return Err("Nested batches, background disk search and asynchronous file actions cannot be inside batch; run search/file/git-branches/git-history/git-switch-branch separately".into());
+                    return Err("Nested batches, background disk search and asynchronous file actions cannot be inside batch; run search/file/git-branches/git-history/git-switch-branch/change review separately".into());
                 }
                 validate(action)?;
             }

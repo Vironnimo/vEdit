@@ -27,7 +27,7 @@ That path is for `.agents/skills/vedit/` in a checkout. In a portable bundle (`s
 
 Recipes run in PowerShell from the task's directory. Quoted executable paths need `&`. Text/JSON files accept UTF-8 with or without BOM and UTF-16 with BOM. Write JSON using `ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8`; pass the file instead of piping payloads into a native command. Use `--` before literal positional text beginning with `-`.
 
-`open`, `review` and `workspace` start the sibling `vedit.exe` when needed; `--no-start` prevents startup. Other commands require a running editor. Do not restart the user's editor to recover a CLI error; report it and preserve their session.
+`open`, `review MANIFEST.json` and `workspace` start the sibling `vedit.exe` when needed; `--no-start` prevents startup. Other commands, including a change review, require a running editor. Do not restart the user's editor to recover a CLI error; report it and preserve their session.
 
 ## Read the result
 
@@ -85,7 +85,7 @@ Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_n
 ## Command index
 
 - `open`: show files at a position or in Markdown preview.
-- `review`: replace review annotations and open their files.
+- `review`: replace review annotations and open their files; with `--working`, `--commit REV` or `--branch`, show the user all changes as one diff to tick off.
 - `status`: session, projects, pending work and visible layout.
 - `tabs`: buffers, IDs, revisions and load/save/error state.
 - `focus`: reveal a tab in its project.
@@ -121,7 +121,7 @@ Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_n
 - `request`: structured action or ordered batch from JSON.
 - `schema`: offline request examples; supply OP for focused output.
 
-Use `COMMAND --help` for unfamiliar arguments and `schema OP` for JSON shapes. For multi-file reviews read [references/review.md](references/review.md); for panes/preferences read [references/layout-settings.md](references/layout-settings.md); for bookmarks, project queries, tasks, file jobs or batch recovery read [references/project-work.md](references/project-work.md).
+Use `COMMAND --help` for unfamiliar arguments and `schema OP` for JSON shapes. For multi-file reviews and change reviews read [references/review.md](references/review.md); for panes/preferences read [references/layout-settings.md](references/layout-settings.md); for bookmarks, project queries, tasks, file jobs or batch recovery read [references/project-work.md](references/project-work.md).
 
 ## Limits and window-only work
 

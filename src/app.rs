@@ -24,6 +24,8 @@ mod agent_marks_control;
 mod agent_marks_ui;
 #[path = "app_menu.rs"]
 mod app_menu;
+#[path = "change_review.rs"]
+mod change_review;
 #[path = "context_actions.rs"]
 mod context_actions;
 #[path = "control.rs"]
@@ -229,6 +231,7 @@ struct Project {
     git_history_refresh_requested: bool,
     git_history_error: Option<String>,
     git_view: git_panel::GitViewState,
+    change_review: change_review::ChangeReviewState,
     git_error: Option<String>,
     git_loading: bool,
     git_status_request: Option<u64>,
@@ -279,6 +282,7 @@ impl Project {
             git_history_refresh_requested: false,
             git_history_error: None,
             git_view: git_panel::GitViewState::default(),
+            change_review: change_review::ChangeReviewState::default(),
             git_error: None,
             git_loading: false,
             git_status_request: None,
@@ -618,6 +622,17 @@ enum WorkerResult {
         generation: u64,
         title: String,
         result: Result<String, String>,
+    },
+    ChangeReview {
+        root: PathBuf,
+        generation: u64,
+        result: Result<change_review::LoadedReview, String>,
+    },
+    ChangeReviewPatches {
+        root: PathBuf,
+        generation: u64,
+        request: u64,
+        patches: Vec<change_review::LoadedPatch>,
     },
     DiskChanges(
         Vec<(
@@ -1269,6 +1284,8 @@ impl VEditApp {
         {
             return;
         }
+        // Showing a document ends a change review of that project.
+        self.park_change_review(project_index);
         let different = self.active_project != project_index
             || self.project().is_some_and(|p| p.active_tab != tab_index);
         if different {
@@ -2168,6 +2185,17 @@ impl VEditApp {
                         }
                     }
                 }
+                WorkerResult::ChangeReview {
+                    root,
+                    generation,
+                    result,
+                } => self.apply_change_review(root, generation, result),
+                WorkerResult::ChangeReviewPatches {
+                    root,
+                    generation,
+                    request,
+                    patches,
+                } => self.apply_change_review_patches(root, generation, request, patches),
                 WorkerResult::DiskChanges(changes) => {
                     self.disk_check_running = false;
                     let ctx = self.ctx.clone();
@@ -3343,6 +3371,7 @@ impl VEditApp {
                 tab.vim.mode == VimMode::Insert
                     && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
             });
+        let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
             if matches!(
@@ -3381,6 +3410,28 @@ impl VEditApp {
                     | Action::ZoomOut
                     | Action::ZoomReset
             ) {
+                continue;
+            }
+            // A change review hides the documents; their commands wait for it to close.
+            if review_visible
+                && matches!(
+                    action,
+                    Action::Save
+                        | Action::SaveAs
+                        | Action::CloseTab
+                        | Action::Find
+                        | Action::Replace
+                        | Action::FindNext
+                        | Action::FindPrevious
+                        | Action::GoToLine
+                        | Action::Definition
+                        | Action::Completion
+                        | Action::MarkdownPreview
+                        | Action::ToggleBookmark
+                        | Action::ScreenJump
+                        | Action::Reload
+                )
+            {
                 continue;
             }
             if action == Action::Find
@@ -4570,6 +4621,8 @@ impl VEditApp {
             .show(ui, |ui| {
                 if self.projects.is_empty() {
                     self.welcome(ui);
+                } else if self.change_review_visible() {
+                    self.change_review_ui(ui);
                 } else {
                     self.split_editor_ui(ui);
                 }
@@ -6490,6 +6543,14 @@ impl VEditApp {
             }
             "Show source control" => {
                 self.show_sidebar(SidebarView::SourceControl);
+            }
+            "Review working tree changes" | "Review branch against main" => {
+                let source = if label == "Review working tree changes" {
+                    git::ReviewSource::WorkingTree
+                } else {
+                    git::ReviewSource::Branch { base: None }
+                };
+                self.show_change_review(self.active_project, source);
             }
             "Show explorer" => {
                 self.show_sidebar(SidebarView::Explorer);
