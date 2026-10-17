@@ -183,6 +183,51 @@ impl Drop for HoverRepository {
     }
 }
 
+#[test]
+fn unchanged_repository_refresh_on_main_launches_three_git_processes() {
+    let repository = HoverRepository::new();
+    for args in [
+        ["branch", "-M", "main"].as_slice(),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    ] {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    let first = read_git_snapshot(&repository.0, None, None, None, false, None).unwrap();
+    let repo = first.root.clone().unwrap();
+    let previous = first.history.unwrap().snapshot;
+    git::take_command_count();
+    // Repository detection, status with HEAD, and the ref listing.
+    let refreshed = read_git_snapshot(
+        &repository.0,
+        None,
+        Some(&repo),
+        Some(previous.clone()),
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(git::take_command_count(), 3);
+    assert!(refreshed.files.is_empty());
+    assert_eq!(refreshed.branch.as_deref(), Some("main"));
+    assert_eq!(
+        refreshed.main_comparison,
+        Ok(Some(git::BranchComparison {
+            base: "main".into(),
+            ahead: 0,
+            behind: 0,
+        }))
+    );
+    let history = refreshed.history.unwrap();
+    assert_eq!(history.snapshot, previous);
+    assert!(history.page.is_none());
+}
+
 fn wait_for_git_refresh(app: &mut VEditApp, index: usize) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while app.projects[index].git_loading {

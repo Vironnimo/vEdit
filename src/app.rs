@@ -440,6 +440,87 @@ struct GitHistoryRefresh {
     snapshot: git::HistorySnapshot,
     page: Option<git::HistoryPage>,
 }
+
+/// Read one project's repository state on a worker for `refresh_git`.
+fn read_git_snapshot(
+    root: &Path,
+    approved_parent: Option<&Path>,
+    previous_repository: Option<&Path>,
+    previous_history: Option<git::HistorySnapshot>,
+    refresh_history: bool,
+    previous_history_error: Option<String>,
+) -> Result<GitSnapshot, String> {
+    let repository = git::project_repository(root, approved_parent).map_err(|e| e.to_string())?;
+    let Some(repo) = repository.root else {
+        return Ok(GitSnapshot {
+            root: None,
+            parent_root: repository.parent,
+            branch: None,
+            tracking: None,
+            main_comparison: Ok(None),
+            files: Vec::new(),
+            stats: git::WorkingTreeStats::default(),
+            stats_error: None,
+            history: Ok(GitHistoryRefresh {
+                snapshot: git::HistorySnapshot::default(),
+                page: Some(git::HistoryPage::default()),
+            }),
+        });
+    };
+    let same_repository = previous_repository == Some(repo.as_path());
+    let previous_history = previous_history.filter(|_| same_repository);
+    let previous_history_error = previous_history_error.filter(|_| same_repository);
+    let (status, tracking, head) = git::status_with_head(&repo).map_err(|e| e.to_string())?;
+    let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
+        Ok(stats) => (stats, None),
+        Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
+    };
+    // HEAD comes from the status read and the base branch from the history
+    // refs, so an unchanged repository on main needs no further Git process.
+    let mut history_head = None;
+    let history = (|| {
+        if let Some(error) = previous_history_error {
+            return Err(error);
+        }
+        let (snapshot, head) = git::history_snapshot_after_status(
+            &repo,
+            previous_history.as_ref(),
+            status.branch.as_deref(),
+            head.as_ref(),
+        )
+        .map_err(|error| error.to_string())?;
+        history_head = Some(head);
+        let page = if refresh_history
+            || previous_history
+                .as_ref()
+                .is_none_or(|history| history.tips.is_empty())
+        {
+            Some(
+                git::history_page(&repo, &snapshot, 0, git::HISTORY_PAGE_SIZE)
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
+        Ok(GitHistoryRefresh { snapshot, page })
+    })();
+    let main_comparison = match &history_head {
+        Some(head) => git::main_comparison_after_history(&repo, head),
+        None => git::main_comparison(&repo),
+    }
+    .map_err(|e| e.to_string());
+    Ok(GitSnapshot {
+        root: Some(repo),
+        parent_root: repository.parent,
+        branch: status.branch,
+        tracking: Some(tracking),
+        main_comparison,
+        files: status.files,
+        stats,
+        stats_error,
+        history,
+    })
+}
 struct ActiveScreenJump {
     tab_id: u64,
     pane_id: u64,
@@ -545,6 +626,14 @@ enum WorkerResult {
             Result<workspace::LoadedDocument, String>,
         )>,
     ),
+}
+impl WorkerResult {
+    /// A periodic disk check that found nothing waits for the next scheduled
+    /// frame, which also starts the following check. Every other result is
+    /// shown right away.
+    fn wakes_window(&self) -> bool {
+        !matches!(self, WorkerResult::DiskChanges(changes) if changes.is_empty())
+    }
 }
 #[derive(Clone)]
 enum GitAction {
@@ -992,8 +1081,11 @@ impl VEditApp {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let result = work();
+            let wake = result.wakes_window();
             let _ = sender.send(result);
-            ctx.request_repaint();
+            if wake {
+                ctx.request_repaint();
+            }
         });
     }
     fn project(&self) -> Option<&Project> {
@@ -2212,69 +2304,14 @@ impl VEditApp {
         let refresh_history = std::mem::take(&mut p.git_history_refresh_requested);
         let previous_history_error = p.git_history_error.clone().filter(|_| !refresh_history);
         self.worker(move || {
-            let result = (|| {
-                let repository = git::project_repository(&root, approved_parent.as_deref())
-                    .map_err(|e| e.to_string())?;
-                if let Some(repo) = repository.root {
-                    let same_repository = previous_repository.as_ref() == Some(&repo);
-                    let previous_history = previous_history.filter(|_| same_repository);
-                    let previous_history_error = previous_history_error.filter(|_| same_repository);
-                    let (status, tracking) =
-                        git::status_with_tracking(&repo).map_err(|e| e.to_string())?;
-                    let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
-                        Ok(stats) => (stats, None),
-                        Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
-                    };
-                    let history = (|| {
-                        if let Some(error) = previous_history_error {
-                            return Err(error);
-                        }
-                        let snapshot =
-                            git::history_snapshot_cached(&repo, previous_history.as_ref())
-                                .map_err(|error| error.to_string())?;
-                        let page = if refresh_history
-                            || previous_history
-                                .as_ref()
-                                .is_none_or(|history| history.tips.is_empty())
-                        {
-                            Some(
-                                git::history_page(&repo, &snapshot, 0, git::HISTORY_PAGE_SIZE)
-                                    .map_err(|error| error.to_string())?,
-                            )
-                        } else {
-                            None
-                        };
-                        Ok(GitHistoryRefresh { snapshot, page })
-                    })();
-                    let main_comparison = git::main_comparison(&repo).map_err(|e| e.to_string());
-                    Ok(GitSnapshot {
-                        root: Some(repo),
-                        parent_root: repository.parent,
-                        branch: status.branch,
-                        tracking: Some(tracking),
-                        main_comparison,
-                        files: status.files,
-                        stats,
-                        stats_error,
-                        history,
-                    })
-                } else {
-                    Ok(GitSnapshot {
-                        root: None,
-                        parent_root: repository.parent,
-                        branch: None,
-                        tracking: None,
-                        main_comparison: Ok(None),
-                        files: Vec::new(),
-                        stats: git::WorkingTreeStats::default(),
-                        stats_error: None,
-                        history: Ok(GitHistoryRefresh {
-                            snapshot: git::HistorySnapshot::default(),
-                            page: Some(git::HistoryPage::default()),
-                        }),
-                    })
-                }
-            })();
+            let result = read_git_snapshot(
+                &root,
+                approved_parent.as_deref(),
+                previous_repository.as_deref(),
+                previous_history,
+                refresh_history,
+                previous_history_error,
+            );
             WorkerResult::GitStatus {
                 root,
                 request_id,

@@ -384,6 +384,11 @@ struct Shared {
     layout_requests: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     visual_index_builds: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    paragraph_layouts: std::sync::atomic::AtomicUsize,
+    /// Benchmarks compare against egui's own one-frame paragraph cache.
+    #[cfg(test)]
+    egui_layout_only: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -399,6 +404,22 @@ struct Document {
     galleys: Vec<CachedGalley>,
     visual_rows: Vec<CachedVisualRows>,
     last_used: u64,
+    /// The last layout exceeded the galley budget. Such layouts are not
+    /// retained, so they use egui's per-frame cache instead of paragraphs.
+    oversized_layout: bool,
+}
+
+impl Document {
+    fn new(last_used: u64) -> Self {
+        Self {
+            ready: None,
+            pending: None,
+            galleys: Vec::new(),
+            visual_rows: Vec::new(),
+            last_used,
+            oversized_layout: false,
+        }
+    }
 }
 
 struct CachedVisualRows {
@@ -407,8 +428,15 @@ struct CachedVisualRows {
     last_used: u64,
 }
 
+/// Shaped source paragraphs by job hash, shared with a retained layout.
+type Paragraphs = HashMap<u64, Arc<egui::Galley>>;
+
 struct CachedGalley {
     value: Arc<egui::Galley>,
+    /// The paragraphs `value` was assembled from, so that the next edit or
+    /// reload shapes only changed paragraphs even after idle frames emptied
+    /// egui's own one-frame cache.
+    paragraphs: Option<Arc<Paragraphs>>,
     bytes: usize,
     revision: u64,
     last_used: u64,
@@ -515,13 +543,10 @@ impl SyntaxCache {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.serial = state.serial.wrapping_add(1);
         let serial = state.serial;
-        let entry = state.documents.entry(document).or_insert(Document {
-            ready: None,
-            pending: None,
-            galleys: Vec::new(),
-            visual_rows: Vec::new(),
-            last_used: serial,
-        });
+        let entry = state
+            .documents
+            .entry(document)
+            .or_insert_with(|| Document::new(serial));
         entry.last_used = serial;
         if let Some(ready) = &entry.ready
             && ready.language == language
@@ -721,8 +746,18 @@ impl SyntaxCache {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.serial = state.serial.wrapping_add(1);
         let serial = state.serial;
+        let mut paragraph_layout = text.len() <= MAX_DOCUMENT_BYTES;
+        let mut donors = Vec::new();
         if let Some(entry) = state.documents.get_mut(&document) {
             entry.last_used = serial;
+            paragraph_layout = !entry.oversized_layout;
+            // Earlier revisions and other pane widths may share most paragraphs.
+            donors.extend(
+                entry
+                    .galleys
+                    .iter()
+                    .filter_map(|cached| cached.paragraphs.clone()),
+            );
             // Keep view layouts only for the current buffer. TextEdit can mutate
             // text before the revision changes, so compare both identities.
             entry
@@ -742,20 +777,49 @@ impl SyntaxCache {
         }
         // Font shaping can be expensive. Do it outside our worker/cache lock.
         drop(state);
-        let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        #[cfg(test)]
+        let paragraph_layout = paragraph_layout
+            && !self
+                .shared
+                .egui_layout_only
+                .load(std::sync::atomic::Ordering::Relaxed);
+        let (galley, paragraphs) = if paragraph_layout && splits_into_paragraphs(&job) {
+            // Read before fonts_mut: the context is locked inside it.
+            let pixels_per_point = ui.ctx().pixels_per_point();
+            let (galley, paragraphs, _shaped) = ui
+                .fonts_mut(|fonts| layout_paragraphs(fonts.fonts, pixels_per_point, job, &donors));
+            #[cfg(test)]
+            self.shared
+                .paragraph_layouts
+                .fetch_add(_shaped, std::sync::atomic::Ordering::Relaxed);
+            (galley, Some(paragraphs))
+        } else {
+            (ui.fonts_mut(|fonts| fonts.layout_job(job)), None)
+        };
+        drop(donors);
         let bytes = galley_bytes(&galley);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes > MAX_GALLEY_BYTES
+            && text.len() > MAX_DOCUMENT_BYTES
+            && !state.documents.contains_key(&document)
+        {
+            // Without an entry, such documents already use egui's cache.
+            return galley;
+        }
+        state.serial = state.serial.wrapping_add(1);
+        let serial = state.serial;
+        let entry = state
+            .documents
+            .entry(document)
+            .or_insert_with(|| Document::new(serial));
+        entry.last_used = serial;
+        entry.oversized_layout = bytes > MAX_GALLEY_BYTES;
         if bytes <= MAX_GALLEY_BYTES {
-            let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.serial = state.serial.wrapping_add(1);
-            let serial = state.serial;
-            let entry = state.documents.entry(document).or_insert(Document {
-                ready: None,
-                pending: None,
-                galleys: Vec::new(),
-                visual_rows: Vec::new(),
-                last_used: serial,
-            });
-            entry.last_used = serial;
+            // Paragraphs share shaped rows with the layout; their own cost is
+            // the copied text, sections and row placement.
+            let paragraphs = paragraphs
+                .map(|paragraphs| (paragraph_bytes(&paragraphs), paragraphs))
+                .filter(|(extra, _)| bytes + extra <= MAX_GALLEY_BYTES);
             if entry.galleys.len() == MAX_GALLEYS_PER_DOCUMENT {
                 let oldest = entry
                     .galleys
@@ -768,7 +832,8 @@ impl SyntaxCache {
             }
             entry.galleys.push(CachedGalley {
                 value: Arc::clone(&galley),
-                bytes,
+                bytes: bytes + paragraphs.as_ref().map_or(0, |(extra, _)| *extra),
+                paragraphs: paragraphs.map(|(_, paragraphs)| Arc::new(paragraphs)),
                 revision,
                 last_used: serial,
                 language: language.into(),
@@ -777,8 +842,8 @@ impl SyntaxCache {
                 // cannot make this older galley appear current on the next pass.
                 syntax_generation,
             });
-            trim(&mut state, document);
         }
+        trim(&mut state, document);
         galley
     }
 
@@ -804,13 +869,10 @@ impl SyntaxCache {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.serial = state.serial.wrapping_add(1);
         let serial = state.serial;
-        let entry = state.documents.entry(document).or_insert(Document {
-            ready: None,
-            pending: None,
-            galleys: Vec::new(),
-            visual_rows: Vec::new(),
-            last_used: serial,
-        });
+        let entry = state
+            .documents
+            .entry(document)
+            .or_insert_with(|| Document::new(serial));
         entry.last_used = serial;
         entry
             .visual_rows
@@ -892,6 +954,123 @@ impl SyntaxCache {
             let _ = sender.try_send(());
         }
     }
+}
+
+/// The jobs `Fonts::layout_job` splits into individually cached paragraphs.
+fn splits_into_paragraphs(job: &LayoutJob) -> bool {
+    job.break_on_newline && job.wrap.max_rows == usize::MAX && job.text.contains('\n')
+}
+
+/// egui's paragraph split from `Fonts::layout_job`, with the paragraphs kept
+/// alongside the retained layout instead of in egui's one-frame cache. The
+/// galley is identical; only paragraphs missing from `donors` are shaped.
+/// Returns the galley, its paragraphs and the number of paragraphs shaped.
+fn layout_paragraphs(
+    fonts: &mut egui::epaint::text::FontsImpl,
+    pixels_per_point: f32,
+    mut job: LayoutJob,
+    donors: &[Arc<Paragraphs>],
+) -> (Arc<egui::Galley>, Paragraphs, usize) {
+    use egui::text::{ByteIndex, LayoutSection};
+    if job.wrap.max_width.is_finite() {
+        // egui limits wrap widths to integers before laying out.
+        job.wrap.max_width = job.wrap.max_width.round();
+    }
+    let mut paragraphs = Paragraphs::new();
+    let mut children = Vec::new();
+    let mut shaped = 0;
+    let mut current_section = 0;
+    let mut start = 0;
+    let mut max_rows_remaining = job.wrap.max_rows;
+    while start < job.text.len() {
+        let is_first_paragraph = start == 0;
+        // A paragraph excludes its separating newline; a final newline stays
+        // with the last paragraph.
+        let mut end = job.text[start..]
+            .find('\n')
+            .map_or(job.text.len(), |index| start + index);
+        if end == job.text.len() - 1 && job.text.ends_with('\n') {
+            end += 1;
+        }
+        let mut paragraph = LayoutJob {
+            text: job.text[start..end].to_owned(),
+            wrap: egui::text::TextWrapping {
+                max_rows: max_rows_remaining,
+                ..job.wrap
+            },
+            sections: Vec::new(),
+            break_on_newline: job.break_on_newline,
+            halign: job.halign,
+            justify: job.justify,
+            first_row_min_height: if is_first_paragraph {
+                job.first_row_min_height
+            } else {
+                0.0
+            },
+            round_output_to_gui: job.round_output_to_gui,
+            keep_trailing_whitespace: job.keep_trailing_whitespace,
+        };
+        for section in &job.sections[current_section..] {
+            let range = &section.byte_range;
+            if range.end <= ByteIndex(start) {
+                current_section += 1;
+            } else if ByteIndex(end) < range.start {
+                break;
+            } else {
+                paragraph.sections.push(LayoutSection {
+                    leading_space: if ByteIndex(start) <= range.start {
+                        section.leading_space
+                    } else {
+                        0.0
+                    },
+                    byte_range: range.start.saturating_sub(start)
+                        ..range.end.min(ByteIndex(end)).saturating_sub(start),
+                    format: section.format.clone(),
+                });
+            }
+        }
+        let hash = egui::epaint::util::hash(&paragraph);
+        let reused = donors
+            .iter()
+            .filter_map(|donor| donor.get(&hash))
+            .find(|galley| galley.pixels_per_point == pixels_per_point && *galley.job == paragraph)
+            .cloned();
+        let galley = reused.unwrap_or_else(|| {
+            shaped += 1;
+            Arc::new(egui::epaint::text::layout(
+                fonts,
+                pixels_per_point,
+                Arc::new(paragraph),
+            ))
+        });
+        if max_rows_remaining != usize::MAX {
+            max_rows_remaining -= galley.rows.len();
+        }
+        let elided = galley.elided;
+        paragraphs.insert(hash, Arc::clone(&galley));
+        children.push(galley);
+        if elided {
+            break;
+        }
+        start = end + 1;
+    }
+    let galley = egui::Galley::concat(Arc::new(job), &children, pixels_per_point);
+    (Arc::new(galley), paragraphs, shaped)
+}
+
+/// Memory paragraphs add to a layout whose glyph rows they share.
+fn paragraph_bytes(paragraphs: &Paragraphs) -> usize {
+    paragraphs
+        .values()
+        .map(|galley| {
+            size_of::<(u64, Arc<egui::Galley>)>()
+                + size_of::<egui::Galley>()
+                + size_of::<LayoutJob>()
+                + galley.job.text.len()
+                + galley.job.sections.len() * size_of::<egui::text::LayoutSection>()
+                + galley.rows.len() * size_of::<egui::epaint::text::PlacedRow>()
+        })
+        .sum()
 }
 
 fn plain(text: &str, font: f32, color: Color32, wrap_width: f32) -> LayoutJob {
@@ -984,20 +1163,15 @@ fn carry_colors(
     job
 }
 
+/// Sections are kept as the parser produced them, without merging equal
+/// neighbors, so unchanged paragraphs match their retained shaped layouts.
 fn append_section(job: &mut LayoutJob, start: usize, end: usize, format: egui::TextFormat) {
     use egui::text::ByteIndex;
-    if let Some(last) = job.sections.last_mut()
-        && last.byte_range.end.0 == start
-        && last.format == format
-    {
-        last.byte_range.end = ByteIndex(end);
-    } else {
-        job.sections.push(egui::text::LayoutSection {
-            leading_space: 0.0,
-            byte_range: ByteIndex(start)..ByteIndex(end),
-            format,
-        });
-    }
+    job.sections.push(egui::text::LayoutSection {
+        leading_space: 0.0,
+        byte_range: ByteIndex(start)..ByteIndex(end),
+        format,
+    });
 }
 
 fn trim(state: &mut State, active: u64) {
@@ -1699,6 +1873,238 @@ mod tests {
         let resized = galley_pass(&ctx, &cache, 1, &text, 14.0, 121.0);
         assert!(!Arc::ptr_eq(&original, &resized));
         assert_eq!(resized.job.wrap.max_width, 121.0);
+    }
+
+    /// Lay out one document revision in its own frame and return the galley
+    /// with egui's own layout of the same job from that frame.
+    #[allow(clippy::too_many_arguments)]
+    fn galley_and_egui_layout(
+        ctx: &egui::Context,
+        cache: &SyntaxCache,
+        revision: u64,
+        text: &str,
+        language: &str,
+        width: f32,
+        tab_width: usize,
+    ) -> (Arc<egui::Galley>, Arc<egui::Galley>) {
+        let mut result = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = cache.galley_with_preferences(
+                ui,
+                1,
+                revision,
+                text,
+                language,
+                14.0,
+                Color32::WHITE,
+                width,
+                1.35,
+                tab_width,
+            );
+            let expected = ui.fonts_mut(|fonts| fonts.layout_job((*galley.job).clone()));
+            result = Some((galley, expected));
+        });
+        output.drop_without_applying_deltas();
+        result.unwrap()
+    }
+
+    fn paragraph_layouts(cache: &SyntaxCache) -> usize {
+        cache
+            .shared
+            .paragraph_layouts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn retained_paragraph_layouts_match_egui_layout() {
+        let texts = [
+            "fn main() {\n    let s = \"Grüße 🦀 中文\";\n}\n",
+            "first\r\nsecond\r\n\r\n",
+            "\tone\n\t\ttwo\n",
+            "\n",
+            "\n\nleading newlines",
+            "ends with newlines\n\n",
+            "words that wrap across several rows\nand a second paragraph that wraps too\n",
+        ];
+        for text in texts {
+            for width in [f32::INFINITY, 80.0, 80.4] {
+                for tab_width in [4, 2] {
+                    let ctx = egui::Context::default();
+                    ctx.set_fonts(crate::typography::fonts(crate::cli::EditorFont::default()));
+                    let cache = SyntaxCache::new();
+                    let (galley, expected) =
+                        galley_and_egui_layout(&ctx, &cache, 0, text, "", width, tab_width);
+                    assert!(paragraph_layouts(&cache) > 0, "{text:?}");
+                    assert_eq!(
+                        *galley, *expected,
+                        "{text:?} at {width} with tabs {tab_width}"
+                    );
+                    // Reused paragraphs after an edit and egui's layout agree.
+                    let edited = format!("{text}edited 🦀\n{text}");
+                    let (galley, expected) =
+                        galley_and_egui_layout(&ctx, &cache, 1, &edited, "", width, tab_width);
+                    assert_eq!(*galley, *expected, "{edited:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edits_after_idle_frames_shape_only_the_changed_paragraph() {
+        let ctx = egui::Context::default();
+        let cache = SyntaxCache::new();
+        let text: String = (0..200)
+            .map(|line| format!("    let value_{line} = \"Grüße 🦀\"; // note\n"))
+            .collect();
+        galley_and_egui_layout(&ctx, &cache, 0, &text, "rs", f32::INFINITY, 4);
+        settle(&cache, 1, &text, "rs", 14.0);
+        let (ready, expected) =
+            galley_and_egui_layout(&ctx, &cache, 0, &text, "rs", f32::INFINITY, 4);
+        assert!(ready.job.sections.len() > 200);
+        assert_eq!(*ready, *expected);
+        let edited = text.replacen("value_100 ", "value_100x ", 1);
+        // Retained-layout frames leave egui's one-frame cache empty.
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                cache.galley(ui, 1, 0, &text, "rs", 14.0, Color32::WHITE, f32::INFINITY);
+            });
+            output.drop_without_applying_deltas();
+        }
+        let before = paragraph_layouts(&cache);
+        let (galley, expected) =
+            galley_and_egui_layout(&ctx, &cache, 1, &edited, "rs", f32::INFINITY, 4);
+        assert_eq!(paragraph_layouts(&cache) - before, 1);
+        assert_eq!(*galley, *expected);
+        // Colors arriving for the edit reshape the same paragraph only.
+        settle(&cache, 1, &edited, "rs", 14.0);
+        let before = paragraph_layouts(&cache);
+        let (galley, expected) =
+            galley_and_egui_layout(&ctx, &cache, 1, &edited, "rs", f32::INFINITY, 4);
+        assert_eq!(paragraph_layouts(&cache) - before, 1);
+        assert_eq!(*galley, *expected);
+        assert!(galley.job.sections.len() > 200);
+    }
+
+    #[test]
+    fn layouts_beyond_the_galley_budget_keep_egui_paragraph_cache() {
+        let ctx = egui::Context::default();
+        let cache = SyntaxCache::new();
+        let text = "first line\nsecond line\n";
+        galley_and_egui_layout(&ctx, &cache, 0, text, "", f32::INFINITY, 4);
+        let flag = |value: bool| {
+            let mut state = cache.shared.state.lock().unwrap();
+            let entry = state.documents.get_mut(&1).unwrap();
+            entry.oversized_layout = value;
+            entry.galleys.clear();
+        };
+        // An unretained layout must not be reshaped by vEdit on every frame.
+        flag(true);
+        let before = paragraph_layouts(&cache);
+        let (galley, expected) = galley_and_egui_layout(&ctx, &cache, 1, "edited\n", "", 80.0, 4);
+        assert_eq!(paragraph_layouts(&cache), before);
+        assert_eq!(*galley, *expected);
+        // Retaining a layout again re-enables paragraphs for the next edit.
+        let state = cache.shared.state.lock().unwrap();
+        let entry = &state.documents[&1];
+        assert!(!entry.oversized_layout);
+        assert!(entry.galleys[0].paragraphs.is_none());
+        drop(state);
+        galley_and_egui_layout(&ctx, &cache, 2, "edited again\n", "", 80.0, 4);
+        assert_eq!(paragraph_layouts(&cache), before + 1);
+    }
+
+    /// Paired timing of an edit after idle frames: egui's one-frame paragraph
+    /// cache is empty by then, while retained paragraphs survive.
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn source_edit_after_idle_frames_benchmark() {
+        let highlighted = include_str!("cli.rs");
+        assert!(highlighted.len() <= MAX_DOCUMENT_BYTES);
+        let plain_text = include_str!("vim.rs");
+        for (name, source, language) in [
+            ("highlighted cli.rs", highlighted, "rs"),
+            ("plain vim.rs", plain_text, ""),
+        ] {
+            for egui_only in [true, false] {
+                let ctx = egui::Context::default();
+                let cache = SyntaxCache::new();
+                cache
+                    .shared
+                    .egui_layout_only
+                    .store(egui_only, std::sync::atomic::Ordering::Relaxed);
+                let pass = |revision: u64, text: &str| {
+                    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        cache.galley(
+                            ui,
+                            1,
+                            revision,
+                            text,
+                            language,
+                            14.0,
+                            Color32::WHITE,
+                            f32::INFINITY,
+                        );
+                    });
+                    output.drop_without_applying_deltas();
+                };
+                // Frames that show another tab (or nothing new) in between.
+                let idle = || {
+                    for _ in 0..2 {
+                        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                            cache.galley(ui, 2, 0, "other tab", "", 14.0, Color32::WHITE, 100.0);
+                        });
+                        output.drop_without_applying_deltas();
+                    }
+                };
+                pass(0, source);
+                settle(&cache, 1, source, language, 14.0);
+                pass(0, source);
+                let lines: Vec<usize> = source.match_indices('\n').map(|(at, _)| at).collect();
+                let mut text = source.to_owned();
+                let mut edit = Duration::ZERO;
+                let mut colored = Duration::ZERO;
+                const EDITS: u32 = 20;
+                for revision in 1..=EDITS {
+                    idle();
+                    let at = lines[revision as usize * 97 % lines.len()];
+                    text.insert(at, 'x');
+                    let started = Instant::now();
+                    pass(revision as u64, &text);
+                    edit += started.elapsed();
+                    settle(&cache, 1, &text, language, 14.0);
+                    idle();
+                    let started = Instant::now();
+                    pass(revision as u64, &text);
+                    colored += started.elapsed();
+                }
+                let state = cache.shared.state.lock().unwrap();
+                let retained = !state.documents[&1].galleys.is_empty();
+                let (layout_mib, paragraph_mib) =
+                    state.documents[&1]
+                        .galleys
+                        .first()
+                        .map_or((0.0, 0.0), |cached| {
+                            let paragraphs =
+                                cached.paragraphs.as_deref().map_or(0, paragraph_bytes);
+                            (
+                                (cached.bytes - paragraphs) as f64 / 1024.0 / 1024.0,
+                                paragraphs as f64 / 1024.0 / 1024.0,
+                            )
+                        });
+                drop(state);
+                println!(
+                    "{name} ({} KiB, retained {retained}: layout {layout_mib:.1} MiB + paragraphs {paragraph_mib:.1} MiB), {}: edit frame {:.2} ms, colored frame {:.2} ms",
+                    source.len() / 1024,
+                    if egui_only {
+                        "egui one-frame cache"
+                    } else {
+                        "retained paragraphs"
+                    },
+                    edit.as_secs_f64() * 1000.0 / f64::from(EDITS),
+                    colored.as_secs_f64() * 1000.0 / f64::from(EDITS),
+                );
+            }
+        }
     }
 
     #[test]
