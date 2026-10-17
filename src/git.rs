@@ -28,6 +28,12 @@ thread_local! {
     static GIT_COMMAND_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Git processes this thread launched since the previous call.
+#[cfg(test)]
+pub fn take_command_count() -> usize {
+    GIT_COMMAND_COUNT.with(|count| count.replace(0))
+}
+
 pub type GitResult<T> = Result<T, GitError>;
 
 /// A readable error returned by a Git operation.
@@ -245,6 +251,31 @@ pub fn main_comparison(root: &Path) -> GitResult<Option<BranchComparison>> {
     }) else {
         return Ok(None);
     };
+    compare_with_main(root, base)
+}
+
+/// [`main_comparison`] for a refresh that has just read the branch refs with
+/// [`history_snapshot_after_status`]. The base branch comes from that listing,
+/// and a HEAD at the base commit needs no count, so an idle refresh on main
+/// launches no Git process here.
+pub fn main_comparison_after_history(
+    root: &Path,
+    refs: &HistoryHead,
+) -> GitResult<Option<BranchComparison>> {
+    let Some((base, base_commit)) = &refs.main else {
+        return Ok(None);
+    };
+    if refs.head.is_some() && refs.head == *base_commit {
+        return Ok(Some(BranchComparison {
+            base: (*base).into(),
+            ahead: 0,
+            behind: 0,
+        }));
+    }
+    compare_with_main(root, base)
+}
+
+fn compare_with_main(root: &Path, base: &str) -> GitResult<Option<BranchComparison>> {
     let output = checked_git(
         root,
         &string_args(&[
@@ -407,7 +438,23 @@ pub fn status(root: &Path) -> GitResult<RepoStatus> {
 }
 
 /// Read file status and local branch tracking in the same Git process.
+#[cfg(test)]
 pub fn status_with_tracking(root: &Path) -> GitResult<(RepoStatus, BranchInfo)> {
+    let (status, tracking, _) = status_with_head(root)?;
+    Ok((status, tracking))
+}
+
+/// The commit HEAD named when the status was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusHead {
+    Commit(String),
+    /// The current branch has no commits yet.
+    Unborn,
+}
+
+/// [`status_with_tracking`] plus the HEAD commit reported by the same process.
+/// The head is `None` when Git did not report a valid one.
+pub fn status_with_head(root: &Path) -> GitResult<(RepoStatus, BranchInfo, Option<StatusHead>)> {
     let args = string_args(&[
         "status",
         "--porcelain=v2",
@@ -858,6 +905,64 @@ pub fn history_snapshot_cached(
     previous: Option<&HistorySnapshot>,
 ) -> GitResult<HistorySnapshot> {
     let head = read_head(root)?;
+    let refs = read_history_refs(root)?;
+    assemble_history_snapshot(root, previous, head, refs)
+}
+
+/// HEAD and local main (or master) as seen by [`history_snapshot_after_status`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryHead {
+    head: Option<String>,
+    /// The base branch name and its commit, when it is a plain commit ref.
+    main: Option<(&'static str, Option<String>)>,
+}
+
+/// [`history_snapshot_cached`] for a refresh that has just read the status.
+/// The HEAD commit reported there is used while the listed refs agree with
+/// it; refs that moved after the status read fall back to reading HEAD again,
+/// so the decorations are the same as a separate HEAD read would give.
+pub fn history_snapshot_after_status(
+    root: &Path,
+    previous: Option<&HistorySnapshot>,
+    branch: Option<&str>,
+    status_head: Option<&StatusHead>,
+) -> GitResult<(HistorySnapshot, HistoryHead)> {
+    let refs = read_history_refs(root)?;
+    let checked_out = refs
+        .iter()
+        .find(|reference| reference.kind == RefKind::Local && reference.checked_out);
+    let reported = match (branch, status_head, checked_out) {
+        (Some(branch), Some(StatusHead::Commit(hash)), Some(reference)) => {
+            (reference.name == branch && reference.commit.as_deref() == Some(hash))
+                .then(|| Some(hash.clone()))
+        }
+        (Some(_), Some(StatusHead::Unborn), None) => Some(None),
+        (None, Some(StatusHead::Commit(hash)), None) => Some(Some(hash.clone())),
+        _ => None,
+    };
+    let head = match reported {
+        Some(head) => head,
+        None => read_head(root)?,
+    };
+    let main = ["main", "master"].into_iter().find_map(|name| {
+        refs.iter()
+            .find(|reference| reference.kind == RefKind::Local && reference.name == name)
+            .map(|reference| (name, reference.commit.clone()))
+    });
+    let snapshot = assemble_history_snapshot(root, previous, head.clone(), refs)?;
+    Ok((snapshot, HistoryHead { head, main }))
+}
+
+/// One local, remote-tracking or tag ref. `commit` is the commit it decorates,
+/// or `None` for symbolic refs and refs to other objects.
+struct HistoryRef {
+    name: String,
+    kind: RefKind,
+    commit: Option<String>,
+    checked_out: bool,
+}
+
+fn read_history_refs(root: &Path) -> GitResult<Vec<HistoryRef>> {
     let output = checked_git(
         root,
         &string_args(&[
@@ -869,7 +974,7 @@ pub fn history_snapshot_cached(
         ]),
         "read history branches",
     )?;
-    let mut snapshot = HistorySnapshot::default();
+    let mut refs = Vec::new();
     for line in output.stdout.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -877,10 +982,6 @@ pub fn history_snapshot_cached(
         let fields: Vec<_> = line.split(|byte| *byte == 0).collect();
         if fields.len() != 7 {
             return Err(GitError::new("read history branches", "invalid ref record"));
-        }
-        // origin/HEAD is an alias of a remote branch, not an extra branch tip.
-        if !fields[2].is_empty() {
-            continue;
         }
         let name = String::from_utf8_lossy(fields[1]);
         let (name, kind) = if let Some(name) = name.strip_prefix("refs/heads/") {
@@ -892,24 +993,46 @@ pub fn history_snapshot_cached(
         } else {
             continue;
         };
-        let hash = if kind == RefKind::Tag && !fields[3].is_empty() {
-            if fields[4] != b"commit" {
-                continue;
-            }
-            fields[3]
+        // origin/HEAD is an alias of a remote branch, not an extra branch tip.
+        let commit = if !fields[2].is_empty() {
+            None
+        } else if kind == RefKind::Tag && !fields[3].is_empty() {
+            (fields[4] == b"commit").then_some(fields[3])
         } else {
-            if fields[5] != b"commit" {
-                continue;
-            }
-            fields[0]
+            (fields[5] == b"commit").then_some(fields[0])
         };
-        let hash = String::from_utf8_lossy(hash).into_owned();
-        validate_commit_hash(&hash)?;
-        snapshot.refs.push(CommitRef {
-            current: kind == RefKind::Local && fields[6] == b"*" && head.as_deref() == Some(&hash),
-            hash,
+        let commit = commit.map(|hash| String::from_utf8_lossy(hash).into_owned());
+        if let Some(hash) = &commit {
+            validate_commit_hash(hash)?;
+        }
+        refs.push(HistoryRef {
             name: name.to_owned(),
             kind,
+            commit,
+            checked_out: fields[6] == b"*",
+        });
+    }
+    Ok(refs)
+}
+
+fn assemble_history_snapshot(
+    root: &Path,
+    previous: Option<&HistorySnapshot>,
+    head: Option<String>,
+    refs: Vec<HistoryRef>,
+) -> GitResult<HistorySnapshot> {
+    let mut snapshot = HistorySnapshot::default();
+    for reference in refs {
+        let Some(hash) = reference.commit else {
+            continue;
+        };
+        snapshot.refs.push(CommitRef {
+            current: reference.kind == RefKind::Local
+                && reference.checked_out
+                && head.as_deref() == Some(&hash),
+            hash,
+            name: reference.name,
+            kind: reference.kind,
         });
     }
     if let Some(head) = head {
@@ -1614,7 +1737,9 @@ fn parse_commit_files(bytes: &[u8]) -> GitResult<Vec<CommitFile>> {
     Ok(files)
 }
 
-fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo)> {
+fn parse_status_with_tracking(
+    bytes: &[u8],
+) -> GitResult<(RepoStatus, BranchInfo, Option<StatusHead>)> {
     let invalid = || {
         GitError::new(
             "parse repository status",
@@ -1632,10 +1757,23 @@ fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo
         divergence_known: false,
     };
     let mut saw_branch = false;
+    let mut head = None;
     let mut files = Vec::new();
     let mut records = bytes.split(|byte| *byte == 0);
     while let Some(record) = records.next() {
         if record.is_empty() {
+            continue;
+        }
+        if let Some(oid) = record.strip_prefix(b"# branch.oid ") {
+            // An unexpected value only costs the caller a separate HEAD read.
+            head = if oid == b"(initial)" {
+                Some(StatusHead::Unborn)
+            } else {
+                std::str::from_utf8(oid)
+                    .ok()
+                    .filter(|hash| validate_commit_hash(hash).is_ok())
+                    .map(|hash| StatusHead::Commit(hash.to_owned()))
+            };
             continue;
         }
         if let Some(name) = record.strip_prefix(b"# branch.head ") {
@@ -1724,6 +1862,7 @@ fn parse_status_with_tracking(bytes: &[u8]) -> GitResult<(RepoStatus, BranchInfo
             files,
         },
         tracking,
+        head,
     ))
 }
 
@@ -1932,6 +2071,276 @@ mod tests {
             &previous.local_only
         ));
         assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 2);
+    }
+
+    /// The refresh path must give the same snapshot and main comparison as
+    /// separate HEAD and main-branch reads.
+    fn assert_refresh_after_status_matches(root: &Path) {
+        let previous = history_snapshot(root).ok();
+        let (status, _, head) = status_with_head(root).unwrap();
+        let (snapshot, refs) = history_snapshot_after_status(
+            root,
+            previous.as_ref(),
+            status.branch.as_deref(),
+            head.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot,
+            history_snapshot_cached(root, previous.as_ref()).unwrap()
+        );
+        match (
+            main_comparison_after_history(root, &refs),
+            main_comparison(root),
+        ) {
+            (Ok(combined), Ok(separate)) => assert_eq!(combined, separate),
+            (Err(_), Err(_)) => {}
+            other => panic!("main comparison differs: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_after_status_matches_separate_head_and_main_reads() {
+        let repository = TestRepository::new();
+        // Unborn main, then a first commit with remote-tracking refs and a tag.
+        assert_refresh_after_status_matches(&repository.0);
+        repository.commit_all("Initial");
+        let first = repository.head_hash();
+        repository.git(&["update-ref", "refs/remotes/origin/main", &first]);
+        repository.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        repository.git(&["tag", "-a", "-m", "First", "v1"]);
+        assert_refresh_after_status_matches(&repository.0);
+        // A feature branch that is ahead, and main moving on behind it.
+        repository.git(&["switch", "-c", "feature"]);
+        repository.write("feature.txt", "feature\n");
+        repository.commit_all("Feature");
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["switch", "main"]);
+        repository.write("main.txt", "main\n");
+        repository.commit_all("Main");
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["switch", "feature"]);
+        assert_refresh_after_status_matches(&repository.0);
+        // A feature branch at the main commit and a detached HEAD.
+        repository.git(&["switch", "-c", "same", "main"]);
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["switch", "--detach", "feature"]);
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["switch", "--detach", "main"]);
+        assert_refresh_after_status_matches(&repository.0);
+        // master as the base, no base at all, and an orphan branch whose
+        // unborn HEAD cannot be compared.
+        repository.git(&["switch", "feature"]);
+        repository.git(&["branch", "-m", "main", "master"]);
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["branch", "-m", "master", "trunk"]);
+        assert_refresh_after_status_matches(&repository.0);
+        repository.git(&["branch", "-m", "trunk", "main"]);
+        repository.git(&["switch", "--orphan", "orphan"]);
+        assert_refresh_after_status_matches(&repository.0);
+    }
+
+    #[test]
+    fn idle_refresh_takes_head_from_status_and_base_from_history_refs() {
+        let repository = TestRepository::new();
+        repository.commit_all("Initial");
+        let head = repository.head_hash();
+        repository.git(&["update-ref", "refs/remotes/origin/main", &head]);
+        let refresh = |previous: &HistorySnapshot| {
+            let (status, _, head) = status_with_head(&repository.0).unwrap();
+            let (snapshot, refs) = history_snapshot_after_status(
+                &repository.0,
+                Some(previous),
+                status.branch.as_deref(),
+                head.as_ref(),
+            )
+            .unwrap();
+            (
+                snapshot,
+                main_comparison_after_history(&repository.0, &refs).unwrap(),
+            )
+        };
+        // Status and the ref listing; HEAD at main needs no count.
+        let previous = history_snapshot(&repository.0).unwrap();
+        take_command_count();
+        let (snapshot, comparison) = refresh(&previous);
+        assert_eq!(take_command_count(), 2);
+        assert_eq!(snapshot, previous);
+        assert_eq!(
+            comparison,
+            Some(BranchComparison {
+                base: "main".into(),
+                ahead: 0,
+                behind: 0,
+            })
+        );
+        // A branch away from main still counts its commits.
+        repository.git(&["switch", "-c", "feature"]);
+        repository.write("feature.txt", "feature\n");
+        repository.commit_all("Feature");
+        let previous = history_snapshot(&repository.0).unwrap();
+        take_command_count();
+        let (snapshot, comparison) = refresh(&previous);
+        assert_eq!(take_command_count(), 3);
+        assert_eq!(snapshot, previous);
+        assert_eq!(
+            comparison,
+            Some(BranchComparison {
+                base: "main".into(),
+                ahead: 1,
+                behind: 0,
+            })
+        );
+    }
+
+    /// Paired timing of the periodic refresh sequence: separate HEAD and main
+    /// reads versus HEAD from status and the base from the history refs.
+    #[test]
+    #[ignore = "manual benchmark; launches several hundred Git processes"]
+    fn benchmark_idle_repository_refresh() {
+        const COMMITS: usize = 2000;
+        const BRANCHES: usize = 200;
+        const ROUNDS: u32 = 20;
+        let repository = TestRepository::new();
+        let mut stream = String::new();
+        for index in 1..=COMMITS {
+            let message = format!("Change {index}\n");
+            let contents = format!("{index}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{index}\ncommitter Bench <bench@example.invalid> {} +0000\ndata {}\n{message}M 644 inline file.txt\ndata {}\n{contents}\n",
+                1_700_000_000 + index,
+                message.len(),
+                contents.len(),
+            ));
+        }
+        for index in 0..BRANCHES {
+            let mark = COMMITS - index * 7;
+            stream.push_str(&format!(
+                "reset refs/heads/branch-{index}\nfrom :{mark}\n\nreset refs/remotes/origin/branch-{index}\nfrom :{mark}\n\nreset refs/tags/v{index}\nfrom :{mark}\n\n"
+            ));
+        }
+        let output = raw_git_with_input(
+            &repository.0,
+            &string_args(&["fast-import", "--quiet"]),
+            "import benchmark history",
+            Some(stream.into_bytes()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        repository.git(&["reset", "--hard", "main"]);
+        repository.commit_all("Ignore fixture files");
+        repository.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let separate = |previous: &HistorySnapshot| {
+            let repo = project_repository(&repository.0, None)
+                .unwrap()
+                .root
+                .unwrap();
+            let (status, _) = status_with_tracking(&repo).unwrap();
+            working_tree_stats(&repo, &status.files).unwrap();
+            let snapshot = history_snapshot_cached(&repo, Some(previous)).unwrap();
+            (snapshot, main_comparison(&repo).unwrap())
+        };
+        let combined = |previous: &HistorySnapshot| {
+            let repo = project_repository(&repository.0, None)
+                .unwrap()
+                .root
+                .unwrap();
+            let (status, _, head) = status_with_head(&repo).unwrap();
+            working_tree_stats(&repo, &status.files).unwrap();
+            let (snapshot, refs) = history_snapshot_after_status(
+                &repo,
+                Some(previous),
+                status.branch.as_deref(),
+                head.as_ref(),
+            )
+            .unwrap();
+            (
+                snapshot,
+                main_comparison_after_history(&repo, &refs).unwrap(),
+            )
+        };
+        for branch in ["main", "branch-3"] {
+            repository.git(&["switch", "--quiet", branch]);
+            let previous = history_snapshot(&repository.0).unwrap();
+            assert_eq!(separate(&previous), combined(&previous));
+            let mut times = [Duration::ZERO; 2];
+            let mut processes = [0; 2];
+            type Refresh<'a> =
+                &'a dyn Fn(&HistorySnapshot) -> (HistorySnapshot, Option<BranchComparison>);
+            let refreshes: [Refresh; 2] = [&separate, &combined];
+            for _ in 0..ROUNDS {
+                for (index, refresh) in refreshes.iter().enumerate() {
+                    take_command_count();
+                    let started = Instant::now();
+                    let (snapshot, _) = refresh(&previous);
+                    times[index] += started.elapsed();
+                    processes[index] += take_command_count();
+                    assert_eq!(snapshot, previous);
+                }
+            }
+            for (index, name) in ["separate HEAD and main reads", "HEAD from status"]
+                .into_iter()
+                .enumerate()
+            {
+                eprintln!(
+                    "{branch:<9} {name:<29} {:>7.2} ms per refresh, {} Git processes",
+                    times[index].as_secs_f64() * 1000.0 / f64::from(ROUNDS),
+                    processes[index] / ROUNDS as usize,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refs_that_moved_after_the_status_read_read_head_again() {
+        let repository = TestRepository::new();
+        repository.commit_all("Initial");
+        repository.git(&["branch", "feature"]);
+        let previous = history_snapshot(&repository.0).unwrap();
+        // A commit and a branch switch between the status and the ref listing.
+        let (status, _, head) = status_with_head(&repository.0).unwrap();
+        repository.write("next.txt", "next\n");
+        repository.commit_all("Next");
+        take_command_count();
+        let (snapshot, refs) = history_snapshot_after_status(
+            &repository.0,
+            Some(&previous),
+            status.branch.as_deref(),
+            head.as_ref(),
+        )
+        .unwrap();
+        // The ref listing and the repeated HEAD read.
+        assert_eq!(take_command_count(), 2);
+        assert_eq!(snapshot, history_snapshot(&repository.0).unwrap());
+        assert!(snapshot.refs[0].current);
+        assert_eq!(snapshot.refs[0].hash, repository.head_hash());
+        assert_eq!(
+            main_comparison_after_history(&repository.0, &refs)
+                .unwrap()
+                .unwrap()
+                .ahead,
+            0
+        );
+        let (status, _, head) = status_with_head(&repository.0).unwrap();
+        repository.git(&["switch", "feature"]);
+        let (snapshot, refs) = history_snapshot_after_status(
+            &repository.0,
+            Some(&previous),
+            status.branch.as_deref(),
+            head.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(snapshot, history_snapshot(&repository.0).unwrap());
+        assert_eq!(snapshot.refs[0].name, "feature");
+        assert_eq!(
+            main_comparison_after_history(&repository.0, &refs).unwrap(),
+            main_comparison(&repository.0).unwrap()
+        );
     }
 
     #[test]
@@ -2927,7 +3336,7 @@ mod tests {
 
     #[test]
     fn porcelain_v2_preserves_paths_and_rejects_truncated_records() {
-        let (status, tracking) = parse_status_with_tracking(
+        let (status, tracking, head) = parse_status_with_tracking(
             b"# branch.oid (initial)\0# branch.head main\0# future.header data\0\
               1 .M N... 100644 100644 100644 a b tab\tand\nnewline.txt\0\
               2 R. N... 100644 100644 100644 a b R100 new name.txt\0old name.txt\0\
@@ -2936,6 +3345,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tracking.name.as_deref(), Some("main"));
+        assert_eq!(head, Some(StatusHead::Unborn));
         assert_eq!(status.files.len(), 4);
         assert_eq!(status.files[0].path, "tab\tand\nnewline.txt");
         assert_eq!(status.files[0].index, FileChange::None);
