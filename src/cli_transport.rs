@@ -132,8 +132,11 @@ pub struct Server {
     receiver: mpsc::Receiver<Envelope>,
     stop: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
+    address: SocketAddr,
     endpoint_path: PathBuf,
     token: String,
+    #[cfg(test)]
+    wakeups: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -154,20 +157,20 @@ impl Server {
         {
             return Err("Another vEdit control server is already running.".into());
         }
+        // The listener blocks in accept() instead of polling, so an idle editor
+        // has no periodic wakeups here. Dropping the server wakes it once.
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .map_err(|error| format!("Could not bind the vEdit control server: {error}"))?;
-        socket
-            .set_nonblocking(true)
-            .map_err(|error| format!("Could not configure the vEdit control server: {error}"))?;
         let token = random_token()
             .map_err(|error| format!("Could not create a private control token: {error}"))?;
+        let port = socket
+            .local_addr()
+            .map_err(|error| format!("Could not inspect the control server address: {error}"))?
+            .port();
         let endpoint = Endpoint {
             version: PROTOCOL_VERSION,
             pid: std::process::id(),
-            port: socket
-                .local_addr()
-                .map_err(|error| format!("Could not inspect the control server address: {error}"))?
-                .port(),
+            port,
             token: token.clone(),
         };
         write_endpoint(&endpoint_path, &endpoint)
@@ -176,11 +179,21 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let listener_stop = stop.clone();
         let active = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let wakeups = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let listener_wakeups = wakeups.clone();
         let listener = thread::Builder::new()
             .name("vedit-control".into())
             .spawn(move || {
-                while !listener_stop.load(Ordering::Acquire) {
-                    match socket.accept() {
+                loop {
+                    let accepted = socket.accept();
+                    #[cfg(test)]
+                    listener_wakeups.fetch_add(1, Ordering::Relaxed);
+                    if listener_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match accepted {
                         Ok((stream, address)) => {
                             if !address.ip().is_loopback()
                                 || active.load(Ordering::Acquire) >= MAX_CONNECTIONS
@@ -211,9 +224,6 @@ impl Server {
                                 active.fetch_sub(1, Ordering::AcqRel);
                             }
                         }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
                         Err(_) => break,
                     }
                 }
@@ -226,8 +236,11 @@ impl Server {
             receiver,
             stop,
             listener: Some(listener),
+            address: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
             endpoint_path,
             token,
+            #[cfg(test)]
+            wakeups,
         })
     }
 
@@ -240,7 +253,14 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
+            // One loopback connection wakes the blocking accept so the listener
+            // observes the stop flag and releases its port. Joining without
+            // that wakeup could block shutdown, so it is only skipped when the
+            // listener cannot be reached and has not already finished.
+            let woken = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT).is_ok();
+            if woken || listener.is_finished() {
+                let _ = listener.join();
+            }
         }
         // A replacement server must never lose its endpoint when an older
         // process finishes shutting down.
@@ -1053,6 +1073,32 @@ mod tests {
         drop(fixture.server.take());
         let response = client.join().unwrap().unwrap();
         assert_eq!(response.error.unwrap().code, "server_closed");
+    }
+
+    #[test]
+    fn idle_listener_sleeps_until_a_client_connects() {
+        let fixture = Fixture::new();
+        let wakeups = fixture.server().wakeups.clone();
+        let before = wakeups.load(Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(500));
+        let idle = wakeups.load(Ordering::Relaxed) - before;
+        eprintln!("idle control listener wakeups in 500 ms: {idle}");
+        assert_eq!(idle, 0, "an idle control listener must not poll");
+        // A client is still accepted promptly without polling.
+        let path = fixture.path();
+        let client = thread::spawn(move || send_to(&Request::Status {}, &path));
+        let envelope = fixture.receive();
+        envelope
+            .reply
+            .send(Response::success(json!({"awake": true})))
+            .unwrap();
+        assert!(client.join().unwrap().unwrap().ok);
+        let started = Instant::now();
+        drop(fixture);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stopping must wake the blocked listener"
+        );
     }
 
     #[test]
