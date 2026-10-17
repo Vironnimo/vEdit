@@ -721,7 +721,7 @@ impl VEditApp {
     pub(super) fn explorer_project_heading(&mut self, ui: &mut egui::Ui, root: &Path) {
         let title = file_title(root);
         let (rect, response) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width().max(1.0), 30.0),
+            Vec2::new(ui.available_width().max(1.0), 24.0),
             egui::Sense::hover(),
         );
         response.widget_info(|| {
@@ -735,13 +735,12 @@ impl VEditApp {
             rect.width() - 18.0,
         );
         ui.painter().galley(
-            egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5),
+            egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5),
             galley,
             TEXT,
         );
         response.on_hover_text(crate::paths::display(root));
         self.explorer_background_menu(ui, root, rect);
-        ui.add_space(3.0);
     }
 }
 
@@ -918,9 +917,14 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
                 None,
             )
         };
-        let title_right = rect.left() + 10.0 + title.size().x;
+        let text_width = title.size().x + suffix.as_ref().map_or(0.0, |suffix| suffix.size().x);
+        // Center the visible label and its change dot as one unit. Keep the
+        // same text budget when Git refreshes so truncation never jumps.
+        let content_width = text_width + if changes.is_some() { 12.0 } else { 0.0 };
+        let text_left = rect.center().x - content_width * 0.5;
+        let title_right = text_left + title.size().x;
         painter.galley(
-            rect.left_center() + Vec2::new(10.0, -title.size().y * 0.5),
+            egui::pos2(text_left, rect.center().y - title.size().y * 0.5),
             title,
             color,
         );

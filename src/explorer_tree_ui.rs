@@ -53,7 +53,6 @@ impl VEditApp {
         };
         self.request_explorer_directory(self.active_project, root.clone());
         self.explorer_register_focus(ui, &root);
-        self.explorer_project_heading(ui, &root);
         let Some(index) = self.explorer_index() else {
             self.explorer_background_menu(ui, &root, ui.available_rect_before_wrap());
             return;

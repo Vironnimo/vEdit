@@ -937,138 +937,233 @@ fn sync_marker(status: &git::WorktreeStatus) -> Option<(String, Color32)> {
     (!parts.is_empty()).then(|| (parts.join(" "), MUTED))
 }
 
-fn tooltip_text(row: &Row, now: i64) -> String {
-    let mut lines = vec![crate::paths::display(&row.path)];
-    match &row.kind {
-        RowKind::Bare => lines.push("Bare repository without a working tree".into()),
-        RowKind::Missing(reason) if reason.is_empty() => {
-            lines.push("Worktree directory is missing · git worktree prune removes it".into())
-        }
-        RowKind::Missing(reason) => lines.push(format!("Worktree directory is missing: {reason}")),
-        RowKind::Worktree => {}
-    }
+fn tooltip_note(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
+    ui.label(RichText::new(text).size(11.0).color(color));
+}
+
+fn file_count(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "file" } else { "files" })
+}
+
+fn repository_tooltip(ui: &mut egui::Ui, row: &Row, now: i64) {
+    ui.set_width((ui.ctx().content_rect().width() - 32.0).clamp(160.0, 400.0));
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    ui.spacing_mut().item_spacing = Vec2::new(10.0, 5.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&row.name).size(15.0).strong().color(TEXT));
+        tooltip_note(
+            ui,
+            if row.linked { "Worktree" } else { "Repository" },
+            MUTED,
+        );
+    });
+    tooltip_note(ui, crate::paths::display(&row.path), MUTED);
+    ui.add_space(3.0);
+    ui.separator();
+
     let known = row.status.as_ref().and_then(|status| status.as_ref().ok());
-    let branch = match (&row.branch, &row.head) {
-        (Some(branch), _) => format!("Branch {branch}"),
-        (None, Some(head)) => format!("Detached at {}", short_hash(head)),
-        (None, None) => String::new(),
-    };
-    if !branch.is_empty() && row.kind != RowKind::Bare {
-        let tracking = known.map(|status| &status.tracking);
-        let upstream = match tracking {
-            Some(tracking) => match &tracking.upstream {
-                Some(upstream) if !tracking.divergence_known => {
-                    format!("tracking {upstream} · status unavailable, fetch to refresh")
-                }
-                Some(upstream) if tracking.ahead == 0 && tracking.behind == 0 => {
-                    format!("tracking {upstream} · up to date")
-                }
-                Some(upstream) => format!(
-                    "tracking {upstream} · {} to push · {} to pull",
-                    tracking.ahead, tracking.behind
-                ),
-                None if row.branch.is_some() => "no upstream".into(),
-                None => String::new(),
-            },
-            None => String::new(),
-        };
-        lines.push(if upstream.is_empty() {
-            branch
-        } else {
-            format!("{branch} · {upstream}")
+    if row.kind != RowKind::Bare {
+        ui.horizontal_wrapped(|ui| match (&row.branch, &row.head) {
+            (Some(branch), _) => {
+                tooltip_note(ui, "Branch", MUTED);
+                ui.label(RichText::new(branch).monospace().color(BLUE));
+            }
+            (None, Some(head)) => {
+                tooltip_note(ui, "Detached HEAD", ORANGE);
+                ui.label(RichText::new(short_hash(head)).monospace().color(BLUE));
+            }
+            _ => {}
         });
+        if let Some(status) = known {
+            let tracking = &status.tracking;
+            match &tracking.upstream {
+                Some(upstream) => {
+                    tooltip_note(ui, format!("Tracking {upstream}"), MUTED);
+                    if !tracking.divergence_known {
+                        tooltip_note(ui, "Upstream status unavailable · fetch to refresh", ORANGE);
+                    } else if tracking.ahead == 0 && tracking.behind == 0 {
+                        tooltip_note(ui, "Up to date", GREEN);
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("↑ {} to push", tracking.ahead)).color(BLUE),
+                            );
+                            ui.label(
+                                RichText::new(format!("↓ {} to pull", tracking.behind))
+                                    .color(ORANGE),
+                            );
+                        });
+                    }
+                }
+                None if row.branch.is_some() => tooltip_note(ui, "No upstream", MUTED),
+                None => {}
+            }
+        }
     }
-    match &row.status {
-        Some(Ok(status)) => {
-            let count = row
-                .details
-                .as_ref()
-                .and_then(|details| details.as_ref().ok())
-                .map_or(status.changes, |details| details.files);
-            let mut line = match count {
-                0 => "No uncommitted changes".to_owned(),
-                1 => "1 changed file".to_owned(),
-                count => format!("{count} changed files"),
-            };
-            if status.conflicts > 0 {
-                line.push_str(&format!(
-                    " · {} {}",
+
+    if row.openable() {
+        ui.add_space(5.0);
+        tooltip_note(ui, "Uncommitted changes", MUTED);
+        let details = row
+            .details
+            .as_ref()
+            .and_then(|details| details.as_ref().ok());
+        let count = details
+            .map(|details| details.files)
+            .or_else(|| known.map(|status| status.changes));
+        ui.horizontal_wrapped(|ui| {
+            if let Some(count) = count {
+                ui.label(
+                    RichText::new(format!("{} changed", file_count(count)))
+                        .strong()
+                        .color(TEXT),
+                );
+            }
+            if let Some(details) = details {
+                ui.label(
+                    RichText::new(format!("+{}", details.added))
+                        .monospace()
+                        .size(16.0)
+                        .strong()
+                        .color(GREEN),
+                );
+                ui.label(
+                    RichText::new(format!("−{}", details.removed))
+                        .monospace()
+                        .size(16.0)
+                        .strong()
+                        .color(RED),
+                );
+            }
+        });
+        if details.is_some() {
+            tooltip_note(ui, "Staged, unstaged & untracked · saved files", MUTED);
+        }
+        if let Some(status) = known
+            && status.conflicts > 0
+        {
+            ui.label(
+                RichText::new(format!(
+                    "{} {}",
                     status.conflicts,
                     if status.conflicts == 1 {
-                        "conflict"
+                        "merge conflict"
                     } else {
-                        "conflicts"
+                        "merge conflicts"
                     }
-                ));
-            }
-            lines.push(line);
+                ))
+                .strong()
+                .color(RED),
+            );
         }
-        Some(Err(error)) => lines.push(format!("Status unavailable: {error}")),
-        None if row.kind == RowKind::Worktree => lines.push("Reading status…".into()),
-        None => {}
-    }
-    if row.openable() {
         match &row.details {
             Some(Ok(details)) => {
-                if known.is_none() {
-                    lines.push(format!("{} changed files", details.files));
-                }
-                lines.push(format!(
-                    "+{} added lines · −{} removed lines",
-                    details.added, details.removed
-                ));
-                lines.push("Staged + unstaged, including untracked files on disk".into());
                 if details.binary > 0 {
-                    lines.push(format!("{} binary files (no line counts)", details.binary));
+                    tooltip_note(
+                        ui,
+                        format!(
+                            "{} binary {} · no line counts",
+                            details.binary,
+                            if details.binary == 1 { "file" } else { "files" }
+                        ),
+                        MUTED,
+                    );
                 }
                 if details.unknown > 0 {
-                    lines.push(format!(
-                        "Partial totals: line counts unavailable for {} files",
-                        details.unknown
-                    ));
+                    tooltip_note(
+                        ui,
+                        format!(
+                            "Partial line counts · {} unavailable",
+                            file_count(details.unknown)
+                        ),
+                        ORANGE,
+                    );
                 }
             }
-            Some(Err(error)) => lines.push(format!("Line counts unavailable: {error}")),
-            None => lines.push("Loading line counts…".into()),
+            Some(Err(error)) => {
+                tooltip_note(ui, "Line counts unavailable", ORANGE);
+                tooltip_note(ui, error, MUTED);
+            }
+            None => tooltip_note(ui, "Loading line counts…", MUTED),
+        }
+        match &row.status {
+            Some(Err(error)) => {
+                tooltip_note(ui, "Status unavailable", ORANGE);
+                tooltip_note(ui, error, MUTED);
+            }
+            None if details.is_none() => tooltip_note(ui, "Reading status…", MUTED),
+            _ => {}
         }
     }
+
     if let Some(headline) = &row.headline {
-        lines.push(format!(
-            "Last commit {} · {}",
-            short_hash(&headline.hash),
-            headline.subject
-        ));
-        lines.push(format!(
-            "{} · {}",
-            headline.author,
-            relative_time(headline.timestamp, now)
-        ));
+        ui.add_space(4.0);
+        ui.separator();
+        tooltip_note(ui, "Last commit", MUTED);
+        ui.label(RichText::new(&headline.subject).strong().color(TEXT));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(short_hash(&headline.hash))
+                    .monospace()
+                    .size(11.0)
+                    .color(BLUE),
+            );
+            tooltip_note(
+                ui,
+                format!(
+                    "{} · {}",
+                    headline.author,
+                    relative_time(headline.timestamp, now)
+                ),
+                MUTED,
+            );
+        });
     } else if row.kind == RowKind::Worktree && row.head.is_none() && row.branch.is_some() {
-        lines.push("No commits yet".into());
+        tooltip_note(ui, "No commits yet", MUTED);
+    }
+    match &row.kind {
+        RowKind::Bare => tooltip_note(ui, "Bare repository without a working tree", MUTED),
+        RowKind::Missing(reason) => {
+            tooltip_note(ui, "Worktree directory is missing", RED);
+            tooltip_note(
+                ui,
+                if reason.is_empty() {
+                    "git worktree prune removes it"
+                } else {
+                    reason
+                },
+                MUTED,
+            );
+        }
+        RowKind::Worktree => {}
     }
     if let Some(reason) = &row.locked {
-        lines.push(if reason.is_empty() {
-            "Locked".into()
-        } else {
-            format!("Locked: {reason}")
-        });
+        tooltip_note(
+            ui,
+            if reason.is_empty() {
+                "Locked".into()
+            } else {
+                format!("Locked: {reason}")
+            },
+            ORANGE,
+        );
     }
     if let Some(error) = &row.listing_error {
-        lines.push(format!("Worktree list unavailable: {error}"));
+        tooltip_note(ui, "Worktree list unavailable", ORANGE);
+        tooltip_note(ui, error, MUTED);
     }
-    lines.push(
-        if row.current {
-            "Current project"
-        } else if row.project.is_some() {
-            "Open project · click to switch"
-        } else if row.openable() {
-            "Click to open as project"
-        } else {
-            "Cannot be opened as a project"
-        }
-        .into(),
-    );
-    lines.join("\n")
+    ui.add_space(3.0);
+    ui.separator();
+    let (action, color) = if row.current {
+        ("Current project", ACCENT)
+    } else if row.project.is_some() {
+        ("Open project · click to switch", MUTED)
+    } else if row.openable() {
+        ("Click to open as project", MUTED)
+    } else {
+        ("Cannot be opened as a project", MUTED)
+    };
+    tooltip_note(ui, action, color);
 }
 
 fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {
@@ -1359,8 +1454,7 @@ fn repository_row(ui: &mut egui::Ui, row: &Row, now: i64) -> (egui::Response, bo
     let mut tooltip_visible = false;
     let response = response.on_hover_ui(|ui| {
         tooltip_visible = true;
-        ui.set_max_width(440.0);
-        ui.label(tooltip_text(row, now));
+        repository_tooltip(ui, row, now);
     });
     (response, tooltip_visible)
 }

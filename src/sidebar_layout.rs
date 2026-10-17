@@ -710,11 +710,12 @@ impl VEditApp {
             .default_size(width)
             .size_range(minimum..=maximum)
             .resizable(true)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(Margin::symmetric(10, 10)),
-            )
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin {
+                left: 10,
+                right: 10,
+                top: 4,
+                bottom: 8,
+            }))
             .show(ui, |ui| {
                 let region = ui.interact(
                     ui.max_rect(),
@@ -781,45 +782,59 @@ impl VEditApp {
 
     fn sidebar_header(&mut self, ui: &mut egui::Ui, side: Side) {
         ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+            Vec2::new(ui.available_width(), 24.0),
             Layout::right_to_left(Align::Center),
             |ui| {
                 let selected = self.sidebar_selected_view(side);
-                // The activity bar already hides a panel when its icon is
-                // clicked again, so the header carries no close button that
-                // could be mistaken for a window or tab close. Actions sit in
-                // a quiet overflow menu without a resting frame.
-                let actions = egui::Button::new(RichText::new("⋯").size(14.0).color(MUTED))
-                    .frame_when_inactive(false)
-                    .min_size(Vec2::new(24.0, 24.0));
-                let (menu, _) =
-                    egui::containers::menu::MenuButton::from_button(actions).ui(ui, |ui| {
-                        if let Some(view) = selected {
-                            self.sidebar_panel_menu(ui, view);
-                            ui.separator();
-                        }
-                        for view in VIEWS {
-                            if self.sidebar_side(view) == side
-                                && selected != Some(view)
-                                && ui.button(format!("Show {}", view.title())).clicked()
-                            {
-                                self.show_sidebar(view);
-                                self.focus_sidebar_region(side);
-                                ui.close();
-                            }
-                        }
+                // A fixed hit target and painted hover cannot change layout.
+                // Button frames otherwise add their hover stroke to the size.
+                let (rect, menu) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::click());
+                let popup = egui::Popup::menu(&menu);
+                let focused = design::keyboard_focus(&menu);
+                if menu.hovered() || focused || egui::Popup::is_id_open(ui.ctx(), popup.get_id()) {
+                    ui.painter().rect_filled(rect, 4.0, HOVER);
+                }
+                if focused {
+                    ui.painter().rect_stroke(
+                        rect.shrink(1.0),
+                        4.0,
+                        Stroke::new(1.0, ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                for offset in [-4.0, 0.0, 4.0] {
+                    ui.painter()
+                        .circle_filled(rect.center() + Vec2::new(offset, 0.0), 1.0, MUTED);
+                }
+                popup.show(|ui| {
+                    if let Some(view) = selected {
+                        self.sidebar_panel_menu(ui, view);
                         ui.separator();
-                        let hide = ui.button(if side == Side::Left {
-                            "Hide left sidebar"
-                        } else {
-                            "Hide right sidebar"
-                        });
-                        if hide.clicked() {
-                            self.set_sidebar_visible(side, false);
+                    }
+                    for view in VIEWS {
+                        if self.sidebar_side(view) == side
+                            && selected != Some(view)
+                            && ui.button(format!("Show {}", view.title())).clicked()
+                        {
+                            self.show_sidebar(view);
+                            self.focus_sidebar_region(side);
                             ui.close();
                         }
+                    }
+                    ui.separator();
+                    let hide = ui.button(if side == Side::Left {
+                        "Hide left sidebar"
+                    } else {
+                        "Hide right sidebar"
                     });
-                let menu = menu.on_hover_text("Panel actions");
+                    if hide.clicked() {
+                        self.set_sidebar_visible(side, false);
+                        ui.close();
+                    }
+                });
+                let menu = menu
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Panel actions");
                 menu.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
@@ -840,9 +855,15 @@ impl VEditApp {
                 // response past its paint clip and leave an unpainted gutter.
                 let title = selected.map_or("Sidebar", SidebarView::title);
                 ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width().max(1.0), 26.0),
+                    Vec2::new(ui.available_width().max(1.0), 24.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
+                        if selected == Some(SidebarView::Explorer)
+                            && let Some(root) = self.project().map(|project| project.root.clone())
+                        {
+                            self.explorer_project_heading(ui, &root);
+                            return;
+                        }
                         let heading = ui.add(
                             egui::Label::new(RichText::new(title).size(12.0).color(MUTED))
                                 .selectable(false)

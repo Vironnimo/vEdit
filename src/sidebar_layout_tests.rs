@@ -857,6 +857,50 @@ fn sidebar_frame_has_no_unpainted_gutter_at_native_dpi_or_after_resize() {
 }
 
 #[test]
+fn panel_actions_hover_never_moves_the_header_or_content() {
+    for side in [Side::Left, Side::Right] {
+        for view in VIEWS {
+            let mut app = fixture();
+            app.move_sidebar(view, side);
+            app.show_sidebar(view);
+            let mut screen = harness(app, 1200.0);
+            set_style(&screen.ctx);
+            screen.hover_at(egui::pos2(-20.0, -20.0));
+            screen.run_steps(3);
+            let label = format!("{} panel actions", view.title());
+            let menu = screen.get_by_label(&label).rect();
+            let content = screen.state().sidebar_layout.view_rects[view.index()].unwrap();
+            let panel = screen.state().sidebar_region_rect(side).unwrap();
+            assert!(menu.height() <= 24.0);
+            assert!(
+                content.top() - panel.top() <= 44.0,
+                "compact header: {panel:?} {content:?}"
+            );
+            screen.hover_at(menu.center());
+            screen.run_steps(3);
+            assert_eq!(
+                screen.get_by_label(&label).rect(),
+                menu,
+                "{side:?} {} button resized on hover",
+                view.title()
+            );
+            assert_eq!(
+                screen.state().sidebar_layout.view_rects[view.index()],
+                Some(content),
+                "{side:?} {} content moved on hover",
+                view.title()
+            );
+            screen.hover_at(egui::pos2(-20.0, -20.0));
+            screen.run_steps(2);
+            assert_eq!(
+                screen.state().sidebar_layout.view_rects[view.index()],
+                Some(content)
+            );
+        }
+    }
+}
+
+#[test]
 fn sidebar_header_shows_only_active_title_and_keeps_other_panels_in_menu() {
     let mut app = fixture();
     app.move_sidebar(SidebarView::SourceControl, Side::Left);
@@ -876,7 +920,11 @@ fn sidebar_header_shows_only_active_title_and_keeps_other_panels_in_menu() {
                     .is_none()
             );
             let titles: Vec<_> = screen
-                .query_all_by_label(&format!("{} panel title", view.title()))
+                .query_all_by_label(&if view == SidebarView::Explorer {
+                    file_title(&screen.state().project().unwrap().root)
+                } else {
+                    format!("{} panel title", view.title())
+                })
                 .map(|node| node.rect())
                 .collect();
             if view == active {
@@ -927,7 +975,11 @@ fn title_actions_still_move_hide_and_restore_panel_assignments() {
             .sidebar_view_visible(SidebarView::SourceControl)
     );
     assert!(screen.state().sidebar_view_visible(SidebarView::Explorer));
-    assert!(screen.query_by_label("Explorer panel title").is_some());
+    assert!(
+        screen
+            .query_by_label(&file_title(&screen.state().project().unwrap().root))
+            .is_some()
+    );
     assert!(
         screen
             .query_by_label("Source control panel title")

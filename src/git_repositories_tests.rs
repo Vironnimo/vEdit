@@ -94,6 +94,100 @@ fn open<'a>(
     }
 }
 
+fn tooltip_screen(row: &Row, now: i64) -> Harness<'static, Row> {
+    let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
+    if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
+        options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
+    }
+    let mut screen = Harness::builder()
+        .with_size([460.0, 560.0])
+        .with_theme(egui::Theme::Dark)
+        .with_os(egui::os::OperatingSystem::Windows)
+        .wgpu_setup(setup)
+        .build_ui_state(
+            move |ui, row: &mut Row| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| repository_tooltip(ui, row, now));
+            },
+            row.clone(),
+        );
+    set_style(&screen.ctx);
+    screen.run_steps(3);
+    screen
+}
+
+fn assert_tooltip_labels(row: &Row, now: i64, labels: &[&str]) {
+    let screen = tooltip_screen(row, now);
+    for label in labels {
+        assert!(
+            screen.query_by_label(label).is_some(),
+            "missing tooltip label: {label}"
+        );
+    }
+}
+
+#[test]
+fn worktree_tooltip_screenshots() {
+    let row = Row {
+        key: "tooltip".into(),
+        path: PathBuf::from("C:/Code/GTSystem/worktrees/agent-review"),
+        name: "agent-review".into(),
+        linked: true,
+        project: None,
+        current: false,
+        kind: RowKind::Worktree,
+        branch: Some("feature/review-panel".into()),
+        head: Some(hash('a')),
+        locked: None,
+        status: Some(Ok(status(
+            Some("feature/review-panel"),
+            'a',
+            7,
+            0,
+            Some((4, 1)),
+        ))),
+        details: Some(Ok(ChangeDetails {
+            files: 7,
+            added: 123,
+            removed: 45,
+            binary: 0,
+            unknown: 0,
+        })),
+        headline: Some(headline(
+            'a',
+            "Make the review panel easier to scan",
+            1_790_426_000,
+        )),
+        listing_error: None,
+    };
+    let mut screen = tooltip_screen(&row, 1_790_426_840);
+    for (name, compact) in [
+        ("vedit_worktree_tooltip", false),
+        ("vedit_worktree_tooltip_compact", true),
+    ] {
+        if compact {
+            screen.set_size(Vec2::new(330.0, 720.0));
+            let row = screen.state_mut();
+            row.path = PathBuf::from(
+                "C:/Development/projects/GTSystem/worktrees/long-agent-review-folder",
+            );
+            row.locked = Some("Agent is applying changes".into());
+            row.status.as_mut().unwrap().as_mut().unwrap().conflicts = 2;
+            let details = row.details.as_mut().unwrap().as_mut().unwrap();
+            details.binary = 1;
+            details.unknown = 1;
+        }
+        screen.run_steps(3);
+        if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+            screen.snapshot_options(
+                name,
+                &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+            );
+        } else {
+            screen.snapshot(name);
+        }
+    }
+}
+
 #[test]
 fn path_keys_match_verbatim_mixed_separator_and_case_variants() {
     if cfg!(windows) {
@@ -220,18 +314,33 @@ fn rows_group_worktrees_under_their_repository_in_project_order() {
     assert_eq!(review_row.head, Some(hash('3')));
     assert_eq!(review_row.locked.as_deref(), Some("agent busy"));
     assert!(matches!(review_row.status, Some(Err(_))));
-    let tooltip = tooltip_text(review_row, 1_700_000_100);
-    assert!(tooltip.contains("Detached at 3333333"), "{tooltip}");
-    assert!(tooltip.contains("Status unavailable: index is corrupt"));
-    assert!(tooltip.contains("Locked: agent busy"));
-    assert!(tooltip.ends_with("Click to open as project"));
-    let tooltip = tooltip_text(agent_row, 1_700_000_100);
-    assert!(
-        tooltip.contains("Branch agent/work · tracking origin/agent/work · 2 to push · 0 to pull")
+    assert_tooltip_labels(
+        review_row,
+        1_700_000_100,
+        &[
+            "Detached HEAD",
+            "3333333",
+            "Status unavailable",
+            "index is corrupt",
+            "Locked: agent busy",
+            "Click to open as project",
+        ],
     );
-    assert!(tooltip.contains("3 changed files"));
-    assert!(tooltip.contains("Last commit 2222222 · Teach the agent"));
-    assert!(tooltip.contains("Alex Taylor · 1 minute ago"));
+    assert_tooltip_labels(
+        agent_row,
+        1_700_000_100,
+        &[
+            "agent/work",
+            "Tracking origin/agent/work",
+            "↑ 2 to push",
+            "↓ 0 to pull",
+            "3 files changed",
+            "Last commit",
+            "2222222",
+            "Teach the agent",
+            "Alex Taylor · 1 minute ago",
+        ],
+    );
 }
 
 #[test]
@@ -854,17 +963,17 @@ fn hovering_a_worktree_shows_cached_file_and_line_counts() {
     });
     screen.hover_at(screen.get_by_label("Worktree agent wt").rect().center());
     screen.run_steps(4);
-    let row = screen
-        .state()
-        .repository_rows()
-        .into_iter()
-        .find(|row| row.path == path)
-        .unwrap();
-    let expected = tooltip_text(&row, now);
-    assert!(expected.contains("7 changed files"));
-    assert!(expected.contains("+123 added lines · −45 removed lines"));
-    assert!(expected.contains("Partial totals"));
-    assert!(screen.query_by_label(&expected).is_some());
+    for label in [
+        "7 files changed",
+        "+123",
+        "−45",
+        "Partial line counts · 1 file unavailable",
+    ] {
+        assert!(
+            screen.query_by_label(label).is_some(),
+            "missing hover label: {label}"
+        );
+    }
     assert!(screen.state().repositories.jobs.is_empty());
 }
 
@@ -1109,15 +1218,16 @@ fn hovered_worktree_details_count_both_comparisons_and_untracked_files() {
         .iter()
         .find(|row| path_key(&row.path) == path_key(path))
         .unwrap();
-    let tooltip = tooltip_text(row, 1_800_000_000);
-    for text in [
-        "3 changed files",
-        "+6 added lines",
-        "−2 removed lines",
-        "1 binary files",
-    ] {
-        assert!(tooltip.contains(text), "{tooltip}");
-    }
+    assert_tooltip_labels(
+        row,
+        1_800_000_000,
+        &[
+            "3 files changed",
+            "+6",
+            "−2",
+            "1 binary file · no line counts",
+        ],
+    );
     // A new read becomes due, but still waits for a hover and the shared budget.
     let later = now + STATUS_INTERVAL;
     overview.start(Target::Status("busy-1".into()), false, later);

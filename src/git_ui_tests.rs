@@ -59,7 +59,13 @@ fn independently_arranged_sidebar_screenshots() {
         .state()
         .sidebar_region_rect(sidebar_layout::Side::Left)
         .unwrap();
-    assert!(screen.get_by_label("Explorer panel title").rect().right() <= left.right() - 9.0);
+    assert!(
+        screen
+            .get_by_label(&file_title(&screen.state().project().unwrap().root))
+            .rect()
+            .right()
+            <= left.right() - 9.0
+    );
     screen.state_mut().show_sidebar(SidebarView::SourceControl);
     screen.run_steps(3);
     assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));

@@ -57,7 +57,7 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
-                app.explorer(ui);
+                app.sidebar_ui(ui);
                 let ctx = ui.ctx().clone();
                 app.context_file_dialog_ui(&ctx);
             },
@@ -119,6 +119,17 @@ fn initial_index_loading_and_error_leave_background_menu_available() {
         right_click(&mut screen, egui::pos2(100.0, 350.0));
         assert_workspace_menu(&screen);
     }
+}
+
+#[test]
+fn project_name_in_sidebar_header_keeps_root_context_menu() {
+    let (_fixture, app) = Fixture::new(true);
+    let root_title = file_title(&app.projects[0].root);
+    let mut screen = harness(app);
+    let title = screen.get_by_label(&root_title).rect();
+    assert!(title.bottom() < screen.get_by_label("notes.txt").rect().top());
+    right_click(&mut screen, title.center());
+    assert_workspace_menu(&screen);
 }
 
 #[test]
