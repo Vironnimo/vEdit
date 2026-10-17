@@ -151,9 +151,20 @@ impl VEditApp {
     }
 }
 
+/// A quiet section heading in sentence case; older call sites pass capitals.
 pub(super) fn preference_heading(ui: &mut egui::Ui, title: &str) {
+    let title = if title.chars().any(char::is_lowercase) {
+        title.to_owned()
+    } else {
+        let lower = title.to_lowercase();
+        let mut chars = lower.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect())
+            .unwrap_or_default()
+    };
     ui.add_space(8.0);
-    ui.label(RichText::new(title).size(10.5).strong().color(ACCENT));
+    ui.label(RichText::new(title).size(11.5).strong().color(MUTED));
     ui.add_space(6.0);
 }
 

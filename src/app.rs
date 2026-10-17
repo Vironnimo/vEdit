@@ -6689,7 +6689,7 @@ impl VEditApp {
             let mut done = false;
             let mut changed = false;
             let modal = egui::Modal::new(egui::Id::new("settings_dialog")).show(&ctx, |ui| {
-                ui.set_width((ctx.content_rect().width() - 32.0).clamp(220.0, 440.0));
+                ui.set_width((ctx.content_rect().width() - 32.0).clamp(220.0, 560.0));
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Settings").size(15.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -6716,7 +6716,10 @@ impl VEditApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    done |= design::primary_button(ui, "Done", Vec2::new(70.0, 28.0)).clicked();
+                    // Settings apply immediately, so closing is not a primary action.
+                    done |= ui
+                        .add(egui::Button::new("Done").min_size(Vec2::new(70.0, 26.0)))
+                        .clicked();
                     ui.label(
                         RichText::new(self.settings_save_hint())
                             .size(10.5)
