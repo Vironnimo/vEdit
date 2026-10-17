@@ -13,7 +13,8 @@ use eframe::egui::{
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::palette::{
-    ACCENT, BORDER, MUTED, PANEL as SURFACE, SURFACE as INLINE_CODE, TEXT as INK,
+    ACCENT, BLUE, BORDER, BORDER_STRONG, HOVER, MUTED, PANEL as SURFACE, SURFACE as INLINE_CODE,
+    TEXT as INK,
 };
 const CODE_PADDING: f32 = 2.0;
 const MAX_DOCUMENTS: usize = 12;
@@ -428,6 +429,7 @@ impl MarkdownCache {
                                 ui.push_id(index, |ui| {
                                     let mut renderer = Renderer {
                                         source_path, font_size, line_starts: &entry.document.line_starts,
+                                        document_start: index == 0 && !entry.document.truncated,
                                         result: &mut result, next_fragment: &mut next_fragment,
                                         pending_fragment: pending_fragment.as_deref(),
                                         reveal_source: reveal_target.map(|(_, source)| source),
@@ -837,6 +839,8 @@ struct Renderer<'a> {
     source_path: &'a Path,
     font_size: f32,
     line_starts: &'a [usize],
+    /// The first block sits directly below the page's own top padding.
+    document_start: bool,
     result: &'a mut PreviewResponse,
     next_fragment: &'a mut Option<String>,
     pending_fragment: Option<&'a str>,
@@ -1283,52 +1287,40 @@ impl Renderer<'_> {
                 spans,
                 anchor,
             } => {
-                ui.add_space(if *level == 1 { 4.0 } else { 16.0 });
+                // Headings structure the text without dominating it: a modest
+                // scale in the semibold face, and a rule only below the title.
+                if !self.document_start {
+                    ui.add_space(12.0);
+                }
                 let size = self.font_size
                     * match level {
-                        1 => 2.1,
-                        2 => 1.6,
-                        3 => 1.3,
-                        _ => 1.1,
+                        1 => 1.5,
+                        2 => 1.25,
+                        3 => 1.1,
+                        _ => 1.0,
                     };
                 let response = self.inline(ui, spans, size, true, block.source.start);
                 if self.pending_fragment == Some(anchor.as_str()) {
                     response.scroll_to_me(Some(Align::TOP));
                 }
-                ui.add_space(9.0);
-                if *level <= 2 {
+                if *level == 1 {
+                    ui.add_space(4.0);
                     ui.separator();
-                    ui.add_space(14.0);
                 }
+                ui.add_space(6.0);
             }
             BlockKind::Code { language, text } => {
-                egui::Frame::new()
+                let frame = egui::Frame::new()
                     .fill(SURFACE)
                     .stroke(Stroke::new(1.0, BORDER))
                     .corner_radius(7.0)
                     .inner_margin(14.0)
                     .show(ui, |ui| {
                         ui.set_width((ui.available_width() - 1.0).max(1.0));
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(if language.is_empty() {
-                                    "Code"
-                                } else {
-                                    language
-                                })
-                                .size(10.5)
-                                .color(MUTED),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let copy =
-                                    crate::design::ghost_button(ui, "Copy", "Copy this code block");
-                                if copy.clicked() {
-                                    ui.ctx().copy_text(text.clone());
-                                    copy.surrender_focus();
-                                }
-                            });
-                        });
-                        ui.add_space(7.0);
+                        if !language.is_empty() {
+                            ui.label(RichText::new(language).size(10.5).color(MUTED));
+                            ui.add_space(7.0);
+                        }
                         let response = ui.add(
                             egui::Label::new(
                                 RichText::new(text.trim_end_matches('\n'))
@@ -1341,6 +1333,7 @@ impl Renderer<'_> {
                         );
                         self.source_response(&response, block.source.start, None);
                     });
+                code_copy_button(ui, frame.response.rect, block.source.start, text);
                 ui.add_space(16.0);
             }
             BlockKind::Quote(children) => {
@@ -1366,7 +1359,7 @@ impl Renderer<'_> {
                         response.rect.left_top() + Vec2::new(2.0, 5.0),
                         response.rect.left_bottom() + Vec2::new(2.0, -5.0),
                     ],
-                    Stroke::new(3.0, ACCENT.gamma_multiply(0.7)),
+                    Stroke::new(3.0, BORDER_STRONG),
                 );
                 ui.add_space(15.0);
             }
@@ -1448,8 +1441,8 @@ impl Renderer<'_> {
                 FontFamily::Proportional
             };
             let color = if span.link.is_some() || span.task == Some(true) {
-                ACCENT
-            } else if span.strike || span.image {
+                BLUE
+            } else if span.strike || span.image || span.task == Some(false) {
                 MUTED
             } else {
                 INK
@@ -1492,7 +1485,13 @@ impl Renderer<'_> {
             .map(|(_, _, height)| *height)
             .fold(0.0, f32::max);
         let pixels = ui.ctx().pixels_per_point();
-        let line_height = ((size * 1.55).max(max_height + 2.0) * pixels).ceil() / pixels;
+        // Enlarged headings use a tighter leading than reading text.
+        let leading = if bold && size > self.font_size {
+            1.3
+        } else {
+            1.55
+        };
+        let line_height = ((size * leading).max(max_height + 2.0) * pixels).ceil() / pixels;
         for (span, mut format) in spans.iter().zip(formats) {
             let ascent = metrics
                 .iter()
@@ -1678,6 +1677,54 @@ impl Renderer<'_> {
             }
         });
     }
+}
+
+/// A code block's Copy action appears while the block is hovered. It stays in
+/// the keyboard order and becomes visible whenever it holds focus.
+fn code_copy_button(ui: &mut egui::Ui, block: egui::Rect, source: usize, text: &str) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap("Copy".into(), FontId::proportional(12.0), INK);
+    let size = Vec2::new(galley.size().x + 14.0, 22.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(block.right() - 7.0 - size.x, block.top() + 6.0),
+        size,
+    );
+    let response = ui.interact(
+        rect,
+        ui.id().with(("markdown_code_copy", source)),
+        Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Copy")
+    });
+    if ui.rect_contains_pointer(block) || response.has_focus() {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, 4.0, HOVER);
+        }
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.5, ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let color = if response.hovered() || response.has_focus() {
+            INK
+        } else {
+            MUTED
+        };
+        painter.galley_with_override_text_color(rect.center() - galley.size() * 0.5, galley, color);
+    }
+    if response.clicked() {
+        ui.ctx().copy_text(text.to_owned());
+        response.surrender_focus();
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Copy this code block");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2143,6 +2190,63 @@ mod tests {
             style.scroll_animation = egui::style::ScrollAnimation::none();
         });
         screen
+    }
+
+    #[test]
+    fn code_copy_action_appears_on_block_hover_and_keyboard_focus() {
+        use egui_kittest::kittest::Queryable;
+        let mut screen = reading_harness([700.0, 500.0], "Intro\n\n```\nlet value = 1;\n```\n");
+        let copy_painted = |screen: &egui_kittest::Harness<'_, MarkdownCache>| {
+            text_bounds(&screen.output().shapes)
+                .iter()
+                .any(|(text, _)| text == "Copy")
+        };
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(2);
+        assert!(screen.query_by_label("Copy").is_some());
+        assert!(!copy_painted(&screen), "Copy stays hidden at rest");
+        let code = text_bounds(&screen.output().shapes)
+            .into_iter()
+            .find_map(|(text, rect)| (text == "let value = 1;").then_some(rect))
+            .expect("code text is painted");
+        screen.hover_at(code.center());
+        screen.run_steps(2);
+        assert!(copy_painted(&screen), "Hovering the block reveals Copy");
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(2);
+        assert!(!copy_painted(&screen));
+
+        for _ in 0..8 {
+            if screen.get_by_label("Copy").is_focused() {
+                break;
+            }
+            screen.key_press(egui::Key::Tab);
+            screen.run_steps(2);
+        }
+        assert!(screen.get_by_label("Copy").is_focused());
+        assert!(copy_painted(&screen), "Keyboard focus reveals Copy");
+        // Press and release in one frame, so its output still holds the copy.
+        screen
+            .input_mut()
+            .events
+            .extend([true, false].map(|pressed| egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }));
+        screen.step();
+        let copied = screen
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.trim_end().to_owned()),
+                _ => None,
+            });
+        assert_eq!(copied.as_deref(), Some("let value = 1;"));
     }
 
     fn reading_scroll_tracks(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
@@ -2735,6 +2839,7 @@ mod tests {
                 source_path: Path::new("README.md"),
                 font_size: size,
                 line_starts: &document.line_starts,
+                document_start: false,
                 result: &mut result,
                 next_fragment: &mut next,
                 pending_fragment: None,

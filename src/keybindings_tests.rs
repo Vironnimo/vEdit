@@ -443,3 +443,65 @@ fn settings_search_record_disable_and_reset_are_operable_through_widgets() {
     assert_eq!(screen.state().shortcut_label(Action::Save), "Ctrl+S");
     assert!(screen.state().settings.keybindings.is_empty());
 }
+
+#[test]
+fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.keybinding_ui.query = "Save current file".into();
+    app.settings
+        .keybindings
+        .insert(Action::Save.id().into(), Some("F8".into()));
+    let mut screen = Harness::builder()
+        .with_size([650.0, 600.0])
+        .with_os(egui::os::OperatingSystem::Windows)
+        .build_ui_state(
+            |ui, app: &mut VEditApp| {
+                app.ctx = ui.ctx().clone();
+                app.capture_shortcut_input();
+                app.keyboard_settings_ui(ui);
+            },
+            app,
+        );
+    let painted = |screen: &Harness<'_, VEditApp>, text: &str| {
+        screen.output().shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::epaint::Shape::Text(painted)
+                if painted.galley.text() == text)
+        })
+    };
+    screen.hover_at(egui::pos2(-20.0, -20.0));
+    screen.run_steps(2);
+    let chip = screen.get_by_label("F8").rect();
+    assert!(chip.height() <= 26.0, "The binding is a compact chip");
+    assert!(painted(&screen, "F8"));
+    assert!(!painted(&screen, "Disable") && !painted(&screen, "Reset"));
+
+    // Hovering the action name reveals both row actions beside the chip.
+    screen.hover_at(egui::pos2(chip.left() - 200.0, chip.center().y));
+    screen.run_steps(2);
+    assert!(painted(&screen, "Disable") && painted(&screen, "Reset"));
+    let disable = screen.get_by_label("Disable").rect();
+    assert!((disable.center().y - chip.center().y).abs() < 1.0);
+    assert!(disable.right() <= chip.left());
+    screen.hover_at(egui::pos2(-20.0, -20.0));
+    screen.run_steps(2);
+    assert!(!painted(&screen, "Disable"));
+
+    // Keyboard users reach the hidden actions in order and see them on focus.
+    for _ in 0..8 {
+        if screen.get_by_label("Disable").is_focused() {
+            break;
+        }
+        screen.key_press(Key::Tab);
+        screen.run_steps(2);
+    }
+    assert!(screen.get_by_label("Disable").is_focused());
+    assert!(painted(&screen, "Disable"));
+    screen.key_press(Key::Enter);
+    screen.run_steps(2);
+    assert!(screen.state().shortcut_label(Action::Save).is_empty());
+    assert_eq!(
+        screen.state().settings.keybindings.get(Action::Save.id()),
+        Some(&None)
+    );
+}

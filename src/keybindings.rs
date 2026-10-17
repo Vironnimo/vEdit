@@ -923,7 +923,7 @@ impl VEditApp {
                         "Press shortcut for {} · Esc cancels",
                         action.label()
                     ))
-                    .color(ACCENT),
+                    .color(TEXT),
                 );
                 if ui.button("Cancel recording").clicked() {
                     self.keybinding_ui.capture = None;
@@ -934,7 +934,7 @@ impl VEditApp {
             ui.label(
                 RichText::new(message)
                     .size(11.0)
-                    .color(if *error { RED } else { ACCENT }),
+                    .color(if *error { RED } else { MUTED }),
             );
         }
         let query = self.keybinding_ui.query.trim().to_lowercase();
@@ -958,70 +958,223 @@ impl VEditApp {
                 .size(10.0)
                 .color(MUTED),
         );
-        for action in rows {
-            ui.push_id(action.id(), |ui| {
-                ui.separator();
-                ui.label(RichText::new(action.label()).size(12.0))
-                    .on_hover_text(action.context_hint());
-                ui.horizontal_wrapped(|ui| {
-                    let binding = self.shortcut_label(action);
-                    let recording = self.keybinding_ui.capture == Some(action);
-                    let text = if recording {
-                        "Press a shortcut…"
-                    } else if binding.is_empty() {
-                        "Unassigned — record"
-                    } else {
-                        &binding
-                    };
-                    if ui
-                        .button(text)
-                        .on_hover_text(format!("Record shortcut for {}", action.label()))
-                        .clicked()
-                    {
-                        self.keybinding_ui.capture = Some(action);
-                        self.keybinding_ui.feedback = None;
-                        if let Some(id) = self.ctx.memory(|memory| memory.focused()) {
-                            self.ctx.memory_mut(|memory| memory.surrender_focus(id));
-                        }
-                    }
-                    if ui
-                        .add_enabled(!binding.is_empty(), egui::Button::new("Disable"))
-                        .clicked()
-                    {
-                        self.settings.keybindings.insert(action.id().into(), None);
-                        self.keybinding_ui.capture = None;
-                        self.keybinding_ui.feedback =
-                            Some((format!("{} shortcut disabled.", action.label()), false));
-                        changed = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.settings.keybindings.contains_key(action.id()),
-                            egui::Button::new("Reset"),
-                        )
-                        .clicked()
-                    {
-                        let mut candidate = self.settings.keybindings.clone();
-                        candidate.remove(action.id());
-                        match validate(&candidate) {
-                            Ok(()) => {
-                                self.settings.keybindings = candidate;
-                                self.keybinding_ui.capture = None;
-                                self.keybinding_ui.feedback = Some((
-                                    format!("{} restored to default.", action.label()),
-                                    false,
-                                ));
-                                changed = true;
-                            }
-                            Err(error) => self.keybinding_ui.feedback = Some((error, true)),
-                        }
-                    }
-                    ui.label(RichText::new(action.group()).size(10.0).color(MUTED));
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for action in rows {
+                ui.push_id(action.id(), |ui| {
+                    changed |= self.keyboard_shortcut_row(ui, action)
                 });
-            });
+            }
+        });
+        changed
+    }
+
+    /// One compact row per action: its name on the left and the binding chip on
+    /// the right. Disable and Reset appear while the row is hovered or focused;
+    /// they stay in the keyboard order after the chip.
+    fn keyboard_shortcut_row(&mut self, ui: &mut egui::Ui, action: Action) -> bool {
+        let mut changed = false;
+        let binding = self.shortcut_label(action);
+        let recording = self.keybinding_ui.capture == Some(action);
+        let can_disable = !binding.is_empty();
+        let can_reset = self.settings.keybindings.contains_key(action.id());
+        let (row, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), SHORTCUT_ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let chip_id = ui.id().with("binding");
+        let disable_id = ui.id().with("disable");
+        let reset_id = ui.id().with("reset");
+        let focused = ui.ctx().memory(|memory| {
+            [chip_id, disable_id, reset_id]
+                .into_iter()
+                .any(|id| memory.has_focus(id))
+        });
+        let active = recording || focused || ui.rect_contains_pointer(row);
+        if active {
+            ui.painter().rect_filled(row, 4.0, SURFACE);
+        }
+
+        let chip_text = if recording {
+            "Press a shortcut…"
+        } else if binding.is_empty() {
+            "Unassigned"
+        } else {
+            &binding
+        };
+        let chip_galley =
+            ui.painter()
+                .layout_no_wrap(chip_text.to_owned(), FontId::proportional(11.5), TEXT);
+        let chip_size = Vec2::new(chip_galley.size().x + 14.0, 20.0);
+        let chip_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                row.right() - 4.0 - chip_size.x,
+                row.center().y - chip_size.y * 0.5,
+            ),
+            chip_size,
+        );
+        let action_galley = |label: &str| {
+            ui.painter()
+                .layout_no_wrap(label.to_owned(), FontId::proportional(11.0), TEXT)
+        };
+        let mut right = chip_rect.left() - 4.0;
+        let mut place = |enabled: bool, galley: Arc<egui::Galley>| {
+            enabled.then(|| {
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(right - galley.size().x - 14.0, chip_rect.top()),
+                    egui::pos2(right, chip_rect.bottom()),
+                );
+                right = rect.left() - 2.0;
+                (rect, galley)
+            })
+        };
+        let reset_place = place(can_reset, action_galley("Reset"));
+        let disable_place = place(can_disable, action_galley("Disable"));
+
+        let label_rect = egui::Rect::from_x_y_ranges(row.left() + 8.0..=right - 6.0, row.y_range());
+        let label_galley = ui.painter().layout_no_wrap(
+            action.label().to_owned(),
+            FontId::proportional(12.0),
+            TEXT,
+        );
+        ui.painter()
+            .with_clip_rect(label_rect.intersect(ui.clip_rect()))
+            .galley(
+                egui::pos2(
+                    label_rect.left(),
+                    row.center().y - label_galley.size().y * 0.5,
+                ),
+                label_galley,
+                TEXT,
+            );
+        let label = ui.interact(label_rect, ui.id().with("label"), egui::Sense::hover());
+        label.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), action.label())
+        });
+        label.on_hover_text(format!("{} · {}", action.group(), action.context_hint()));
+
+        let chip = ui.interact(chip_rect, chip_id, egui::Sense::click());
+        chip.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), chip_text)
+        });
+        let painter = ui.painter();
+        if chip.hovered() {
+            painter.rect_filled(chip_rect, 4.0, HOVER);
+        } else if !binding.is_empty() || recording {
+            painter.rect_filled(chip_rect, 4.0, SURFACE);
+        }
+        if recording || chip.has_focus() {
+            painter.rect_stroke(
+                chip_rect,
+                4.0,
+                egui::Stroke::new(1.5, ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        } else if !binding.is_empty() {
+            painter.rect_stroke(
+                chip_rect,
+                4.0,
+                egui::Stroke::new(1.0, crate::palette::BORDER_STRONG),
+                egui::StrokeKind::Inside,
+            );
+        }
+        painter.galley_with_override_text_color(
+            chip_rect.center() - chip_galley.size() * 0.5,
+            chip_galley,
+            if binding.is_empty() && !recording && !chip.hovered() {
+                MUTED
+            } else {
+                TEXT
+            },
+        );
+        if chip
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!("Record shortcut for {}", action.label()))
+            .clicked()
+        {
+            self.keybinding_ui.capture = Some(action);
+            self.keybinding_ui.feedback = None;
+            if let Some(id) = self.ctx.memory(|memory| memory.focused()) {
+                self.ctx.memory_mut(|memory| memory.surrender_focus(id));
+            }
+        }
+
+        if let Some((rect, galley)) = disable_place
+            && shortcut_row_action(ui, rect, disable_id, "Disable", galley, active)
+                .on_hover_text(format!("Remove the shortcut for {}", action.label()))
+                .clicked()
+        {
+            self.settings.keybindings.insert(action.id().into(), None);
+            self.keybinding_ui.capture = None;
+            self.keybinding_ui.feedback =
+                Some((format!("{} shortcut disabled.", action.label()), false));
+            changed = true;
+        }
+        if let Some((rect, galley)) = reset_place
+            && shortcut_row_action(ui, rect, reset_id, "Reset", galley, active)
+                .on_hover_text(format!(
+                    "Restore the default shortcut for {}",
+                    action.label()
+                ))
+                .clicked()
+        {
+            let mut candidate = self.settings.keybindings.clone();
+            candidate.remove(action.id());
+            match validate(&candidate) {
+                Ok(()) => {
+                    self.settings.keybindings = candidate;
+                    self.keybinding_ui.capture = None;
+                    self.keybinding_ui.feedback =
+                        Some((format!("{} restored to default.", action.label()), false));
+                    changed = true;
+                }
+                Err(error) => self.keybinding_ui.feedback = Some((error, true)),
+            }
         }
         changed
     }
+}
+
+const SHORTCUT_ROW_HEIGHT: f32 = 26.0;
+
+/// A frameless row action that is painted only while its row is active, yet
+/// remains focusable so keyboard users can reach it.
+fn shortcut_row_action(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    label: &str,
+    galley: Arc<egui::Galley>,
+    row_active: bool,
+) -> egui::Response {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if row_active || response.has_focus() {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, 4.0, HOVER);
+        }
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(1.5, ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        painter.galley_with_override_text_color(
+            rect.center() - galley.size() * 0.5,
+            galley,
+            if response.hovered() || response.has_focus() {
+                TEXT
+            } else {
+                MUTED
+            },
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[cfg(test)]

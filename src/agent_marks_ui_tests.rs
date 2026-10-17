@@ -218,12 +218,86 @@ fn inline_remove_stays_visible_and_keeps_selection_after_horizontal_scroll() {
     assert_eq!(
         screen.get_by_label(&label).rect(),
         before,
-        "The gutter action must stay visible even when the marked text is offscreen horizontally"
+        "The gutter action must stay in place even when the marked text is offscreen horizontally"
     );
     screen.get_by_label(&label).click();
     screen.run_steps(4);
     assert!(screen.state().agent_marks.items.is_empty());
     assert_eq!(original_selection(&screen), original);
+}
+
+#[test]
+fn gutter_bar_reveals_its_remove_action_only_while_the_mark_gutter_is_hovered() {
+    let mut screen = harness(fixture(true), [1200.0, 900.0]);
+    select(&mut screen, 8, 14);
+    add_selection(&mut screen);
+    let id = screen.state().agent_marks.items[0].id;
+    let badge = screen
+        .get_by_label(&format!("Remove marked block {id}"))
+        .rect();
+    let tiles = |screen: &Harness<'_, VEditApp>| {
+        let fills = [
+            PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.08),
+            PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.22),
+        ];
+        screen
+            .output()
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Rect(rect)
+                    if fills.contains(&rect.fill) && rect.rect == badge)
+            })
+            .count()
+    };
+    let bars = screen
+        .output()
+        .shapes
+        .iter()
+        .filter(|shape| {
+            matches!(&shape.shape, egui::epaint::Shape::LineSegment { points, stroke }
+                if stroke.width == 2.0
+                    && stroke.color == AGENT_MARK_COLOR
+                    && (points[0].x - badge.center().x).abs() < 0.5)
+        })
+        .count();
+    assert_eq!(bars, 1, "Each visible mark keeps a quiet gutter bar");
+    // The pointer still rests on the source text after selecting.
+    assert_eq!(tiles(&screen), 0, "The remove tile must not stay visible");
+    // Beside the hidden button, but still within this mark's gutter strip.
+    screen.hover_at(egui::pos2(badge.left() - 2.0, badge.center().y));
+    screen.run_steps(2);
+    assert_eq!(tiles(&screen), 1, "Hovering the mark gutter reveals remove");
+    let point = character_point(&screen, 30);
+    screen.hover_at(point);
+    screen.run_steps(2);
+    assert_eq!(tiles(&screen), 0);
+    assert_eq!(screen.state().agent_marks.items.len(), 1);
+}
+
+#[test]
+fn toolbar_shows_a_count_only_once_blocks_are_marked() {
+    let mut screen = harness(fixture(true), [1200.0, 900.0]);
+    let toolbar_texts = |screen: &Harness<'_, VEditApp>| {
+        let toolbar = screen.get_by_label("For agent").rect();
+        screen
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text)
+                    if toolbar.intersects(text.galley.rect.translate(text.pos.to_vec2())) =>
+                {
+                    Some(text.galley.text().to_owned())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(toolbar_texts(&screen).is_empty(), "No zero badge");
+    select(&mut screen, 8, 14);
+    add_selection(&mut screen);
+    assert_eq!(toolbar_texts(&screen), ["1"]);
 }
 
 #[test]
@@ -529,7 +603,14 @@ fn restore_detail_follows_the_latest_take_or_removal_and_keeps_new_marks() {
         marks.get(kept, None).unwrap().note,
         "Keep this current note"
     );
-    assert!(screen.query_by_label("Nothing to restore").is_some());
+    // With nothing left to restore, the disabled action carries no extra state text.
+    assert!(screen.query_by_label_contains("removed block").is_none());
+    assert!(
+        screen
+            .query_by_label_contains("agent-collected block")
+            .is_none()
+    );
+    assert!(screen.query_by_label("Nothing to restore").is_none());
     screen.get_by_label("Clear all").click();
     screen.run_steps(4);
     assert!(screen.query_by_label("2 removed blocks").is_some());
