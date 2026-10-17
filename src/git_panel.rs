@@ -1130,22 +1130,17 @@ impl VEditApp {
                         .auto_shrink([false, false])
                         .max_height((ui.available_height() - composer_height).max(24.0))
                         .show(ui, |ui| {
+                            // The summary above already says "No changes"; one
+                            // quiet hint is enough here.
                             if project.git_changes.is_empty() {
-                                ui.add_space(20.0);
+                                ui.add_space(10.0);
                                 ui.label(
                                     RichText::new(if unsaved_count > 0 {
                                         "No changes on disk"
                                     } else {
-                                        "Working tree is clean"
+                                        "Saved changes appear here."
                                     })
-                                    .size(12.5)
-                                    .color(TEXT),
-                                );
-                                ui.label(
-                                    RichText::new(
-                                        "Saved changes appear here. Stage them before committing.",
-                                    )
-                                    .size(11.0)
+                                    .size(11.5)
                                     .color(MUTED),
                                 );
                             }

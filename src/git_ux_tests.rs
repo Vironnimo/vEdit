@@ -127,7 +127,11 @@ fn git_explains_unsaved_documents_and_save_action_preserves_agent_draft_until_sa
             .query_by_label("1 unsaved document. Git uses files on disk.")
             .is_some()
     );
-    assert!(screen.query_by_label("Working tree is clean").is_none());
+    assert!(
+        screen
+            .query_by_label("Saved changes appear here.")
+            .is_none()
+    );
     assert!(screen.query_by_label("No changes on disk").is_some());
     screen.get_by_label("Save all files").click();
     screen.run_steps(2);
@@ -408,7 +412,11 @@ fn stacked_git_regions_resize_and_keep_both_contents_visible() {
         screen.get_by_label("Changes").rect().bottom()
             < screen.get_by_label("History").rect().top()
     );
-    assert!(screen.query_by_label("Working tree is clean").is_some());
+    assert!(
+        screen
+            .query_by_label("Saved changes appear here.")
+            .is_some()
+    );
     assert!(screen.query_by_label_contains("Commit 0:").is_some());
     let before = screen.get_by_label("History").rect().top();
     let start = screen
@@ -448,7 +456,11 @@ fn stacked_git_regions_resize_and_keep_both_contents_visible() {
         screen.state().projects[0].git_view.section,
         GitSection::History
     );
-    assert!(screen.query_by_label("Working tree is clean").is_some());
+    assert!(
+        screen
+            .query_by_label("Saved changes appear here.")
+            .is_some()
+    );
     screen.get_by_label("Changes").click();
     screen.run_steps(2);
     assert_eq!(
