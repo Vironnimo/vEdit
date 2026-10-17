@@ -231,22 +231,24 @@ impl VEditApp {
                 "Toggle Markdown preview",
             )
         });
+        // The icon color alone shows the active view; orange stays reserved
+        // for keyboard focus.
         let color = if preview {
-            ACCENT
-        } else if response.hovered() {
+            BLUE
+        } else if response.hovered() || response.has_focus() {
             TEXT
         } else {
             MUTED
         };
-        if response.hovered() || response.has_focus() || preview {
-            ui.painter().rect_filled(
-                rect,
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 4.0, HOVER);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
                 4.0,
-                if response.hovered() {
-                    HOVER
-                } else {
-                    ACCENT.linear_multiply(0.10)
-                },
+                Stroke::new(1.5, ACCENT),
+                egui::StrokeKind::Inside,
             );
         }
         let center = rect.center();
