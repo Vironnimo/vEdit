@@ -1661,8 +1661,15 @@ mod tests {
         assert_eq!(selected(screen.state()), Some(new.clone()));
         assert_eq!(screen.state().tab().unwrap().path, Some(new));
         assert!(screen.state().explorer_keyboard_focused());
-        screen.run_steps(3);
-        assert!(screen.query_by_label("renamed.md").is_some());
+        // The Explorer reloads the folder on its own worker, after the index.
+        while screen.query_by_label("renamed.md").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "renamed row did not appear in the Explorer"
+            );
+            screen.run_steps(1);
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert_eq!(
             fs::read_to_string(fixture.0.join("renamed.md")).unwrap(),
             "# Plan\n"
