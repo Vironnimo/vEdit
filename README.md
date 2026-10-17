@@ -1,6 +1,8 @@
-# vEdit 0.4.23
+# vEdit 0.4.24
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.24 macht die Oberfläche ruhiger: Die Codeschrift ist leichter (JetBrains Mono Light statt Regular). Source control zeigt oben nur noch Branch, Commits zu pushen/pullen, geänderte Dateien mit hinzugefügten/entfernten Zeilen und den Abstand zu `main`; **Fetch**, **Pull** und **Push** stehen im **⋯**-Menü des Panels. Seitenleistenköpfe haben kein **×** mehr, und ihr **⋯**-Menü erscheint ohne Rahmen.
 
 Version 0.4.23 macht **Interface zoom** zuverlässig einstellbar: Beim Ziehen am Regler oder Prozentfeld bleibt die Oberfläche unverändert. Erst beim Loslassen wird der gewählte Wert angewendet, sodass die Auswahl nicht mehr durch das Skalieren verrutscht. Zoom-Tastenkürzel wirken weiterhin sofort.
 
