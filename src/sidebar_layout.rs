@@ -923,6 +923,7 @@ impl VEditApp {
             self.index_project(self.active_project);
             if view == SidebarView::SourceControl {
                 self.refresh_git_history(self.active_project);
+                self.repositories.request_refresh();
             }
             self.refresh_git(self.active_project, true);
             ui.close();

@@ -12,11 +12,78 @@ fn fixture(count: usize) -> VEditApp {
     app
 }
 
+fn summary(root: &Path, changes: usize) -> Result<Option<GitSummary>, String> {
+    Ok(Some(GitSummary {
+        repository: root.to_path_buf(),
+        status: git::WorktreeStatus {
+            head: Some("a".repeat(40)),
+            tracking: git::BranchInfo {
+                name: Some("main".into()),
+                upstream: Some("origin/main".into()),
+                ahead: 1,
+                behind: 0,
+                divergence_known: true,
+            },
+            changes,
+            conflicts: 0,
+        },
+    }))
+}
+
+fn read_uncommitted_count(
+    root: &Path,
+    approved_parent: Option<&Path>,
+) -> Result<Option<usize>, String> {
+    read_git_summary(root, approved_parent)
+        .map(|summary| summary.map(|summary| summary.status.changes))
+}
+
 fn pending(app: &mut VEditApp, index: usize, id: u64) -> PathBuf {
     let root = app.projects[index].root.clone();
     app.projects[index].git_indicator_request = Some(id);
     app.git_indicator_requests.insert(id, root.clone());
     root
+}
+
+#[test]
+fn project_tab_tooltip_summarizes_branch_divergence_and_conflicts() {
+    let root = PathBuf::from("C:/Code/vEdit");
+    let mut project = Project::new(root.clone());
+    assert_eq!(project.git_tab_summary(), None);
+    let mut summary = summary(&root, 2).unwrap().unwrap();
+    summary.status.tracking.behind = 2;
+    project.git_summary = Some(summary.clone());
+    assert_eq!(
+        project.git_tab_summary().as_deref(),
+        Some("Branch main · ↑1 ↓2")
+    );
+    summary.status.tracking.ahead = 0;
+    summary.status.tracking.behind = 0;
+    summary.status.conflicts = 2;
+    project.git_summary = Some(summary.clone());
+    assert_eq!(
+        project.git_tab_summary().as_deref(),
+        Some("Branch main · up to date · 2 conflicts")
+    );
+    summary.status.conflicts = 0;
+    summary.status.tracking.divergence_known = false;
+    project.git_summary = Some(summary.clone());
+    assert_eq!(
+        project.git_tab_summary().as_deref(),
+        Some("Branch main · ↑? ↓?")
+    );
+    summary.status.tracking.upstream = None;
+    project.git_summary = Some(summary.clone());
+    assert_eq!(
+        project.git_tab_summary().as_deref(),
+        Some("Branch main · no upstream")
+    );
+    summary.status.tracking.name = None;
+    project.git_summary = Some(summary);
+    assert_eq!(
+        project.git_tab_summary().as_deref(),
+        Some("Detached at aaaaaaa")
+    );
 }
 
 #[test]
@@ -28,7 +95,7 @@ fn refreshes_oldest_inactive_projects_with_a_global_budget() {
     assert_eq!(app.inactive_git_indicator_candidates(), [3]);
     pending(&mut app, 3, 101);
     assert!(app.inactive_git_indicator_candidates().is_empty());
-    app.finish_git_indicator(removed, 100, Ok(Some(9)));
+    app.finish_git_indicator(removed.clone(), 100, summary(&removed, 9));
     assert_eq!(app.inactive_git_indicator_candidates(), [2]);
 }
 
@@ -49,11 +116,15 @@ fn close_and_reopen_or_replaced_requests_reject_stale_counts() {
     app.projects[1] = Project::new(root.clone());
     app.projects[1].git_indicator_count = Some(0);
     pending(&mut app, 1, 201);
-    app.finish_git_indicator(root.clone(), 200, Ok(Some(7)));
+    app.finish_git_indicator(root.clone(), 200, summary(&root, 7));
     assert_eq!(app.projects[1].uncommitted_change_count(), Some(0));
+    assert!(app.projects[1].git_summary.is_none());
     assert_eq!(app.projects[1].git_indicator_request, Some(201));
-    app.finish_git_indicator(root, 201, Ok(Some(2)));
+    app.finish_git_indicator(root.clone(), 201, summary(&root, 2));
     assert_eq!(app.projects[1].uncommitted_change_count(), Some(2));
+    let status = &app.projects[1].git_summary.as_ref().unwrap().status;
+    assert_eq!(status.tracking.upstream.as_deref(), Some("origin/main"));
+    assert_eq!(status.tracking.ahead, 1);
     assert!(app.git_indicator_requests.is_empty());
 }
 
@@ -61,6 +132,7 @@ fn close_and_reopen_or_replaced_requests_reject_stale_counts() {
 fn status_failure_is_unknown_and_retries_without_overwriting_full_git_data() {
     let mut app = fixture(2);
     app.projects[1].git_indicator_count = Some(3);
+    app.projects[1].git_summary = summary(&app.projects[1].root.clone(), 3).unwrap();
     app.projects[1].git_branch = Some("keep-branch".into());
     app.projects[1].git_error = Some("keep-full-refresh-error".into());
     let previous_refresh = app.projects[1].last_git_refresh;
@@ -68,6 +140,7 @@ fn status_failure_is_unknown_and_retries_without_overwriting_full_git_data() {
     app.finish_git_indicator(root, 300, Err("unavailable".into()));
     let project = &app.projects[1];
     assert_eq!(project.uncommitted_change_count(), None);
+    assert!(project.git_summary.is_none(), "unknown, not stale");
     assert_eq!(project.git_branch.as_deref(), Some("keep-branch"));
     assert_eq!(
         project.git_error.as_deref(),
@@ -96,27 +169,50 @@ fn full_snapshot_updates_count_and_invalidates_an_older_indicator() {
                 branch: Some("main".into()),
                 tracking: None,
                 main_comparison: Ok(None),
-                files: vec![git::FileStatus {
-                    path: "change.txt".into(),
-                    original_path: None,
-                    index: git::FileChange::Modified,
-                    worktree: git::FileChange::None,
-                }],
+                files: vec![
+                    git::FileStatus {
+                        path: "change.txt".into(),
+                        original_path: None,
+                        index: git::FileChange::Modified,
+                        worktree: git::FileChange::None,
+                    },
+                    git::FileStatus {
+                        path: "conflict.txt".into(),
+                        original_path: None,
+                        index: git::FileChange::Unmerged,
+                        worktree: git::FileChange::Unmerged,
+                    },
+                ],
                 stats: git::WorkingTreeStats::default(),
                 stats_error: None,
                 history: Ok(GitHistoryRefresh {
-                    snapshot: git::HistorySnapshot::default(),
+                    snapshot: git::HistorySnapshot {
+                        refs: vec![git::CommitRef {
+                            hash: "b".repeat(40),
+                            name: "main".into(),
+                            kind: git::RefKind::Local,
+                            current: true,
+                        }],
+                        ..Default::default()
+                    },
                     page: None,
                 }),
             })),
         })
         .unwrap();
     app.poll();
-    assert_eq!(app.projects[1].uncommitted_change_count(), Some(1));
+    assert_eq!(app.projects[1].uncommitted_change_count(), Some(2));
+    let full = app.projects[1].git_summary.clone().unwrap();
+    assert_eq!(full.repository, root);
+    assert_eq!(full.status.head, Some("b".repeat(40)));
+    assert_eq!(full.status.tracking.name.as_deref(), Some("main"));
+    assert!(!full.status.tracking.divergence_known);
+    assert_eq!((full.status.changes, full.status.conflicts), (2, 1));
     assert!(app.projects[1].git_indicator_request.is_none());
     assert_eq!(app.git_indicator_requests.len(), 1);
-    app.finish_git_indicator(root, 400, Ok(Some(0)));
-    assert_eq!(app.projects[1].uncommitted_change_count(), Some(1));
+    app.finish_git_indicator(root.clone(), 400, summary(&root, 0));
+    assert_eq!(app.projects[1].uncommitted_change_count(), Some(2));
+    assert_eq!(app.projects[1].git_summary, Some(full));
     assert!(app.git_indicator_requests.is_empty());
 }
 

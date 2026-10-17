@@ -4,6 +4,52 @@ use super::*;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_REQUESTS: usize = 2;
 
+/// Branch, upstream divergence and change totals of a project's repository.
+/// Full and status-only refreshes both keep it current, so project tabs and
+/// the repository overview never start Git for an open project themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GitSummary {
+    /// The repository's top-level working tree as reported by Git.
+    pub(super) repository: PathBuf,
+    pub(super) status: git::WorktreeStatus,
+}
+
+impl GitSummary {
+    /// Summarize a full refresh. Its history snapshot already names HEAD, so
+    /// this adds no Git process to the active project's refresh.
+    pub(super) fn from_snapshot(snapshot: &GitSnapshot) -> Option<Self> {
+        let repository = snapshot.root.clone()?;
+        let head = snapshot.history.as_ref().ok().and_then(|history| {
+            history
+                .snapshot
+                .refs
+                .iter()
+                .find(|reference| reference.current)
+                .map(|reference| reference.hash.clone())
+        });
+        let tracking = snapshot.tracking.clone().unwrap_or(git::BranchInfo {
+            name: snapshot.branch.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            divergence_known: false,
+        });
+        Some(Self {
+            repository,
+            status: git::WorktreeStatus {
+                head,
+                tracking,
+                changes: snapshot.files.len(),
+                conflicts: snapshot
+                    .files
+                    .iter()
+                    .filter(|file| file.is_conflicted())
+                    .count(),
+            },
+        })
+    }
+}
+
 impl Project {
     pub(super) fn clear_git_repository_data(&mut self) {
         self.git_root = None;
@@ -27,23 +73,62 @@ impl Project {
         self.git_view.split_ratio = split_ratio;
         self.git_error = None;
         self.git_indicator_count = None;
+        self.git_summary = None;
     }
 
     pub(super) fn uncommitted_change_count(&self) -> Option<usize> {
         self.git_indicator_count
     }
+
+    /// Branch and upstream line for the project tab tooltip, from the same
+    /// refreshes as its change dot.
+    pub(super) fn git_tab_summary(&self) -> Option<String> {
+        let status = &self.git_summary.as_ref()?.status;
+        let tracking = &status.tracking;
+        let mut line = match (&tracking.name, &status.head) {
+            (Some(branch), _) => {
+                let upstream = match &tracking.upstream {
+                    None => "no upstream".to_owned(),
+                    Some(_) if !tracking.divergence_known => "↑? ↓?".to_owned(),
+                    Some(_) if tracking.ahead == 0 && tracking.behind == 0 => {
+                        "up to date".to_owned()
+                    }
+                    Some(_) => format!("↑{} ↓{}", tracking.ahead, tracking.behind),
+                };
+                format!("Branch {branch} · {upstream}")
+            }
+            (None, Some(head)) => format!("Detached at {}", head.get(..7).unwrap_or(head)),
+            (None, None) => return None,
+        };
+        if status.conflicts > 0 {
+            line.push_str(&format!(
+                " · {} {}",
+                status.conflicts,
+                if status.conflicts == 1 {
+                    "conflict"
+                } else {
+                    "conflicts"
+                }
+            ));
+        }
+        Some(line)
+    }
 }
 
-fn read_uncommitted_count(
+/// One status process per refresh: the change count of the tab's dot plus
+/// the branch and upstream divergence shown in tooltips and the overview.
+fn read_git_summary(
     root: &Path,
     approved_parent: Option<&Path>,
-) -> Result<Option<usize>, String> {
+) -> Result<Option<GitSummary>, String> {
     let repository = git::project_repository(root, approved_parent)
         .map_err(|error| error.to_string())?
         .root;
     repository
         .map(|repository| {
-            git::uncommitted_change_count(&repository).map_err(|error| error.to_string())
+            git::worktree_status(&repository)
+                .map(|status| GitSummary { repository, status })
+                .map_err(|error| error.to_string())
         })
         .transpose()
 }
@@ -108,7 +193,7 @@ impl VEditApp {
             // Keep removed projects' workers in the budget until they finish.
             self.git_indicator_requests.insert(request_id, root.clone());
             self.worker(move || WorkerResult::GitIndicator {
-                result: read_uncommitted_count(&root, approved_parent.as_deref()),
+                result: read_git_summary(&root, approved_parent.as_deref()),
                 root,
                 request_id,
             });
@@ -119,7 +204,7 @@ impl VEditApp {
         &mut self,
         root: PathBuf,
         request_id: u64,
-        result: Result<Option<usize>, String>,
+        result: Result<Option<GitSummary>, String>,
     ) {
         if self.git_indicator_requests.remove(&request_id).as_ref() != Some(&root) {
             return;
@@ -133,7 +218,9 @@ impl VEditApp {
         project.last_git_indicator_refresh = Instant::now();
         // Failure means unknown, rather than a misleading clean status. A later
         // refresh retries without replacing history, file rows or diff statistics.
-        project.git_indicator_count = result.ok().flatten();
+        let summary = result.ok().flatten();
+        project.git_indicator_count = summary.as_ref().map(|summary| summary.status.changes);
+        project.git_summary = summary;
     }
 }
 

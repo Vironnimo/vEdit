@@ -1365,6 +1365,7 @@ impl VEditApp {
                 {
                     self.index_project(index);
                     self.refresh_git(index, true);
+                    self.repositories.request_refresh();
                 }
             }
             _ => {}
@@ -1819,7 +1820,7 @@ impl VEditApp {
         }
     }
 
-    fn context_reveal(&mut self, path: PathBuf) {
+    pub(super) fn context_reveal(&mut self, path: PathBuf) {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

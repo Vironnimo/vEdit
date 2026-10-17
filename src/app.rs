@@ -164,6 +164,8 @@ struct Session {
     layout: Option<split::SessionLayout>,
     bookmarks: Vec<crate::bookmarks::Bookmark>,
     agent_marks: crate::agent_marks::AgentMarks,
+    /// The Source control repository overview stays folded across restarts.
+    repositories_collapsed: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -229,6 +231,8 @@ struct Project {
     git_refresh_pending: bool,
     last_git_refresh: Instant,
     git_indicator_count: Option<usize>,
+    /// Branch, divergence and change totals from the latest full or status refresh.
+    git_summary: Option<project_status::GitSummary>,
     git_indicator_request: Option<u64>,
     last_git_indicator_refresh: Instant,
     commit_message: String,
@@ -276,6 +280,7 @@ impl Project {
             git_refresh_pending: false,
             last_git_refresh: Instant::now() - Duration::from_secs(30),
             git_indicator_count: None,
+            git_summary: None,
             git_indicator_request: None,
             last_git_indicator_refresh: Instant::now() - Duration::from_secs(30),
             commit_message: String::new(),
@@ -482,8 +487,10 @@ enum WorkerResult {
     GitIndicator {
         root: PathBuf,
         request_id: u64,
-        result: Result<Option<usize>, String>,
+        result: Result<Option<project_status::GitSummary>, String>,
     },
+    /// Worktree listing or status for the Source control repository overview.
+    RepositoryOverview(git_panel::repositories::OverviewResult),
     GitCommit {
         root: PathBuf,
         hash: String,
@@ -674,6 +681,7 @@ pub struct VEditApp {
     exit_ready: bool,
     git_busy: Option<PathBuf>,
     git_indicator_requests: HashMap<u64, PathBuf>,
+    repositories: git_panel::repositories::RepositoryOverview,
     diff: Option<(String, String)>,
     diff_view: crate::git_diff_view::DiffView,
     diff_generation: u64,
@@ -738,6 +746,7 @@ impl VEditApp {
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
+        app.repositories.collapsed = session.repositories_collapsed;
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -929,6 +938,7 @@ impl VEditApp {
             exit_ready: false,
             git_busy: None,
             git_indicator_requests: HashMap::new(),
+            repositories: git_panel::repositories::RepositoryOverview::default(),
             diff: None,
             diff_view: crate::git_diff_view::DiffView::default(),
             diff_generation: 0,
@@ -1813,8 +1823,10 @@ impl VEditApp {
                                 if p.git_root != s.root {
                                     p.clear_git_repository_data();
                                 }
+                                p.git_summary = project_status::GitSummary::from_snapshot(&s);
                                 p.git_parent_root = s.parent_root;
-                                p.git_indicator_count = s.root.as_ref().map(|_| s.files.len());
+                                p.git_indicator_count =
+                                    p.git_summary.as_ref().map(|summary| summary.status.changes);
                                 let repository = s.root.as_ref().unwrap_or(&p.root);
                                 p.git_view
                                     .hover_stats_pending
@@ -1860,6 +1872,7 @@ impl VEditApp {
                             }
                             Err(e) => {
                                 p.git_indicator_count = None;
+                                p.git_summary = None;
                                 p.git_error = Some(e);
                             }
                         }
@@ -1875,6 +1888,9 @@ impl VEditApp {
                     result,
                 } => {
                     self.finish_git_indicator(root, request_id, result);
+                }
+                WorkerResult::RepositoryOverview(result) => {
+                    self.repositories.finish(result);
                 }
                 WorkerResult::GitCommit { root, hash, result } => {
                     if let Some(p) = self.projects.iter_mut().find(|p| p.root == root)
@@ -1979,6 +1995,12 @@ impl VEditApp {
                     match result {
                         Ok(_) => {
                             self.status(format!("{message} completed"), false);
+                            // Commits, fetches and branch switches move other
+                            // worktrees' upstream divergence and listings too;
+                            // staging stays inside one worktree.
+                            if !matches!(message.as_str(), "Stage changes" | "Unstage changes") {
+                                self.repositories.request_refresh();
+                            }
                             let indices: Vec<_> = self
                                 .projects
                                 .iter()
@@ -2947,6 +2969,7 @@ impl VEditApp {
             layout: None,
             bookmarks: self.bookmarks.items.clone(),
             agent_marks: self.agent_marks.clone(),
+            repositories_collapsed: self.repositories.collapsed,
         }
     }
     fn persist_session(&self) {
@@ -7036,6 +7059,7 @@ impl VEditApp {
         }
         self.refresh_git(self.active_project, false);
         self.refresh_inactive_git_indicators();
+        self.refresh_repository_overview();
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();
             if elapsed >= Duration::from_millis(250) {
@@ -7069,6 +7093,7 @@ impl VEditApp {
         }
         self.editor_ui(ui);
         self.finish_workspace_action();
+        self.finish_repository_action();
         self.finish_region_render_owner();
         self.finish_region_focus();
         self.overlays();
