@@ -81,10 +81,18 @@ impl ExplorerGitMarks {
                 continue;
             };
             let path: PathBuf = Path::new(&file.path).components().collect();
+            // Red folders mean conflicts only; a deletion inside is a change.
+            let folder_mark = match mark {
+                ExplorerGitMark::Deleted => ExplorerGitMark::Modified,
+                mark => mark,
+            };
             let mut folder = path.parent();
             while let Some(parent) = folder.filter(|parent| !parent.as_os_str().is_empty()) {
-                let strongest = marks.folders.entry(parent.to_path_buf()).or_insert(mark);
-                *strongest = (*strongest).max(mark);
+                let strongest = marks
+                    .folders
+                    .entry(parent.to_path_buf())
+                    .or_insert(folder_mark);
+                *strongest = (*strongest).max(folder_mark);
                 folder = parent.parent();
             }
             marks.files.insert(path, mark);
@@ -141,7 +149,16 @@ mod tests {
                 git::FileChange::Modified,
                 git::FileChange::None,
             ),
+            status(
+                "assets/old.png",
+                git::FileChange::None,
+                git::FileChange::Deleted,
+            ),
         ]);
+        assert_eq!(
+            marks.get(Path::new("assets"), true),
+            Some(ExplorerGitMark::Modified)
+        );
         assert_eq!(
             marks.get(Path::new("src/new.rs"), false),
             Some(ExplorerGitMark::Untracked)
