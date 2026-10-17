@@ -1,8 +1,8 @@
 //! Repositories overview at the top of Source control.
 //!
-//! Lists every repository behind the open projects, grouped by its main
-//! worktree, with all of its worktrees beneath, including ones that are not
-//! open as projects. Open projects reuse their own status refreshes. The
+//! Shows the active project's repository and its worktrees, including ones
+//! that are not open as projects. Listings stay cached across project switches.
+//! Open projects reuse their own status refreshes. The
 //! overview itself starts one `worktree list` per repository and one status
 //! read per worktree that is not open, only while Source control is visible.
 //! Request IDs keep a late worker from replacing a newer result.
@@ -47,6 +47,7 @@ enum Target {
     Listing(String),
     /// Keyed by the worktree path.
     Status(String),
+    Details(String),
 }
 
 struct Job {
@@ -79,6 +80,55 @@ struct StatusEntry {
     request: u64,
 }
 
+struct DetailsEntry {
+    result: Result<ChangeDetails, String>,
+    refreshed: Instant,
+    request: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::app) struct ChangeDetails {
+    files: usize,
+    added: u64,
+    removed: u64,
+    binary: usize,
+    unknown: usize,
+}
+
+fn read_change_details(path: &Path) -> Result<ChangeDetails, String> {
+    let (status, _, _) = git::status_with_head(path).map_err(|error| error.to_string())?;
+    let stats = git::working_tree_stats(path, &status.files).map_err(|error| error.to_string())?;
+    Ok(change_details(&status.files, &stats))
+}
+
+fn change_details(files: &[git::FileStatus], stats: &git::WorkingTreeStats) -> ChangeDetails {
+    let mut details = ChangeDetails {
+        files: files.len(),
+        ..Default::default()
+    };
+    for file in files {
+        let mut binary = false;
+        let mut unknown = file.is_conflicted();
+        for (changed, comparison) in [
+            (file.is_staged(), &stats.staged),
+            (file.is_unstaged() || file.is_untracked(), &stats.unstaged),
+        ] {
+            if changed {
+                if let Some(lines) = comparison.get(&file.path) {
+                    details.added = details.added.saturating_add(lines.added);
+                    details.removed = details.removed.saturating_add(lines.removed);
+                    binary |= lines.binary;
+                } else {
+                    unknown = true;
+                }
+            }
+        }
+        details.binary += usize::from(binary);
+        details.unknown += usize::from(unknown);
+    }
+    details
+}
+
 /// A deferred click, applied after the editor pass like project tab switches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum RepositoryAction {
@@ -92,6 +142,8 @@ pub(in crate::app) struct RepositoryOverview {
     repositories: Vec<Repository>,
     /// Worktrees that are not open as projects, by path key.
     statuses: HashMap<String, StatusEntry>,
+    /// Line counts are read only while a row is hovered, within the same job budget.
+    details: HashMap<String, DetailsEntry>,
     headlines: HashMap<String, git::CommitHeadline>,
     headline_order: VecDeque<String>,
     /// Heads already asked for once, so a missing object cannot loop.
@@ -121,6 +173,10 @@ pub(in crate::app) enum Work {
         path: PathBuf,
         cached_head: Option<String>,
     },
+    Details {
+        request: u64,
+        path: PathBuf,
+    },
 }
 
 pub(in crate::app) enum OverviewResult {
@@ -131,6 +187,10 @@ pub(in crate::app) enum OverviewResult {
     Status {
         request: u64,
         result: Result<StatusRead, String>,
+    },
+    Details {
+        request: u64,
+        result: Result<ChangeDetails, String>,
     },
 }
 
@@ -163,6 +223,10 @@ impl Work {
             } => OverviewResult::Status {
                 request,
                 result: read_status(&path, cached_head.as_deref()),
+            },
+            Self::Details { request, path } => OverviewResult::Details {
+                request,
+                result: read_change_details(&path),
             },
         }
     }
@@ -254,6 +318,7 @@ struct Row {
     head: Option<String>,
     locked: Option<String>,
     status: Option<Result<git::WorktreeStatus, String>>,
+    details: Option<Result<ChangeDetails, String>>,
     headline: Option<git::CommitHeadline>,
     listing_error: Option<String>,
 }
@@ -351,6 +416,7 @@ impl RepositoryOverview {
         // An open worktree keeps its last overview status until its project's
         // own refresh replaces it; it gets no further reads from here.
         self.statuses.retain(|key, _| listed.contains(key));
+        self.details.retain(|key, _| listed.contains(key));
         self.failed
             .retain(|key, _| seed_keys.contains(key.as_str()));
         if self.requested_heads.len() > MAX_HEADLINES {
@@ -503,6 +569,26 @@ impl RepositoryOverview {
         !covered && !backed_off && !in_flight.contains(&Target::Listing(key.to_owned()))
     }
 
+    fn details_work(&mut self, path: &Path, now: Instant) -> Option<Work> {
+        let key = path_key(path);
+        let target = Target::Details(key.clone());
+        if self.collapsed
+            || self.jobs.len() >= MAX_JOBS
+            || self.jobs.values().any(|job| job.target == target)
+            || self.details.get(&key).is_some_and(|entry| {
+                now.saturating_duration_since(entry.refreshed) < STATUS_INTERVAL
+                    && !self.requested_after(entry.refreshed)
+            })
+        {
+            return None;
+        }
+        let request = self.start(target, false, now);
+        Some(Work::Details {
+            request,
+            path: path.to_path_buf(),
+        })
+    }
+
     /// Heads of open worktrees in one repository that have no headline yet
     /// and were not asked for before.
     fn missing_heads(
@@ -525,6 +611,31 @@ impl RepositoryOverview {
 
     pub(in crate::app) fn finish(&mut self, result: OverviewResult) {
         match result {
+            OverviewResult::Details { request, result } => {
+                let Some(Job {
+                    target: Target::Details(key),
+                    started,
+                    ..
+                }) = self.jobs.remove(&request)
+                else {
+                    return;
+                };
+                if self
+                    .details
+                    .get(&key)
+                    .is_some_and(|entry| entry.request > request)
+                {
+                    return;
+                }
+                self.details.insert(
+                    key,
+                    DetailsEntry {
+                        result,
+                        refreshed: started,
+                        request,
+                    },
+                );
+            }
             OverviewResult::Listing { request, result } => {
                 let Some(Job {
                     target: Target::Listing(seed_key),
@@ -709,6 +820,7 @@ impl RepositoryOverview {
                     head,
                     locked: entry.locked.clone(),
                     status,
+                    details: self.details.get(key).map(|entry| entry.result.clone()),
                     listing_error: (position == 0).then(|| repository.error.clone()).flatten(),
                 });
             }
@@ -762,6 +874,7 @@ impl RepositoryOverview {
                     head,
                     locked: None,
                     status,
+                    details: self.details.get(key).map(|entry| entry.result.clone()),
                     listing_error: None,
                 },
             ));
@@ -867,10 +980,15 @@ fn tooltip_text(row: &Row, now: i64) -> String {
     }
     match &row.status {
         Some(Ok(status)) => {
-            let mut line = match status.changes {
+            let count = row
+                .details
+                .as_ref()
+                .and_then(|details| details.as_ref().ok())
+                .map_or(status.changes, |details| details.files);
+            let mut line = match count {
                 0 => "No uncommitted changes".to_owned(),
-                1 => "1 uncommitted change".to_owned(),
-                count => format!("{count} uncommitted changes"),
+                1 => "1 changed file".to_owned(),
+                count => format!("{count} changed files"),
             };
             if status.conflicts > 0 {
                 line.push_str(&format!(
@@ -888,6 +1006,31 @@ fn tooltip_text(row: &Row, now: i64) -> String {
         Some(Err(error)) => lines.push(format!("Status unavailable: {error}")),
         None if row.kind == RowKind::Worktree => lines.push("Reading status…".into()),
         None => {}
+    }
+    if row.openable() {
+        match &row.details {
+            Some(Ok(details)) => {
+                if known.is_none() {
+                    lines.push(format!("{} changed files", details.files));
+                }
+                lines.push(format!(
+                    "+{} added lines · −{} removed lines",
+                    details.added, details.removed
+                ));
+                lines.push("Staged + unstaged, including untracked files on disk".into());
+                if details.binary > 0 {
+                    lines.push(format!("{} binary files (no line counts)", details.binary));
+                }
+                if details.unknown > 0 {
+                    lines.push(format!(
+                        "Partial totals: line counts unavailable for {} files",
+                        details.unknown
+                    ));
+                }
+            }
+            Some(Err(error)) => lines.push(format!("Line counts unavailable: {error}")),
+            None => lines.push("Loading line counts…".into()),
+        }
     }
     if let Some(headline) = &row.headline {
         lines.push(format!(
@@ -1021,7 +1164,7 @@ fn header_row(ui: &mut egui::Ui, rows: &[Row], collapsed: bool) -> egui::Respons
         })
 }
 
-fn repository_row(ui: &mut egui::Ui, row: &Row, now: i64) -> egui::Response {
+fn repository_row(ui: &mut egui::Ui, row: &Row, now: i64) -> (egui::Response, bool) {
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(1.0), TREE_ROW_HEIGHT),
         egui::Sense::hover(),
@@ -1213,10 +1356,13 @@ fn repository_row(ui: &mut egui::Ui, row: &Row, now: i64) -> egui::Response {
         response
     };
     // Built only while hovered.
-    response.on_hover_ui(|ui| {
+    let mut tooltip_visible = false;
+    let response = response.on_hover_ui(|ui| {
+        tooltip_visible = true;
         ui.set_max_width(440.0);
         ui.label(tooltip_text(row, now));
-    })
+    });
+    (response, tooltip_visible)
 }
 
 enum RowAction {
@@ -1246,7 +1392,25 @@ impl VEditApp {
     }
 
     fn repository_rows(&self) -> Vec<Row> {
-        self.repositories.rows(&self.open_projects_for_overview())
+        let projects = self.open_projects_for_overview();
+        let Some(current) = projects.iter().find(|project| project.current) else {
+            return Vec::new();
+        };
+        let key = current.repository_key.as_ref().unwrap_or(&current.root_key);
+        let repository = self
+            .repositories
+            .repositories
+            .iter()
+            .find(|repository| repository.covers(key));
+        self.repositories
+            .rows(&projects)
+            .into_iter()
+            .filter(|row| {
+                repository.map_or(row.key == *key, |repository| {
+                    repository.keys.contains(&row.key)
+                })
+            })
+            .collect()
     }
 
     /// The active project's first history page usually has its HEAD commit;
@@ -1382,7 +1546,15 @@ impl VEditApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for (index, row) in rows.iter().enumerate() {
-                            let response = repository_row(ui, row, now);
+                            let (response, tooltip_visible) = repository_row(ui, row, now);
+                            if tooltip_visible
+                                && row.openable()
+                                && self.git_busy.is_none()
+                                && let Some(work) =
+                                    self.repositories.details_work(&row.path, Instant::now())
+                            {
+                                self.worker(move || WorkerResult::RepositoryOverview(work.run()));
+                            }
                             if response.clicked() {
                                 actions.push((index, RowAction::Activate));
                             }

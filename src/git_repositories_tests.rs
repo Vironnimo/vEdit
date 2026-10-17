@@ -229,7 +229,7 @@ fn rows_group_worktrees_under_their_repository_in_project_order() {
     assert!(
         tooltip.contains("Branch agent/work · tracking origin/agent/work · 2 to push · 0 to pull")
     );
-    assert!(tooltip.contains("3 uncommitted changes"));
+    assert!(tooltip.contains("3 changed files"));
     assert!(tooltip.contains("Last commit 2222222 · Teach the agent"));
     assert!(tooltip.contains("Alex Taylor · 1 minute ago"));
 }
@@ -658,6 +658,62 @@ fn screen(app: VEditApp) -> Harness<'static, VEditApp> {
 }
 
 #[test]
+fn switching_projects_scopes_worktrees_even_before_the_next_refresh() {
+    let folders = Folders::new(&[
+        "vEdit",
+        "vEdit-feature",
+        "agent wt",
+        "other",
+        "other-wt",
+        "plain",
+    ]);
+    let mut app = overview_app(&folders, true);
+    let other = folders.path("other");
+    let other_wt = folders.path("other-wt");
+    app.projects.push(project_with_summary(
+        &other,
+        status(Some("main"), '4', 0, 0, None),
+    ));
+    app.projects.push(Project::new(folders.path("plain")));
+    list(
+        &mut app.repositories,
+        &other,
+        vec![
+            entry(&other, Some("main"), Some('4')),
+            entry(&other_wt, Some("feature"), Some('4')),
+        ],
+        Vec::new(),
+    );
+    let mut screen = screen(app);
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
+    assert!(screen.query_by_label("Worktree other-wt").is_none());
+    screen.get_by_label("Project: other").click();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Worktree other-wt").is_some());
+    assert!(screen.query_by_label("Worktree agent wt").is_none());
+    screen.get_by_label("Project: plain").click();
+    screen.run_steps(2);
+    assert!(screen.state().repository_rows().is_empty());
+    // A late result from the previous project cannot bring its rows back.
+    list(
+        &mut screen.state_mut().repositories,
+        &other,
+        vec![
+            entry(&other, Some("main"), Some('4')),
+            entry(&other_wt, Some("feature"), Some('4')),
+        ],
+        Vec::new(),
+    );
+    screen.run_steps(2);
+    assert!(screen.state().repository_rows().is_empty());
+    screen.get_by_label("Project: vEdit-feature").click();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Repository vEdit").is_some());
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
+    assert!(screen.query_by_label("Worktree other-wt").is_none());
+}
+
+#[test]
 fn overview_appears_only_with_more_than_one_worktree() {
     let folders = Folders::new(&["vEdit", "vEdit-feature"]);
     let mut app = overview_app(&folders, false);
@@ -765,6 +821,51 @@ fn collapsing_hides_rows_pauses_reads_and_persists_in_the_session() {
     screen.run_steps(2);
     assert!(!screen.state().repositories.collapsed);
     assert!(screen.query_by_label("Worktree agent wt").is_some());
+}
+
+#[test]
+fn hovering_a_worktree_shows_cached_file_and_line_counts() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut app = overview_app(&folders, true);
+    let path = folders.path("agent wt");
+    app.repositories.details.insert(
+        path_key(&path),
+        DetailsEntry {
+            result: Ok(ChangeDetails {
+                files: 7,
+                added: 123,
+                removed: 45,
+                binary: 1,
+                unknown: 1,
+            }),
+            refreshed: Instant::now(),
+            request: 0,
+        },
+    );
+    let mut screen = screen(app);
+    let now = 1_790_426_840_i64;
+    screen
+        .ctx
+        .data_mut(|data| data.insert_temp(egui::Id::new("git-history-test-clock"), now));
+    screen.ctx.all_styles_mut(|style| {
+        style.interaction.tooltip_delay = 0.0;
+        style.interaction.tooltip_grace_time = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    screen.hover_at(screen.get_by_label("Worktree agent wt").rect().center());
+    screen.run_steps(4);
+    let row = screen
+        .state()
+        .repository_rows()
+        .into_iter()
+        .find(|row| row.path == path)
+        .unwrap();
+    let expected = tooltip_text(&row, now);
+    assert!(expected.contains("7 changed files"));
+    assert!(expected.contains("+123 added lines · −45 removed lines"));
+    assert!(expected.contains("Partial totals"));
+    assert!(screen.query_by_label(&expected).is_some());
+    assert!(screen.state().repositories.jobs.is_empty());
 }
 
 #[test]
@@ -961,6 +1062,110 @@ fn simulate(
             git::take_command_count()
         })
         .collect()
+}
+
+#[test]
+fn hovered_worktree_details_count_both_comparisons_and_untracked_files() {
+    let fixture = RealWorktrees::new();
+    let path = &fixture.linked[0];
+    fs::write(path.join("README.md"), "first\nsecond\n").unwrap();
+    git::stage_all(path).unwrap();
+    fs::write(path.join("README.md"), "first\nthird\nfourth\n").unwrap();
+    fs::write(path.join("new ü.txt"), "new\ntext\n").unwrap();
+    fs::write(path.join("binary.dat"), b"\0binary").unwrap();
+    let details = read_change_details(path).unwrap();
+    assert_eq!(
+        details,
+        ChangeDetails {
+            files: 3,
+            added: 6,
+            removed: 2,
+            binary: 1,
+            unknown: 0,
+        }
+    );
+    let mut overview = RepositoryOverview::default();
+    list(
+        &mut overview,
+        &fixture.main,
+        git::worktree_list(&fixture.main).unwrap(),
+        Vec::new(),
+    );
+    let now = Instant::now();
+    let work = overview.details_work(path, now).unwrap();
+    assert!(
+        overview.details_work(path, now).is_none(),
+        "no duplicate hover job"
+    );
+    overview.finish(work.run());
+    assert!(
+        overview
+            .details_work(path, now + Duration::from_secs(1))
+            .is_none(),
+        "reuse cached hover details"
+    );
+    let rows = overview.rows(&[]);
+    let row = rows
+        .iter()
+        .find(|row| path_key(&row.path) == path_key(path))
+        .unwrap();
+    let tooltip = tooltip_text(row, 1_800_000_000);
+    for text in [
+        "3 changed files",
+        "+6 added lines",
+        "−2 removed lines",
+        "1 binary files",
+    ] {
+        assert!(tooltip.contains(text), "{tooltip}");
+    }
+    // A new read becomes due, but still waits for a hover and the shared budget.
+    let later = now + STATUS_INTERVAL;
+    overview.start(Target::Status("busy-1".into()), false, later);
+    overview.start(Target::Status("busy-2".into()), false, later);
+    assert!(overview.details_work(path, later).is_none());
+    overview.jobs.clear();
+    assert!(overview.details_work(path, later).is_some());
+}
+
+#[test]
+fn hover_details_mark_missing_counts_and_retry_errors_without_looping() {
+    let files = vec![git::FileStatus {
+        path: "too-large.txt".into(),
+        original_path: None,
+        index: git::FileChange::None,
+        worktree: git::FileChange::Untracked,
+    }];
+    assert_eq!(
+        change_details(&files, &git::WorkingTreeStats::default()).unknown,
+        1
+    );
+    let mut overview = RepositoryOverview::default();
+    let path = Path::new("C:/test-worktree");
+    let now = Instant::now();
+    let Some(Work::Details { request, .. }) = overview.details_work(path, now) else {
+        panic!("expected hover read");
+    };
+    overview.finish(OverviewResult::Details {
+        request,
+        result: Err("repository unavailable".into()),
+    });
+    assert!(
+        overview
+            .details_work(path, now + Duration::from_secs(1))
+            .is_none()
+    );
+    assert!(overview.details_work(path, now + STATUS_INTERVAL).is_some());
+    // Duplicate/late responses cannot replace a newer result.
+    let later_request = overview.start(Target::Details(path_key(path)), false, now);
+    overview.finish(OverviewResult::Details {
+        request: later_request,
+        result: Ok(ChangeDetails::default()),
+    });
+    overview.finish(OverviewResult::Details {
+        request,
+        result: Err("old result".into()),
+    });
+    assert!(overview.details[&path_key(path)].result.is_ok());
 }
 
 #[test]

@@ -284,6 +284,11 @@ fn project_tabs_and_git_indicators_screenshots() {
     }
     let mut screen = harness(app);
     snapshot(&mut screen, "vedit_project_tabs");
+    screen.get_by_label("Project: vBot").click_secondary();
+    screen.run_steps(3);
+    snapshot(&mut screen, "vedit_project_context_menu");
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
     screen.set_size(Vec2::new(500.0, 360.0));
     snapshot(&mut screen, "vedit_project_tabs_compact");
 }

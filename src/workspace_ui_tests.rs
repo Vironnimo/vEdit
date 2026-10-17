@@ -933,6 +933,59 @@ fn accepting_a_project_from_insert_mode_does_not_insert_the_enter_text_event() {
 }
 
 #[test]
+fn project_context_menu_supports_keyboard_and_copies_the_clicked_project_path() {
+    let mut screen = harness(fixture(2));
+    let root = screen.state().projects[1].root.clone();
+    screen
+        .get_by_label("Project: vedit-workspace-ui-01")
+        .focus();
+    screen.run_steps(1);
+    shortcut(&mut screen, Key::F10, egui::Modifiers::SHIFT);
+    assert!(screen.query_by_label("Reveal in Explorer").is_some());
+    let before = screen.get_by_label("Copy path").rect();
+    screen.run_steps(2);
+    assert_eq!(screen.get_by_label("Copy path").rect(), before);
+    screen.get_by_label("Copy path").click();
+    screen.run_steps(1);
+    assert!(screen.output().platform_output.commands.iter().any(|command| {
+        matches!(command, egui::OutputCommand::CopyText(text) if *text == crate::paths::display(&root))
+    }));
+    assert_eq!(screen.state().active_project, 0);
+}
+
+#[test]
+fn project_context_menu_closes_its_target_and_preserves_dirty_projects() {
+    let mut app = fixture(3);
+    app.switch_project(1);
+    visual_draft(&mut app);
+    app.switch_project(0);
+    let mut screen = harness(app);
+    screen
+        .get_by_label("Project: vedit-workspace-ui-01")
+        .click_secondary();
+    screen.run_steps(2);
+    assert_eq!(screen.state().active_project, 0);
+    screen.get_by_label("Close project").click();
+    screen.run_steps(3);
+    assert!(matches!(
+        screen.state().close_action,
+        Some(CloseAction::Project(1))
+    ));
+    assert_draft(screen.state(), 1);
+    screen.get_by_label("Cancel").click();
+    screen.run_steps(2);
+    screen
+        .get_by_label("Project: vedit-workspace-ui-02")
+        .click_secondary();
+    screen.run_steps(2);
+    screen.get_by_label("Close project").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().projects.len(), 2);
+    assert_eq!(screen.state().active_project, 0);
+    assert_draft(screen.state(), 1);
+}
+
+#[test]
 fn closing_the_selected_dirty_project_requires_confirmation() {
     let mut app = fixture(3);
     app.switch_project(2);

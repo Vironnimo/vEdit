@@ -18,11 +18,26 @@ pub(super) struct WorkspaceUiState {
     prefix_focus_policy: Option<egui::SurrenderFocusOn>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum WorkspaceAction {
     TogglePicker,
-    Cycle { next: bool },
-    Select { index: usize },
+    Cycle {
+        next: bool,
+    },
+    Select {
+        index: usize,
+    },
+    Project {
+        root: PathBuf,
+        action: ProjectAction,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ProjectAction {
+    Close,
+    CopyPath,
+    Reveal,
 }
 
 struct ProjectRow {
@@ -214,6 +229,20 @@ impl VEditApp {
                 // The source was rendered before this deferred switch.
                 self.ctx.request_repaint();
             }
+            WorkspaceAction::Project { root, action } => {
+                if let Some(index) = self
+                    .projects
+                    .iter()
+                    .position(|project| project.root == root)
+                {
+                    match action {
+                        ProjectAction::Close => self.request_close(CloseAction::Project(index)),
+                        ProjectAction::CopyPath => self.ctx.copy_text(crate::paths::display(&root)),
+                        ProjectAction::Reveal => self.context_reveal(root),
+                    }
+                    self.ctx.request_repaint();
+                }
+            }
         }
     }
 
@@ -362,6 +391,13 @@ impl VEditApp {
                                     let response = project_header_tab(ui, tab, *width);
                                     if response.clicked() {
                                         chosen = Some((index, response.rect));
+                                    }
+                                    if let Some(action) = project_context_menu(&response, tab) {
+                                        self.workspace_ui.pending =
+                                            Some(WorkspaceAction::Project {
+                                                root: tab.root.clone(),
+                                                action,
+                                            });
                                     }
                                 });
                             }
@@ -759,6 +795,52 @@ fn project_text(
     })
 }
 
+fn project_context_menu(
+    response: &egui::Response,
+    tab: &ProjectHeaderTab,
+) -> Option<ProjectAction> {
+    let mut action = None;
+    let keyboard = response.has_focus()
+        && response
+            .ctx
+            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+    let popup = egui::Popup::context_menu(response);
+    let position_key = popup.get_id().with("keyboard-position");
+    if keyboard {
+        egui::Popup::open_id(&response.ctx, popup.get_id());
+        response
+            .ctx
+            .data_mut(|data| data.insert_temp(position_key, response.rect.left_bottom()));
+    } else if response.secondary_clicked() {
+        response
+            .ctx
+            .data_mut(|data| data.remove::<egui::Pos2>(position_key));
+    }
+    let popup = if let Some(position) = response
+        .ctx
+        .data(|data| data.get_temp::<egui::Pos2>(position_key))
+    {
+        popup.at_position(position)
+    } else {
+        popup
+    };
+    popup.show(|ui| {
+        ui.label(RichText::new(&tab.label).strong());
+        ui.separator();
+        for (label, tooltip, command) in [
+            ("Reveal in Explorer", "Open this project folder in Windows Explorer", ProjectAction::Reveal),
+            ("Copy path", "Copy this project's full path", ProjectAction::CopyPath),
+            ("Close project", "Remove this project from vEdit; files stay on disk. Unsaved changes are confirmed.", ProjectAction::Close),
+        ] {
+            if design::menu_item(ui, label, "", tooltip).clicked() {
+                action = Some(command);
+                ui.close();
+            }
+        }
+    });
+    action
+}
+
 fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> egui::Response {
     let response = ui.add_sized(
         Vec2::new(width, PROJECT_TAB_HEIGHT),
@@ -783,7 +865,10 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
         // Like editor tabs, the current project is marked by its underline.
-        if response.hovered() || crate::design::keyboard_focus(&response) {
+        if response.hovered()
+            || response.context_menu_opened()
+            || crate::design::keyboard_focus(&response)
+        {
             painter.rect_filled(rect, 5.0, HOVER);
         }
         if tab.current {
