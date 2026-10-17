@@ -6479,25 +6479,12 @@ impl VEditApp {
                 let page_down = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageDown));
                 let page_up = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageUp));
                 let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
-                ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(match palette {
-                        Palette::Files => "QUICK OPEN",
-                        Palette::Commands => "COMMANDS",
-                        Palette::Line => "GO TO LINE",
-                    })
-                    .size(10.5)
-                    .strong()
-                    .color(ACCENT),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let response = design::ghost_button(ui, "×", "Close picker (Esc)");
-                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button,
-                        ui.is_enabled(), "Close picker"));
-                    close = response.clicked();
+                design::overlay_title(ui, match palette {
+                    Palette::Files => "Quick open",
+                    Palette::Commands => "Commands",
+                    Palette::Line => "Go to line",
                 });
-                });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.palette_query)
                         .id(egui::Id::new("palette_input"))
@@ -6517,17 +6504,11 @@ impl VEditApp {
                 if query_changed {
                     self.palette_selected = 0;
                 }
-                ui.add_space(9.0);
-                ui.separator();
+                ui.add_space(6.0);
                 if palette == Palette::Line {
                     if enter {
                         line = self.palette_query.trim().parse::<usize>().ok();
                     }
-                    ui.label(
-                        RichText::new("Enter to jump · Escape to close")
-                            .size(11.0)
-                            .color(MUTED),
-                    );
                 } else {
                     let options: Vec<(String, String, Option<PathBuf>)> = if palette
                         == Palette::Commands
@@ -6565,7 +6546,8 @@ impl VEditApp {
                         && self.project().and_then(|project| project.index.as_ref()).is_some_and(|index| index.truncated);
                     let limit_note_height = if index_truncated { 30.0 } else { 0.0 };
                     let results_height = (ctx.content_rect().height() - 285.0 - limit_note_height).clamp(96.0, 340.0);
-                    let page_size = (results_height / 48.0).floor().max(1.0) as usize;
+                    let page_size =
+                        (results_height / design::DETAIL_ROW_HEIGHT).floor().max(1.0) as usize;
                     if down && !options.is_empty() {
                         self.palette_selected = (self.palette_selected + 1).min(options.len() - 1);
                     }
@@ -6677,12 +6659,6 @@ impl VEditApp {
                                 .color(ORANGE),
                         ).on_hover_text(format!("The index reached its file, depth, or time limit. Open a narrower project folder, or close Quick Open and use Open file ({}) to open directly.", self.shortcut_label(keybindings::Action::OpenFile)));
                     }
-                    ui.separator();
-                    ui.label(
-                        RichText::new("↑ ↓ to navigate    Page ↑ ↓ to scroll    Enter to open    Esc to close")
-                            .size(10.5)
-                            .color(MUTED),
-                    );
                 }
             });
             close |= modal.should_close()
@@ -6718,7 +6694,7 @@ impl VEditApp {
             let modal = egui::Modal::new(egui::Id::new("settings_dialog")).show(&ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 32.0).clamp(220.0, 440.0));
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Settings").size(20.0).strong());
+                    ui.label(RichText::new("Settings").size(15.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let close = small_button(ui, "×", "Close settings · Esc");
                         close.widget_info(|| {
@@ -7991,10 +7967,10 @@ impl VEditApp {
                 Vec2::ZERO,
             )
         });
-        let row_height = 48.0;
-        let list_height = (p.items.len().min(6) as f32 * row_height)
+        let row_height = design::DETAIL_ROW_HEIGHT;
+        let list_height = (p.items.len().min(8) as f32 * row_height)
             .min((bounds.height() - 180.0).max(row_height));
-        let popup_height = list_height + 65.0;
+        let popup_height = list_height + 30.0;
         let width = (bounds.width() - 32.0).clamp(200.0, 490.0);
         let top = if caret.bottom() + popup_height > bounds.bottom() - 40.0 {
             (caret.top() - popup_height).max(bounds.top() + 70.0)
@@ -8016,7 +7992,6 @@ impl VEditApp {
             .fixed_size([width, popup_height])
             .fixed_pos(position)
             .show(&ctx, |ui| {
-                ui.label(RichText::new("SUGGESTIONS").size(10.0).color(ACCENT));
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let scroll_id = ui.make_persistent_id("completion_results");
                 let mut scroll = egui::ScrollArea::vertical()
@@ -8077,16 +8052,13 @@ impl VEditApp {
                         ),
                     );
                 });
-                ui.add_space(7.0);
+                ui.add_space(5.0);
                 ui.label(
-                    RichText::new(format!(
-                        "{} of {} · ↑ ↓ choose · Enter / Tab accepts · Esc closes",
-                        selection + 1,
-                        p.items.len()
-                    ))
-                    .size(10.5)
-                    .color(MUTED),
-                );
+                    RichText::new(format!("{} of {}", selection + 1, p.items.len()))
+                        .size(10.5)
+                        .color(MUTED),
+                )
+                .on_hover_text("↑ ↓ choose · Enter or Tab accepts · Esc closes");
             });
         if let Some(i) = selected {
             self.apply_completion(i);

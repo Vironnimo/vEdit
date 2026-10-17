@@ -70,6 +70,15 @@ pub(crate) fn status_item(ui: &mut Ui, label: &str, color: Color32, tooltip: &st
     .on_hover_text(tooltip)
 }
 
+/// The small muted heading at the top of pickers and overlays.
+pub(crate) fn overlay_title(ui: &mut Ui, title: &str) -> Response {
+    ui.label(
+        RichText::new(title)
+            .size(11.5)
+            .color(ui.visuals().weak_text_color()),
+    )
+}
+
 /// A menu item with a real right-aligned keyboard hint instead of spaces.
 pub(crate) fn menu_item(ui: &mut Ui, label: &str, shortcut: &str, tooltip: &str) -> Response {
     let mut button = egui::Button::new(RichText::new(label).size(12.0))
@@ -312,6 +321,11 @@ pub(crate) fn left_row(
 }
 
 /// A navigation row that keeps the filename/action and its context distinct.
+/// Pickers and suggestion lists use one line per entry, like other editors.
+pub(crate) const DETAIL_ROW_HEIGHT: f32 = 26.0;
+
+/// A picker entry: the label on the left and muted detail, such as a path or
+/// shortcut, right-aligned on the same line. The label keeps priority.
 pub(crate) fn detail_row(
     ui: &mut Ui,
     label: &str,
@@ -320,7 +334,7 @@ pub(crate) fn detail_row(
     tooltip: &str,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(1.0), 48.0),
+        Vec2::new(ui.available_width().max(1.0), DETAIL_ROW_HEIGHT),
         Sense::click(),
     );
     response.widget_info(|| {
@@ -333,21 +347,30 @@ pub(crate) fn detail_row(
     });
     if ui.is_rect_visible(rect) {
         paint_row_background(ui, rect, &response, selected);
-        let left = rect.left() + 12.0;
-        let width = (rect.width() - 24.0).max(1.0);
+        let left = rect.left() + 10.0;
+        let right = rect.right() - 10.0;
+        let width = (right - left).max(1.0);
         let color = row_text_color(ui, &response, selected);
-        let primary = truncated_galley(ui, label, FontId::proportional(12.0), color, width);
-        let top = if detail.is_empty() {
-            rect.center().y - primary.size().y * 0.5
-        } else {
-            rect.top() + 7.0
-        };
+        let primary = truncated_galley(ui, label, FontId::proportional(12.5), color, width);
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        painter.galley(egui::pos2(left, top), primary, color);
-        if !detail.is_empty() {
+        let label_right = left + primary.size().x;
+        painter.galley(
+            egui::pos2(left, rect.center().y - primary.size().y * 0.5),
+            primary,
+            color,
+        );
+        let room = right - label_right - 16.0;
+        if !detail.is_empty() && room > 24.0 {
             let muted = enabled_color(ui, ui.visuals().weak_text_color());
-            let secondary = truncated_galley(ui, detail, FontId::proportional(10.5), muted, width);
-            painter.galley(egui::pos2(left, rect.top() + 27.0), secondary, muted);
+            let secondary = truncated_galley(ui, detail, FontId::proportional(11.0), muted, room);
+            painter.galley(
+                egui::pos2(
+                    right - secondary.size().x,
+                    rect.center().y - secondary.size().y * 0.5,
+                ),
+                secondary,
+                muted,
+            );
         }
     }
     response

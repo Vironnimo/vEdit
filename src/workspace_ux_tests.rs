@@ -120,7 +120,7 @@ fn quick_open_distinguishes_indexing_failures_and_real_no_matches() {
     app.projects[0].indexing = true;
     app.open_palette(Palette::Files);
     let mut screen = harness(app);
-    let header = screen.get_by_label("QUICK OPEN").rect();
+    let header = screen.get_by_label("Quick open").rect();
     let loading: Vec<_> = screen
         .query_all_by_label("Indexing files…")
         .map(|node| node.rect())

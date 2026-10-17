@@ -497,7 +497,8 @@ impl VEditApp {
         let modal = egui::Modal::new(egui::Id::new("bookmark_picker")).show(&ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 70.0).clamp(280.0, 620.0));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Bookmarks").size(20.0).strong());
+                ui.label(RichText::new("Bookmarks").size(15.0).strong())
+                    .on_hover_text("↑ ↓ choose · Enter opens · Right-click edits · Esc closes");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     close = design::ghost_button(ui, "×", "Close bookmarks (Esc)").clicked();
                 });
@@ -605,10 +606,11 @@ impl VEditApp {
                             .iter()
                             .position(|bookmark| Some(bookmark.id) == picker.selected)
                     {
-                        scroll = scroll
-                            .vertical_scroll_offset((index as f32 * 48.0 - height * 0.5).max(0.0));
+                        scroll = scroll.vertical_scroll_offset(
+                            (index as f32 * design::DETAIL_ROW_HEIGHT - height * 0.5).max(0.0),
+                        );
                     }
-                    scroll.show_rows(ui, 48.0, matches.len(), |ui, rows| {
+                    scroll.show_rows(ui, design::DETAIL_ROW_HEIGHT, matches.len(), |ui, rows| {
                         for index in rows {
                             let bookmark = matches[index];
                             ui.push_id(bookmark.id, |ui| {
@@ -781,11 +783,6 @@ impl VEditApp {
                             .clicked();
                     });
                 });
-                ui.label(
-                    RichText::new("↑ ↓ choose · Enter opens · Right-click edits · Esc closes")
-                        .size(10.5)
-                        .color(MUTED),
-                );
             }
         });
         close |= modal.should_close();
