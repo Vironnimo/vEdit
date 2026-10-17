@@ -368,7 +368,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
     let idle = [
         screen.get_by_label("Source control panel title").rect(),
         screen.get_by_label(&format!("{branch} ▾")).rect(),
-        screen.get_by_label("···").rect(),
+        screen.get_by_label("Source control panel actions").rect(),
     ];
     screen.state_mut().projects[0].git_loading = true;
     screen.run_steps(3);
@@ -377,7 +377,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
         [
             screen.get_by_label("Source control panel title").rect(),
             screen.get_by_label(&format!("{branch} ▾")).rect(),
-            screen.get_by_label("···").rect()
+            screen.get_by_label("Source control panel actions").rect()
         ]
     );
     let spinner = screen.get_by_label("Refreshing repository").rect();
@@ -390,7 +390,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
         [
             screen.get_by_label("Source control panel title").rect(),
             screen.get_by_label(&format!("{branch} ▾")).rect(),
-            screen.get_by_label("···").rect()
+            screen.get_by_label("Source control panel actions").rect()
         ]
     );
     assert!(screen.query_by_label("Refreshing repository").is_none());
@@ -921,7 +921,7 @@ fn git_keyboard_no_repository_focus_has_safe_initialize_target() {
 }
 
 #[test]
-fn repository_overview_keeps_push_visible_and_separates_files_tracking_and_main() {
+fn compact_repository_overview_shows_counts_and_keeps_remote_actions_in_the_panel_menu() {
     let mut app = fixture();
     app.projects[0].git_tracking = Some(git::BranchInfo {
         name: Some("feature".into()),
@@ -935,21 +935,13 @@ fn repository_overview_keeps_push_visible_and_separates_files_tracking_and_main(
         ahead: 12,
         behind: 1,
     }));
-    let mut screen = harness(app, 300.0, false);
+    let mut screen = harness(app, 1000.0, true);
     screen.run_steps(2);
-    for label in [
-        "Repository status",
-        "Working tree clean",
-        "Tracking · origin/feature",
-        "3 ahead · 2 behind",
-        "Local base · main",
-        "12 ahead · 1 behind",
-        "Fetch",
-        "Pull",
-        "Push",
-        "Remote status as of last fetch",
-    ] {
+    for label in ["No changes", "↑3 ↓2", "main ↑12 ↓1"] {
         assert!(screen.query_by_label(label).is_some(), "missing {label}");
+    }
+    for label in ["Repository status", "Fetch", "Pull", "Push", "···"] {
+        assert!(screen.query_by_label(label).is_none(), "unexpected {label}");
     }
     screen.state_mut().projects[0]
         .git_changes
@@ -959,40 +951,61 @@ fn repository_overview_keeps_push_visible_and_separates_files_tracking_and_main(
             index: git::FileChange::Modified,
             worktree: git::FileChange::Modified,
         });
+    screen.state_mut().projects[0].git_stats.staged.insert(
+        "file.rs".into(),
+        git::LineStats {
+            added: 7,
+            removed: 2,
+            binary: false,
+        },
+    );
+    screen.state_mut().projects[0].git_stats.unstaged.insert(
+        "file.rs".into(),
+        git::LineStats {
+            added: 1,
+            removed: 0,
+            binary: false,
+        },
+    );
     let project = &mut screen.state_mut().projects[0];
     project
         .git_view
         .update_working_cache(&project.git_changes, &project.git_stats);
     screen.run_steps(2);
-    assert!(screen.query_by_label("1 changed file").is_some());
-    assert!(
-        screen
-            .query_by_label("1 staged · 1 unstaged · 0 untracked")
-            .is_some()
-    );
-    assert!(screen.query_by_label("Push").is_some());
-    assert!(screen.query_by_label("3 ahead · 2 behind").is_some());
+    for label in ["1 file", "+8", "−2"] {
+        assert!(screen.query_by_label(label).is_some(), "missing {label}");
+    }
+
+    screen.get_by_label("Source control panel actions").click();
+    screen.run_steps(2);
+    for label in [
+        "Fetch",
+        "Pull",
+        "Push",
+        "Stage all changes",
+        "Hide left sidebar",
+    ] {
+        assert!(
+            screen.query_by_label_contains(label).is_some(),
+            "missing {label}"
+        );
+    }
+    // Do not run the action: a push must never reach a real repository from a test.
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
+
     screen.state_mut().projects[0]
         .git_tracking
         .as_mut()
         .unwrap()
         .divergence_known = false;
     screen.run_steps(2);
-    assert!(
-        screen
-            .query_by_label("Tracking status unavailable · Fetch to refresh")
-            .is_some()
-    );
-    assert!(screen.query_by_label("3 ahead · 2 behind").is_none());
+    assert!(screen.query_by_label("↑? ↓?").is_some());
+    assert!(screen.query_by_label("↑3 ↓2").is_none());
     screen.state_mut().projects[0].git_tracking = None;
     screen.run_steps(2);
-    assert!(
-        screen
-            .query_by_label("No tracking branch configured")
-            .is_some()
-    );
-    assert!(screen.query_by_label("Push").is_some());
-    assert!(screen.query_by_label("12 ahead · 1 behind").is_some());
+    assert!(screen.query_by_label("No upstream").is_some());
+    assert!(screen.query_by_label("main ↑12 ↓1").is_some());
 }
 
 #[test]

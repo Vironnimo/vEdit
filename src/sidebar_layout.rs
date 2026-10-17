@@ -777,46 +777,43 @@ impl VEditApp {
             Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
             Layout::right_to_left(Align::Center),
             |ui| {
-                let close = small_button(
-                    ui,
-                    "×",
-                    &format!(
-                        "Hide {} sidebar",
-                        if side == Side::Left { "left" } else { "right" }
-                    ),
-                );
-                close.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        ui.is_enabled(),
-                        if side == Side::Left {
+                let selected = self.sidebar_selected_view(side);
+                // The activity bar already hides a panel when its icon is
+                // clicked again, so the header carries no close button that
+                // could be mistaken for a window or tab close. Actions sit in
+                // a quiet overflow menu without a resting frame.
+                let actions = egui::Button::new(RichText::new("⋯").size(14.0).color(MUTED))
+                    .frame_when_inactive(false)
+                    .min_size(Vec2::new(24.0, 24.0));
+                let (menu, _) =
+                    egui::containers::menu::MenuButton::from_button(actions).ui(ui, |ui| {
+                        if let Some(view) = selected {
+                            self.sidebar_panel_menu(ui, view);
+                            ui.separator();
+                        }
+                        for view in VIEWS {
+                            if self.sidebar_side(view) == side
+                                && selected != Some(view)
+                                && ui.button(format!("Show {}", view.title())).clicked()
+                            {
+                                self.show_sidebar(view);
+                                self.focus_sidebar_region(side);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        let hide = ui.button(if side == Side::Left {
                             "Hide left sidebar"
                         } else {
                             "Hide right sidebar"
-                        },
-                    )
-                });
-                if close.clicked() {
-                    self.set_sidebar_visible(side, false);
-                }
-                let selected = self.sidebar_selected_view(side);
-                let menu = ui.menu_button("⋯", |ui| {
-                    if let Some(view) = selected {
-                        self.sidebar_panel_menu(ui, view);
-                        ui.separator();
-                    }
-                    for view in VIEWS {
-                        if self.sidebar_side(view) == side
-                            && selected != Some(view)
-                            && ui.button(format!("Show {}", view.title())).clicked()
-                        {
-                            self.show_sidebar(view);
-                            self.focus_sidebar_region(side);
+                        });
+                        if hide.clicked() {
+                            self.set_sidebar_visible(side, false);
                             ui.close();
                         }
-                    }
-                });
-                menu.response.widget_info(|| {
+                    });
+                let menu = menu.on_hover_text("Panel actions");
+                menu.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
                         ui.is_enabled(),
@@ -895,6 +892,9 @@ impl VEditApp {
     }
 
     fn sidebar_panel_menu(&mut self, ui: &mut egui::Ui, view: SidebarView) {
+        if view == SidebarView::SourceControl && self.git_repository_menu(ui) {
+            ui.separator();
+        }
         for (side, label) in [
             (Side::Left, "Move panel to left"),
             (Side::Right, "Move panel to right"),

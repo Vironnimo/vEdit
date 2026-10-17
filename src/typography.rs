@@ -1,4 +1,4 @@
-//! Regular code faces, independent of the UI's proportional font.
+//! Upright code faces, independent of the UI's proportional font.
 use crate::cli::EditorFont;
 use eframe::egui::epaint::text::{FontTweak, HintingTarget, SmoothHinting};
 use eframe::egui::{FontData, FontDefinitions, FontFamily};
@@ -25,9 +25,10 @@ pub(crate) fn tab_family(width: usize) -> FontFamily {
 
 fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-    let regular = FontData::from_static(include_bytes!(
-        "../assets/fonts/JetBrainsMonoNL-Regular.ttf"
-    ));
+    // The bundled Light face matches the visual weight of native editors:
+    // egui's dark-mode coverage boost makes the Regular face look bold.
+    let bundled =
+        FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMonoNL-Light.ttf"));
     let selected = match choice {
         EditorFont::JetBrainsMono => None,
         EditorFont::Consolas => Some("consola.ttf"),
@@ -35,7 +36,7 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
     }
     .and_then(|name| fs::read(directory.join(name)).ok())
     .map(FontData::from_owned)
-    .unwrap_or(regular)
+    .unwrap_or(bundled)
     .tweak(FontTweak {
         // Light grayscale hinting keeps small regular glyphs crisp without
         // the horizontal stem widening used by the default rendering target.
@@ -107,7 +108,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_system_fonts_retain_bundled_regular_code_and_unicode_fallbacks() {
+    fn missing_system_fonts_retain_bundled_code_face_and_unicode_fallbacks() {
         let missing = std::env::temp_dir().join("vedit-no-system-fonts-typography");
         for choice in [
             EditorFont::JetBrainsMono,
@@ -118,7 +119,7 @@ mod tests {
             let code = &fonts.font_data["vedit-code"];
             assert_eq!(
                 code.font.as_ref(),
-                include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf")
+                include_bytes!("../assets/fonts/JetBrainsMonoNL-Light.ttf")
             );
             let family = &fonts.families[&FontFamily::Monospace];
             assert_eq!(family[0], "vedit-code");

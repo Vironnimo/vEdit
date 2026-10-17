@@ -77,6 +77,10 @@ fn deliver_refresh(
 }
 
 fn history_screen(app: VEditApp) -> Harness<'static, VEditApp> {
+    history_screen_with(app, false)
+}
+
+fn history_screen_with(app: VEditApp, panel_menu: bool) -> Harness<'static, VEditApp> {
     // Paint the actual Git panel without draw_ui's background-result polling.
     // A dispatched page stays pending across frames so its request guard can
     // be tested independently of worker scheduling and the rest of the editor.
@@ -85,8 +89,14 @@ fn history_screen(app: VEditApp) -> Harness<'static, VEditApp> {
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
-            |ui, app: &mut VEditApp| {
+            move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
+                if panel_menu {
+                    // Repository actions live in the sidebar header's menu.
+                    ui.menu_button("Repository actions", |ui| {
+                        app.git_repository_menu(ui);
+                    });
+                }
                 app.git_ui(ui);
             },
             app,
@@ -213,10 +223,10 @@ fn parent_repository_choice_is_persisted_and_can_be_revoked() {
     app.projects.push(Project::new(nested));
     app.refresh_git(0, true);
     wait_for_git_refresh(&mut app, 0);
-    let mut screen = history_screen(app);
+    let mut screen = history_screen_with(app, true);
     screen.run_steps(2);
     assert!(screen.query_by_label("Initialize repository").is_none());
-    assert!(screen.query_by_label("Push").is_none());
+    assert!(screen.query_by_label("History").is_none());
     screen.state_mut().focus_git_content();
     screen.run_steps(2);
     let select = screen.get_by_label("Use parent repository");
@@ -235,7 +245,7 @@ fn parent_repository_choice_is_persisted_and_can_be_revoked() {
     assert_eq!(screen.state().projects[0].recent_commits.len(), 2);
     screen.run_steps(2);
     assert!(screen.query_by_label("Using parent repository").is_some());
-    assert!(screen.query_by_label("Push").is_some());
+    assert!(screen.query_by_label("History").is_some());
     let saved: Session =
         serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
     let mut restored = VEditApp::empty(egui::Context::default());
@@ -244,7 +254,7 @@ fn parent_repository_choice_is_persisted_and_can_be_revoked() {
     wait_for_git_refresh(&mut restored, 0);
     assert!(restored.projects[0].git_root.is_some());
     let generation = screen.state().projects[0].git_history_generation;
-    screen.get_by_label("···").click();
+    screen.get_by_label("Repository actions").click();
     screen.run_steps(2);
     screen.get_by_label("Stop using parent repository").click();
     screen.run_steps(2);
@@ -267,7 +277,7 @@ fn parent_repository_choice_is_persisted_and_can_be_revoked() {
     );
     screen.run_steps(2);
     assert!(screen.query_by_label("Use parent repository").is_some());
-    assert!(screen.query_by_label("Push").is_none());
+    assert!(screen.query_by_label("History").is_none());
     // Wait for the final background session write before removing the fixture.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

@@ -933,6 +933,10 @@ fn title_actions_still_move_hide_and_restore_panel_assignments() {
             .query_by_label("Source control panel title")
             .is_some()
     );
+    // The header has no close button; hiding the sidebar is a menu action.
+    assert!(screen.query_by_label("Hide right sidebar").is_none());
+    screen.get_by_label("Explorer panel actions").click();
+    screen.run_steps(2);
     screen.get_by_label("Hide right sidebar").click();
     screen.run_steps(3);
     assert!(!screen.state().sidebar_view_visible(SidebarView::Explorer));
