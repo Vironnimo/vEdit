@@ -194,7 +194,9 @@ impl VEditApp {
 
     pub(super) fn agent_marks_toolbar(&mut self, ui: &mut egui::Ui) {
         let count = self.agent_marks.items.len();
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(44.0, 28.0), egui::Sense::click());
+        // An empty collection shows only the icon; the count appears with the first mark.
+        let width = if count > 0 { 44.0 } else { 30.0 };
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "For agent")
         });
@@ -206,7 +208,12 @@ impl VEditApp {
         } else {
             MUTED
         };
-        let center = rect.left_center() + Vec2::new(13.0, 0.0);
+        let center = if count > 0 {
+            rect.left_center() + Vec2::new(13.0, 0.0)
+        } else {
+            // The drawn excerpt spans -7..4 around its center.
+            rect.center() + Vec2::new(1.5, 0.0)
+        };
         // A small highlighted excerpt, drawn as paths so no symbol font is required.
         for y in [-4.0, 0.0, 4.0] {
             ui.painter().line_segment(
@@ -221,18 +228,20 @@ impl VEditApp {
             ],
             Stroke::new(2.0, color),
         );
-        let badge = if count > 99 {
-            "99+".into()
-        } else {
-            count.to_string()
-        };
-        ui.painter().text(
-            rect.right_center() - Vec2::new(5.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            badge,
-            FontId::proportional(10.5),
-            color,
-        );
+        if count > 0 {
+            let badge = if count > 99 {
+                "99+".into()
+            } else {
+                count.to_string()
+            };
+            ui.painter().text(
+                rect.right_center() - Vec2::new(5.0, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                badge,
+                FontId::proportional(10.5),
+                color,
+            );
+        }
         if response.clicked() {
             self.open_agent_marks();
         }
@@ -386,11 +395,11 @@ impl VEditApp {
         let restore_count = self.agent_marks.restore_count();
         let can_restore = self.agent_marks.can_restore();
         let restore_origin = self.agent_marks.restore_origin();
-        let restore_detail = restore_summary(restore_count, restore_origin);
-        let restore_tooltip = if can_restore {
-            format!("Restore {restore_detail}, keeping new marks and notes")
-        } else {
-            "No removed or agent-collected blocks are missing from the current collection".into()
+        let restore_detail = can_restore.then(|| restore_summary(restore_count, restore_origin));
+        let restore_tooltip = match &restore_detail {
+            Some(detail) => format!("Restore {detail}, keeping new marks and notes"),
+            None => "No removed or agent-collected blocks are missing from the current collection"
+                .into(),
         };
         let mut next_row_focus_ids = Vec::new();
         let pending_batch = self
@@ -537,12 +546,12 @@ impl VEditApp {
                         add = response.clicked();
                         restore = ui.add_enabled_ui(can_restore, |ui|
                             design::ghost_button(ui, "Restore last", &restore_tooltip)).inner.clicked();
-                        ui.label(RichText::new(&restore_detail).size(10.5).color(MUTED));
+                        if let Some(detail) = &restore_detail {
+                            ui.label(RichText::new(detail).size(10.5).color(MUTED));
+                        }
                         clear = ui.add_enabled_ui(!rows.is_empty(), |ui|
                             design::ghost_button(ui, "Clear all", "Remove all current marks and make them the Restore last target. Source text stays unchanged.")).inner.clicked();
                     });
-                    ui.label(RichText::new("↑ ↓ choose · Enter opens · Esc closes. Restoration keeps new marks and notes.")
-                        .size(10.5).color(MUTED));
                     if let Some((batch, count)) = pending_batch {
                         ui.label(RichText::new(format!("Agent collected {count} block{} · awaiting acknowledgment", block_suffix(count)))
                             .size(10.5).color(AGENT_MARK_COLOR))
@@ -799,9 +808,6 @@ fn block_suffix(count: usize) -> &'static str {
 }
 
 fn restore_summary(count: usize, origin: crate::agent_marks::RestoreSource) -> String {
-    if count == 0 {
-        return "Nothing to restore".into();
-    }
     let origin = match origin {
         crate::agent_marks::RestoreSource::Removed => "removed",
         crate::agent_marks::RestoreSource::Taken(_) => "agent-collected",
@@ -924,6 +930,8 @@ pub(super) fn paint_agent_mark_overlays(
     let mut badges: Vec<egui::Rect> = Vec::new();
     for mark in marks {
         let mut first_rect = None;
+        let mut rows_top = f32::INFINITY;
+        let mut rows_bottom = f32::NEG_INFINITY;
         for &(row_index, mapped) in visible_rows {
             let Some(segment) = crate::render::range_on_visual_row(
                 galley,
@@ -942,6 +950,8 @@ pub(super) fn paint_agent_mark_overlays(
                     source_rect.x_range(),
                     clip.y_range(),
                 )));
+                rows_top = rows_top.min(source_rect.top().max(clip.top()));
+                rows_bottom = rows_bottom.max(source_rect.bottom().min(clip.bottom()));
             }
             let rect = source_rect.intersect(clip);
             if !rect.is_positive() {
@@ -974,8 +984,18 @@ pub(super) fn paint_agent_mark_overlays(
         let Some(first) = first_rect else {
             continue;
         };
+        // A quiet bar marks the rows in the gutter; its remove action appears
+        // only while the pointer is over that mark's part of the gutter.
+        let gutter_x = clip.left() + 16.0;
+        ui.painter().line_segment(
+            [
+                egui::pos2(gutter_x, rows_top + 2.0),
+                egui::pos2(gutter_x, (rows_bottom - 2.0).max(rows_top + 2.0)),
+            ],
+            Stroke::new(2.0, AGENT_MARK_COLOR),
+        );
         let mut center = egui::pos2(
-            clip.left() + 16.0,
+            gutter_x,
             first
                 .center()
                 .y
@@ -1002,16 +1022,23 @@ pub(super) fn paint_agent_mark_overlays(
                 format!("Remove marked block {}", mark.id),
             )
         });
-        ui.painter().rect_filled(
-            badge,
-            4.0,
-            if response.hovered() {
-                PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.22)
-            } else {
-                PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.08)
-            },
-        );
-        paint_cross(ui, badge, false, AGENT_MARK_COLOR);
+        let gutter = egui::Rect::from_x_y_ranges(
+            clip.left() + 4.0..=clip.left() + 28.0,
+            rows_top..=rows_bottom.max(rows_top),
+        )
+        .union(badge);
+        if ui.rect_contains_pointer(gutter) || response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(
+                badge,
+                4.0,
+                if response.hovered() {
+                    PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.22)
+                } else {
+                    PANEL.lerp_to_gamma(AGENT_MARK_COLOR, 0.08)
+                },
+            );
+            paint_cross(ui, badge, false, AGENT_MARK_COLOR);
+        }
         if response.clicked() {
             remove = Some(mark.id);
         }
