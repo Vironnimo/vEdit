@@ -36,13 +36,18 @@ pub(crate) fn dialog(
             .show(ui, |ui| {
                 let mut close = false;
                 ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [(ui.available_width() - 36.0).max(60.0), 26.0],
-                        egui::Label::new(RichText::new(title).size(15.0).strong())
-                            .truncate()
-                            .halign(egui::Align::Min),
-                    )
-                    .on_hover_text(title);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_width() - 36.0).max(60.0), 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(title).size(14.0).strong())
+                                    .truncate(),
+                            )
+                            .on_hover_text(title);
+                            ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
+                        },
+                    );
                     let response = ui
                         .add_sized([26.0, 26.0], egui::Button::new("×").frame(false))
                         .on_hover_text(format!("{close_label} · Esc or click outside"));
@@ -92,14 +97,6 @@ impl DiffView {
         let palette = Palette::new(ui);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            ui.label(
-                RichText::new("Unified diff")
-                    .size(12.0)
-                    .color(palette.muted),
-            )
-            .on_hover_text(
-                "Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B · Home / End. Esc closes the diff.",
-            );
             if self.patch.files > 1 {
                 let noun = if self.patch.files == 1 {
                     "file"
@@ -125,7 +122,8 @@ impl DiffView {
                     .size(12.0)
                     .color(palette.added),
             )
-            .on_hover_text("Lines added; file headers are excluded");
+            .on_hover_text("Lines added; file headers are excluded.
+Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B · Home / End. Esc closes the diff.");
             ui.label(
                 RichText::new(format!("−{}", self.patch.deletions))
                     .monospace()

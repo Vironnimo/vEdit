@@ -2934,7 +2934,6 @@ fn history_hover(
         ui.ctx().request_repaint_after(Duration::from_secs(30));
         ui.set_max_width(460.0);
         ui.label(RichText::new(&commit.subject).strong());
-        ui.label(RichText::new(&commit.author).color(MUTED));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2947,29 +2946,38 @@ fn history_hover(
         ui.label(
             RichText::new(format!(
                 "{} · {}",
-                commit.date.replace('T', " "),
+                commit.author,
                 relative_time(commit.timestamp, now)
             ))
             .color(MUTED),
         );
-        ui.label(
-            RichText::new(if commit.on_remote {
-                "On remote · based on the last fetch"
-            } else {
-                "Local only · not on a fetched remote branch"
-            })
-            .color(if commit.on_remote {
-                GRAPH_REMOTE
-            } else {
-                GRAPH_LOCAL
-            }),
-        );
-        ui.label(
-            RichText::new(&commit.hash)
-                .monospace()
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                RichText::new(short_hash(&commit.hash))
+                    .monospace()
+                    .size(10.5)
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new(if commit.on_remote {
+                    "on remote"
+                } else {
+                    "local only"
+                })
                 .size(10.5)
-                .color(MUTED),
-        );
+                .color(if commit.on_remote {
+                    GRAPH_REMOTE
+                } else {
+                    GRAPH_LOCAL
+                }),
+            );
+            ui.label(
+                RichText::new(commit.date.replace('T', " "))
+                    .size(10.5)
+                    .color(MUTED),
+            );
+        });
         if !commit.refs.is_empty() {
             ui.label(
                 commit
@@ -3022,7 +3030,6 @@ fn history_hover(
                 });
             }
         }
-        ui.label(RichText::new("Open commit details").size(10.5).color(MUTED));
     });
 }
 

@@ -2482,7 +2482,6 @@ impl VEditApp {
             self.active_project = pi;
         }
         self.tab_strip_active = pane.tab_strip_active;
-        let focused = pane_id == self.editor_layout.focused;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(rect)
@@ -2545,16 +2544,6 @@ impl VEditApp {
             self.editor_focused = metrics.0;
             self.editor_rect = metrics.1;
             self.editor_cursor_rect = metrics.2;
-        }
-        if self.editor_layout.panes.len() > 1
-            && focused
-            && self.focused_sidebar().is_none()
-            && !self.output_keyboard_focused()
-        {
-            ui.painter().line_segment(
-                [rect.left_top(), rect.right_top()],
-                Stroke::new(1.0, ACCENT),
-            );
         }
         self.active_project = active_before.0;
         if let Some(project) = self.projects.get_mut(active_before.0) {

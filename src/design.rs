@@ -83,13 +83,17 @@ pub(crate) fn overlay_title(ui: &mut Ui, title: &str) -> Response {
 pub(crate) fn menu_item(ui: &mut Ui, label: &str, shortcut: &str, tooltip: &str) -> Response {
     let mut button = egui::Button::new(RichText::new(label).size(12.0))
         .frame_when_inactive(false)
-        .min_size(Vec2::new(225.0, 27.0));
+        .min_size(Vec2::new(225.0, 24.0));
     if !shortcut.is_empty() {
         button = button.shortcut_text(RichText::new(shortcut).size(11.0));
     }
-    ui.add(button)
-        .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
+    let response = ui.add(button).on_hover_cursor(CursorIcon::PointingHand);
+    // A tooltip that only restates the label is noise.
+    if tooltip.is_empty() || tooltip.trim_end_matches('.').eq_ignore_ascii_case(label) {
+        response
+    } else {
+        response.on_hover_text(tooltip)
+    }
 }
 
 /// A text menu with native popups and shared hover switching within its bar.
@@ -101,7 +105,7 @@ pub(crate) fn menu<R>(
 ) -> Response {
     let button = egui::Button::new(RichText::new(label).size(12.0))
         .frame_when_inactive(false)
-        .min_size(Vec2::new(38.0, 27.0));
+        .min_size(Vec2::new(38.0, 24.0));
     if egui::containers::menu::is_in_menu(ui) {
         let (response, _) = egui::containers::menu::SubMenuButton::from_button(
             button.right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),

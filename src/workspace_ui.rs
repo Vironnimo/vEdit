@@ -779,8 +779,9 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-        if tab.current || response.hovered() || crate::design::keyboard_focus(&response) {
-            painter.rect_filled(rect, 5.0, if response.hovered() { HOVER } else { SURFACE });
+        // Like editor tabs, the current project is marked by its underline.
+        if response.hovered() || crate::design::keyboard_focus(&response) {
+            painter.rect_filled(rect, 5.0, HOVER);
         }
         if tab.current {
             painter.line_segment(
@@ -835,7 +836,9 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
             title,
             color,
         );
+        let mut text_right = title_right;
         if let Some(suffix) = suffix {
+            text_right += suffix.size().x;
             painter.galley(
                 egui::pos2(title_right, rect.center().y - suffix.size().y * 0.5),
                 suffix,
@@ -843,7 +846,8 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
             );
         }
         if let Some(description) = &git_description {
-            let center = egui::pos2(rect.right() - 11.0, rect.center().y);
+            // The dot follows the name so it never reads as the next tab's.
+            let center = egui::pos2((text_right + 9.0).min(rect.right() - 11.0), rect.center().y);
             painter.circle_filled(center, 2.8, ORANGE.gamma_multiply(0.85));
             let status = ui.interact(
                 egui::Rect::from_center_size(center, Vec2::new(12.0, 18.0)),

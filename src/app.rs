@@ -4271,12 +4271,6 @@ impl VEditApp {
                         if response.clicked() {
                             clicked = Some((m.path.clone(), m.line, m.column));
                         }
-                        response.on_hover_text(format!(
-                            "{}:{}:{}",
-                            crate::paths::display(&m.path),
-                            m.line,
-                            m.column
-                        ));
                     }
                 });
         } else if !self.search_running {
@@ -4394,7 +4388,11 @@ impl VEditApp {
                         .unwrap_or(0);
                     let problems_tab = design::ghost_button(
                         ui,
-                        &format!("Problems {count}"),
+                        &if count > 0 {
+                            format!("Problems {count}")
+                        } else {
+                            "Problems".to_owned()
+                        },
                         &format!("Language errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems)),
                     );
                     if self.problems_visible {
@@ -4414,10 +4412,25 @@ impl VEditApp {
                     if self.task.is_some() {
                         ui.spinner();
                     }
+                    // The rail's Output icon and its shortcut hide the panel.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "×", "Hide output").clicked() {
-                            self.output_visible = false;
-                            self.clear_hidden_output_focus();
+                        if design::ghost_button(
+                            ui,
+                            "Configure tasks",
+                            "Edit this project's commands and Python interpreter",
+                        )
+                        .clicked()
+                        {
+                            self.open_project_task_settings();
+                        }
+                        if design::ghost_button(
+                            ui,
+                            "Terminal",
+                            "Open an interactive terminal in this project for prompts, shells, and long-running commands.",
+                        )
+                        .clicked()
+                        {
+                            self.open_terminal();
                         }
                         if let Some(task) = &self.task {
                             if design::ghost_button(ui, "Stop", "Stop the running command")
@@ -4440,15 +4453,6 @@ impl VEditApp {
                     self.problems_ui(ui);
                     return;
                 }
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Commands run without input and stop after 10 minutes.").size(10.5).color(MUTED));
-                    if design::ghost_button(ui, "Open terminal", "Open an interactive terminal in this project for prompts, shells, and long-running commands.").clicked() {
-                        self.open_terminal();
-                    }
-                    if design::ghost_button(ui, "Configure tasks", "Edit this project's commands and Python interpreter").clicked() {
-                        self.open_project_task_settings();
-                    }
-                });
                 let unsaved = self.project_task_unsaved_count();
                 if unsaved > 0 {
                     ui.horizontal_wrapped(|ui| {
@@ -4472,8 +4476,9 @@ impl VEditApp {
                     if ui
                         .add_enabled(
                             self.task.is_none() && !self.command.trim().is_empty(),
-                            egui::Button::new("Run"),
+                            egui::Button::new("Run").frame_when_inactive(false),
                         )
+                        .on_hover_text("Commands run without input and stop after 10 minutes. Use Terminal for prompts and long-running commands.")
                         .clicked()
                         || enter
                     {
@@ -4960,7 +4965,7 @@ impl VEditApp {
                         if !close_rect.contains(ui.input(|input| input.pointer.press_origin().unwrap_or_default())) {
                             self.start_tab_drag(&response, *id, title);
                         }
-                        if selected || hovered || close_response.hovered() {
+                        if hovered || close_response.hovered() || (selected && !*dirty) {
                             if close_response.hovered() {
                                 ui.painter().rect_filled(close_rect, 4.0, HOVER);
                             }
@@ -4980,14 +4985,7 @@ impl VEditApp {
                                 .on_hover_text(format!("Close tab in this pane · {} · Middle-click also closes", self.shortcut_label(keybindings::Action::CloseTab)))
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                         } else if *dirty {
-                            ui.painter().circle_filled(close_rect.center(), 2.5, ACCENT);
-                        }
-                        if *dirty && selected {
-                            ui.painter().circle_filled(
-                                egui::pos2(rect.right() - 31.0, rect.top() + 9.0),
-                                2.0,
-                                ACCENT,
-                            );
+                            ui.painter().circle_filled(close_rect.center(), 3.0, TEXT.gamma_multiply(0.8));
                         }
                         if *marks > 0 {
                             ui.painter().circle_filled(
@@ -5741,7 +5739,7 @@ impl VEditApp {
                     }
                     if settings.line_numbers == crate::cli::LineNumbers::Off { continue; }
                     let color = if mapped.line == current_line {
-                        ACCENT
+                        TEXT
                     } else {
                         MUTED.linear_multiply(0.7)
                     };
@@ -6245,10 +6243,9 @@ impl VEditApp {
                         .show(ui, |ui| {
                             ui.set_max_width(460.0);
                             ui.label(
-                                RichText::new("BUILT AROUND YOUR FLOW")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(ACCENT),
+                                RichText::new("Built around your flow")
+                                    .size(11.5)
+                                    .color(MUTED),
                             );
                             ui.add_space(if compact { 8.0 } else { 12.0 });
                             for (index, (label, keys)) in [
@@ -6468,7 +6465,7 @@ impl VEditApp {
             let modal = egui::Modal::new(egui::Id::new("palette"))
                 .area(egui::Modal::default_area(egui::Id::new("palette"))
                     .anchor(egui::Align2::CENTER_TOP, [0.0, 125.0]))
-                .backdrop_color(Color32::from_black_alpha(70))
+                .backdrop_color(Color32::from_black_alpha(30))
                 .show(&ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 70.0).clamp(280.0, 590.0));
                 let navigate = palette != Palette::Line;
@@ -7317,16 +7314,24 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
     });
     let c = rect.center();
     let painter = ui.painter();
-    let color = if selected {
-        ACCENT
-    } else if response.hovered() {
+    let color = if selected || response.hovered() {
         TEXT
     } else {
         MUTED
     };
     let stroke = Stroke::new(1.5, color);
-    if selected || response.hovered() {
-        painter.rect_filled(rect, 5.0, if selected { SURFACE } else { HOVER });
+    if response.hovered() {
+        painter.rect_filled(rect, 5.0, HOVER);
+    }
+    if selected {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() - 4.0, rect.top() + 7.0),
+                egui::pos2(rect.left() - 2.0, rect.bottom() - 7.0),
+            ),
+            1.0,
+            ACCENT,
+        );
     }
     if design::keyboard_focus(&response) {
         painter.rect_stroke(

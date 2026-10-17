@@ -357,7 +357,7 @@ fn history_hover_loads_statistics_once_then_reuses_cached_colored_totals() {
     assert!(screen.query_by_label("2 files changed").is_some());
     assert!(screen.query_by_label("+3").is_some());
     assert!(screen.query_by_label("−1").is_some());
-    assert!(screen.query_by_label(&commit.hash).is_some());
+    assert!(screen.query_by_label(&commit.hash[..7]).is_some());
     for (label, expected) in [("+3", GREEN), ("−1", RED)] {
         assert!(screen.output().shapes.iter().any(|shape| {
             let egui::Shape::Text(text) = &shape.shape else {
@@ -422,9 +422,9 @@ fn older_merge_commit_hover_keeps_metadata_and_shows_its_cached_change_summary()
         "−4",
         "Includes binary changes",
         "topic/older-merge",
-        "History Author",
-        "2026-09-26 · time unavailable",
-        &hash,
+        "History Author · time unavailable",
+        "2026-09-26",
+        &hash[..7],
     ] {
         assert!(
             screen.query_by_label(label).is_some(),
@@ -1025,9 +1025,10 @@ fn history_tooltip_shows_exact_zoned_time_and_relative_age() {
     screen.run_steps(3);
     screen.hover_at(screen.get_by_label("Commit 00").rect().center());
     screen.run_steps(4);
+    assert!(screen.query_by_label("2026-10-10 21:05:12+02:00").is_some());
     assert!(
         screen
-            .query_by_label("2026-10-10 21:05:12+02:00 · 12 minutes ago")
+            .query_by_label_contains(" · 12 minutes ago")
             .is_some()
     );
 }
