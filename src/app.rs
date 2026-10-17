@@ -921,7 +921,7 @@ impl VEditApp {
             project.git_view.split_ratio = entry
                 .git_split_ratio
                 .filter(|ratio| ratio.is_finite())
-                .map(|ratio| ratio.clamp(0.25, 0.75));
+                .map(|ratio| ratio.clamp(0.0, 1.0));
             let saved_tabs = if entry.tabs.is_empty() {
                 entry
                     .open_files

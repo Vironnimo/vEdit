@@ -22,7 +22,14 @@ pub(super) struct GitViewState {
     pub graph: crate::git_graph::Graph,
     // Active keyboard region; both regions are always rendered.
     pub(super) section: GitSection,
+    /// Divider position as a share of the whole panel below its title.
+    /// `None` sizes Changes to its content, up to half of the space.
     pub(super) split_ratio: Option<f32>,
+    /// Height of the branch summary between the repositories and Changes,
+    /// measured in the previous frame.
+    summary_height: f32,
+    /// Height Changes needs to show all of its content, from the previous frame.
+    changes_needed: f32,
     changes_rect: Option<egui::Rect>,
     history_rect: Option<egui::Rect>,
     pub(super) selected_commit: Option<String>,
@@ -810,7 +817,24 @@ impl VEditApp {
     }
 
     fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
-        self.repository_overview_ui(ui);
+        let panel_top = ui.cursor().top();
+        let panel_height = ui.available_height().max(1.0);
+        // A divider pulled up first shrinks the repository list, so History
+        // can take nearly the whole panel.
+        let list_budget = self
+            .project()
+            .and_then(|project| {
+                let state = &project.git_view;
+                state.split_ratio.map(|ratio| {
+                    ratio * panel_height
+                        - state.summary_height
+                        - CHANGES_MIN_HEIGHT
+                        - crate::app::git_panel::repositories::HEADER_HEIGHT
+                })
+            })
+            .unwrap_or(f32::INFINITY);
+        self.repository_overview_ui(ui, list_budget);
+        let summary_top = ui.cursor().top();
         let project_index = self.active_project;
         let unsaved_count = self.git_unsaved_document_count();
         let busy = self.git_busy.is_some();
@@ -1075,16 +1099,24 @@ impl VEditApp {
             }
         } else {
             ui.add_space(7.0);
-            let total_height = ui.available_height().max(420.0);
-            let ratio = state.split_ratio.unwrap_or(0.5).clamp(0.25, 0.75);
-            let changes_height =
-                (total_height * ratio).clamp(215.0, (total_height - 140.0).max(215.0));
+            let split_top = ui.cursor().top();
+            state.summary_height = split_top - summary_top;
+            let remaining = panel_top + panel_height - split_top;
+            let max_changes =
+                (remaining - DIVIDER_HEIGHT - HISTORY_MIN_HEIGHT).max(CHANGES_MIN_HEIGHT);
+            let changes_height = match state.split_ratio {
+                Some(ratio) => panel_top + ratio * panel_height - split_top,
+                None => state.changes_needed.min(remaining * 0.5),
+            }
+            .clamp(CHANGES_MIN_HEIGHT, max_changes);
+            let ratio = (split_top + changes_height - panel_top) / panel_height;
             let (changes_rect, _) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), changes_height),
                 egui::Sense::hover(),
             );
             state.changes_rect = Some(changes_rect);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(changes_rect), |ui| {
+            // A child UI keeps overflowing content from pushing the divider down.
+            ui.new_child(egui::UiBuilder::new().max_rect(changes_rect)).scope(|ui| {
                 ui.set_clip_rect(changes_rect.intersect(ui.clip_rect()));
                 let header = region_header(ui, "Changes", ());
                 state.keyboard_header = Some(header.id);
@@ -1121,13 +1153,15 @@ impl VEditApp {
                             .map(|cache| (cache.groups[0].1.summary.total, cache.conflicted))
                             .unwrap_or_default()
                     };
-                    let composer_height = if conflicted { 112.0 } else { 88.0 };
+                    let composer_height = if conflicted { 82.0 } else { 62.0 };
                     if let Some(error) = &project.git_stats_error {
                         error_note(ui, &format!("Line counts unavailable: {error}"));
                     }
+                    let tree_top = ui.cursor().top();
                     let tree_scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-working-tree", project_index))
                         .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
                         .max_height((ui.available_height() - composer_height).max(24.0))
                         .show(ui, |ui| {
                             // The summary above already says "No changes"; one
@@ -1163,6 +1197,16 @@ impl VEditApp {
                                 }
                             }
                         });
+                    let needed = tree_top - changes_rect.top()
+                        + tree_scroll.content_size.y
+                        + composer_height
+                        + 6.0;
+                    if (needed - state.changes_needed).abs() > 0.5 {
+                        state.changes_needed = needed;
+                        if state.split_ratio.is_none() {
+                            ui.ctx().request_repaint();
+                        }
+                    }
                     if state.section == GitSection::Changes {
                     state.keyboard_page_rows =
                         (tree_scroll.inner_rect.intersect(ui.clip_rect()).height() / 31.0)
@@ -1233,7 +1277,7 @@ impl VEditApp {
                 });
             });
             let (divider_rect, divider) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 9.0),
+                Vec2::new(ui.available_width(), DIVIDER_HEIGHT),
                 egui::Sense::click_and_drag(),
             );
             divider.widget_info(|| {
@@ -1248,8 +1292,8 @@ impl VEditApp {
             if divider.dragged()
                 && let Some(pointer) = divider.interact_pointer_pos()
             {
-                state.split_ratio =
-                    Some(((pointer.y - changes_rect.top()) / total_height).clamp(0.25, 0.75));
+                // Layout clamps the position; the stored share follows the pointer.
+                state.split_ratio = Some(((pointer.y - panel_top) / panel_height).clamp(0.0, 1.0));
             }
             if divider.double_clicked() {
                 state.split_ratio = None;
@@ -1265,7 +1309,7 @@ impl VEditApp {
                     }
                 });
                 if step != 0.0 {
-                    state.split_ratio = Some((ratio + step).clamp(0.25, 0.75));
+                    state.split_ratio = Some((ratio + step).clamp(0.0, 1.0));
                 }
             }
             state.keyboard_controls.push(divider.id);
@@ -1905,6 +1949,10 @@ fn error_note(ui: &mut egui::Ui, error: &str) {
 
 /// Horizontal text inset shared by the branch, summary and section titles.
 const SECTION_TEXT_INSET: f32 = 4.0;
+/// Changes keeps at least its header when History is pulled up.
+const CHANGES_MIN_HEIGHT: f32 = 34.0;
+const HISTORY_MIN_HEIGHT: f32 = 120.0;
+const DIVIDER_HEIGHT: f32 = 9.0;
 
 /// One quiet line with what matters for an overview: changed files, their
 /// line delta, and how far the branch has moved from the local main branch.

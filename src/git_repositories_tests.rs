@@ -823,6 +823,39 @@ fn overview_screenshot() {
         data.insert_temp(egui::Id::new("git-history-test-clock"), 1_790_426_840_i64)
     });
     visual_tests::snapshot(&mut screen, "vedit_git_repositories");
+
+    // Pulling History up shrinks Changes to its header, then the repository
+    // list, until History fills nearly the whole panel.
+    let start = screen
+        .get_by_label("Resize Changes and History")
+        .rect()
+        .center();
+    let title = screen.get_by_label("Source control panel title").rect();
+    screen.event(egui::Event::PointerMoved(start));
+    screen.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    screen.run_steps(1);
+    let end = egui::pos2(start.x, title.bottom());
+    screen.event(egui::Event::PointerMoved(end));
+    screen.run_steps(2);
+    screen.event(egui::Event::PointerButton {
+        pos: end,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    screen.run_steps(4);
+    visual_tests::snapshot(&mut screen, "vedit_git_history_pulled_up");
+    let history = screen.get_by_label("History").rect();
+    assert!(
+        history.top() < title.bottom() + 200.0,
+        "History stays low at {history:?}"
+    );
+    assert!(screen.get_by_label("Changes").rect().bottom() < history.top());
 }
 
 /// A real repository with seven linked worktrees created by `git worktree add`.

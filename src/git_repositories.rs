@@ -20,7 +20,7 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_JOBS: usize = 2;
 const MAX_HEADLINES: usize = 512;
 const VISIBLE_ROWS: usize = 6;
-const HEADER_HEIGHT: f32 = 22.0;
+pub(in crate::app) const HEADER_HEIGHT: f32 = 22.0;
 const HEADER_ID: &str = "git-repositories-header";
 
 /// Compare worktree paths the way Windows and Git for Windows do: without the
@@ -1336,7 +1336,8 @@ impl VEditApp {
     }
 
     /// The overview only appears once there is something to choose between.
-    pub(in crate::app) fn repository_overview_ui(&mut self, ui: &mut egui::Ui) {
+    /// `list_budget` caps the rows' height when History is pulled up.
+    pub(in crate::app) fn repository_overview_ui(&mut self, ui: &mut egui::Ui, list_budget: f32) {
         let rows = self.repository_rows();
         if rows.len() < 2 {
             self.repositories.rows.clear();
@@ -1375,7 +1376,8 @@ impl VEditApp {
             if !collapsed {
                 egui::ScrollArea::vertical()
                     .id_salt("git-repositories")
-                    .max_height(VISIBLE_ROWS as f32 * TREE_ROW_HEIGHT)
+                    .max_height((VISIBLE_ROWS as f32 * TREE_ROW_HEIGHT).min(list_budget.max(0.0)))
+                    .min_scrolled_height(0.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
