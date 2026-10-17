@@ -7,6 +7,9 @@
 use super::*;
 use std::collections::{BTreeMap, VecDeque};
 
+#[path = "git_repositories.rs"]
+pub(super) mod repositories;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum GitSection {
     #[default]
@@ -700,6 +703,9 @@ impl VEditApp {
         let Some(focused) = self.ctx.memory(|memory| memory.focused()) else {
             return false;
         };
+        if self.repository_overview_has_focus() {
+            return true;
+        }
         self.project().is_some_and(|project| {
             let state = &project.git_view;
             state
@@ -799,6 +805,7 @@ impl VEditApp {
     }
 
     fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
+        self.repository_overview_ui(ui);
         let project_index = self.active_project;
         let unsaved_count = self.git_unsaved_document_count();
         let busy = self.git_busy.is_some();

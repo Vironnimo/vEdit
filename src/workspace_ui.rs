@@ -42,6 +42,8 @@ struct ProjectHeaderTab {
     open: usize,
     dirty: usize,
     changes: Option<usize>,
+    /// Branch and upstream divergence from the project's own Git refreshes.
+    git: Option<String>,
     current: bool,
 }
 
@@ -286,6 +288,7 @@ impl VEditApp {
                 open: project.tabs.len(),
                 dirty: project.tabs.iter().filter(|tab| tab.dirty).count(),
                 changes: project.uncommitted_change_count(),
+                git: project.git_tab_summary(),
                 current: index == self.active_project,
             })
             .collect();
@@ -868,6 +871,10 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
         "{}\n{} open files · {} unsaved",
         tab.path, tab.open, tab.dirty,
     );
+    if let Some(git) = &tab.git {
+        tooltip.push('\n');
+        tooltip.push_str(git);
+    }
     if let Some(description) = git_description {
         tooltip.push('\n');
         tooltip.push_str(&description);
