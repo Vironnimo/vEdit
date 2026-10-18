@@ -1,6 +1,6 @@
 [package]
 name = "vedit"
-version = "0.4.32"
+version = "0.4.33"
 edition = "2024"
 description = "A calm, multi-project code editor for Windows"
 license = "MIT"
@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
 regex = "1"
+tiktoken-rs = "0.12.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [[bin]]

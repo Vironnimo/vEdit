@@ -164,25 +164,27 @@ fn drag_snapshot(
     // A drag snapshot must retain its actual target and feedback instead.
     screen.run_steps(3);
     let deadline = Instant::now() + Duration::from_secs(8);
-    while screen.state().editor_layout.panes.iter().any(|pane| {
-        pane.view == DocumentView::Source
-            && pane.document.is_some_and(|id| {
-                screen
-                    .state()
-                    .projects
-                    .iter()
-                    .flat_map(|project| &project.tabs)
-                    .find(|tab| tab.id == id)
-                    .is_some_and(|tab| {
-                        !screen.state().syntax.is_ready(
-                            tab.id,
-                            &tab.text,
-                            syntax_language(tab.path.as_deref()),
-                            screen.state().settings.font_size,
-                        )
-                    })
-            })
-    }) {
+    while screen.state().text_statistics.pending()
+        || screen.state().editor_layout.panes.iter().any(|pane| {
+            pane.view == DocumentView::Source
+                && pane.document.is_some_and(|id| {
+                    screen
+                        .state()
+                        .projects
+                        .iter()
+                        .flat_map(|project| &project.tabs)
+                        .find(|tab| tab.id == id)
+                        .is_some_and(|tab| {
+                            !screen.state().syntax.is_ready(
+                                tab.id,
+                                &tab.text,
+                                syntax_language(tab.path.as_deref()),
+                                screen.state().settings.font_size,
+                            )
+                        })
+                })
+        })
+    {
         assert!(
             Instant::now() < deadline,
             "drag snapshot syntax worker timed out"

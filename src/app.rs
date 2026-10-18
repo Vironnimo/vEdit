@@ -830,6 +830,7 @@ pub struct VEditApp {
     last_disk_check: Instant,
     disk_check_running: bool,
     syntax: crate::render::SyntaxCache,
+    text_statistics: crate::text_statistics::Statistics,
     markdown: crate::markdown::MarkdownCache,
     control: Option<crate::cli::Server>,
     review: Option<crate::cli::ReviewSummary>,
@@ -1089,6 +1090,7 @@ impl VEditApp {
             last_disk_check: Instant::now(),
             disk_check_running: false,
             syntax: crate::render::SyntaxCache::new(),
+            text_statistics: crate::text_statistics::Statistics::default(),
             markdown: crate::markdown::MarkdownCache::default(),
             control: None,
             review: None,
@@ -4480,13 +4482,28 @@ impl VEditApp {
 
 impl VEditApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let statistics = self.tab().filter(|tab| !tab.loading).map(|tab| {
+            self.text_statistics.display(
+                ui.ctx(),
+                tab.id,
+                tab.revision,
+                &tab.text,
+                tab.lines.char_count(&tab.text, tab.revision),
+                tab.selection.clone(),
+            )
+        });
+        if statistics.is_none() {
+            self.text_statistics.clear();
+        }
         egui::Panel::bottom("status").exact_size(28.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 2)))
             .show(ui, |ui| {
                 let compact = ui.available_width() < 820.0;
                 let narrow = ui.available_width() < 360.0;
+                let compact_statistics = ui.available_width() < 1100.0;
+                let show_statistics = ui.available_width() >= 650.0;
                 let status_error = self.status.as_ref().is_some_and(|(_, error, _)| *error);
-                let right_budget = if narrow { 125.0 } else if compact { 300.0 } else { 650.0 };
+                let right_budget = if narrow { 125.0 } else if !show_statistics { 300.0 } else if compact_statistics { 500.0 } else { 900.0 };
                 ui.spacing_mut().item_spacing.x = 12.0;
                 ui.spacing_mut().interact_size.y = 20.0;
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
@@ -4508,7 +4525,7 @@ impl VEditApp {
                         let tracking = self.project().and_then(|p| p.git_tracking.as_ref());
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
-                        let budget = (ui.available_width() - if compact { 290.0 } else { 650.0 }).clamp(30.0, 180.0);
+                        let budget = (ui.available_width() - right_budget).clamp(30.0, 180.0);
                         if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if let Some(jump) = &self.screen_jump {
@@ -4530,19 +4547,24 @@ impl VEditApp {
                             let (line, col) = t.lines.line_col(&t.text, t.revision, t.vim.cursor);
                             let total = t.lines.line_count(&t.text, t.revision);
                             let position = if narrow { format!("{line}:{col}") } else { format!("Ln {line}/{total}, Col {col}") };
-                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine)));
-                            let selected = t.selection.end.saturating_sub(t.selection.start);
-                            if selected > 0 && !compact { ui.label(RichText::new(format!("{selected} selected")).size(11.0).color(MUTED)).on_hover_text("Selected characters"); }
+                            let mut position_hint = format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine));
+                            if !show_statistics && let Some(statistics) = &statistics {
+                                position_hint.push_str(&format!("\n\n{}", statistics.tooltip()));
+                            }
+                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(position_hint);
+                            if show_statistics && let Some(statistics) = &statistics {
+                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_text(statistics.tooltip());
+                            }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            if !compact { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
                         }
-                        if !compact { self.indentation_status_ui(ui); }
+                        if !compact_statistics { self.indentation_status_ui(ui); }
                         self.save_status_ui(ui, !narrow);
-                        if !compact && let Some(project) = self.project() {
+                        if !compact_statistics && let Some(project) = self.project() {
                             let problem_count = project.diagnostics.values().map(Vec::len).sum::<usize>();
                             if problem_count > 0 && design::status_item(ui, &format!("{problem_count} problems"), ORANGE, &format!("Show errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems))).clicked() { self.problems_visible = true; self.output_visible = true; }
                         }
-                        if !compact { self.rust_analysis_status_ui(ui); }
+                        if !compact_statistics { self.rust_analysis_status_ui(ui); }
                     });
                 });
             });

@@ -24,6 +24,7 @@ mod search;
 mod selection_scroll;
 mod single_instance;
 mod tasks;
+mod text_statistics;
 mod typography;
 mod vim;
 mod window_chrome;

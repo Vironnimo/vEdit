@@ -132,6 +132,18 @@ the accepted `MORROW_CONTROL_DIR` alias. Task processes export both `VEDIT_*` an
 `MORROW_*` path variables so saved custom commands continue working. Historical
 review/evaluation results retain their original product names and versions.
 
+## Text statistics
+
+`src/text_statistics.rs` counts ordinary text with the bundled `o200k_base`
+vocabulary from `tiktoken-rs`. It makes no network requests. A 250 ms debounce
+precedes copying the current buffer; at most one background calculation and one
+cached buffer snapshot are retained. Counts are matched to document ID, revision
+and selection before display. Moving the cursor does not count again; changing
+only the selection reuses the full-file count. The line index supplies Unicode
+scalar counts, including raw CRLF from agent edits. Tokenizer licenses are in
+`licenses/tokenizer/` and are copied into the portable bundle. Render fixtures
+wait for both syntax and token workers before taking snapshots.
+
 ## Documentation ownership
 
 `README.md` describes current user behavior. `AGENTS.md` provides repository

@@ -196,7 +196,7 @@ pub(super) fn settle_render(screen: &mut Harness<'_, VEditApp>) {
     // Highlighting deliberately arrives from a worker after the first plain
     // render. Wait for that result so baseline colors are deterministic.
     let deadline = Instant::now() + Duration::from_secs(8);
-    while source_highlighting_pending(screen.state()) {
+    while source_highlighting_pending(screen.state()) || screen.state().text_statistics.pending() {
         assert!(Instant::now() < deadline, "visual syntax worker timed out");
         screen.state_mut().last_disk_check = Instant::now();
         std::thread::sleep(Duration::from_millis(2));

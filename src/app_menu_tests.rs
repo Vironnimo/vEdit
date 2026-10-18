@@ -236,3 +236,74 @@ fn status_bar_aligns_mode_branch_and_save_text_with_room_for_labels() {
         assert!(screen.ctx.content_rect().bottom() - mode.bottom() >= 6.0);
     }
 }
+
+#[test]
+fn text_statistics_follow_unsaved_text_and_selection_without_overlapping_status() {
+    for width in [250.0, 500.0, 700.0, 960.0, 1140.0, 1440.0] {
+        let mut app = fixture();
+        let tab = app.tab_mut().unwrap();
+        tab.text = "ä👩‍💻\r\n".into();
+        tab.changed();
+        let mut screen = harness(app, width, 640.0);
+        let position = screen
+            .get_by_label(if width < 360.0 {
+                "1:1"
+            } else {
+                "Ln 1/2, Col 1"
+            })
+            .rect();
+        let saved = screen.get_by_label("Unsaved").rect();
+        let mode = screen.get_by_label(" NORMAL ").rect();
+        if width >= 700.0 {
+            let chars = screen
+                .get_by_label_contains(if width < 1100.0 {
+                    "6 ch ·"
+                } else {
+                    "6 chars ·"
+                })
+                .rect();
+            assert!(
+                saved.right() < chars.left(),
+                "save/statistics overlap at {width}"
+            );
+            assert!(
+                chars.right() < position.left(),
+                "statistics/position overlap at {width}"
+            );
+            assert!(screen.ctx.content_rect().contains_rect(chars));
+            let tab = screen.state_mut().tab_mut().unwrap();
+            tab.set_cursor(1..1);
+            tab.vim.handle_key(&mut tab.text, VimKey::Char('v'));
+            tab.vim.cursor = 3;
+            tab.pending_selection = tab.vim.selection(&tab.text);
+            screen.run_steps(3);
+            assert!(
+                screen
+                    .query_by_label_contains(if width < 1100.0 {
+                        "Sel: 3 ch"
+                    } else {
+                        "Selection: 3 chars"
+                    })
+                    .is_some()
+            );
+        } else {
+            assert!(screen.query_by_label_contains(" chars ·").is_none());
+            screen.ctx.all_styles_mut(|style| {
+                style.interaction.tooltip_delay = 0.0;
+                style.interaction.tooltip_grace_time = 0.0;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+            screen.hover_at(position.center());
+            screen.run_steps(3);
+            assert!(
+                screen
+                    .query_by_label_contains("File: 6 characters")
+                    .is_some()
+            );
+        }
+        assert!(mode.right() < saved.left(), "mode/save overlap at {width}");
+        for rect in [mode, saved, position] {
+            assert!(screen.ctx.content_rect().contains_rect(rect));
+        }
+    }
+}

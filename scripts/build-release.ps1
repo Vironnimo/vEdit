@@ -82,6 +82,10 @@ try {
         Copy-Item -LiteralPath (Join-Path $projectRoot "assets/syntaxes/$syntaxDocumentation") -Destination $syntaxLicenseDirectory -Force
     }
     $windowLicenseDirectory = Join-Path $releaseDirectory 'licenses/winit'
+    $tokenizerLicenseDirectory = Join-Path $releaseDirectory 'licenses/tokenizer'
+    New-Item -ItemType Directory -Path $tokenizerLicenseDirectory -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'licenses/tokenizer') -File |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $tokenizerLicenseDirectory -Force }
     New-Item -ItemType Directory -Path $windowLicenseDirectory -Force | Out-Null
     foreach ($windowDocumentation in @('LICENSE', 'VEDIT_PATCH.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/winit/$windowDocumentation") -Destination $windowLicenseDirectory -Force

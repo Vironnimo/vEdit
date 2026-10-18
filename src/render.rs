@@ -102,6 +102,15 @@ impl LineIndex {
             .map_or(1, |index| index.starts.len())
     }
 
+    /// Unicode scalars in the current buffer, including raw CRLF characters.
+    pub fn char_count(&self, text: &str, revision: u64) -> usize {
+        self.line_col(text, revision, 0);
+        self.cached
+            .borrow()
+            .as_ref()
+            .map_or(0, |index| index.char_len)
+    }
+
     /// End character offset of a one-based line, excluding LF or CRLF.
     pub fn line_end(&self, text: &str, revision: u64, line: usize) -> Option<usize> {
         let row = line.checked_sub(1)?;
