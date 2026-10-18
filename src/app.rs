@@ -227,7 +227,6 @@ struct Project {
     git_history_loading: bool,
     git_history_has_more: bool,
     git_history_generation: u64,
-    git_history_update_available: bool,
     git_history_refresh_requested: bool,
     git_history_error: Option<String>,
     git_view: git_panel::GitViewState,
@@ -278,7 +277,6 @@ impl Project {
             git_history_loading: false,
             git_history_has_more: false,
             git_history_generation: 0,
-            git_history_update_available: false,
             git_history_refresh_requested: false,
             git_history_error: None,
             git_view: git_panel::GitViewState::default(),
@@ -453,6 +451,7 @@ fn read_git_snapshot(
     previous_history: Option<git::HistorySnapshot>,
     refresh_history: bool,
     previous_history_error: Option<String>,
+    automatic_history_limit: Option<usize>,
 ) -> Result<GitSnapshot, String> {
     let repository = git::project_repository(root, approved_parent).map_err(|e| e.to_string())?;
     let Some(repo) = repository.root else {
@@ -495,13 +494,17 @@ fn read_git_snapshot(
         .map_err(|error| error.to_string())?;
         history_head = Some(head);
         let page = if refresh_history
-            || previous_history
-                .as_ref()
-                .is_none_or(|history| history.tips.is_empty())
+            || previous_history.is_none()
+            || (automatic_history_limit.is_some() && previous_history.as_ref() != Some(&snapshot))
         {
             Some(
-                git::history_page(&repo, &snapshot, 0, git::HISTORY_PAGE_SIZE)
-                    .map_err(|error| error.to_string())?,
+                git::history_page(
+                    &repo,
+                    &snapshot,
+                    0,
+                    automatic_history_limit.unwrap_or(git::HISTORY_PAGE_SIZE),
+                )
+                .map_err(|error| error.to_string())?,
             )
         } else {
             None
@@ -1969,18 +1972,15 @@ impl VEditApp {
                                                 NEXT_HISTORY.fetch_add(1, Ordering::Relaxed);
                                             p.git_history_loading = false;
                                             p.git_history_has_more = page.has_more;
+                                            p.git_view.preserve_history_scroll(
+                                                &p.recent_commits,
+                                                &page.commits,
+                                            );
                                             p.recent_commits = page.commits;
                                             p.git_view.graph.clear();
                                             p.git_view.graph.append(&p.recent_commits);
                                             p.git_history_error = None;
-                                            p.git_history_update_available = false;
                                             p.git_history_snapshot = Some(history.snapshot);
-                                        } else {
-                                            // Keep browsing and paging the original object
-                                            // IDs until the user chooses to refresh history.
-                                            p.git_history_update_available =
-                                                p.git_history_snapshot.as_ref()
-                                                    != Some(&history.snapshot);
                                         }
                                     }
                                     Err(error) => p.git_history_error = Some(error),
@@ -2303,9 +2303,20 @@ impl VEditApp {
             self.ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
+    fn git_polling_active(&self) -> bool {
+        self.ctx
+            .input(|input| input.focused && input.viewport().minimized != Some(true))
+    }
+
     fn refresh_git(&mut self, index: usize, force: bool) {
         static NEXT_STATUS_REQUEST: AtomicU64 = AtomicU64::new(1);
-        let interval = if self.sidebar_view_visible(SidebarView::SourceControl) {
+        let window_active = self.git_polling_active();
+        if !force && !window_active {
+            return;
+        }
+        let history_visible =
+            index == self.active_project && self.sidebar_view_visible(SidebarView::SourceControl);
+        let interval = if history_visible {
             Duration::from_secs(3)
         } else {
             Duration::from_secs(10)
@@ -2317,7 +2328,12 @@ impl VEditApp {
             p.git_refresh_pending |= force;
             return;
         }
-        if self.git_busy.is_some() || (!force && p.last_git_refresh.elapsed() < interval) {
+        if self.git_busy.is_some() {
+            return;
+        }
+        if !force && p.last_git_refresh.elapsed() < interval {
+            self.ctx
+                .request_repaint_after(interval.saturating_sub(p.last_git_refresh.elapsed()));
             return;
         }
         p.git_loading = true;
@@ -2329,7 +2345,13 @@ impl VEditApp {
         let approved_parent = p.git_approved_parent.clone();
         let previous_repository = p.git_root.clone();
         let previous_history = p.git_history_snapshot.clone();
-        let refresh_history = std::mem::take(&mut p.git_history_refresh_requested);
+        // Only reload the graph when its immutable traversal snapshot changes.
+        // Retain the depth already loaded by the reader instead of dropping back
+        // to the first page. Hidden histories catch up on their next visible poll.
+        let automatic_history_limit = (window_active && history_visible)
+            .then_some(p.recent_commits.len().max(git::HISTORY_PAGE_SIZE));
+        let refresh_history = std::mem::take(&mut p.git_history_refresh_requested)
+            || (automatic_history_limit.is_some() && p.git_history_error.is_some());
         let previous_history_error = p.git_history_error.clone().filter(|_| !refresh_history);
         self.worker(move || {
             let result = read_git_snapshot(
@@ -2339,6 +2361,7 @@ impl VEditApp {
                 previous_history,
                 refresh_history,
                 previous_history_error,
+                automatic_history_limit,
             );
             WorkerResult::GitStatus {
                 root,
@@ -7164,8 +7187,10 @@ impl VEditApp {
             self.handle_vim();
         }
         self.refresh_git(self.active_project, false);
-        self.refresh_inactive_git_indicators();
-        self.refresh_repository_overview();
+        if self.git_polling_active() {
+            self.refresh_inactive_git_indicators();
+            self.refresh_repository_overview();
+        }
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();
             if elapsed >= Duration::from_millis(250) {

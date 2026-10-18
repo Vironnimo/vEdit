@@ -66,7 +66,6 @@ impl Project {
         self.git_history_loading = false;
         self.git_history_has_more = false;
         self.git_history_generation = 0;
-        self.git_history_update_available = false;
         self.git_history_refresh_requested = false;
         self.git_history_error = None;
         let split_ratio = self.git_view.split_ratio;

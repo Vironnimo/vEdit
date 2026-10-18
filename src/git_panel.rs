@@ -58,9 +58,30 @@ pub(super) struct GitViewState {
     detail_page_rows: usize,
     /// The last clicked history row, so a double-click can open its review.
     history_click: Option<(String, egui::Rect)>,
+    history_scroll_offset: f32,
+    history_scroll_pending: Option<f32>,
 }
 
 impl GitViewState {
+    pub(super) fn preserve_history_scroll(
+        &mut self,
+        previous: &[git::CommitSummary],
+        next: &[git::CommitSummary],
+    ) {
+        // At the top, follow incoming commits. While reading older commits,
+        // keep the first visible commit and its partial-row offset in place.
+        let offset = self
+            .history_scroll_pending
+            .unwrap_or(self.history_scroll_offset);
+        let row = (offset / HISTORY_ROW_HEIGHT).floor() as usize;
+        let anchored = (offset > 0.0)
+            .then(|| previous.get(row))
+            .flatten()
+            .and_then(|commit| next.iter().position(|next| next.hash == commit.hash))
+            .map(|index| index as f32 * HISTORY_ROW_HEIGHT + offset % HISTORY_ROW_HEIGHT);
+        self.history_scroll_pending = Some(anchored.unwrap_or(offset));
+    }
+
     pub(super) fn update_working_cache(
         &mut self,
         files: &[git::FileStatus],
@@ -697,7 +718,6 @@ enum GitUiAction {
     LoadCommitStats(String),
     LoadMore,
     RetryHistory,
-    RefreshHistory,
     Fetch,
     Pull,
     Push,
@@ -1348,16 +1368,6 @@ impl VEditApp {
                 state
                     .graph
                     .append(&project.recent_commits[state.graph.rows.len()..]);
-                if project.git_history_update_available
-                    && design::ghost_button(
-                        ui,
-                        "History changed · Refresh",
-                        "Show the latest branches and commits",
-                    )
-                    .clicked()
-                {
-                    actions.push(GitUiAction::RefreshHistory);
-                }
                 if let Some(error) = &project.git_history_error {
                     error_note(ui, error);
                     if design::ghost_button(ui, "Retry history", "Retry the failed history request")
@@ -1387,9 +1397,12 @@ impl VEditApp {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.spacing_mut().scroll.floating = false;
                     let mut scroll = egui::ScrollArea::vertical()
-                        .id_salt(("git-history", project_index, project.git_history_generation))
+                        .id_salt(("git-history", &project.root))
                         .auto_shrink([false, false])
                         .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT));
+                    if let Some(offset) = state.history_scroll_pending.take() {
+                        scroll = scroll.vertical_scroll_offset(offset);
+                    }
                     if state.section == GitSection::History
                         && let Some(target) = keyboard_target
                         && let Some(index) = state.keyboard_rows.iter().position(|id| *id == target)
@@ -1476,6 +1489,7 @@ impl VEditApp {
                             }
                         },
                     );
+                    state.history_scroll_offset = history_scroll.state.offset.y;
                     if state.section == GitSection::History {
                         state.keyboard_page_rows =
                             (history_scroll.inner_rect.intersect(ui.clip_rect()).height()
@@ -1913,7 +1927,6 @@ impl VEditApp {
                         self.refresh_git_history(project_index);
                     }
                 }
-                GitUiAction::RefreshHistory => self.refresh_git_history(project_index),
                 GitUiAction::Fetch => self.git_action(root.to_path_buf(), GitAction::Fetch),
                 GitUiAction::Pull => self.git_action(root.to_path_buf(), GitAction::Pull),
                 GitUiAction::Push => self.git_action(root.to_path_buf(), GitAction::Push),

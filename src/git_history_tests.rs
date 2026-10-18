@@ -198,7 +198,7 @@ fn unchanged_repository_refresh_on_main_launches_three_git_processes() {
             .unwrap();
         assert!(output.status.success());
     }
-    let first = read_git_snapshot(&repository.0, None, None, None, false, None).unwrap();
+    let first = read_git_snapshot(&repository.0, None, None, None, false, None, None).unwrap();
     let repo = first.root.clone().unwrap();
     let previous = first.history.unwrap().snapshot;
     git::take_command_count();
@@ -210,6 +210,7 @@ fn unchanged_repository_refresh_on_main_launches_three_git_processes() {
         Some(previous.clone()),
         false,
         None,
+        Some(git::HISTORY_PAGE_SIZE),
     )
     .unwrap();
     assert_eq!(git::take_command_count(), 3);
@@ -236,6 +237,267 @@ fn wait_for_git_refresh(app: &mut VEditApp, index: usize) {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(app.projects[index].git_error.is_none());
+}
+
+fn history_window_state(app: &mut VEditApp, focused: bool, minimized: bool) {
+    let mut input = egui::RawInput {
+        focused,
+        ..Default::default()
+    };
+    input
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .minimized = Some(minimized);
+    app.ctx.run_ui(input, |_| {}).textures_delta.clear();
+}
+
+#[test]
+fn visible_history_automatically_shows_external_commits() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    let previous = app.projects[0].recent_commits.clone();
+    app.projects[0].git_view.selected_commit = Some(previous[1].hash.clone());
+    fs::write(repository.0.join("external.txt"), "from another process\n").unwrap();
+    git::stage_all(&repository.0).unwrap();
+    git::commit(&repository.0, "External commit").unwrap();
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+
+    app.refresh_git(0, false);
+    let request = app.projects[0].git_status_request;
+    app.refresh_git(0, false);
+    assert_eq!(app.projects[0].git_status_request, request);
+    assert!(!app.projects[0].git_refresh_pending);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].recent_commits[0].subject, "External commit");
+    assert_eq!(
+        app.projects[0].recent_commits[1..]
+            .iter()
+            .map(|commit| &commit.hash)
+            .collect::<Vec<_>>(),
+        previous
+            .iter()
+            .map(|commit| &commit.hash)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        app.projects[0].git_view.selected_commit.as_ref(),
+        Some(&previous[1].hash)
+    );
+    app.refresh_git(0, false);
+    assert!(
+        !app.projects[0].git_loading,
+        "completed polls must be throttled"
+    );
+}
+
+#[test]
+fn automatic_repository_refresh_pauses_in_background_and_when_minimized() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    for (focused, minimized) in [(false, false), (true, true)] {
+        history_window_state(&mut app, focused, minimized);
+        app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(30);
+        app.refresh_git(0, false);
+        assert!(!app.projects[0].git_loading);
+        assert!(app.projects[0].git_status_request.is_none());
+    }
+    history_window_state(&mut app, true, false);
+    app.refresh_git(0, false);
+    assert!(app.projects[0].git_loading);
+    wait_for_git_refresh(&mut app, 0);
+}
+
+#[test]
+fn hidden_history_catches_up_when_source_control_is_shown() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    app.set_sidebar_view_visible(SidebarView::SourceControl, false);
+    let previous = app.projects[0].recent_commits.clone();
+    fs::write(repository.0.join("external.txt"), "new\n").unwrap();
+    git::stage_all(&repository.0).unwrap();
+    git::commit(&repository.0, "While hidden").unwrap();
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(30);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].recent_commits, previous);
+
+    app.set_sidebar_view_visible(SidebarView::SourceControl, true);
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].recent_commits[0].subject, "While hidden");
+}
+
+#[test]
+fn remote_ref_updates_refresh_history_decorations_without_a_new_local_commit() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    assert!(
+        app.projects[0]
+            .recent_commits
+            .iter()
+            .all(|commit| !commit.on_remote)
+    );
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository.0)
+        .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    assert!(
+        app.projects[0]
+            .recent_commits
+            .iter()
+            .all(|commit| commit.on_remote)
+    );
+    assert!(
+        app.projects[0].recent_commits[0]
+            .refs
+            .iter()
+            .any(|reference| reference.name == "origin/main")
+    );
+}
+
+#[test]
+fn automatic_history_refresh_recovers_from_a_transient_error() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    app.projects[0].git_history_error = Some("temporary failure".into());
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    assert!(app.projects[0].git_history_error.is_none());
+    assert_eq!(app.projects[0].recent_commits.len(), 2);
+}
+
+#[test]
+fn automatic_history_refresh_retains_loaded_depth_and_can_continue_paging() {
+    use std::io::Write;
+    let repository = HoverRepository::new();
+    let mut input = String::new();
+    for mark in 1..=137 {
+        let message = format!("History {mark}\n");
+        input.push_str(&format!(
+            "commit refs/heads/history\nmark :{mark}\ncommitter History Test <test@example.invalid> {} +0000\ndata {}\n{}",
+            1_700_000_000 + mark, message.len(), message
+        ));
+        if mark > 1 {
+            input.push_str(&format!("from :{}\n", mark - 1));
+        }
+        input.push('\n');
+    }
+    input.push_str("done\n");
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository.0)
+        .args(["fast-import", "--quiet", "--done"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    let snapshot = app.projects[0].git_history_snapshot.clone().unwrap();
+    let page = git::history_page(&repository.0, &snapshot, 0, 120).unwrap();
+    deliver_refresh(&mut app, snapshot, Some(page));
+    let selected = app.projects[0].recent_commits[90].hash.clone();
+    app.projects[0].git_view.selected_commit = Some(selected.clone());
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository.0)
+        .args([
+            "update-ref",
+            "refs/remotes/origin/history",
+            "refs/heads/history",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].recent_commits.len(), 120);
+    assert!(app.projects[0].git_history_has_more);
+    assert_eq!(
+        app.projects[0].git_view.selected_commit.as_ref(),
+        Some(&selected)
+    );
+    app.load_more_git_history();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app.projects[0].git_history_loading {
+        assert!(Instant::now() < deadline);
+        app.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(app.projects[0].recent_commits.len(), 139);
+    assert!(!app.projects[0].git_history_has_more);
+    assert!(app.projects[0].git_history_error.is_none());
+}
+
+#[test]
+fn replacing_visible_history_preserves_the_reading_position_and_top_follows_head() {
+    for scrolled in [false, true] {
+        let mut app = history_workspace(120);
+        app.projects[0].git_history_has_more = false;
+        let mut screen = history_screen(app);
+        screen.run_steps(3);
+        if scrolled {
+            let first = screen.get_by_label("Commit 00").rect().center();
+            screen.hover_at(first);
+            screen.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -1500.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            // Let wheel smoothing finish before measuring a stationary reader.
+            screen.run_steps(20);
+            screen.input_mut().events.push(egui::Event::PointerGone);
+            screen.run_steps(3);
+        }
+        let label = if scrolled { "Commit 65" } else { "Commit 00" };
+        let before = screen.get_by_label(label).rect().top()
+            - screen.get_by_label("History").rect().bottom();
+        let mut replacement = vec![commit(500)];
+        replacement.extend(screen.state().projects[0].recent_commits.clone());
+        deliver_refresh(
+            screen.state_mut(),
+            git::HistorySnapshot::default(),
+            Some(git::HistoryPage {
+                commits: replacement,
+                has_more: false,
+            }),
+        );
+        screen.run_steps(3);
+        assert!(screen.query_by_label("History changed · Refresh").is_none());
+        let label = if scrolled { label } else { "Commit 500" };
+        let after = screen.get_by_label(label).rect().top()
+            - screen.get_by_label("History").rect().bottom();
+        assert_eq!(after, before, "scrolled={scrolled}");
+    }
 }
 
 #[test]
@@ -359,7 +621,6 @@ fn new_project_repository_replaces_the_selected_parents_history() {
     );
     assert!(project.git_parent_root.is_none());
     assert!(project.recent_commits.is_empty());
-    assert!(!project.git_history_update_available);
 }
 
 #[test]
@@ -742,11 +1003,10 @@ fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
     assert_eq!(project.git_history_snapshot.as_ref(), Some(&snapshot));
     assert_eq!(project.git_history_generation, generation);
     assert!(project.git_history_loading && project.git_history_has_more);
-    assert!(!project.git_history_update_available);
 }
 
 #[test]
-fn moved_refs_leave_the_original_graph_and_snapshot_pageable() {
+fn hidden_history_keeps_a_consistent_pageable_snapshot_until_reloaded() {
     let mut app = history_workspace(2);
     let original = git::HistorySnapshot {
         local_only: Default::default(),
@@ -775,7 +1035,6 @@ fn moved_refs_leave_the_original_graph_and_snapshot_pageable() {
     };
 
     deliver_refresh(&mut app, changed, None);
-    assert!(app.projects[0].git_history_update_available);
     assert_eq!(app.projects[0].recent_commits, prefix);
     assert_eq!(app.projects[0].git_view.graph, graph);
     assert_eq!(
@@ -801,7 +1060,6 @@ fn moved_refs_leave_the_original_graph_and_snapshot_pageable() {
         app.projects[0].git_history_snapshot.as_ref(),
         Some(&original)
     );
-    assert!(app.projects[0].git_history_update_available);
     assert!(!app.projects[0].git_history_has_more);
 }
 
@@ -906,7 +1164,7 @@ fn scrolling_near_the_end_requests_one_page_without_a_load_more_button() {
 }
 
 #[test]
-fn a_history_error_stops_automatic_requests_until_explicit_retry() {
+fn a_history_error_stops_scroll_requests_until_retry() {
     let mut app = history_workspace(2);
     app.projects[0].git_history_loading = true;
     let generation = app.projects[0].git_history_generation;

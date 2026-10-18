@@ -162,7 +162,16 @@ $env:VEDIT_CLI_TEST_BINARY = (Resolve-Path 'target/debug/vedit-cli.exe').Path
 cargo test --bin vedit git_cli_executable_round_trip_in_isolated_editor -- --ignored --nocapture
 ```
 
-Git history freezes traversal roots and remote reachability for paging. The branch
+Git history freezes traversal roots and remote reachability within each page
+generation. While Source control is visible in the focused, non-minimized window,
+the active repository is polled every three seconds after the previous read.
+Changed snapshots automatically replace the loaded history depth; unchanged ones
+keep the graph and pending page requests. Scroll position follows the first visible
+commit where it remains in the loaded range, while the top follows new commits.
+Old page results cannot enter the new generation. History failures retry on the
+next visible poll; hidden histories catch up when shown again. Periodic Git reads,
+including project indicators and the worktree overview, pause in inactive or
+minimized windows; explicit operations can still complete there. The branch
 picker uses the latest refreshed refs; a switch runs without force or automatic stash
 and returns to the CLI after completion. The Changes/History divider is saved per
 project. Hover timestamps use the author time zone and a relative age.
