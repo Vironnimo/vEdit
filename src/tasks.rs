@@ -21,6 +21,8 @@ const TRUNCATION_NOTICE: &str = "\n[Output limit reached; further output omitted
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskEvent {
+    /// Application process was spawned; this does not imply service readiness.
+    Started,
     /// A chunk of stdout or stderr, already decoded as UTF-8.
     Output(String),
     /// Final event, sent after the process stops and its output is drained.
@@ -87,7 +89,16 @@ pub fn spawn_configured(
     command: CommandSpec,
     environment: Vec<(OsString, OsString)>,
 ) -> RunningTask {
-    spawn_invocation(root, command, environment, DEFAULT_TIMEOUT)
+    spawn_invocation(root, command, environment, Some(DEFAULT_TIMEOUT))
+}
+
+/// Applications keep running until exit/cancellation. The caller retains a rolling log.
+pub fn spawn_application(
+    root: PathBuf,
+    command: CommandSpec,
+    environment: Vec<(OsString, OsString)>,
+) -> RunningTask {
+    spawn_invocation(root, command, environment, None)
 }
 
 /// Open an interactive terminal in a project directory.
@@ -140,14 +151,14 @@ pub fn open_terminal(root: &Path, environment: Vec<(OsString, OsString)>) -> Res
 
 #[cfg(test)]
 fn spawn_with_timeout(root: PathBuf, command: String, timeout: Duration) -> RunningTask {
-    spawn_invocation(root, CommandSpec::Shell(command), Vec::new(), timeout)
+    spawn_invocation(root, CommandSpec::Shell(command), Vec::new(), Some(timeout))
 }
 
 fn spawn_invocation(
     root: PathBuf,
     command: CommandSpec,
     environment: Vec<(OsString, OsString)>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> RunningTask {
     // Bounded even if the UI is temporarily unable to poll. Readers use
     // cancellable sends so a full queue cannot prevent stopping a process.
@@ -186,7 +197,7 @@ fn run_task(
     root: PathBuf,
     command: CommandSpec,
     environment: Vec<(OsString, OsString)>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     sender: SyncSender<TaskEvent>,
     cancel_requested: Arc<AtomicBool>,
 ) {
@@ -236,7 +247,13 @@ fn run_task(
     };
 
     let mut process = ProcessGuard::new(child);
-    let budget = Arc::new(Mutex::new(OutputBudget::default()));
+    if timeout.is_none() {
+        let _ = sender.send(TaskEvent::Started);
+    }
+    let budget = Arc::new(Mutex::new(OutputBudget {
+        streaming: timeout.is_none(),
+        ..Default::default()
+    }));
     let readers = [
         process.child.stdout.take().map(|pipe| {
             spawn_reader(
@@ -269,7 +286,9 @@ fn run_task(
             process.terminate();
             break;
         }
-        if started.elapsed() >= timeout {
+        if let Some(timeout) = timeout
+            && started.elapsed() >= timeout
+        {
             failure = Some(format!(
                 "The command timed out after {} seconds and was stopped.",
                 timeout.as_secs()
@@ -417,6 +436,7 @@ fn send_output(
 
 #[derive(Default)]
 struct OutputBudget {
+    streaming: bool,
     bytes: usize,
     newlines: usize,
     truncated: bool,
@@ -424,6 +444,9 @@ struct OutputBudget {
 
 impl OutputBudget {
     fn take(&mut self, text: &str) -> Vec<String> {
+        if self.streaming {
+            return vec![text.to_owned()];
+        }
         if self.truncated || text.is_empty() {
             return Vec::new();
         }

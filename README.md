@@ -1,6 +1,8 @@
-# vEdit 0.4.31
+# vEdit 0.4.32
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.32 ergänzt benannte Startoptionen pro Projekt: **▶ Run** startet die im Dropdown gewählte Variante, zum Beispiel Web UI, Desktop oder Headless. Agents können die Optionen samt Startskripten einrichten. Anwendungen haben eigene Ausgaben und Stop pro Projekt, laufen ohne Zeitlimit und unabhängig von Build- und Testaufgaben.
 
 Version 0.4.31 vereinfacht den Explorer: Ordner zeigen nur ihren Aufklapppfeil, Dateien kleinere Symbole; die Namen stehen bündig in einer gemeinsamen Spalte. Dateitabs sind schmaler und so hoch wie die Projekttabs. Beide verwenden dezent gerundete Hover-Flächen und eine schmale Linie für den aktiven Tab. Der zusätzliche Abstand über den Dateitabs entfällt.
 
@@ -330,6 +332,16 @@ Die portable Ausgabe bringt **basedpyright und Node** für Python mit. Ein vorha
 **Settings → Editing** steuert Einrückung. Neue Python-Dateien verwenden vier, Dart-Dateien zwei Leerzeichen. Vorhandene Einrückung wird automatisch erkannt; diese Erkennung lässt sich ausschalten. Breite und Tab-Verwendung sind je Sprache überschreibbar. Die Statusleiste zeigt die tatsächlich verwendete Einstellung und öffnet sie per Klick. Einstellungen ändern zukünftige Eingaben; vorhandener Text wird nicht automatisch umformatiert.
 
 **Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; vEdit zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben.
+
+## Anwendungen starten
+
+Ein eingerichtetes Projekt zeigt unter den Projekttabs **▶ Run** und eine Auswahlliste seiner Startoptionen. Wähle etwa **Web UI**, **Desktop** oder **Headless** und starte mit **Run**. Die Auswahl wird lokal für das Projekt gespeichert. Es muss keine Quelldatei geöffnet sein; ungespeicherte Projektdateien müssen vor dem Start gespeichert werden. **Run → Run application** und **Stop application** sind auch über die Befehlspalette erreichbar und lassen sich in den Tastatureinstellungen belegen. Die bisherigen Kürzel für Prüfen und Ausführen einer Datei bleiben erhalten.
+
+**Application output** zeigt den Zustand, die Ausgabe und nach dem Ende den Exitcode. **Stop** beendet die Anwendung einschließlich ihrer gestarteten Unterprozesse. Pro Projekt läuft eine Variante; andere Projekte und Build-/Testaufgaben können gleichzeitig laufen. Anwendungen haben kein Zehn-Minuten-Limit. Beim Schließen ihres Projekts oder des Editors werden ihre Prozesse beendet. Die Ausgabe behält die letzten 1 MiB beziehungsweise etwa 10.000 Zeilen. Ein laufender Prozess bedeutet noch nicht, dass beispielsweise der Webserver schon bereit ist.
+
+Bitte einen Agenten beispielsweise: „Richte Web UI und Headless als Startoptionen in vEdit ein.“ Der mitgelieferte Skill beschreibt das Ermitteln der Startwege, Schreiben benötigter Skripte und Prüfen von Start, Stop und erneutem Start. Über `vedit-cli launch configure --file CONFIG.json --workspace PROJEKT` hinterlegt er die Optionen revisionsgeschützt in `.vedit/launch.json`. `launch list`, `select`, `start`, `stop` und `output` bedienen dieselben Projektstarts. Die Datei und relative Startskripte können mit dem Projekt versioniert werden; Änderungen lädt vEdit automatisch nach. Ein Projekt wird beim Öffnen nicht automatisch gestartet.
+
+Jede Option enthält einen Namen, eine ID, Programm und separate Argumente sowie optional Arbeitsordner und Umgebungsvariablen. Relative Programm- und Arbeitsordnerpfade beziehen sich auf die Projektwurzel; reine Programmnamen werden über PATH gefunden. Für Skripte wird der Interpreter ausdrücklich angegeben. Startskripte bleiben bis zum Ende ihrer Anwendung aktiv und reichen Fehler weiter. Eingabeaufforderungen benötigen weiterhin das interaktive Terminal. Bereits laufende Dienste und außerhalb des Prozessbaums verwaltete Dienste, etwa Container, werden von Stop nicht beendet.
 
 ## Git und Befehle
 

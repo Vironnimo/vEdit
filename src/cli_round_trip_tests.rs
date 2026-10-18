@@ -2,6 +2,98 @@ use super::*;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+#[cfg(windows)]
+#[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
+fn launch_cli_round_trip_in_isolated_editor() {
+    let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
+    let root = std::env::temp_dir().join(format!(
+        "vedit-cli-round-trip-launch-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture(root);
+    let endpoint = fixture.0.join("control");
+    let project = fixture.0.join("project café & 東京");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("start.ps1"), "param([string]$Mode)\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::Out.WriteLine(\"ready $Mode $env:LAUNCH_TEST\")\nStart-Sleep -Seconds 30\n").unwrap();
+    let input = fixture.0.join("launch-input.json");
+    let config = json!({"profiles":[{"id":"web","name":"Web 東京","program":"powershell.exe","args":["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File","start.ps1","-Mode","web"],"env":{"LAUNCH_TEST":"café 東京"}},{"id":"headless","name":"Headless","program":"missing-vedit-launch.exe"}],"default":"web"});
+    fs::write(&input, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.projects.push(Project::new(fixture.0.clone()));
+    app.projects.push(Project::new(project.clone()));
+    app.recovery_session_path = fixture.0.join("session.json");
+    app.control = Some(cli::Server::start_test(app.ctx.clone(), endpoint.clone()).unwrap());
+    let mut cli = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        command
+            .arg("launch")
+            .args(args)
+            .arg("--workspace")
+            .arg(&project);
+        let output = run(&mut app, command, &endpoint);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code().unwrap(), value)
+    };
+    let (code, list) = cli(&["list"]);
+    assert_eq!(code, 0);
+    assert_eq!(list["result"]["revision"], 0);
+    let (code, configured) = cli(&["configure", "--file", input.to_str().unwrap()]);
+    assert_eq!(code, 0, "{configured}");
+    assert_eq!(
+        configured["result"]["configuration"]["profiles"][0]["name"],
+        "Web 東京"
+    );
+    let (code, conflict) = cli(&["configure", "--file", input.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(
+        conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revision")
+    );
+    let (code, missing) = cli(&["start", "absent"]);
+    assert_eq!(code, 1);
+    assert_eq!(missing["error"]["code"], "unknown_launch");
+    let (code, selected) = cli(&["select", "web"]);
+    assert_eq!(code, 0);
+    assert_eq!(selected["result"]["selected"], "web");
+    for _ in 0..2 {
+        let (code, started) = cli(&["start"]);
+        assert_eq!(code, 0, "{started}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (code, output) = cli(&["output"]);
+            assert_eq!(code, 0);
+            if output["result"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("ready web café 東京")
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{output}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(cli(&["stop"]).0, 0);
+        loop {
+            let (_, output) = cli(&["output"]);
+            if output["result"]["run"]["running"] == false {
+                assert_eq!(output["result"]["run"]["status"], "Stopped");
+                break;
+            }
+            assert!(Instant::now() < deadline, "{output}");
+        }
+    }
+    assert_eq!(app.active_project, 0);
+    assert!(app.projects[0].launch.configuration.profiles.is_empty());
+}
+
 struct Fixture(PathBuf);
 impl Drop for Fixture {
     fn drop(&mut self) {

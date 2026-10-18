@@ -61,6 +61,8 @@ mod language_settings;
 mod language_support;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "project_launch.rs"]
+mod project_launch;
 #[path = "project_status.rs"]
 mod project_status;
 #[path = "project_tasks.rs"]
@@ -174,6 +176,7 @@ struct Session {
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct SessionProject {
+    launch_selected: Option<String>,
     root: PathBuf,
     tasks: project_tasks::TaskConfiguration,
     open_files: Vec<PathBuf>,
@@ -196,6 +199,7 @@ struct SessionTab {
 }
 
 struct Project {
+    launch: project_launch::LaunchState,
     root: PathBuf,
     tasks: project_tasks::TaskConfiguration,
     tabs: Vec<EditorTab>,
@@ -248,6 +252,7 @@ struct Project {
 impl Project {
     fn new(root: PathBuf) -> Self {
         Self {
+            launch: project_launch::LaunchState::default(),
             root,
             tasks: project_tasks::TaskConfiguration::default(),
             tabs: Vec::new(),
@@ -921,6 +926,7 @@ impl VEditApp {
             }
             let mut project = Project::new(root.clone());
             project.tasks = entry.tasks;
+            project.launch.selected = entry.launch_selected;
             project.git_approved_parent = entry.git_approved_parent;
             project.git_view.split_ratio = entry
                 .git_split_ratio
@@ -1616,6 +1622,7 @@ impl VEditApp {
         Ok(())
     }
     fn poll(&mut self) {
+        self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
                 WorkerResult::ContextFile(result) => self.context_file_result(result),
@@ -2271,6 +2278,7 @@ impl VEditApp {
                     }
                 };
                 match event {
+                    tasks::TaskEvent::Started => {}
                     tasks::TaskEvent::Output(text) => {
                         if self.output.len() < 1024 * 1024 {
                             self.output.push_str(&text);
@@ -3077,6 +3085,7 @@ impl VEditApp {
                 .projects
                 .iter()
                 .map(|p| SessionProject {
+                    launch_selected: p.launch.selected.clone(),
                     root: p.root.clone(),
                     tasks: p.tasks.clone(),
                     git_split_ratio: p.git_view.split_ratio,
@@ -3355,6 +3364,9 @@ impl VEditApp {
         self.ctx.request_repaint();
     }
     fn run_task(&mut self, command: String) {
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.launch.show_output = false;
+        }
         if self.task.is_some() {
             self.status("Stop the current task first", true);
             return;
@@ -4554,7 +4566,7 @@ impl VEditApp {
                 self.begin_output_region(ui);
                 ui.horizontal(|ui| {
                     let output_tab = design::ghost_button(ui, "Output", &format!("Command output · {}", self.shortcut_label(keybindings::Action::ToggleOutput)));
-                    if !self.problems_visible {
+                    if !self.problems_visible && !self.project().is_some_and(|p| p.launch.show_output) {
                         ui.painter().line_segment(
                             [
                                 output_tab.rect.left_bottom(),
@@ -4565,7 +4577,9 @@ impl VEditApp {
                     }
                     if output_tab.clicked() {
                         self.problems_visible = false;
+                        if let Some(project) = self.projects.get_mut(self.active_project) { project.launch.show_output = false; }
                     }
+                    self.launch_output_tab(ui);
                     let count = self
                         .project()
                         .map(|p| p.diagnostics.values().map(Vec::len).sum::<usize>())
@@ -4592,8 +4606,9 @@ impl VEditApp {
                         self.problems_visible = true;
                     }
                     ui.add_space(14.0);
-                    ui.label(RichText::new(&self.task_status).size(11.0).color(MUTED));
-                    if self.task.is_some() {
+                    let application_visible = self.project().is_some_and(|p| p.launch.show_output) && !self.problems_visible;
+                    if !application_visible { ui.label(RichText::new(&self.task_status).size(11.0).color(MUTED)); }
+                    if self.task.is_some() && !application_visible {
                         ui.spinner();
                     }
                     // The rail's Output icon and its shortcut hide the panel.
@@ -4616,6 +4631,7 @@ impl VEditApp {
                         {
                             self.open_terminal();
                         }
+                        if application_visible { return; }
                         if let Some(task) = &self.task {
                             if design::ghost_button(ui, "Stop", "Stop the running command")
                                 .clicked()
@@ -4646,6 +4662,7 @@ impl VEditApp {
                         }
                     });
                 }
+                if self.launch_output_ui(ui) { return; }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(">").monospace().color(ACCENT));
                     let response = ui.add_sized(
@@ -6633,6 +6650,8 @@ impl VEditApp {
             "Run tests" => self.run_project_task(project_tasks::ProjectTaskAction::Test),
             "Build project" => self.run_project_task(project_tasks::ProjectTaskAction::Build),
             "Run active file" => self.run_project_task(project_tasks::ProjectTaskAction::RunFile),
+            "Run application" => self.run_selected_application(),
+            "Stop application" => self.stop_application(),
             "Configure project tasks" => self.open_project_task_settings(),
             "Open terminal" => self.open_terminal(),
             "Toggle word wrap" => {
@@ -7240,6 +7259,7 @@ impl VEditApp {
             }
         }
         self.header(ui);
+        self.launch_toolbar(ui);
         self.status_bar(ui);
         self.activity(ui);
         self.sidebar_ui(ui);

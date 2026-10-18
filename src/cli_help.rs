@@ -16,6 +16,20 @@ macro_rules! command {
 
 pub const COMMANDS: &[CommandHelp] = &[
     command!(
+        "launch",
+        "list | configure --file CONFIG.json | select ID | start [ID] | stop | output",
+        "Configure, select and run named project applications; read their state/output.",
+        "Definitions live in .vedit/launch.json: profiles:[{id,name,program,args,cwd,env}], optional default:ID. JSON: schema launch.\nconfigure replaces definitions atomically; preserve existing profiles. Omit --revision only to create; for updates use revision from list.\nlist reads definitions and runtime state. select remembers this machine's choice. start uses ID or the selected/default/first profile; no active file required.\nArguments are passed literally. Relative cwd/program paths use the project root; bare executable names use PATH. Environment inherits vEdit plus profile env and VEDIT_ROOT.\nstart requires saved project buffers, returns Starting, and keeps the process tree until it exits or stop completes; no runtime timeout. Each project has its own run. Check output.run.running/status/error; running is not application readiness.\nstop requests termination of this project's tree. output pages its current retained log. Launches have closed stdin; use Run > Open terminal for interactive programs.",
+        [
+            "--workspace",
+            "--file",
+            "--revision",
+            "--line",
+            "--column",
+            "--count"
+        ]
+    ),
+    command!(
         "open",
         "PATH...",
         "Open files in the window; preserves unsaved text.",
@@ -291,6 +305,7 @@ pub fn takes_value(flag: &str) -> bool {
     matches!(
         flag,
         "--line"
+            | "--workspace"
             | "--column"
             | "--limit"
             | "--offset"
@@ -318,6 +333,15 @@ pub fn render(name: Option<&str>) -> String {
         ));
         for flag in entry.flags {
             let description = match *flag {
+                "--workspace" => {
+                    "PATH: open project to target. Omit for the active project; does not switch projects."
+                }
+                "--file" if entry.name == "launch" => {
+                    "CONFIG.json: launch definitions. Required for configure; accepts UTF-8 or UTF-16 with BOM."
+                }
+                "--revision" if entry.name == "launch" => {
+                    "N: configuration revision from list/configure. Omit for 0, which creates only if absent."
+                }
                 "--line" => {
                     "N: first line, 1-based. Omit for line 1 when reading; navigation preserves position."
                 }

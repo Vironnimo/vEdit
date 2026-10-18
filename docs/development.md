@@ -162,6 +162,21 @@ $env:VEDIT_CLI_TEST_BINARY = (Resolve-Path 'target/debug/vedit-cli.exe').Path
 cargo test --bin vedit git_cli_executable_round_trip_in_isolated_editor -- --ignored --nocapture
 ```
 
+The launch CLI fixture uses a private endpoint and temporary projects. It tests
+configuration conflicts, an explicit inactive project, a real PowerShell script,
+Unicode paths/environment/output, variant selection, Stop and a second start:
+
+```powershell
+cargo build --bin vedit-cli
+$env:VEDIT_CLI_TEST_BINARY = (Resolve-Path 'target/debug/vedit-cli.exe').Path
+cargo test --bin vedit launch_cli_round_trip_in_isolated_editor -- --ignored --nocapture
+```
+
+The regular `project_launch` tests also cover Play/Stop UI input, independent
+project runs, unsaved buffers, configuration repair, local selection persistence,
+bounded rolling output and launch toolbar snapshots. These use isolated fixtures;
+they do not run or reconfigure the user's applications.
+
 Git history freezes traversal roots and remote reachability within each page
 generation. While Source control is visible in the focused, non-minimized window,
 the active repository is polled every three seconds after the previous read.

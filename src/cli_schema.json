@@ -1,5 +1,11 @@
 {
   "protocol": 1,
+  "launch": {
+    "storage": "Project-relative .vedit/launch.json, UTF-8, at most 64 KiB and 32 profiles. Configure replaces it atomically. revision:0 creates only if absent; updates require the revision from list. Preserve profiles outside the user's request. Empty profiles removes all launch options. Definitions reload in the background; opening a project never starts an application.",
+    "profile": "id (1..64 ASCII letters/digits/-/_), name (1..100 bytes), program, args:[], cwd:'.', env:{}. Relative cwd and program paths resolve against the project root; bare program names use PATH. Arguments are literal, without shell interpolation. Environment inherits vEdit plus profile env and VEDIT_ROOT. Optional default names one profile; local selection persists in the session.",
+    "lifecycle": "Each open project owns one application process tree, independent of build/test tasks. Start needs saved/loaded project buffers and no existing run. It returns Starting, not readiness; inspect launch output.run for status/running/error/exit_code and verify actual application readiness. No runtime timeout; closed stdin. Stop requests tree termination; wait for running:false before restarting. Closing the project/editor stops owned applications. Configuration edits do not alter a running process.",
+    "output": "Latest 1 MiB / approximately 10000 lines retained per project, with output_truncated. Output text uses next_line/next_column continuation; run carries workspace, running_id and state. Pages are snapshots of a changing rolling log. Launch operations cannot be batched."
+  },
   "responses": {
       "envelope": "One JSON document on stdout: ok, result, and error:{code,message} on failure. Exit 0 means observed/applied, 1 failure, 2 partial execution (result.complete:false); pending loads, saves, jobs and tasks can still return exit 0.",
       "completion": "For tabs require loading:false and error:null; after saving also saving:false and dirty:false. Inspect location_error for navigation/review. For file_job require complete:true, applied:true and no error; for tasks inspect output.running and status. Completed batch effects remain applied.",
@@ -38,6 +44,12 @@
     "json_bytes": 1048576
   },
   "commands": [
+    {"op":"launch","workspace":"C:/work/example","action":{"action":"list"}},
+    {"op":"launch","workspace":"C:/work/example","action":{"action":"configure","revision":0,"configuration":{"default":"web","profiles":[{"id":"web","name":"Web UI","program":"powershell.exe","args":["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File","scripts/start.ps1","-Mode","web"],"cwd":".","env":{}}]}}},
+    {"op":"launch","action":{"action":"select","id":"web"}},
+    {"op":"launch","action":{"action":"start","id":"web"}},
+    {"op":"launch","action":{"action":"stop"}},
+    {"op":"launch","action":{"action":"output","start_line":1,"start_column":1,"line_count":100}},
     {
       "op": "status"
     },

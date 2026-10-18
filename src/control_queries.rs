@@ -541,7 +541,7 @@ fn bounded_lines(lines: &[&str], max_lines: usize) -> (String, usize, bool, bool
     )
 }
 
-fn same_workspace(left: &Path, right: &Path) -> bool {
+pub(in crate::app) fn same_workspace(left: &Path, right: &Path) -> bool {
     // Components remove harmless `.` and repeated/trailing separators without
     // reading the filesystem or guessing the identity of a symbolic link.
     let left: PathBuf = Path::new(&crate::paths::display(left))

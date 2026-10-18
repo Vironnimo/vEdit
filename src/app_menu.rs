@@ -256,6 +256,23 @@ impl VEditApp {
             }
         });
         design::menu(ui, "Run", "Build, test and run commands", |ui| {
+            for (name, action) in [
+                ("Run application", keybindings::Action::RunApplication),
+                ("Stop application", keybindings::Action::StopApplication),
+            ] {
+                if design::menu_item(
+                    ui,
+                    name,
+                    &self.shortcut_label(action),
+                    "Use the selected project launch option",
+                )
+                .clicked()
+                {
+                    self.command_action(name);
+                    ui.close();
+                }
+            }
+            ui.separator();
             if design::menu_item(
                 ui,
                 "Restart language analysis",

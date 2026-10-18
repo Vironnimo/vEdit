@@ -418,6 +418,9 @@ impl VEditApp {
     }
 
     pub(super) fn start_resolved_task(&mut self, task: ResolvedTask) {
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.launch.show_output = false;
+        }
         self.output_visible = true;
         self.problems_visible = false;
         self.output = format!(

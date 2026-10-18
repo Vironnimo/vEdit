@@ -1,5 +1,70 @@
 use super::*;
 
+#[test]
+fn launch_cli_validates_profiles_options_and_unicode_file_input() {
+    let json = r#"{"profiles":[{"id":"web","name":"Web 東京","program":"powershell.exe","args":["--help","café & test"]},{"id":"desktop","name":"Desktop","program":"app.exe"}],"default":"desktop"}"#;
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in json.encode_utf16() {
+        bytes.extend(unit.to_le_bytes());
+    }
+    let file = InputFile::new(&bytes);
+    let Parsed::Command {
+        request:
+            Request::Launch {
+                workspace,
+                action:
+                    launch::Action::Configure {
+                        configuration,
+                        revision,
+                    },
+            },
+        start,
+    } = parse(&[
+        "launch",
+        "configure",
+        "--file",
+        file.path(),
+        "--revision",
+        "7",
+        "--workspace",
+        ".",
+    ])
+    .unwrap()
+    else {
+        panic!("launch configure");
+    };
+    assert!(!start);
+    assert!(workspace.unwrap().is_absolute());
+    assert_eq!(revision, 7);
+    assert_eq!(configuration.profiles[0].name, "Web 東京");
+    assert_eq!(configuration.profiles[0].args[0], "--help");
+    for args in [
+        vec!["launch", "start", "a", "b"],
+        vec!["launch", "start", "--revision", "1"],
+        vec!["launch", "configure"],
+        vec!["launch", "list", "--count", "2"],
+        vec!["status", "--workspace", "."],
+        vec!["launch", "output", "--count", "0"],
+        vec!["launch", "select", "bad/id"],
+    ] {
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+    for action in ["list", "start", "stop", "output"] {
+        assert!(parse(&["launch", action]).is_ok());
+    }
+    let duplicate = json.replace("\"desktop\"", "\"web\"");
+    assert!(launch::decode(duplicate.as_bytes()).is_err());
+    assert!(launch::decode(br#"{"profiles":[],"default":"missing"}"#).is_err());
+    assert!(launch::decode(br#"{"profiles":[],"unknown":true}"#).is_err());
+    assert!(
+        schema_topic(Some("launch")).unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 6
+    );
+}
+
 fn parse(values: &[&str]) -> Result<Parsed, String> {
     parse_args(values.iter().map(OsString::from))
 }

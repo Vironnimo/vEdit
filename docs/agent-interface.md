@@ -4,6 +4,16 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
+## Project application launches (0.4.32)
+
+`launch list|configure|select|start|stop|output` configures and operates named application variants for an explicit `--workspace` or the active project. The GUI uses the same project state for Play, the variant dropdown and Application output. Each project owns one run, separate from the existing short-lived task runner; no active source file is required.
+
+Definitions are versioned project data in `.vedit/launch.json`. The configuration holds up to 32 profiles (`id`, `name`, `program`, `args`, `cwd`, `env`) and an optional default ID. The local selection is session data. Configuration reads/writes run in background workers tied to the originating project; writes use the editor's atomic replacement and content fingerprint checks. `configure --file CONFIG.json --revision N` replaces definitions; revision 0 only creates an absent file. Preserve unrelated profiles. Invalid JSON exposes its current revision so it can be repaired. Open unsaved configuration drafts block CLI replacement.
+
+Applications inherit the environment plus profile overrides and `VEDIT_ROOT`; relative executable paths and working directories resolve against the project root. Arguments are passed literally, with no implicit shell. A launcher has closed stdin and owns its child process tree until exit, Stop or project/editor closure. No ten-minute timeout applies. Scripts keep their parent process alive, propagate failures, and emit UTF-8. External services and detached processes are outside this lifecycle.
+
+Start returns process state `Starting`; even `Running` is not a readiness assertion. `launch output` returns paged output and `run` with workspace, running ID, status, error and exit code. Stop completes when `run.running` becomes false. Logs retain recent output (1 MiB and about 10,000 lines); paging is a snapshot of a changing log. Launch requests are excluded from batches. Loading/saving/dirty buffers prevent starting, and agent drafts are never auto-saved.
+
 ## CLI discovery and text workflows (0.4.19)
 
 Every ordinary command has focused `COMMAND --help`; the command catalog also owns allowed flags. `schema OP` returns typed examples and the relevant rules. JSON responses and exit codes remain compatible (0 read/applied, 1 failed, 2 partial execution); neither success nor partial execution implies background completion.

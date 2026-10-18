@@ -11,6 +11,8 @@ use std::{
 
 #[path = "cli_help.rs"]
 pub mod help;
+#[path = "cli_launch.rs"]
+pub mod launch;
 
 #[path = "cli_spawn.rs"]
 mod spawn;
@@ -403,6 +405,11 @@ pub enum FileAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Launch {
+        #[serde(default)]
+        workspace: Option<PathBuf>,
+        action: launch::Action,
+    },
     Status {},
     Tabs {
         #[serde(default = "default_limit")]
@@ -730,6 +737,11 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--workspace" => set_option(
+                &mut options.workspace,
+                iter.next().ok_or("--workspace needs a project path")?,
+                "--workspace",
+            )?,
             "--" => {
                 positional.extend(iter);
                 break;
@@ -845,6 +857,10 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
     }
     options.allowed(&command)?;
     let mut request = match command.as_str() {
+        "launch" => Request::Launch {
+            workspace: options.workspace.as_ref().map(PathBuf::from),
+            action: launch::parse(&positional, &options)?,
+        },
         "status" => {
             require_empty(&positional)?;
             Request::Status {}
@@ -1211,6 +1227,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
 
 #[derive(Default)]
 struct Options {
+    workspace: Option<String>,
     file: Option<String>,
     path: Option<String>,
     line: Option<usize>,
@@ -1241,6 +1258,7 @@ impl Options {
         let definition = help::command(command)
             .ok_or_else(|| format!("Unknown command {command}; use vedit-cli --help"))?;
         for (present, flag) in [
+            (self.workspace.is_some(), "--workspace"),
             (self.line.is_some(), "--line"),
             (self.column.is_some(), "--column"),
             (self.file.is_some(), "--file"),
@@ -1665,6 +1683,10 @@ fn resolve_paths(request: &mut Request) {
         | Request::ChangeReview {
             workspace: Some(path),
             ..
+        }
+        | Request::Launch {
+            workspace: Some(path),
+            ..
         } => *path = absolute(path.clone()),
         Request::Batch { actions, .. } => {
             for action in actions {
@@ -1677,6 +1699,25 @@ fn resolve_paths(request: &mut Request) {
 
 pub fn validate(request: &Request) -> Result<(), String> {
     match request {
+        Request::Launch { workspace, action } => {
+            if let Some(path) = workspace {
+                validate_path(path)?;
+            }
+            match action {
+                launch::Action::Configure { configuration, .. } => configuration.validate()?,
+                launch::Action::Select { id } | launch::Action::Start { id: Some(id) } => {
+                    launch::validate_id(id)?
+                }
+                launch::Action::Output {
+                    start_line,
+                    start_column,
+                    line_count,
+                } if *start_line == 0 || *start_column == 0 || !(1..=500).contains(line_count) => {
+                    return Err("Launch output uses 1-based positions and 1..500 lines.".into());
+                }
+                _ => {}
+            }
+        }
         Request::Open { files } | Request::Review { files, .. } => {
             if files.is_empty() || files.len() > MAX_FILES {
                 return Err(format!("Supply 1..{MAX_FILES} files"));
@@ -2160,6 +2201,7 @@ pub fn validate(request: &Request) -> Result<(), String> {
                         | Request::GitHistory { .. }
                         | Request::GitSwitchBranch { .. }
                         | Request::ChangeReview { .. }
+                        | Request::Launch { .. }
                 ) {
                     return Err("Nested batches, background disk search and asynchronous file actions cannot be inside batch; run search/file/git-branches/git-history/git-switch-branch/change review separately".into());
                 }

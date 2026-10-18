@@ -1,6 +1,6 @@
 ---
 name: vedit
-description: "Read and edit open buffers, receive marked snippets, arrange views and show reviews in vEdit. Use when the user wants work performed or shown in the vEdit editor."
+description: "Control buffers, views, reviews and project launches in vEdit. Use when the user wants work performed or shown in vEdit, or applications made runnable from its Play button."
 ---
 
 # vEdit
@@ -82,6 +82,34 @@ Read the user's marked snippets, retaining highlights:
 
 Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_next_offset`, run `agent-marks text <mark-id> --offset <text-offset>` and follow its `next_offset` to null. Captures can outlive sources or have stale coordinates; read the current buffer before editing. When marks need collecting and clearing, read [references/agent-marks.md](references/agent-marks.md) for take/ack/restore. Agent-authored annotations use `review`/`clear-marks` and are separate from user marks.
 
+## Set up project launch options
+
+When the user wants an application runnable from vEdit, configure its useful launch variants, such as Web UI, Desktop and Headless. Definitions live in the project's `.vedit/launch.json`; scripts belong in the application repository. The editor shows Play and a dropdown once options exist.
+
+1. Determine the project's supported launch modes from its entry points and documentation. Reuse working commands/scripts. Write a script when preparation, multiple services or mode selection needs one. Done when each requested mode has a repeatable command.
+2. Make each command run without stdin prompts, use project-relative paths and emit readable output. Keep the launcher alive until its application exits, propagate failures through a nonzero exit code, and keep child processes attached. vEdit stops the owned process tree; detached services, containers and already running applications are outside that tree. Do not depend on a PowerShell `finally` block running after forced Stop. State any unmanaged service requirement in the report.
+3. Read existing definitions with the command below and preserve unrelated profiles. Write a UTF-8 JSON input file with `profiles` and optional `default`. Each profile has `id`, `name`, `program`, `args`, optional `cwd` (project root by default) and `env`. Arguments are literal; use an explicit interpreter for scripts. Relative program paths and cwd resolve against the project root. Use environment references in the script for machine-local values; keep secrets out of versioned definitions.
+4. Configure the open project with the file and returned revision. A new configuration has revision 0. Done when the response contains the complete intended profiles. An existing project can be opened with `workspace` if the user requested it.
+5. Start each requested variant, check actual application readiness, stop it, wait for `run.running:false`, and start it again. `Starting` or `Running` proves process state, not a working UI or service. Verify the user's intended interface or a project-specific readiness check. Report the selectable names and any mode whose dependencies prevented validation. Leave applications stopped unless the user requested a running instance.
+
+Replace `<project-path>` with the application's open project folder, `<config-file>` with the JSON file you prepared, `<revision>` with the list/configure response, and `<profile-id>` with an ID from those profiles. Run from the task directory:
+
+```powershell
+& $VEditCli launch list --workspace '<project-path>'
+& $VEditCli launch configure --workspace '<project-path>' --file '<config-file>' --revision <revision>
+& $VEditCli launch start '<profile-id>' --workspace '<project-path>'
+& $VEditCli launch output --workspace '<project-path>'
+& $VEditCli launch stop --workspace '<project-path>'
+```
+
+Example profile for a repository script you have created at `scripts/start.ps1` accepting `-Mode web`; adapt both path and arguments to the real entry point. Add other supported modes as separate named profiles:
+
+```json
+{"profiles":[{"id":"web","name":"Web UI","program":"powershell.exe","args":["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File","scripts/start.ps1","-Mode","web"],"cwd":".","env":{}}],"default":"web"}
+```
+
+Launches use saved project files and leave agent drafts untouched. Each project can run one variant at a time, alongside build/test tasks and other projects. `launch select ID` remembers the dropdown choice locally. Configuration reloads automatically; changing it does not change an already running application. Launch output retains recent lines, with `output_truncated` when older output was removed; use its `next_line`/`next_column` for a stationary log. A long-running service has no launch timeout. Closing its project or vEdit stops its owned processes.
+
 ## Command index
 
 - `open`: show files at a position or in Markdown preview.
@@ -114,6 +142,7 @@ Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_n
 - `git-history`: paged history and remote reachability.
 - `git-switch-branch`: switch to an exact ref and wait for completion.
 - `task`: start check/test/build/run_file, or stop it.
+- `launch`: configure/list named project applications, select/start/stop a variant and read its output.
 - `file`: start rename, folder creation or Recycle Bin deletion.
 - `file-job`: inspect a file operation.
 - `layout`: inspect/change active-project panes and tab groups.

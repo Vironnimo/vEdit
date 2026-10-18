@@ -81,6 +81,8 @@ actions! {
     TestProject, "test_project", "Run tests", "Run", ["Alt+F6"];
     BuildProject, "build_project", "Build project", "Run", [];
     RunFile, "run_file", "Run active file", "Run", ["Ctrl+F5"];
+    RunApplication, "run_application", "Run application", "Run", [];
+    StopApplication, "stop_application", "Stop application", "Run", [];
     ConfigureTasks, "configure_tasks", "Configure project tasks", "Run", [];
     Terminal, "terminal", "Open terminal", "Run", [];
     ToggleWrap, "toggle_wrap", "Toggle word wrap", "Editing", ["Alt+Z"];

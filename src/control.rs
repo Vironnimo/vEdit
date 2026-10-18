@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 mod documents;
 #[path = "control_queries.rs"]
 mod queries;
+pub(super) use queries::same_workspace;
 
 #[cfg(test)]
 #[path = "cli_round_trip_tests.rs"]
@@ -32,6 +33,9 @@ impl VEditApp {
                 continue;
             }
             if self.control_git_async(&envelope.request, envelope.reply.clone()) {
+                continue;
+            }
+            if self.control_launch_async(&envelope.request, envelope.reply.clone()) {
                 continue;
             }
             if self.control_change_review(&envelope.request, envelope.reply.clone()) {
@@ -712,7 +716,7 @@ fn truncate_utf8(text: &mut String, maximum: usize) {
 
 /// Page by lines, continuing oversized lines at exact Unicode columns. Reading
 /// documents keeps the existing omitted-final-LF convention; output retains LF.
-fn text_page(
+pub(super) fn text_page(
     text: &str,
     line: usize,
     column: usize,

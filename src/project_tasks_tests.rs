@@ -374,6 +374,7 @@ fn run_and_collect(resolved: ResolvedTask) -> (Option<i32>, String) {
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("Python task did not finish")
         {
+            tasks::TaskEvent::Started => {}
             tasks::TaskEvent::Output(text) => output.push_str(&text),
             tasks::TaskEvent::Error(error) => panic!("Python task failed: {error}"),
             tasks::TaskEvent::Finished { code, cancelled } => {
