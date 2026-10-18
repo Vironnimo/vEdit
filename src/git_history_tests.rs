@@ -362,11 +362,17 @@ fn primary_push_button_pushes_to_an_isolated_local_remote() {
     assert_eq!(app.projects[0].git_tracking.as_ref().unwrap().ahead, 1);
     let head = app.projects[0].recent_commits[0].hash.clone();
     let branch = app.projects[0].git_branch.clone().unwrap();
+    // Hold an old read across the click and deliver it after the push. The
+    // action must stay available and an obsolete snapshot must not undo it.
+    let stale = read_git_snapshot(&repository.0, None, None, None, false, None, None).unwrap();
+    app.projects[0].git_loading = true;
+    app.projects[0].git_status_request = Some(u64::MAX);
     let mut screen = history_screen(app);
     screen.run_steps(3);
     screen.get_by_label("Push 1 commit").click();
     screen.run_steps(2);
     assert!(screen.state().git_busy.is_some());
+    assert!(!screen.state().projects[0].git_loading);
     let deadline = Instant::now() + Duration::from_secs(15);
     while screen.state().git_busy.is_some() || screen.state().projects[0].git_loading {
         assert!(Instant::now() < deadline, "local push did not finish");
@@ -389,6 +395,24 @@ fn primary_push_button_pushes_to_an_isolated_local_remote() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), head);
+    screen
+        .state()
+        .sender
+        .send(WorkerResult::GitStatus {
+            root: repository.0.clone(),
+            request_id: u64::MAX,
+            result: Ok(Box::new(stale)),
+        })
+        .unwrap();
+    screen.state_mut().poll();
+    assert_eq!(
+        screen.state().projects[0]
+            .git_tracking
+            .as_ref()
+            .unwrap()
+            .ahead,
+        0
+    );
     screen.run_steps(3);
     assert!(screen.query_by_label("Push 1 commit").is_none());
     assert!(screen.query_by_label("Commit staged changes").is_some());
@@ -1252,7 +1276,7 @@ fn scrolling_near_the_end_requests_one_page_without_a_load_more_button() {
     });
     screen.run_steps(3);
     assert!(screen.state().projects[0].git_history_loading);
-    assert!(screen.query_by_label("Loading commits…").is_some());
+    assert!(screen.query_by_label("Loading commits…").is_none());
 
     let request = screen
         .state_mut()

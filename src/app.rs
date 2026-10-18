@@ -2434,6 +2434,19 @@ impl VEditApp {
             }
         }
         self.git_busy = Some(root.clone());
+        // Status reads use GIT_OPTIONAL_LOCKS=0 and need not hold up an action.
+        // Discard their results, which may describe the repository before or
+        // halfway through the action. Keep the last complete view until the
+        // post-action refresh arrives; late workers cannot overwrite it.
+        for project in &mut self.projects {
+            if project.git_root.as_ref() == Some(&root) || project.root == root {
+                project.git_status_request = None;
+                project.git_indicator_request = None;
+                project.git_loading = false;
+                project.git_refresh_pending = false;
+                project.last_git_refresh = Instant::now() - Duration::from_secs(30);
+            }
+        }
         let message = action.label().to_owned();
         self.status(format!("{message}…"), false);
         self.worker(move || WorkerResult::GitAction {

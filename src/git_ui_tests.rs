@@ -495,3 +495,39 @@ fn clean_repository_push_screenshot() {
     let mut screen = visual_tests::harness(app);
     visual_tests::snapshot(&mut screen, "vedit_git_push");
 }
+
+#[test]
+fn history_bottom_uses_the_full_sidebar_height_screenshot() {
+    let mut app = git_workspace();
+    let project = &mut app.projects[0];
+    project.git_changes.clear();
+    project.git_stats = git::WorkingTreeStats::default();
+    project.git_history_has_more = false;
+    let template = project.recent_commits[0].clone();
+    project.recent_commits = (0..120)
+        .map(|index| git::CommitSummary {
+            hash: format!("{index:040x}"),
+            parents: vec![format!("{:040x}", index + 1)],
+            refs: Vec::new(),
+            subject: format!("Improve repository navigation ({index})"),
+            ..template.clone()
+        })
+        .collect();
+    project.git_view.graph.clear();
+    let mut screen = visual_tests::harness(app);
+    visual_tests::settle_render(&mut screen);
+    let first = screen
+        .get_by_label("Improve repository navigation (0)")
+        .rect()
+        .center();
+    screen.hover_at(first);
+    screen.input_mut().events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: Vec2::new(0.0, -100_000.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    screen.run_steps(20);
+    screen.input_mut().events.push(egui::Event::PointerGone);
+    visual_tests::snapshot(&mut screen, "vedit_git_history_bottom");
+}

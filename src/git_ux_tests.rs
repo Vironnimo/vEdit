@@ -446,7 +446,7 @@ fn background_repository_refresh_does_not_keep_repainting_the_window() {
     app.projects[0].git_loading = true;
     let mut screen = harness(app, 1000.0, true);
     screen.run_steps(4);
-    assert!(screen.query_by_label("Refreshing repository").is_some());
+    assert!(screen.query_by_label("Refreshing repository").is_none());
     let settled = screen
         .try_run()
         .expect("automatic Git refresh must not animate the entire editor while waiting");
@@ -459,9 +459,11 @@ fn background_refresh_of_empty_history_also_settles() {
     let mut app = fixture();
     app.projects[0].git_loading = true;
     app.projects[0].recent_commits.clear();
+    app.projects[0].git_history_snapshot = Some(git::HistorySnapshot::default());
     let mut screen = harness(app, 1000.0, true);
     screen.run_steps(4);
-    assert!(screen.query_by_label("Loading commits…").is_some());
+    assert!(screen.query_by_label("Loading commits…").is_none());
+    assert!(screen.query_by_label("No commits yet").is_some());
     screen
         .try_run()
         .expect("a repository without commits must not animate on each automatic refresh");
@@ -469,7 +471,7 @@ fn background_refresh_of_empty_history_also_settles() {
 }
 
 #[test]
-fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
+fn source_control_refresh_does_not_change_header_or_branch_controls() {
     let mut app = fixture();
     let branch = "feature/header-Überarbeitung-der-sehr-langen-Branch-Beschreibung";
     app.projects[0].git_branch = Some(branch.into());
@@ -490,9 +492,7 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
             screen.get_by_label("Source control panel actions").rect()
         ]
     );
-    let spinner = screen.get_by_label("Refreshing repository").rect();
-    assert_eq!(spinner.size(), Vec2::splat(14.0));
-    assert!(spinner.left() > idle[0].right());
+    assert!(screen.query_by_label("Refreshing repository").is_none());
     screen.state_mut().projects[0].git_loading = false;
     screen.run_steps(3);
     assert_eq!(
@@ -504,6 +504,124 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
         ]
     );
     assert!(screen.query_by_label("Refreshing repository").is_none());
+}
+
+#[test]
+fn background_refresh_keeps_the_rendered_sidebar_and_actions_unchanged() {
+    for mode in ["push", "commit", "empty"] {
+        let mut app = fixture();
+        let project = &mut app.projects[0];
+        project.git_history_snapshot = Some(git::HistorySnapshot::default());
+        match mode {
+            "push" => {
+                project.git_tracking = Some(git::BranchInfo {
+                    name: Some("main".into()),
+                    upstream: Some("origin/main".into()),
+                    ahead: 3,
+                    behind: 0,
+                    divergence_known: true,
+                });
+            }
+            "commit" => {
+                project.commit_message = "Ready to commit".into();
+                project.git_changes.push(git::FileStatus {
+                    path: "file.rs".into(),
+                    original_path: None,
+                    index: git::FileChange::Modified,
+                    worktree: git::FileChange::None,
+                });
+            }
+            _ => project.recent_commits.clear(),
+        }
+        let mut screen = harness(app, 1000.0, true);
+        screen.run_steps(4);
+        let idle = screen.output().shapes.clone();
+        for loading in [true, false, true, false] {
+            screen.state_mut().projects[0].git_loading = loading;
+            screen.run_steps(1);
+            assert!(
+                idle == screen.output().shapes,
+                "background refresh changed painted content: {mode}, loading={loading}"
+            );
+        }
+    }
+}
+
+#[test]
+fn history_paging_preserves_sidebar_geometry_and_uses_the_full_height() {
+    for split in [None, Some(0.8)] {
+        let mut app = fixture();
+        let project = &mut app.projects[0];
+        let template = project.recent_commits[0].clone();
+        let page = |range: std::ops::Range<usize>| {
+            range
+                .map(|index| git::CommitSummary {
+                    hash: format!("{index:040x}"),
+                    parents: vec![format!("{:040x}", index + 1)],
+                    refs: Vec::new(),
+                    subject: format!("Page commit {index}"),
+                    ..template.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        project.recent_commits = page(0..120);
+        project.git_view.split_ratio = split;
+        let mut screen = harness(app, 1000.0, true);
+        screen.run_steps(4);
+        screen.state_mut().projects[0]
+            .git_view
+            .history_scroll_pending = Some(100_000.0);
+        screen.run_steps(3);
+        let geometry = |screen: &Harness<'_, VEditApp>| {
+            [
+                screen.get_by_label("Source control panel title").rect(),
+                screen.get_by_label("Source control panel actions").rect(),
+                screen.get_by_label("Resize Changes and History").rect(),
+                screen.get_by_label("History").rect(),
+                screen.get_by_label("Page commit 119").rect(),
+            ]
+        };
+        let idle = geometry(&screen);
+        let offset = screen.state().projects[0].git_view.history_scroll_offset;
+        let bottom = screen.state().projects[0]
+            .git_view
+            .history_rect
+            .unwrap()
+            .bottom();
+        assert!(
+            (bottom - idle[4].bottom()).abs() <= 1.0,
+            "History leaves unused space at the bottom: {} px",
+            bottom - idle[4].bottom()
+        );
+        screen.state_mut().projects[0].git_history_loading = true;
+        for _ in 0..3 {
+            screen.run_steps(1);
+            assert_eq!(
+                geometry(&screen),
+                idle,
+                "sidebar moved while loading a page"
+            );
+            assert_eq!(
+                screen.state().projects[0].git_view.history_scroll_offset,
+                offset
+            );
+        }
+        let project = &mut screen.state_mut().projects[0];
+        project.recent_commits.extend(page(120..180));
+        project.git_history_loading = false;
+        for _ in 0..3 {
+            screen.run_steps(1);
+            assert_eq!(
+                geometry(&screen),
+                idle,
+                "sidebar moved after receiving a page"
+            );
+            assert_eq!(
+                screen.state().projects[0].git_view.history_scroll_offset,
+                offset
+            );
+        }
+    }
 }
 
 #[test]

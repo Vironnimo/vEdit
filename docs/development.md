@@ -174,7 +174,12 @@ including project indicators and the worktree overview, pause in inactive or
 minimized windows; explicit operations can still complete there. Regaining focus
 or restoring the window bypasses the polling interval and refreshes the active
 repository and worktree overview immediately. A pending read receives one follow-up;
-an active Git action delays the read until it completes. The branch
+an active Git action delays the read until it completes. Background reads do not
+show activity markers or disable actions. Starting an action invalidates pending
+status results for that repository; optional index locks are disabled, so those
+read workers can finish without delaying the action. The subsequent refresh
+replaces the last complete view. History paging keeps the viewport geometry and
+scroll offset unchanged, without an activity footer or reserved bottom gap. The branch
 picker uses the latest refreshed refs; a switch runs without force or automatic stash
 and returns to the CLI after completion. The Changes/History divider is saved per
 project. Hover timestamps use the author time zone and a relative age.

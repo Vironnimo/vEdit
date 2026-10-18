@@ -1,6 +1,8 @@
-# vEdit 0.4.29
+# vEdit 0.4.30
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.30 hält automatische Git-Abfragen unsichtbar: keine blinkenden Ladepunkte und kein ausgegrauter Push-Button. Git-Aktionen bleiben während einer Statusabfrage bedienbar; veraltete Abfrageergebnisse können den Stand nach einer Aktion nicht überschreiben. Ältere History-Einträge werden ohne springende Sidebar nachgeladen. Der reservierte Leerraum unter dem Verlauf entfällt.
 
 Version 0.4.29 liest den Git-Status beim Aktivieren oder Wiederherstellen des Fensters sofort neu ein. Source control zeigt den Änderungsstatus nur noch einmal; die zusätzliche Changes-Überschrift und der leere Erklärungstext entfallen. Bei sauberem Arbeitsverzeichnis und ausstehenden Commits wird die Hauptaktion zu **Push**. Sobald Dateien oder offene Dokumente geändert sind, erscheinen wieder Commit-Nachricht und **Commit**. Eine bereits geschriebene Nachricht bleibt erhalten.
 
@@ -337,7 +339,7 @@ Oben stehen nur zwei kompakte Zeilen, weil Commits und Pushes meist von Agents k
 
 Git betrachtet den gespeicherten Dateistand. Bei ungespeicherten Dokumenten zeigt Source control deren Anzahl und **Save all files**; auch offene Ordner desselben Repositorys werden berücksichtigt. Nach dem Speichern müssen die gewünschten Änderungen weiterhin gestaged werden. Speichern löst keinen Commit aus.
 
-Automatische Git-Abfragen zeigen eine ruhige Punktanzeige, damit der Editor im Leerlauf nicht ständig neu zeichnet. Änderungen werden weiterhin automatisch aktualisiert.
+Automatische Git-Abfragen laufen ohne Ladeanzeige und ohne Bedienelemente zu sperren. Bis ein neues Ergebnis vorliegt, bleibt der zuletzt gelesene Stand sichtbar. Ausdrücklich gestartete Git-Aktionen zeigen Fortschritt und Fehler in der Statusleiste; während dieser Aktionen sind weitere Git-Aktionen gesperrt. Die History nutzt die verfügbare Höhe bis zum unteren Rand und lädt ältere Einträge ohne zusätzliche Ladezeile nach.
 
 **View → Source control** zeigt oben den Änderungsstatus, die Dateien und die Commit- beziehungsweise Push-Aktion, darunter **History**. Der Status nennt einmalig **No changes** oder die Anzahl geänderter Dateien; es gibt keine zusätzliche Changes-Überschrift und keinen Erklärungstext für eine leere Liste. Ohne eigene Aufteilung erhält der obere Bereich nur so viel Höhe, wie sein Inhalt braucht, höchstens die Hälfte. Ziehen an der horizontalen Trennlinie verteilt den Platz frei: **History** lässt sich bis knapp unter die Branch-Zeile hochziehen; dabei schrumpft zuerst der Änderungsbereich und dann die Repository-Liste. Die Höhe wird pro Projekt gespeichert. Doppelklick setzt die Aufteilung zurück. Beide Bereiche scrollen unabhängig. Änderungen stehen als Ordnerbaum getrennt nach **Staged**, **Unstaged** und **Untracked**, mit hinzugefügten und entfernten Zeilen pro Datei. Eine teilweise gestagte Datei erscheint in beiden passenden Gruppen mit den jeweiligen Zahlen. Binärdateien werden als solche angezeigt; für große unversionierte Dateien können die Zahlen fehlen.
 

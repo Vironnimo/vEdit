@@ -845,12 +845,6 @@ impl VEditApp {
                         ),
                     )
                 });
-                if selected == Some(SidebarView::SourceControl) {
-                    git_panel::refresh_indicator(
-                        ui,
-                        self.project().is_some_and(|project| project.git_loading),
-                    );
-                }
                 // Measure actions first so a long title cannot expand the panel
                 // response past its paint clip and leave an unpainted gutter.
                 let title = selected.map_or("Sidebar", SidebarView::title);

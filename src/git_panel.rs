@@ -867,6 +867,8 @@ impl VEditApp {
             .unwrap_or_else(|| project.root.clone());
         let repo = project.git_root.is_some();
         let loading = project.git_loading;
+        let initial_history_loading =
+            loading && project.git_history_snapshot.is_none() && project.recent_commits.is_empty();
         let push_count = project
             .git_tracking
             .as_ref()
@@ -1238,7 +1240,7 @@ impl VEditApp {
                     ui.add_space(4.0);
                     if let Some(count) = push_count {
                         let label = format!("Push {count} {}", if count == 1 { "commit" } else { "commits" });
-                        let push = ui.add_enabled_ui(!busy && !loading && project.git_error.is_none(), |ui| {
+                        let push = ui.add_enabled_ui(!busy, |ui| {
                             design::primary_button(ui, &label, Vec2::new(ui.available_width(), 26.0))
                         }).inner.on_hover_text("Push local commits to the configured remote");
                         state.keyboard_controls.push(push.id);
@@ -1396,7 +1398,8 @@ impl VEditApp {
                     }
                 }
                 if project.recent_commits.is_empty()
-                    && !loading
+                    && !initial_history_loading
+                    && !project.git_history_loading
                     && project.git_history_error.is_none()
                 {
                     ui.add_space(20.0);
@@ -1406,6 +1409,9 @@ impl VEditApp {
                             .size(11.0)
                             .color(MUTED),
                     );
+                }
+                if initial_history_loading {
+                    ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
                 }
                 let mut near_end = false;
                 let upstream = project
@@ -1417,8 +1423,7 @@ impl VEditApp {
                     ui.spacing_mut().scroll.floating = false;
                     let mut scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-history", &project.root))
-                        .auto_shrink([false, false])
-                        .max_height((ui.available_height() - 31.0).max(HISTORY_ROW_HEIGHT));
+                        .auto_shrink([false, false]);
                     if let Some(offset) = state.history_scroll_pending.take() {
                         scroll = scroll.vertical_scroll_offset(offset);
                     }
@@ -1517,17 +1522,9 @@ impl VEditApp {
                                 .max(1.0) as usize;
                     }
                 });
-                if project.git_history_loading || (project.recent_commits.is_empty() && loading) {
-                    ui.add_space(7.0);
-                    ui.horizontal(|ui| {
-                        if project.git_history_loading {
-                            ui.add(egui::Spinner::new().size(14.0).color(MUTED));
-                        } else {
-                            refresh_indicator(ui, true);
-                        }
-                        ui.label(RichText::new("Loading commits…").size(11.0).color(MUTED));
-                    });
-                }
+                // Page reads keep the existing viewport intact. A footer here
+                // changes the parent's measured height and makes the sidebar
+                // jump for a frame; reserving space for it wastes list height.
                 if near_end
                     && project.git_history_has_more
                     && !project.git_history_loading
@@ -1537,16 +1534,7 @@ impl VEditApp {
                     actions.push(GitUiAction::LoadMore);
                 }
             });
-            if busy {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0).color(MUTED));
-                    ui.label(
-                        RichText::new("Updating repository…")
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                });
-            }
+            // Explicit actions already report progress and errors in the status bar.
         }
         if (focus_requested || (previous_row_index.is_some() && state.keyboard_rows.is_empty()))
             && keyboard_target.is_none()
@@ -2124,32 +2112,6 @@ fn sync_status(ui: &mut egui::Ui, project: &Project) {
             .selectable(false),
     )
     .on_hover_text(tip);
-}
-
-pub(super) fn refresh_indicator(ui: &mut egui::Ui, running: bool) -> egui::Response {
-    // Keep this slot even while idle: periodic refresh must not move the title
-    // or repository controls, nor increase the header's height.
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
-    if running {
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::ProgressIndicator,
-                ui.is_enabled(),
-                "Refreshing repository",
-            )
-        });
-        // Automatic refreshes run every few seconds. An animated spinner here
-        // repaints the entire editor at display rate for every Git subprocess.
-        // The worker wakes the UI when the snapshot is ready; a static activity
-        // mark keeps that wait visible without creating an idle render loop.
-        for offset in [-4.0, 0.0, 4.0] {
-            ui.painter()
-                .circle_filled(rect.center() + Vec2::new(offset, 0.0), 1.25, MUTED);
-        }
-        response.on_hover_text("Refreshing repository")
-    } else {
-        response
-    }
 }
 
 /// A quiet, left-aligned section title. It stays clickable to move keyboard
