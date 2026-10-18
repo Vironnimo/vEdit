@@ -1,6 +1,8 @@
-# vEdit 0.4.30
+# vEdit 0.4.31
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.4.31 vereinfacht den Explorer: Ordner zeigen nur ihren Aufklapppfeil, Dateien kleinere Symbole; die Namen stehen bündig in einer gemeinsamen Spalte. Dateitabs sind schmaler und so hoch wie die Projekttabs. Beide verwenden dezent gerundete Hover-Flächen und eine schmale Linie für den aktiven Tab. Der zusätzliche Abstand über den Dateitabs entfällt.
 
 Version 0.4.30 hält automatische Git-Abfragen unsichtbar: keine blinkenden Ladepunkte und kein ausgegrauter Push-Button. Git-Aktionen bleiben während einer Statusabfrage bedienbar; veraltete Abfrageergebnisse können den Stand nach einer Aktion nicht überschreiben. Ältere History-Einträge werden ohne springende Sidebar nachgeladen. Der reservierte Leerraum unter dem Verlauf entfällt.
 

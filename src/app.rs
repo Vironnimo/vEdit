@@ -5067,7 +5067,7 @@ impl VEditApp {
         ui.spacing_mut().item_spacing.x = 0.0;
         let controls_width = 44.0 + if markdown { 38.0 } else { 0.0 };
         let tab_width = (ui.available_width() - controls_width).max(20.0);
-        ui.allocate_ui_with_layout(Vec2::new(tab_width, 37.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(tab_width, 28.0), Layout::left_to_right(Align::Min), |ui| {
         let tab_scroll = egui::ScrollArea::horizontal()
             .id_salt("document_tabs")
             .auto_shrink([false, true])
@@ -5084,9 +5084,9 @@ impl VEditApp {
                             if selected { TEXT } else { MUTED },
                             f32::INFINITY, *preview,
                         );
-                        let width = (title_galley.size().x + 65.0).clamp(125.0, if title == original_title { 230.0 } else { 300.0 });
+                        let width = (title_galley.size().x + 59.0).clamp(96.0, if title == original_title { 220.0 } else { 290.0 });
                         let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(width, 37.0), egui::Sense::click_and_drag());
+                            ui.allocate_exact_size(Vec2::new(width, 28.0), egui::Sense::click_and_drag());
                         tab_drop_rects.push((*id, rect));
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title)
@@ -5098,26 +5098,26 @@ impl VEditApp {
                             response.scroll_to_me(None);
                         }
                         let hovered = response.hovered();
-                        if selected || hovered {
+                        if hovered || response.context_menu_opened() {
                             ui.painter()
-                                .rect_filled(rect, 0.0, if hovered { SURFACE } else { BG });
+                                .rect_filled(rect, 5.0, HOVER);
                         }
                         if selected {
                             ui.painter().line_segment(
-                                [rect.left_bottom(), rect.right_bottom()],
-                                Stroke::new(2.0, ACCENT),
+                                [rect.left_bottom() + Vec2::new(8.0, -0.5), rect.right_bottom() + Vec2::new(-8.0, -0.5)],
+                                Stroke::new(1.5, ACCENT.gamma_multiply(0.85)),
                             );
                         }
                         let badge = file_badge(path.as_deref().unwrap_or(Path::new("")));
                         ui.painter().text(
-                            rect.left_center() + Vec2::new(13.0, 0.0),
+                            rect.left_center() + Vec2::new(9.0, 0.0),
                             egui::Align2::LEFT_CENTER,
                             badge,
-                            FontId::monospace(10.5),
+                            FontId::monospace(9.5),
                             file_color(path.as_deref()),
                         );
                         let clip = egui::Rect::from_min_max(
-                            rect.min + Vec2::new(36.0, 0.0),
+                            rect.min + Vec2::new(30.0, 0.0),
                             rect.max - Vec2::new(29.0, 0.0),
                         );
                         let painter = ui.painter().with_clip_rect(clip);
@@ -5132,7 +5132,7 @@ impl VEditApp {
                         } else {
                             painter.galley(
                                 egui::pos2(
-                                    rect.left() + 36.0,
+                                    rect.left() + 30.0,
                                     rect.center().y - title_galley.size().y * 0.5,
                                 ),
                                 title_galley,
@@ -5153,7 +5153,7 @@ impl VEditApp {
                         }
                         if hovered || close_response.hovered() || (selected && !*dirty) {
                             if close_response.hovered() {
-                                ui.painter().rect_filled(close_rect, 4.0, HOVER);
+                                ui.painter().rect_filled(close_rect, 4.0, SURFACE);
                             }
                             let c = close_rect.center();
                             ui.painter().line_segment(
@@ -5175,14 +5175,14 @@ impl VEditApp {
                         }
                         if *marks > 0 {
                             ui.painter().circle_filled(
-                                egui::pos2(rect.left() + 27.0, rect.bottom() - 8.0),
+                                egui::pos2(rect.left() + 22.0, rect.bottom() - 5.0),
                                 2.2,
                                 BLUE,
                             );
                         }
                         if *loading || *saving {
                             ui.painter().circle_filled(
-                                egui::pos2(rect.left() + 26.0, rect.center().y),
+                                egui::pos2(rect.left() + 24.0, rect.center().y),
                                 2.0,
                                 MUTED,
                             );
@@ -5231,7 +5231,7 @@ impl VEditApp {
             });
         self.register_tab_drop_strip(&tab_scroll, std::mem::take(&mut tab_drop_rects));
         });
-        ui.allocate_ui_with_layout(Vec2::new(controls_width, 37.0), Layout::right_to_left(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(controls_width, 28.0), Layout::right_to_left(Align::Center), |ui| {
             if self.tab_pointer_interaction_active() { ui.disable(); }
             self.agent_marks_toolbar(ui);
             if markdown {

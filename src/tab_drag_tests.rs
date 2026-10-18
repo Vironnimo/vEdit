@@ -1,6 +1,6 @@
 //! Real pointer drags and model moves must preserve buffers and pane-local state.
 use super::*;
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 
 fn fixture() -> VEditApp {
     let mut app = VEditApp::empty(egui::Context::default());
@@ -57,6 +57,39 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     });
     screen.run_steps(3);
     screen
+}
+
+#[test]
+fn compact_tabs_keep_the_hover_target_flush_with_the_pane_top() {
+    let mut screen = harness(fixture());
+    visual_tests::settle_render(&mut screen);
+    let pane = screen.state().editor_layout.focused;
+    let pane_rect = screen.state().editor_layout.rects[&pane];
+    let tab = screen.get_by_label("second.txt").rect();
+    assert_eq!(tab.top(), pane_rect.top(), "unused strip above file tabs");
+    assert!(
+        tab.height() <= 30.0,
+        "file tabs should stay compact: {tab:?}"
+    );
+    assert!(
+        tab.width() < 125.0,
+        "short names should not reserve a wide tab"
+    );
+    screen.hover_at(egui::pos2(tab.center().x, pane_rect.top() + 1.0));
+    screen.run_steps(2);
+    assert!(screen.output().shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::Rect(rect) if rect.rect == tab && rect.fill == HOVER && rect.corner_radius == egui::CornerRadius::same(5))));
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+        screen.snapshot_options(
+            "vedit_compact_tabs_hover",
+            &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+        );
+    } else {
+        screen.snapshot("vedit_compact_tabs_hover");
+    }
+    screen.get_by_label("second.txt").click();
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().title, "second.txt");
 }
 fn documents(app: &VEditApp, pane: u64) -> Vec<u64> {
     app.editor_layout
@@ -910,8 +943,8 @@ fn pointer_middle_click_and_close_button_keep_working_without_dragging() {
     screen.run_steps(2);
     assert!(!screen.state().pane_contains_tab(1, id));
     assert!(!screen.state().tab_drag_active());
-    let rect = screen.state().editor_layout.rects[&1];
-    let close = rect.left_top() + Vec2::new(125.0 - 16.0, 18.5);
+    let tab = screen.get_by_label("first.txt").rect();
+    let close = tab.right_center() - Vec2::new(16.0, 0.0);
     pointer(&mut screen, close, true, egui::PointerButton::Primary);
     pointer(&mut screen, close, false, egui::PointerButton::Primary);
     screen.run_steps(2);
