@@ -792,6 +792,7 @@ pub struct VEditApp {
     close_after_save: bool,
     exit_ready: bool,
     git_busy: Option<PathBuf>,
+    git_window_was_active: Option<bool>,
     git_indicator_requests: HashMap<u64, PathBuf>,
     repositories: git_panel::repositories::RepositoryOverview,
     diff: Option<(String, String)>,
@@ -1049,6 +1050,7 @@ impl VEditApp {
             close_after_save: false,
             exit_ready: false,
             git_busy: None,
+            git_window_was_active: None,
             git_indicator_requests: HashMap::new(),
             repositories: git_panel::repositories::RepositoryOverview::default(),
             diff: None,
@@ -2306,6 +2308,33 @@ impl VEditApp {
     fn git_polling_active(&self) -> bool {
         self.ctx
             .input(|input| input.focused && input.viewport().minimized != Some(true))
+    }
+
+    fn refresh_visible_git(&mut self) {
+        let active = self.git_polling_active();
+        // Focus events also cover a minimize/restore cycle during which the
+        // native backend did not render an inactive frame.
+        let resumed = active
+            && self.git_window_was_active.is_some()
+            && (self.git_window_was_active == Some(false)
+                || self
+                    .ctx
+                    .input(|input| input.events.contains(&egui::Event::WindowFocused(true))));
+        self.git_window_was_active = Some(active);
+        if !active {
+            return;
+        }
+        if resumed {
+            if let Some(project) = self.projects.get_mut(self.active_project) {
+                // Keep the refresh due even if a Git action currently owns the
+                // repository. An in-flight read gets one coalesced follow-up.
+                project.last_git_refresh = Instant::now() - Duration::from_secs(30);
+            }
+            self.repositories.request_refresh();
+        }
+        self.refresh_git(self.active_project, resumed);
+        self.refresh_inactive_git_indicators();
+        self.refresh_repository_overview();
     }
 
     fn refresh_git(&mut self, index: usize, force: bool) {
@@ -7111,6 +7140,8 @@ impl VEditApp {
     }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
         design::focus_visible(&self.ctx);
+        // Observe window focus before editor input routing can consume events.
+        self.refresh_visible_git();
         self.begin_region_focus_frame();
         self.capture_shortcut_input();
         self.preference_shortcuts();
@@ -7185,11 +7216,6 @@ impl VEditApp {
             && !jumping
         {
             self.handle_vim();
-        }
-        self.refresh_git(self.active_project, false);
-        if self.git_polling_active() {
-            self.refresh_inactive_git_indicators();
-            self.refresh_repository_overview();
         }
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();

@@ -171,7 +171,10 @@ commit where it remains in the loaded range, while the top follows new commits.
 Old page results cannot enter the new generation. History failures retry on the
 next visible poll; hidden histories catch up when shown again. Periodic Git reads,
 including project indicators and the worktree overview, pause in inactive or
-minimized windows; explicit operations can still complete there. The branch
+minimized windows; explicit operations can still complete there. Regaining focus
+or restoring the window bypasses the polling interval and refreshes the active
+repository and worktree overview immediately. A pending read receives one follow-up;
+an active Git action delays the read until it completes. The branch
 picker uses the latest refreshed refs; a switch runs without force or automatic stash
 and returns to the CLI after completion. The Changes/History divider is saved per
 project. Hover timestamps use the author time zone and a relative age.

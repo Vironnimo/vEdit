@@ -310,6 +310,137 @@ fn automatic_repository_refresh_pauses_in_background_and_when_minimized() {
 }
 
 #[test]
+fn restoring_the_window_refreshes_immediately_even_after_a_recent_read() {
+    for (focused, minimized) in [(false, false), (true, true)] {
+        let repository = HoverRepository::new();
+        let mut app = repository.app();
+        history_window_state(&mut app, focused, minimized);
+        app.refresh_visible_git();
+        fs::write(repository.0.join("external.txt"), "new while away\n").unwrap();
+        git::stage_all(&repository.0).unwrap();
+        git::commit(&repository.0, "While away").unwrap();
+        // No polling interval has elapsed. Returning still must start a read.
+        app.projects[0].last_git_refresh = Instant::now();
+        history_window_state(&mut app, true, false);
+        app.refresh_visible_git();
+        assert!(app.projects[0].git_loading);
+        wait_for_git_refresh(&mut app, 0);
+        assert_eq!(app.projects[0].recent_commits[0].subject, "While away");
+        app.refresh_visible_git();
+        assert!(!app.projects[0].git_loading);
+    }
+}
+
+#[test]
+fn primary_push_button_pushes_to_an_isolated_local_remote() {
+    let repository = HoverRepository::new();
+    let remote = repository.0.join(".git/push-test-remote.git");
+    for args in [
+        vec!["init", "--bare", remote.to_str().unwrap()],
+        vec!["remote", "add", "origin", remote.to_str().unwrap()],
+        vec!["push", "-u", "origin", "HEAD"],
+    ] {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repository.0.join("push.txt"), "local test\n").unwrap();
+    git::stage_all(&repository.0).unwrap();
+    git::commit(&repository.0, "Ready to push").unwrap();
+    let mut app = repository.app();
+    history_window_state(&mut app, true, false);
+    app.refresh_git(0, true);
+    wait_for_git_refresh(&mut app, 0);
+    assert_eq!(app.projects[0].git_tracking.as_ref().unwrap().ahead, 1);
+    let head = app.projects[0].recent_commits[0].hash.clone();
+    let branch = app.projects[0].git_branch.clone().unwrap();
+    let mut screen = history_screen(app);
+    screen.run_steps(3);
+    screen.get_by_label("Push 1 commit").click();
+    screen.run_steps(2);
+    assert!(screen.state().git_busy.is_some());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while screen.state().git_busy.is_some() || screen.state().projects[0].git_loading {
+        assert!(Instant::now() < deadline, "local push did not finish");
+        screen.state_mut().poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        screen.state().projects[0]
+            .git_tracking
+            .as_ref()
+            .unwrap()
+            .ahead,
+        0
+    );
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&remote)
+        .args(["rev-parse", &branch])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), head);
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Push 1 commit").is_none());
+    assert!(screen.query_by_label("Commit staged changes").is_some());
+}
+
+#[test]
+fn resume_coalesces_an_in_flight_read_and_waits_for_a_git_action() {
+    let repository = HoverRepository::new();
+    let mut app = repository.app();
+    history_window_state(&mut app, false, false);
+    app.refresh_visible_git();
+    app.projects[0].git_loading = true;
+    app.projects[0].git_status_request = Some(u64::MAX);
+    history_window_state(&mut app, true, false);
+    app.refresh_visible_git();
+    app.refresh_visible_git();
+    assert!(app.projects[0].git_refresh_pending);
+    assert_eq!(app.projects[0].git_status_request, Some(u64::MAX));
+    let snapshot = app.projects[0].git_history_snapshot.clone().unwrap();
+    deliver_refresh(&mut app, snapshot, None);
+    assert!(app.projects[0].git_loading);
+    assert!(!app.projects[0].git_refresh_pending);
+    wait_for_git_refresh(&mut app, 0);
+
+    history_window_state(&mut app, false, false);
+    app.refresh_visible_git();
+    app.git_busy = Some(repository.0.clone());
+    history_window_state(&mut app, true, false);
+    app.refresh_visible_git();
+    assert!(!app.projects[0].git_loading);
+    app.git_busy = None;
+    app.refresh_visible_git();
+    assert!(app.projects[0].git_loading);
+    wait_for_git_refresh(&mut app, 0);
+
+    // Some native minimize/restore cycles render no inactive frame. The
+    // restored focus event must still bypass the just-completed poll's timer.
+    let input = egui::RawInput {
+        focused: true,
+        events: vec![
+            egui::Event::WindowFocused(false),
+            egui::Event::WindowFocused(true),
+        ],
+        ..Default::default()
+    };
+    app.ctx.run_ui(input, |_| {}).textures_delta.clear();
+    app.refresh_visible_git();
+    assert!(app.projects[0].git_loading);
+    wait_for_git_refresh(&mut app, 0);
+}
+
+#[test]
 fn hidden_history_catches_up_when_source_control_is_shown() {
     let repository = HoverRepository::new();
     let mut app = repository.app();

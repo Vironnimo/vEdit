@@ -111,6 +111,110 @@ fn row_rects(screen: &Harness<'static, VEditApp>) -> Vec<egui::Rect> {
 }
 
 #[test]
+fn clean_repository_has_one_status_line_without_an_empty_changes_section() {
+    let mut screen = harness(fixture(), 360.0, false);
+    screen.run_steps(3);
+    assert!(screen.query_by_label("No changes").is_some());
+    assert!(screen.query_by_label("Changes").is_none());
+    assert!(
+        screen
+            .query_by_label("Saved changes appear here.")
+            .is_none()
+    );
+    assert!(screen.query_by_label("No changes on disk").is_none());
+}
+
+#[test]
+fn clean_ahead_branch_offers_push_and_edits_restore_the_commit_draft() {
+    let mut app = fixture();
+    app.projects[0].commit_message = "Keep my draft".into();
+    app.projects[0].git_view.section = GitSection::Changes;
+    app.projects[0].git_view.keyboard_last_focus =
+        Some(git_row_id(&app.projects[0].root, "commit-message"));
+    app.projects[0].git_tracking = Some(git::BranchInfo {
+        name: Some("main".into()),
+        upstream: Some("origin/main".into()),
+        ahead: 3,
+        behind: 0,
+        divergence_known: true,
+    });
+    let mut screen = harness(app, 360.0, false);
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Push 3 commits").is_some());
+    assert!(
+        screen.get_by_label("Push 3 commits").rect().bottom()
+            < screen.get_by_label("History").rect().top()
+    );
+    assert!(
+        screen
+            .query_by_role(egui::accesskit::Role::MultilineTextInput)
+            .is_none()
+    );
+    assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
+
+    screen.state_mut().focus_git_content();
+    screen.run_steps(3);
+    assert!(screen.get_by_label("No changes").is_focused());
+
+    let project = &mut screen.state_mut().projects[0];
+    project.git_changes.push(git::FileStatus {
+        path: "file.rs".into(),
+        original_path: None,
+        index: git::FileChange::None,
+        worktree: git::FileChange::Modified,
+    });
+    project
+        .git_view
+        .update_working_cache(&project.git_changes, &project.git_stats);
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Push 3 commits").is_none());
+    assert!(screen.query_by_label("Commit staged changes").is_some());
+    assert!(
+        screen
+            .query_by_role(egui::accesskit::Role::MultilineTextInput)
+            .is_some()
+    );
+    assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
+}
+
+#[test]
+fn unsaved_documents_and_unknown_remote_status_keep_the_commit_action() {
+    for case in [
+        "unsaved",
+        "no-upstream",
+        "unknown",
+        "up-to-date",
+        "detached",
+    ] {
+        let mut app = fixture();
+        let project = &mut app.projects[0];
+        project.git_tracking = Some(git::BranchInfo {
+            name: Some("main".into()),
+            upstream: (case != "no-upstream").then(|| "origin/main".into()),
+            ahead: if case == "up-to-date" { 0 } else { 3 },
+            behind: 0,
+            divergence_known: case != "unknown",
+        });
+        if case == "unsaved" {
+            let mut tab = EditorTab::new(None, "Draft".into());
+            tab.text = "Unsaved text".into();
+            tab.changed();
+            project.tabs.push(tab);
+        }
+        if case == "detached" {
+            project.git_branch = None;
+        }
+        let mut screen = harness(app, 360.0, false);
+        screen.run_steps(3);
+        assert!(screen.query_by_label("Push 3 commits").is_none(), "{case}");
+        assert!(
+            screen.query_by_label("Commit staged changes").is_some(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn git_explains_unsaved_documents_and_save_action_preserves_agent_draft_until_saved() {
     let mut app = fixture();
     app.projects[0].git_view.section = GitSection::Changes;
@@ -132,7 +236,7 @@ fn git_explains_unsaved_documents_and_save_action_preserves_agent_draft_until_sa
             .query_by_label("Saved changes appear here.")
             .is_none()
     );
-    assert!(screen.query_by_label("No changes on disk").is_some());
+    assert!(screen.query_by_label("No changes on disk").is_none());
     screen.get_by_label("Save all files").click();
     screen.run_steps(2);
     assert_eq!(screen.state().save_as, Some(id));
@@ -406,16 +510,17 @@ fn source_control_refresh_indicator_does_not_move_header_or_branch_controls() {
 fn stacked_git_regions_resize_and_keep_both_contents_visible() {
     let mut app = fixture();
     app.projects[0].git_view.section = GitSection::Changes;
+    app.projects[0].git_view.split_ratio = Some(0.5);
     let mut screen = harness(app, 360.0, false);
     screen.run_steps(3);
     assert!(
-        screen.get_by_label("Changes").rect().bottom()
+        screen.get_by_label("No changes").rect().bottom()
             < screen.get_by_label("History").rect().top()
     );
     assert!(
         screen
             .query_by_label("Saved changes appear here.")
-            .is_some()
+            .is_none()
     );
     assert!(screen.query_by_label_contains("Commit 0:").is_some());
     let before = screen.get_by_label("History").rect().top();
@@ -459,9 +564,9 @@ fn stacked_git_regions_resize_and_keep_both_contents_visible() {
     assert!(
         screen
             .query_by_label("Saved changes appear here.")
-            .is_some()
+            .is_none()
     );
-    screen.get_by_label("Changes").click();
+    screen.get_by_label("No changes").click();
     screen.run_steps(2);
     assert_eq!(
         screen.state().projects[0].git_view.section,

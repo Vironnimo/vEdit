@@ -478,3 +478,20 @@ fn repository_overview_screenshots() {
     project.git_parent_root = Some(PathBuf::from("C:/Code/vEdit"));
     visual_tests::snapshot(&mut screen, "vedit_git_parent_repository");
 }
+
+#[test]
+fn clean_repository_push_screenshot() {
+    let mut app = git_workspace();
+    let project = &mut app.projects[0];
+    project.git_changes.clear();
+    project.git_stats = git::WorkingTreeStats::default();
+    project.git_tracking = Some(git::BranchInfo {
+        name: Some("main".into()),
+        upstream: Some("origin/main".into()),
+        ahead: 3,
+        behind: 0,
+        divergence_known: true,
+    });
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "vedit_git_push");
+}

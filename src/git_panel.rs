@@ -867,6 +867,18 @@ impl VEditApp {
             .unwrap_or_else(|| project.root.clone());
         let repo = project.git_root.is_some();
         let loading = project.git_loading;
+        let push_count = project
+            .git_tracking
+            .as_ref()
+            .filter(|tracking| {
+                project.git_changes.is_empty()
+                    && unsaved_count == 0
+                    && project.git_branch.is_some()
+                    && tracking.upstream.is_some()
+                    && tracking.divergence_known
+                    && tracking.ahead > 0
+            })
+            .map(|tracking| tracking.ahead);
         let mut state = std::mem::take(&mut project.git_view);
         let previous_split_ratio = state.split_ratio;
         let mut actions = Vec::new();
@@ -885,7 +897,7 @@ impl VEditApp {
         let focus_requested = state.keyboard_focus_pending;
         let commit_message_id = git_row_id(&root, "commit-message");
         state.keyboard_controls.clear();
-        if repo {
+        if repo && push_count.is_none() {
             state.keyboard_controls.push(commit_message_id);
         }
         let focused = ui.memory(|memory| memory.focused());
@@ -915,7 +927,9 @@ impl VEditApp {
             keyboard_target = state
                 .keyboard_last_focus
                 .filter(|id| {
-                    (state.section == GitSection::Changes && *id == commit_message_id)
+                    (state.section == GitSection::Changes
+                        && push_count.is_none()
+                        && *id == commit_message_id)
                         || state
                             .keyboard_rows
                             .iter()
@@ -1062,8 +1076,17 @@ impl VEditApp {
             );
             ui.add(egui::Label::new(crate::paths::display(parent)).wrap());
         }
-        if repo && repository_overview(ui, project, &state) {
-            actions.push(GitUiAction::ReviewBranch);
+        if repo {
+            let (header, review) = repository_overview(ui, project, &state);
+            state.keyboard_header = Some(header.id);
+            state.keyboard_controls.push(header.id);
+            if header.clicked() {
+                state.section = GitSection::Changes;
+                state.keyboard_focus_pending = true;
+            }
+            if review {
+                actions.push(GitUiAction::ReviewBranch);
+            }
         }
         if let Some(error) = &project.git_error {
             error_note(ui, error);
@@ -1138,13 +1161,6 @@ impl VEditApp {
             // A child UI keeps overflowing content from pushing the divider down.
             ui.new_child(egui::UiBuilder::new().max_rect(changes_rect)).scope(|ui| {
                 ui.set_clip_rect(changes_rect.intersect(ui.clip_rect()));
-                let header = region_header(ui, "Changes", ());
-                state.keyboard_header = Some(header.id);
-                state.keyboard_controls.push(header.id);
-                if header.clicked() {
-                    state.section = GitSection::Changes;
-                    state.keyboard_focus_pending = true;
-                }
                 let height = ui.available_height();
                 egui::ScrollArea::vertical().id_salt(("git-changes-region", project_index)).auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_max_height(height);
@@ -1173,31 +1189,17 @@ impl VEditApp {
                             .map(|cache| (cache.groups[0].1.summary.total, cache.conflicted))
                             .unwrap_or_default()
                     };
-                    let composer_height = if conflicted { 82.0 } else { 62.0 };
+                    let composer_height = if push_count.is_some() { 30.0 } else if conflicted { 82.0 } else { 62.0 };
                     if let Some(error) = &project.git_stats_error {
                         error_note(ui, &format!("Line counts unavailable: {error}"));
                     }
                     let tree_top = ui.cursor().top();
                     let tree_scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-working-tree", project_index))
-                        .auto_shrink([false, false])
+                        .auto_shrink([false, true])
                         .min_scrolled_height(0.0)
                         .max_height((ui.available_height() - composer_height).max(24.0))
                         .show(ui, |ui| {
-                            // The summary above already says "No changes"; one
-                            // quiet hint is enough here.
-                            if project.git_changes.is_empty() {
-                                ui.add_space(10.0);
-                                ui.label(
-                                    RichText::new(if unsaved_count > 0 {
-                                        "No changes on disk"
-                                    } else {
-                                        "Saved changes appear here."
-                                    })
-                                    .size(11.5)
-                                    .color(MUTED),
-                                );
-                            }
                             if let Some(cache) = &state.working_cache {
                                 for (group, tree) in &cache.groups {
                                     if tree.summary.total == 0 {
@@ -1234,6 +1236,23 @@ impl VEditApp {
                             .max(1.0) as usize;
                     }
                     ui.add_space(4.0);
+                    if let Some(count) = push_count {
+                        let label = format!("Push {count} {}", if count == 1 { "commit" } else { "commits" });
+                        let push = ui.add_enabled_ui(!busy && !loading && project.git_error.is_none(), |ui| {
+                            design::primary_button(ui, &label, Vec2::new(ui.available_width(), 26.0))
+                        }).inner.on_hover_text("Push local commits to the configured remote");
+                        state.keyboard_controls.push(push.id);
+                        if ui.memory(|memory| memory.has_focus(commit_message_id)) {
+                            push.request_focus();
+                        }
+                        if push.gained_focus() {
+                            push.scroll_to_me(None);
+                        }
+                        if push.clicked() {
+                            actions.push(GitUiAction::Push);
+                        }
+                        return;
+                    }
                     let composer = ui.add(
                         egui::TextEdit::multiline(&mut project.commit_message)
                             .id(commit_message_id)
@@ -1962,22 +1981,27 @@ fn error_note(ui: &mut egui::Ui, error: &str) {
 
 /// Horizontal text inset shared by the branch, summary and section titles.
 const SECTION_TEXT_INSET: f32 = 4.0;
-/// Changes keeps at least its header when History is pulled up.
+/// Keep room for the first control when History is pulled up.
 const CHANGES_MIN_HEIGHT: f32 = 34.0;
 const HISTORY_MIN_HEIGHT: f32 = 120.0;
 const DIVIDER_HEIGHT: f32 = 9.0;
 
 /// One quiet line with what matters for an overview: changed files, their
 /// line delta, and how far the branch has moved from the local main branch.
-/// Remote actions live in the panel menu; agents usually commit and push.
-/// Returns true when the main comparison was clicked to review the branch.
-fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewState) -> bool {
+/// This is also the keyboard entry point for the working-tree region.
+/// Returns the working-tree status control and whether to review the branch.
+fn repository_overview(
+    ui: &mut egui::Ui,
+    project: &Project,
+    state: &GitViewState,
+) -> (egui::Response, bool) {
     let mut review = false;
+    let mut status = None;
     let inset = egui::Margin {
         left: SECTION_TEXT_INSET as i8,
         ..Default::default()
     };
-    egui::Frame::new().inner_margin(inset).show(ui, |ui| {
+    let frame = egui::Frame::new().inner_margin(inset).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
             if let Some(cache) = &state.working_cache {
@@ -1989,21 +2013,16 @@ fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewStat
                     cache.groups[1].1.summary.total,
                     cache.groups[2].1.summary.total
                 );
-                if cache.conflicted {
-                    ui.label(
-                        RichText::new(format!("Conflicts · {files}"))
-                            .size(11.5)
-                            .color(RED),
-                    )
-                    .on_hover_text(breakdown);
+                let (label, color) = if cache.conflicted {
+                    (format!("Conflicts · {files}"), RED)
                 } else if count == 0 {
-                    ui.label(RichText::new("No changes").size(11.5).color(MUTED));
+                    ("No changes".into(), MUTED)
                 } else {
-                    ui.label(RichText::new(files).size(11.5).color(TEXT))
-                        .on_hover_text(format!(
-                            "{breakdown}\nA partially staged file counts as staged and unstaged."
-                        ));
-                }
+                    (files, TEXT)
+                };
+                status = Some(ui.add(egui::Label::new(RichText::new(label).size(11.5).color(color))
+                    .sense(egui::Sense::click()))
+                    .on_hover_text(format!("{breakdown}\nA partially staged file counts as staged and unstaged.")));
                 let (added, removed) =
                     cache.groups.iter().fold((0u64, 0u64), |(a, r), (_, tree)| {
                         (
@@ -2061,7 +2080,7 @@ fn repository_overview(ui: &mut egui::Ui, project: &Project, state: &GitViewStat
             }
         })
     });
-    review
+    (status.unwrap_or(frame.response), review)
 }
 
 /// Commits to push and pull, right-aligned beside the branch name.

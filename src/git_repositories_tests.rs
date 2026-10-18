@@ -1034,7 +1034,7 @@ fn overview_screenshot() {
     });
     visual_tests::snapshot(&mut screen, "vedit_git_repositories");
 
-    // Pulling History up shrinks Changes to its header, then the repository
+    // Pulling History up shrinks the change controls, then the repository
     // list, until History fills nearly the whole panel.
     let start = screen
         .get_by_label("Resize Changes and History")
@@ -1065,7 +1065,7 @@ fn overview_screenshot() {
         history.top() < title.bottom() + 200.0,
         "History stays low at {history:?}"
     );
-    assert!(screen.get_by_label("Changes").rect().bottom() < history.top());
+    assert!(screen.get_by_label("No changes").rect().bottom() < history.top());
 }
 
 /// A real repository with seven linked worktrees created by `git worktree add`.
