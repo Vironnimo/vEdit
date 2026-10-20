@@ -347,8 +347,13 @@ fn external_changes_are_preserved_and_conflicted_editor_edits_remain_dirty() {
     assert_eq!(tab.text, "my unsaved edit");
     assert_eq!(tab.saved_text, "original");
     assert!(tab.dirty);
-    assert!(tab.error.as_ref().unwrap().contains("changed on disk"));
-    assert!(app.status.as_ref().unwrap().1);
+    // The newer disk version becomes a decision for the user, not a file error.
+    assert!(tab.error.is_none());
+    let conflict = tab.disk_conflict.as_ref().expect("a visible disk conflict");
+    assert_eq!(conflict.disk.text, "changed by another editor");
+    let status = app.status.as_ref().unwrap();
+    assert!(status.1);
+    assert!(status.0.contains("changed on disk"));
 }
 
 #[test]
@@ -501,7 +506,11 @@ fn native_save_as_overwrites_only_the_confirmed_fingerprint() {
     );
     assert_eq!(app.tab().unwrap().text, "later edits");
     assert!(app.tab().unwrap().dirty);
-    assert!(app.tab().unwrap().error.is_some());
+    assert_eq!(
+        app.tab().unwrap().disk_conflict.as_ref().unwrap().disk.text,
+        "external change after confirmation"
+    );
+    assert!(app.status.as_ref().unwrap().1);
 }
 
 #[test]

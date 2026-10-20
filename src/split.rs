@@ -780,6 +780,50 @@ impl VEditApp {
         }
     }
     /// Explicit agent navigation also updates parked views, without changing project focus.
+    /// Move every pane's view of `id` through a replacement of its whole text,
+    /// so cursors, selections and scroll positions stay on the same lines.
+    pub(super) fn remap_document_views(
+        &mut self,
+        id: u64,
+        position: &dyn Fn(usize) -> usize,
+        scroll: &dyn Fn(f32) -> f32,
+    ) {
+        let layouts = std::iter::once(&mut self.editor_layout).chain(
+            self.projects
+                .iter_mut()
+                .filter_map(|project| project.layout.as_mut()),
+        );
+        for layout in layouts {
+            for pane in &mut layout.panes {
+                if let Some(state) = pane.states.get_mut(&id) {
+                    state.navigation = state.navigation.mapped(position);
+                    let start = position(state.selection.start);
+                    state.selection = start..position(state.selection.end).max(start);
+                    if let Some([x, y]) = state.source_scroll {
+                        state.source_scroll = Some([x, scroll(y)]);
+                    }
+                }
+            }
+        }
+        // Rendered panes restore these offsets on their next frame.
+        let mut offsets: HashMap<(u64, u64), Vec2> = self
+            .find
+            .view_scroll
+            .iter()
+            .filter(|((_, document), _)| *document == id)
+            .map(|(key, (_, offset))| (*key, *offset))
+            .collect();
+        for (key, offset) in &self.find.restore_scroll {
+            if key.1 == id {
+                offsets.insert(*key, *offset);
+            }
+        }
+        for (key, offset) in offsets {
+            self.find
+                .restore_scroll
+                .insert(key, Vec2::new(offset.x, scroll(offset.y)));
+        }
+    }
     pub(super) fn sync_external_document_navigation(&mut self, id: u64) {
         let Some((pi, ti)) = self.tab_location(id) else {
             return;
@@ -1226,7 +1270,7 @@ impl VEditApp {
             }
         }
     }
-    fn tab_location(&self, id: u64) -> Option<(usize, usize)> {
+    pub(super) fn tab_location(&self, id: u64) -> Option<(usize, usize)> {
         self.projects
             .iter()
             .enumerate()

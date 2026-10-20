@@ -247,6 +247,16 @@ impl VimNavigation {
             .map(|anchor| anchor.saturating_add_signed(delta));
         navigation
     }
+
+    /// Move a view's cursor and visual anchor through a replacement of the whole
+    /// text, e.g. an external reload. Modal state and pending commands remain.
+    pub fn mapped(&self, map: impl Fn(usize) -> usize) -> Self {
+        let mut navigation = self.clone();
+        navigation.cursor = map(navigation.cursor);
+        navigation.visual_anchor = navigation.visual_anchor.map(&map);
+        navigation.preferred_column = None;
+        navigation
+    }
 }
 
 #[derive(Clone, Debug)]

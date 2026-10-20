@@ -102,6 +102,25 @@ impl VEditApp {
                 }
                 ui.close();
             }
+            let can_compare = self
+                .tab()
+                .is_some_and(|tab| tab.path.is_some() && !tab.loading);
+            if ui
+                .add_enabled_ui(can_compare, |ui| {
+                    design::menu_item(
+                        ui,
+                        "Compare with saved",
+                        &self.shortcut_label(keybindings::Action::CompareWithSaved),
+                        "Show the unsaved changes of this document as a diff",
+                    )
+                })
+                .inner
+                .on_disabled_hover_text("New files have no saved version to compare with")
+                .clicked()
+            {
+                self.compare_current_with_saved();
+                ui.close();
+            }
             ui.separator();
             if design::menu_item(
                 ui,

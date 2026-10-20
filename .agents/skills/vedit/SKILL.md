@@ -35,6 +35,7 @@ Commands return one JSON document on stdout: `ok`, `result`, and `error` on fail
 
 - Inspect each item of multi-item responses. `complete:false` leaves completed effects applied. Correct failed items before retrying them; a replacement review needs its complete intended manifest.
 - A tab is ready when `loading:false` and `error:null`. A save is complete when `saving:false`, `dirty:false` and `error:null`. Use `tabs` while pending; inspect `location_error` for navigation/review errors.
+- `disk_conflict:true` in `tabs` means the file changed on disk while the buffer has unsaved edits. Reading and editing still work; `save` fails with `disk_conflict` and writes nothing. Keep the buffer with `save-as`, or tell the user to choose a version in the editor banner. A clean buffer follows disk changes as one Undo step.
 - `file` returns a job ID; use `file-job ID` until `complete:true`, then require `applied:true` and no error. For tasks, use `output` until `running:false` and inspect its exit status.
 - Lists continue at `next_offset`. `read`/`output` continue at `next_line` and `next_column`; pass both. Concatenate byte continuations directly. Insert a newline between complete `read` line pages; `output` includes its separators. Keep one revision across buffer pages.
 - After uncertain delivery or a stopped shell, inspect relevant state before repeating a mutation: `tabs`, `layout`, `status.file_jobs`, `bookmarks`, or `agent-marks batch`.

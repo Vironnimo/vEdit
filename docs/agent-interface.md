@@ -4,6 +4,18 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
+## Disk conflicts and draft comparison
+
+Agents often rewrite a file the user has open. vEdit treats the disk as the newer truth only while the buffer has nothing to lose:
+
+- **Clean buffer.** A periodic disk check (every 2 s, metadata first) reloads it as one Undo step in both native and Vim history. Each pane keeps its cursor, selection and first visible line on the same text, mapped through a line diff. The status bar briefly reports `Reloaded … from disk: N lines changed · Ctrl+Z restores` and keeps a `Reloaded` save state until the next edit. Above 4 MiB of combined old and new text the positions keep their line and column instead of being diffed on the UI thread; Undo still restores the previous text, within the editor's normal Undo history limits.
+- **Dirty buffer.** The buffer is kept unchanged and the newer disk version is held in memory as a disk conflict. `tabs` reports `disk_conflict:true`. Reading, finding, diffing, selections, edits, replacements and `save_as` work as usual. Only `save` to the original path is refused with the error `disk_conflict`, because it would overwrite the disk version; nothing is written. Autosave pauses for the document. An unchanged conflicted file is not read again on each check.
+- **The user decides** in a banner above the editor: **Compare** (disk version → buffer as a diff, Esc closes), **Use disk version** (one Undo step; the buffer becomes clean), **Keep my version** (the disk version becomes the comparison baseline; the buffer stays dirty and the next save, or autosave for a user buffer, replaces it) or **Save as…**. A buffer undone back to its saved text leaves the conflict and follows the disk.
+- A save that meets a newer disk version becomes the same conflict. Recovered edits whose file changed while vEdit was closed open as a conflict as well; the recovery snapshot keeps its original comparison baseline until the user chooses.
+- Disk-check results carry the checked path and comparison fingerprint. A result for a tab that was renamed, saved or reloaded meanwhile is ignored. A Save As confirmed while a save is still running starts after it finishes.
+
+`Compare with saved` (palette, File menu, tab context menu, or a click on `Agent draft`/`Unsaved` in the status bar) shows the buffer against its saved text in the same diff view. Line-ending differences such as raw CRLF in CLI edits are not shown as changes. Untitled buffers have no saved version and disable the command. The agent-draft flag ends whenever the buffer is no longer dirty, including Undo back to the saved text, and is not persisted when the user discards changes on exit. A buffer that loses its file through a Recycle Bin deletion keeps its draft state: user edits do not become an agent draft.
+
 ## Project application launches (0.4.32)
 
 `launch list|configure|select|start|stop|output` configures and operates named application variants for an explicit `--workspace` or the active project. The GUI uses the same project state for Play, the variant dropdown and Application output. Each project owns one run, separate from the existing short-lived task runner; no active source file is required.

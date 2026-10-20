@@ -513,6 +513,7 @@
     "insert": "Ordinary Vim Insert is finished as a separate undo transaction. If finishing a counted Insert would change observed text, the request fails counted_insert_active without effects; finish it in the app and read again.",
     "new": "Creates a buffer only, never writes disk. Omit path for untitled; provided absolute path must not exist.",
     "save_as": "Requires a nonexistent destination; never overwrites. saving:true means pending: inspect tabs until saving:false, dirty:false and error:null. save retains current path and its external-change guard.",
+    "disk_conflict": "tabs reports disk_conflict:true when the file changed on disk while the buffer has unsaved edits. read, find, diff, selection, edit, replace and save_as still work; save refuses with disk_conflict and writes nothing. Keep the buffer with save_as or ask the user to choose Use disk version or Keep my version in the editor banner. A clean buffer follows disk changes as one Undo step instead.",
     "selection": "Omit range to inspect selected text/mode/history; set range with expected_revision to focus source and enter Vim Visual (empty range returns Normal). End exclusive.",
     "find": "Literal case/whole-word search of the current buffer; no GUI Find query or cursor is changed. Use a returned range with selection to reveal it.",
     "replace": "Literal replacement in the current buffer, all:true by default; all:false replaces the first document match. At most 10000 matches, one undo step; no write.",
