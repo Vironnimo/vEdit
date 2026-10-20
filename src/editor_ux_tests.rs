@@ -21,7 +21,24 @@ fn fixture(text: &str, markdown: bool) -> VEditApp {
 }
 
 fn harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
-    let mut screen = Harness::builder()
+    harness_with(app, size, Harness::<VEditApp>::builder())
+}
+
+/// Frames 1/60 s apart, so edits stay within the text widget's Undo grouping.
+fn fast_harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
+    harness_with(
+        app,
+        size,
+        Harness::<VEditApp>::builder().with_step_dt(1.0 / 60.0),
+    )
+}
+
+fn harness_with(
+    app: VEditApp,
+    size: [f32; 2],
+    builder: egui_kittest::HarnessBuilder<VEditApp>,
+) -> Harness<'static, VEditApp> {
+    let mut screen = builder
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
@@ -260,6 +277,62 @@ fn replacement_enter_does_not_skip_adjacent_matches_and_updates_count() {
     );
     key(&mut screen, Key::Escape, egui::Modifiers::NONE);
     assert!(!screen.state().find_visible);
+}
+
+#[test]
+fn native_undo_restores_the_exact_text_before_replace_and_replace_all() {
+    let mut app = fixture("alpha foo beta foo\n", false);
+    app.settings.vim = false;
+    app.find_visible = true;
+    app.replace_visible = true;
+    app.find_text = "foo".into();
+    app.replace_text = "bar".into();
+    let mut screen = fast_harness(app, [1200.0, 760.0]);
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    // Typing and replacing quickly after each other would otherwise share
+    // one native Undo step, and Undo would also remove the typing.
+    let widget = screen
+        .state()
+        .document_widget_id(screen.state().tab().unwrap().id);
+    screen.ctx.memory_mut(|memory| memory.request_focus(widget));
+    screen.run_steps(1);
+    text(&mut screen, "typed ");
+    let typed = "typed alpha foo beta foo\n";
+    assert_eq!(screen.state().tab().unwrap().text, typed);
+    screen.get_by_label("Replace all").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "typed alpha bar beta bar\n"
+    );
+    key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+    key(&mut screen, Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        typed,
+        "one Undo reverts Replace all and keeps the typing before it"
+    );
+
+    screen.state_mut().find_visible = true;
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    screen.ctx.memory_mut(|memory| memory.request_focus(widget));
+    screen.run_steps(1);
+    text(&mut screen, "more ");
+    let typed = "more typed alpha foo beta foo\n";
+    assert_eq!(screen.state().tab().unwrap().text, typed);
+    screen.get_by_label("Replace").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "more typed alpha bar beta foo\n"
+    );
+    key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+    key(&mut screen, Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        typed,
+        "one Undo reverts Replace and keeps the typing before it"
+    );
 }
 
 #[test]

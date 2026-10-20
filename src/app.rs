@@ -6394,6 +6394,11 @@ impl VEditApp {
                 .cloned()
             {
                 let replacement = self.replace_text.clone();
+                // Without Vim, the text widget owns Undo: record the text
+                // before this programmatic edit so Ctrl+Z restores it exactly.
+                if let Some(id) = self.tab().map(|tab| tab.id) {
+                    self.context_native_undo_checkpoint(id);
+                }
                 if let Some(tab) = self.tab_mut() {
                     let edit = editor::replace_selection(&tab.text, range, &replacement);
                     let cursor = edit.selection.end;
@@ -6420,6 +6425,9 @@ impl VEditApp {
             let query = self.find_text.clone();
             let replacement = self.replace_text.clone();
             let options = self.find_options();
+            if let Some(id) = self.tab().map(|tab| tab.id) {
+                self.context_native_undo_checkpoint(id);
+            }
             if let Some(tab) = self.tab_mut() {
                 let (edit, count) = editor::replace_all(
                     &tab.text,
