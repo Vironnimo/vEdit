@@ -385,6 +385,14 @@ impl VEditApp {
                         ));
                         continue;
                     }
+                    if let Some(error) = tab
+                        .path
+                        .as_deref()
+                        .and_then(|path| self.git_checkout_save_error(path))
+                    {
+                        items.push(item_error(id, "git_checkout_running", &error));
+                        continue;
+                    }
                     self.save_tab(id, None);
                     let tab = &self.projects[project].tabs[index];
                     items

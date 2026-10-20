@@ -790,6 +790,7 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
         branch: project.git_branch.clone(),
         tracking: project.git_tracking.clone(),
         main_comparison: project.git_main_comparison.clone(),
+        untracked_collapsed: false,
         files,
         stats: project.git_stats.clone(),
         stats_error: None,

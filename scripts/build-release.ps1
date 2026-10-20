@@ -4,12 +4,32 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $releaseDirectory = Join-Path $projectRoot 'dist/vEdit'
 $preservedBinaries = [System.Collections.Generic.List[object]]::new()
 
+function Remove-ExitedEditorBackups([string]$Directory) {
+    # A backup stays while any process with its PID runs; a reused PID only delays removal.
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return }
+    Get-ChildItem -LiteralPath $Directory -File -Filter 'vedit-running-*.exe' |
+        Where-Object { $_.Name -match '^vedit-running-(\d+)\.exe$' } |
+        ForEach-Object {
+            $backupFile = $_
+            $processId = [int]$Matches[1]
+            if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { return }
+            try {
+                Remove-Item -LiteralPath $backupFile.FullName -ErrorAction Stop
+                Write-Output "Removed the backup of an exited editor: $($backupFile.Name)"
+            }
+            catch {
+                Write-Warning "Could not remove $($backupFile.FullName): $($_.Exception.Message)"
+            }
+        }
+}
+
 function Preserve-RunningEditor([string]$BinaryPath) {
     $absoluteBinary = [System.IO.Path]::GetFullPath($BinaryPath)
     $workspacePrefix = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
     if (-not $absoluteBinary.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'The release binary must remain inside the project workspace.'
     }
+    Remove-ExitedEditorBackups (Split-Path -Parent $absoluteBinary)
     if (-not (Test-Path -LiteralPath $absoluteBinary -PathType Leaf)) { return }
     try {
         $probe = [System.IO.File]::Open($absoluteBinary, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)

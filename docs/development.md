@@ -112,7 +112,10 @@ the repository vEdit skill, visual references and third-party licenses.
 A running editor is preserved under a process-specific filename if it locks an
 output binary. Its window and documents remain open; it continues using the old
 code until the user closes and starts vEdit again. Do not terminate it to force a
-build. Verify both packaged binaries and relevant copied files against the build
+build. On each run the script deletes `vedit-running-<pid>.exe` backups in
+`target/release/` and `dist/vEdit/` whose process no longer exists; a backup
+stays while any process with that PID runs (also a reused PID), and a backup that
+cannot be deleted only produces a warning. Verify both packaged binaries and relevant copied files against the build
 outputs. `target/`, `dist/`, local backups and the shortcut are ignored by Git.
 
 ## vEdit branding and compatibility

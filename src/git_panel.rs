@@ -726,6 +726,7 @@ enum GitUiAction {
     ReviewCommit(String),
     ReviewBranch,
     ReviewWorkingTree,
+    CancelAction,
 }
 
 impl VEditApp {
@@ -1071,6 +1072,23 @@ impl VEditApp {
         }
         if let Some(error) = &project.git_error {
             error_note(ui, error);
+        }
+        if let Some(action) = self
+            .git_action
+            .as_ref()
+            .filter(|action| action.root == root)
+            && ui.horizontal(|ui| action.progress_ui(ui, 11.5)).inner
+        {
+            actions.push(GitUiAction::CancelAction);
+        }
+        if repo && project.git_untracked_collapsed {
+            ui.label(
+                RichText::new(
+                    "Too many untracked files to list individually; untracked folders are shown as a whole. Add build outputs to .gitignore to see single files again.",
+                )
+                .size(11.0)
+                .color(MUTED),
+            );
         }
         if !repo {
             ui.add_space(12.0);
@@ -1939,6 +1957,7 @@ impl VEditApp {
                 GitUiAction::ReviewWorkingTree => {
                     self.show_change_review(project_index, git::ReviewSource::WorkingTree)
                 }
+                GitUiAction::CancelAction => self.cancel_git_action(),
             }
         }
     }

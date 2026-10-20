@@ -232,6 +232,8 @@ struct Project {
     git_tracking: Option<git::BranchInfo>,
     git_main_comparison: Result<Option<git::BranchComparison>, String>,
     git_changes: Vec<git::FileStatus>,
+    /// `git_changes` lists untracked folders because there were too many files.
+    git_untracked_collapsed: bool,
     /// Explorer decorations for `git_changes`, rebuilt on first use after a change.
     explorer_git: Option<explorer_git::ExplorerGitMarks>,
     git_stats: git::WorkingTreeStats,
@@ -289,6 +291,7 @@ impl Project {
             git_tracking: None,
             git_main_comparison: Ok(None),
             git_changes: Vec::new(),
+            git_untracked_collapsed: false,
             explorer_git: None,
             git_stats: git::WorkingTreeStats::default(),
             git_stats_error: None,
@@ -340,6 +343,9 @@ struct EditorTab {
     recovery_cleanup_pending: Option<u64>,
     recovery_cleanup_retry_at: Option<Instant>,
     recovery_generation: u64,
+    /// A recovery file may still exist although the buffer matches the disk,
+    /// for example after a save or when recovered text equals the file.
+    recovery_stale: bool,
     revision: u64,
     fingerprint: Option<workspace::FileFingerprint>,
     line_ending: workspace::LineEnding,
@@ -381,8 +387,12 @@ struct EditorTab {
 impl EditorTab {
     fn new(path: Option<PathBuf>, title: String) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = (u64::from(std::process::id()) << 32) | NEXT.fetch_add(1, Ordering::Relaxed);
-        let recovery_path = recovery_directory().join(format!("{}-{id}.txt", std::process::id()));
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = (u64::from(std::process::id()) << 32) | sequence;
+        let recovery_path = recovery_directory().join(format!(
+            "{}-{sequence}.txt",
+            crate::recovery::session_prefix()
+        ));
         Self {
             id,
             path,
@@ -398,6 +408,7 @@ impl EditorTab {
             recovery_cleanup_pending: None,
             recovery_cleanup_retry_at: None,
             recovery_generation: 0,
+            recovery_stale: false,
             revision: 0,
             fingerprint: None,
             line_ending: workspace::LineEnding::Lf,
@@ -515,6 +526,7 @@ struct GitSnapshot {
     tracking: Option<git::BranchInfo>,
     main_comparison: Result<Option<git::BranchComparison>, String>,
     files: Vec<git::FileStatus>,
+    untracked_collapsed: bool,
     stats: git::WorkingTreeStats,
     stats_error: Option<String>,
     /// HEAD as the status read reported it; `None` when Git did not say.
@@ -547,6 +559,7 @@ fn read_git_snapshot(
             tracking: None,
             main_comparison: Ok(None),
             files: Vec::new(),
+            untracked_collapsed: false,
             stats: git::WorkingTreeStats::default(),
             stats_error: None,
             head: None,
@@ -610,6 +623,7 @@ fn read_git_snapshot(
         branch: status.branch,
         tracking: Some(tracking),
         main_comparison,
+        untracked_collapsed: status.untracked_collapsed,
         files: status.files,
         stats,
         stats_error,
@@ -745,6 +759,8 @@ enum WorkerResult {
         base: Arc<str>,
         hunks: Vec<crate::line_diff::Hunk>,
     },
+    /// A background job panicked; its own error result follows if it has one.
+    Panicked(String),
 }
 impl WorkerResult {
     /// A periodic disk check that found nothing waits for the next scheduled
@@ -780,6 +796,11 @@ impl GitAction {
             Self::SwitchBranch(_) => "Switch branch",
         }
     }
+    /// Actions that rewrite working-tree files. Saving into the repository
+    /// while one runs could interleave with Git's checkout.
+    fn rewrites_working_tree(&self) -> bool {
+        matches!(self, Self::Pull | Self::SwitchBranch(_))
+    }
     fn run(&self, root: &Path) -> Result<String, String> {
         match self {
             Self::Initialize => git::initialize(root).map(|_| "Repository initialized".into()),
@@ -796,6 +817,39 @@ impl GitAction {
             Self::SwitchBranch(target) => git::switch_branch(root, target),
         }
         .map_err(|e| e.to_string())
+    }
+}
+/// The Git action that currently owns `git_busy`.
+struct ActiveGitAction {
+    root: PathBuf,
+    label: &'static str,
+    cancellation: git::Cancellation,
+    rewrites_working_tree: bool,
+}
+impl ActiveGitAction {
+    /// A spinner, the action and its Cancel button. Returns whether the user
+    /// asked to stop the action.
+    fn progress_ui(&self, ui: &mut egui::Ui, size: f32) -> bool {
+        let stopping = self.cancellation.is_cancelled();
+        let label = if stopping {
+            format!("Stopping {}…", self.label.to_lowercase())
+        } else {
+            format!("{}…", self.label)
+        };
+        ui.add(egui::Spinner::new().size(size).color(MUTED));
+        ui.add(egui::Label::new(RichText::new(label).size(size).color(MUTED)).truncate())
+            .on_hover_text(format!(
+                "Git is working in {}",
+                crate::paths::display(&self.root)
+            ));
+        !stopping
+            && design::status_item(
+                ui,
+                "Cancel",
+                ORANGE,
+                "Stop Git and the hooks it started. An interrupted action can leave the repository partly updated.",
+            )
+            .clicked()
     }
 }
 #[derive(Clone, Copy)]
@@ -897,6 +951,7 @@ pub struct VEditApp {
     close_after_save: bool,
     exit_ready: bool,
     git_busy: Option<PathBuf>,
+    git_action: Option<ActiveGitAction>,
     git_window_was_active: Option<bool>,
     git_indicator_requests: HashMap<u64, PathBuf>,
     repositories: git_panel::repositories::RepositoryOverview,
@@ -955,10 +1010,26 @@ impl VEditApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-        let session: Session = fs::read(recovery_directory().join("session.json"))
+        let manifest: Option<Session> = fs::read(recovery_directory().join("session.json"))
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or(stored);
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        // Only a readable manifest proves which recovery files are still in use.
+        if let Some(session) = &manifest {
+            let referenced: Vec<PathBuf> = session
+                .projects
+                .iter()
+                .flat_map(|project| &project.tabs)
+                .filter_map(|tab| tab.recovery_path.clone())
+                .collect();
+            std::thread::spawn(move || {
+                crate::recovery::remove_orphans(
+                    &recovery_directory(),
+                    &referenced,
+                    ORPHANED_RECOVERY_AGE,
+                );
+            });
+        }
+        let session = manifest.unwrap_or(stored);
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
@@ -1165,6 +1236,7 @@ impl VEditApp {
             close_after_save: false,
             exit_ready: false,
             git_busy: None,
+            git_action: None,
             git_window_was_active: None,
             git_indicator_requests: HashMap::new(),
             repositories: git_panel::repositories::RepositoryOverview::default(),
@@ -1214,11 +1286,48 @@ impl VEditApp {
             rendering_panes: false,
         }
     }
+    /// Run `work` on a background thread. A panic is reported in the status
+    /// bar instead of silently losing the result.
     fn worker(&self, work: impl FnOnce() -> WorkerResult + Send + 'static) {
+        self.spawn_worker(work, None);
+    }
+    /// Like [`Self::worker`], for a job whose pending flag (saving, loading,
+    /// a running Git action, a disk check) must clear even if it panics:
+    /// `failed` turns the panic message into that job's error result.
+    fn worker_or(
+        &self,
+        work: impl FnOnce() -> WorkerResult + Send + 'static,
+        failed: impl FnOnce(String) -> WorkerResult + Send + 'static,
+    ) {
+        self.spawn_worker(work, Some(Box::new(failed)));
+    }
+    fn spawn_worker(
+        &self,
+        work: impl FnOnce() -> WorkerResult + Send + 'static,
+        failed: Option<Box<dyn FnOnce(String) -> WorkerResult + Send>>,
+    ) {
         let sender = self.sender.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = work();
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".into());
+                    let message = format!("Internal error in a background task: {message}");
+                    let _ = sender.send(WorkerResult::Panicked(message.clone()));
+                    match failed {
+                        Some(failed) => failed(message),
+                        None => {
+                            ctx.request_repaint();
+                            return;
+                        }
+                    }
+                }
+            };
             let wake = result.wakes_window();
             let _ = sender.send(result);
             if wake {
@@ -1295,20 +1404,28 @@ impl VEditApp {
         self.request_explorer_directory(index, explorer_root);
     }
     fn load_tab(&self, id: u64, path: Option<PathBuf>, recovery: Option<PathBuf>) {
-        self.worker(move || {
-            let result = path
-                .as_ref()
-                .map(|p| workspace::read_document(p, MAX_DOCUMENT))
-                .unwrap_or_else(|| Err("Untitled".into()));
-            let recovered = recovery
-                .filter(|p| p.is_file())
-                .map(|p| crate::recovery::read_document(&p, MAX_DOCUMENT));
-            WorkerResult::Loaded {
+        self.worker_or(
+            move || {
+                let result = path
+                    .as_ref()
+                    .map(|p| workspace::read_document(p, MAX_DOCUMENT))
+                    .unwrap_or_else(|| Err("Untitled".into()));
+                let recovered = recovery
+                    .filter(|p| p.is_file())
+                    .map(|p| crate::recovery::read_document(&p, MAX_DOCUMENT));
+                WorkerResult::Loaded {
+                    id,
+                    result,
+                    recovery: recovered,
+                }
+            },
+            move |error| WorkerResult::Loaded {
                 id,
-                result,
-                recovery: recovered,
-            }
-        });
+                result: Err(error),
+                // The recovery file stays on disk for the next attempt.
+                recovery: None,
+            },
+        );
     }
     fn open_file(&mut self, path: PathBuf) {
         self.open_file_in_mode(path, false);
@@ -1521,6 +1638,22 @@ impl VEditApp {
             );
             return;
         }
+        if let Some(message) = target
+            .as_deref()
+            .or_else(|| {
+                self.projects
+                    .iter()
+                    .flat_map(|project| &project.tabs)
+                    .find(|tab| tab.id == id)
+                    .and_then(|tab| tab.path.as_deref())
+            })
+            .and_then(|path| self.git_checkout_save_error(path))
+        {
+            self.status(message, true);
+            self.close_after_save = false;
+            self.save_queue.clear();
+            return;
+        }
         let Some(tab) = self.tab_by_id_mut(id) else {
             return;
         };
@@ -1563,50 +1696,68 @@ impl VEditApp {
         let ending = tab.line_ending;
         let bom = tab.bom;
         let format_source = tab.path.clone().zip(tab.fingerprint.clone());
+        // Keep the path the user opened, for example through a junction, so a
+        // later open of the same path finds this document instead of a copy.
+        let new_path = tab.path.as_ref() != Some(&path);
         tab.saving = true;
         tab.error = None;
-        self.worker(move || {
-            let result = (|| {
-                if expected.is_none()
-                    && let Some(parent) = path.parent()
-                {
-                    fs::create_dir_all(parent).map_err(|e| (e.to_string(), false))?;
+        let failed_path = path.clone();
+        self.worker_or(
+            move || {
+                let result = (|| {
+                    if expected.is_none()
+                        && let Some(parent) = path.parent()
+                    {
+                        fs::create_dir_all(parent).map_err(|e| (e.to_string(), false))?;
+                    }
+                    if let Some(parent) = path.parent() {
+                        workspace::remove_stale_save_temporaries(parent);
+                    }
+                    workspace::save_document(
+                        &path,
+                        &text,
+                        ending,
+                        bom,
+                        expected.as_ref(),
+                        format_source
+                            .as_ref()
+                            .map(|(path, baseline)| (path.as_path(), baseline)),
+                    )
+                    .map_err(|error| {
+                        let conflict = matches!(error, workspace::SaveError::Conflict(_));
+                        (error.to_string(), conflict)
+                    })
+                })();
+                // A conflict on the document's own path shows the newer disk
+                // version, so the user can compare and decide.
+                let conflict = match &result {
+                    Err((_, true)) if own_path => {
+                        workspace::read_document(&path, MAX_DOCUMENT).ok()
+                    }
+                    _ => None,
+                };
+                let result = result.map_err(|(error, _)| error);
+                let path = if result.is_ok() && new_path {
+                    fs::canonicalize(&path).unwrap_or(path)
+                } else {
+                    path
+                };
+                WorkerResult::Saved {
+                    result,
+                    id,
+                    text,
+                    path,
+                    conflict,
                 }
-                workspace::save_document(
-                    &path,
-                    &text,
-                    ending,
-                    bom,
-                    expected.as_ref(),
-                    format_source
-                        .as_ref()
-                        .map(|(path, baseline)| (path.as_path(), baseline)),
-                )
-                .map_err(|error| {
-                    let conflict = matches!(error, workspace::SaveError::Conflict(_));
-                    (error.to_string(), conflict)
-                })
-            })();
-            // A conflict on the document's own path shows the newer disk
-            // version, so the user can compare and decide.
-            let conflict = match &result {
-                Err((_, true)) if own_path => workspace::read_document(&path, MAX_DOCUMENT).ok(),
-                _ => None,
-            };
-            let result = result.map_err(|(error, _)| error);
-            let path = if result.is_ok() {
-                fs::canonicalize(&path).unwrap_or(path)
-            } else {
-                path
-            };
-            WorkerResult::Saved {
-                result,
+            },
+            move |error| WorkerResult::Saved {
+                result: Err(error),
                 id,
-                text,
-                path,
-                conflict,
-            }
-        });
+                text: String::new(),
+                path: failed_path,
+                conflict: None,
+            },
+        );
     }
     fn save_current(&mut self) {
         if let Some(tab) = self.tab() {
@@ -1696,9 +1847,8 @@ impl VEditApp {
                         self.agent_marks.detach_document(t.id);
                         self.markdown.forget_document(t.id);
                         self.git_gutter.forget(t.id);
-                        let _ = self
-                            .recovery_writer
-                            .remove(&t.recovery_path, self.recovery_writer.stamp());
+                        self.recovery_writer
+                            .remove_in_background(t.recovery_path, self.recovery_writer.stamp());
                     }
                     if self.active_project > index {
                         self.active_project -= 1;
@@ -1744,9 +1894,8 @@ impl VEditApp {
                 self.agent_marks.detach_document(id);
                 self.markdown.forget_document(id);
                 self.git_gutter.forget(id);
-                let _ = self
-                    .recovery_writer
-                    .remove(&tab.recovery_path, self.recovery_writer.stamp());
+                self.recovery_writer
+                    .remove_in_background(tab.recovery_path, self.recovery_writer.stamp());
                 if project.active_tab > index {
                     project.active_tab -= 1;
                 }
@@ -1770,6 +1919,7 @@ impl VEditApp {
         self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                WorkerResult::Panicked(message) => self.status(message, true),
                 WorkerResult::ContextFile(result) => self.context_file_result(result),
                 WorkerResult::ContextFilePrepared(result) => self.context_file_prepared(result),
                 WorkerResult::ExplorerDirectory {
@@ -1818,7 +1968,7 @@ impl VEditApp {
                     let preserve_scroll = self.has_saved_document_scroll(id);
                     let next_recovery_name = format!(
                         "{}-{id}-after-unreadable-{}.txt",
-                        std::process::id(),
+                        crate::recovery::session_prefix(),
                         self.recovery_writer.stamp()
                     );
                     if let Some(tab) = self.tab_by_id_mut(id) {
@@ -1930,6 +2080,10 @@ impl VEditApp {
                                         if let Some(bom) = doc.bom {
                                             tab.bom = bom;
                                         }
+                                    } else {
+                                        // Nothing to recover: the file already
+                                        // holds this text. Remove the record.
+                                        tab.recovery_stale = true;
                                     }
                                     tab.recovery_revision = tab.revision;
                                 }
@@ -1967,9 +2121,9 @@ impl VEditApp {
                     conflict,
                 } => {
                     let mut message = None;
-                    let recovery_writer = self.recovery_writer.clone();
                     let mut new_document = false;
                     let mut observed = None;
+                    let mut cleanup = false;
                     if let Some(tab) = self.tab_by_id_mut(id) {
                         tab.saving = false;
                         match result {
@@ -2002,8 +2156,14 @@ impl VEditApp {
                                 }
                                 tab.error = None;
                                 if !tab.dirty {
-                                    let _ = recovery_writer
-                                        .remove(&tab.recovery_path, recovery_writer.stamp());
+                                    // Remove the recovery file off the UI
+                                    // thread; auto save retries a failure.
+                                    // Older snapshot completions no longer
+                                    // describe the recovery state.
+                                    tab.recovery_generation =
+                                        tab.recovery_generation.wrapping_add(1);
+                                    tab.recovery_stale = true;
+                                    cleanup = true;
                                 }
                                 message = Some((
                                     if saved.format_fallback {
@@ -2049,6 +2209,9 @@ impl VEditApp {
                         }
                     }
                     self.session_dirty = true;
+                    if cleanup {
+                        self.start_recovery_cleanup(id);
+                    }
                     if (new_document
                         || (saved && path.file_name().is_some_and(|name| name == ".gitignore")))
                         && let Some(index) = self
@@ -2114,6 +2277,7 @@ impl VEditApp {
                         if result.is_ok() && generation == tab.recovery_generation {
                             tab.recovery_revision = tab.recovery_revision.max(revision);
                             tab.recovery_cleanup_retry_at = None;
+                            tab.recovery_stale = false;
                         } else {
                             tab.recovery_cleanup_retry_at =
                                 Some(Instant::now() + Duration::from_millis(850));
@@ -2169,6 +2333,7 @@ impl VEditApp {
                                     p.explorer_git = None;
                                 }
                                 p.git_changes = s.files;
+                                p.git_untracked_collapsed = s.untracked_collapsed;
                                 p.git_stats = s.stats;
                                 p.git_stats_error = s.stats_error;
                                 match s.history {
@@ -2313,6 +2478,7 @@ impl VEditApp {
                     result,
                 } => {
                     self.git_busy = None;
+                    self.git_action = None;
                     if let Some(reply) = reply {
                         let response = match &result {
                             Ok(branch) => crate::cli::Response::success(
@@ -2602,14 +2768,65 @@ impl VEditApp {
             }
         }
         let message = action.label().to_owned();
-        self.status(format!("{message}…"), false);
-        self.worker(move || WorkerResult::GitAction {
-            result: action.run(&root),
-            root,
-            message,
-            reply,
+        let cancellation = git::Cancellation::default();
+        self.git_action = Some(ActiveGitAction {
+            root: root.clone(),
+            label: action.label(),
+            cancellation: cancellation.clone(),
+            rewrites_working_tree: action.rewrites_working_tree(),
         });
+        // The running action and its Cancel button stay visible until it ends.
+        self.status = None;
+        let fallback = (root.clone(), message.clone(), reply.clone());
+        self.worker_or(
+            move || WorkerResult::GitAction {
+                result: git::cancellable(&cancellation, || action.run(&root)),
+                root,
+                message,
+                reply,
+            },
+            move |error| {
+                let (root, message, reply) = fallback;
+                WorkerResult::GitAction {
+                    reply,
+                    root,
+                    message,
+                    result: Err(error),
+                }
+            },
+        );
         Ok(())
+    }
+    /// Stop the running Git action with its hooks and helpers. Git reports
+    /// the result; a partly updated repository stays as it is.
+    fn cancel_git_action(&mut self) {
+        if let Some(action) = &self.git_action
+            && !action.cancellation.is_cancelled()
+        {
+            action.cancellation.cancel();
+            let label = action.label;
+            self.status(format!("Stopping {}…", label.to_lowercase()), false);
+        }
+    }
+    /// The repository whose working tree a running pull or branch switch is
+    /// rewriting. Saves into it wait until Git has finished.
+    fn git_checkout_root(&self) -> Option<&Path> {
+        self.git_action
+            .as_ref()
+            .filter(|action| action.rewrites_working_tree)
+            .map(|action| action.root.as_path())
+    }
+    /// Why a save to `path` must wait, while Git rewrites its working tree.
+    fn git_checkout_save_error(&self, path: &Path) -> Option<String> {
+        let action = self.git_action.as_ref()?;
+        (action.rewrites_working_tree && context_actions::path_contains(&action.root, path)).then(
+            || {
+                format!(
+                    "Git is running {} in this repository. Nothing was saved; save after it finishes. Edits stay open.",
+                    action.label.to_lowercase()
+                )
+            },
+        )
     }
     fn request_git_commit(&mut self, index: usize, hash: String) {
         let Some(project) = self.projects.get_mut(index) else {
@@ -3125,6 +3342,8 @@ impl VEditApp {
         let mut removals = Vec::new();
         let mut saves = Vec::new();
         let mut delay: Option<Duration> = None;
+        // Auto save resumes when the pull or branch switch reports its result.
+        let checkout = self.git_checkout_root().map(Path::to_path_buf);
         for p in &mut self.projects {
             for t in &mut p.tabs {
                 if t.loading {
@@ -3136,7 +3355,7 @@ impl VEditApp {
                         .map(|retry| retry.saturating_duration_since(Instant::now()));
                     if !t.saving
                         && t.error.is_none()
-                        && t.recovery_revision != t.revision
+                        && (t.recovery_revision != t.revision || t.recovery_stale)
                         && t.recovery_cleanup_pending != Some(t.revision)
                     {
                         if let Some(remaining) =
@@ -3179,7 +3398,11 @@ impl VEditApp {
                 if self.settings.autosave
                     && !t.agent_unsaved
                     && self.save_as != Some(t.id)
-                    && t.path.is_some()
+                    && t.path.as_deref().is_some_and(|path| {
+                        checkout
+                            .as_deref()
+                            .is_none_or(|root| !context_actions::path_contains(root, path))
+                    })
                     && !t.saving
                     && t.error.is_none()
                     && t.disk_conflict.is_none()
@@ -3197,27 +3420,28 @@ impl VEditApp {
         for (id, revision, generation, path, text, baseline, ending, bom) in recoveries {
             let writer = self.recovery_writer.clone();
             let stamp = writer.stamp();
-            self.worker(move || {
-                let result =
-                    crate::recovery::encode_document(&text, baseline.as_ref(), ending, bom)
-                        .and_then(|bytes| writer.write(&path, stamp, &bytes));
-                WorkerResult::Recovered {
+            self.worker_or(
+                move || {
+                    let result =
+                        crate::recovery::encode_document(&text, baseline.as_ref(), ending, bom)
+                            .and_then(|bytes| writer.write(&path, stamp, &bytes));
+                    WorkerResult::Recovered {
+                        id,
+                        revision,
+                        generation,
+                        result,
+                    }
+                },
+                move |error| WorkerResult::Recovered {
                     id,
                     revision,
                     generation,
-                    result,
-                }
-            });
+                    result: Err(error),
+                },
+            );
         }
         for (id, revision, generation, path) in removals {
-            let writer = self.recovery_writer.clone();
-            let stamp = writer.stamp();
-            self.worker(move || WorkerResult::RecoveryRemoved {
-                id,
-                revision,
-                generation,
-                result: writer.remove(&path, stamp),
-            });
+            self.spawn_recovery_removal(id, revision, generation, path);
         }
         for id in saves {
             let pending = self
@@ -3240,6 +3464,46 @@ impl VEditApp {
             self.last_session_save = Instant::now();
         }
     }
+    fn spawn_recovery_removal(&self, id: u64, revision: u64, generation: u64, path: PathBuf) {
+        let writer = self.recovery_writer.clone();
+        let stamp = writer.stamp();
+        self.worker_or(
+            move || WorkerResult::RecoveryRemoved {
+                id,
+                revision,
+                generation,
+                result: writer.remove(&path, stamp),
+            },
+            move |error| WorkerResult::RecoveryRemoved {
+                id,
+                revision,
+                generation,
+                result: Err(error),
+            },
+        );
+    }
+    /// Remove the recovery file of a document that now matches its file.
+    fn start_recovery_cleanup(&mut self, id: u64) {
+        let Some(tab) = self.tab_by_id_mut(id) else {
+            return;
+        };
+        if tab.dirty
+            || tab.loading
+            || tab.saving
+            || tab.error.is_some()
+            || tab.recovery_cleanup_pending == Some(tab.revision)
+        {
+            return;
+        }
+        tab.recovery_cleanup_pending = Some(tab.revision);
+        tab.recovery_cleanup_retry_at = None;
+        let (revision, generation, path) = (
+            tab.revision,
+            tab.recovery_generation,
+            tab.recovery_path.clone(),
+        );
+        self.spawn_recovery_removal(id, revision, generation, path);
+    }
     fn session(&self) -> Session {
         Session {
             projects: self
@@ -3259,7 +3523,17 @@ impl VEditApp {
                         .map(|t| SessionTab {
                             path: t.path.clone(),
                             title: t.title.clone(),
-                            recovery_path: Some(t.recovery_path.clone()),
+                            // A document whose recovery file is known to be
+                            // removed no longer refers to it.
+                            recovery_path: (t.dirty
+                                || t.loading
+                                || t.saving
+                                || t.error.is_some()
+                                || t.recovery_stale
+                                || t.recovery_pending
+                                || t.recovery_cleanup_pending.is_some()
+                                || t.recovery_revision != t.revision)
+                                .then(|| t.recovery_path.clone()),
                             cursor: t.vim.cursor,
                             view: t.agent_view,
                             agent_unsaved: t.agent_unsaved,
@@ -3282,12 +3556,12 @@ impl VEditApp {
     }
     fn persist_session(&self) {
         if let Ok(bytes) = serde_json::to_vec(&self.session()) {
-            let path = self.recovery_session_path.clone();
-            let writer = self.recovery_writer.clone();
-            let stamp = writer.stamp();
-            std::thread::spawn(move || {
-                let _ = writer.write(&path, stamp, &bytes);
-            });
+            let stamp = self.recovery_writer.stamp();
+            self.recovery_writer.write_in_background(
+                self.recovery_session_path.clone(),
+                stamp,
+                bytes,
+            );
         }
     }
     fn flush_recovery(&self) {
@@ -4735,6 +5009,9 @@ impl VEditApp {
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
                         let budget = (ui.available_width() - right_budget).clamp(30.0, 180.0);
                         if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                    }
+                    if !narrow && let Some(action) = &self.git_action && action.progress_ui(ui, 11.0) {
+                        self.cancel_git_action();
                     }
                     if let Some(jump) = &self.screen_jump {
                         let hint = jump.state.hint();
@@ -7788,6 +8065,10 @@ impl eframe::App for VEditApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.session());
     }
 }
+
+/// Recovery files that no session references are removed at startup once they
+/// are this old, which leaves time to find a file after an unexpected crash.
+const ORPHANED_RECOVERY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[cfg(test)]
 fn recovery_directory() -> PathBuf {

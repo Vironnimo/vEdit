@@ -282,25 +282,30 @@ impl VEditApp {
             return;
         }
         self.disk_check_running = true;
-        self.worker(move || {
-            let mut checks = Vec::new();
-            for (id, path, baseline, known) in documents {
-                match fs::metadata(&path) {
-                    Ok(meta)
-                        if meta.len() == known.len && meta.modified().ok() == known.modified => {}
-                    _ => {
-                        let result = workspace::read_document(&path, MAX_DOCUMENT);
-                        checks.push(DiskCheck {
-                            id,
-                            path,
-                            baseline,
-                            result,
-                        });
+        // A panicking check must still clear `disk_check_running`.
+        self.worker_or(
+            move || {
+                let mut checks = Vec::new();
+                for (id, path, baseline, known) in documents {
+                    match fs::metadata(&path) {
+                        Ok(meta)
+                            if meta.len() == known.len
+                                && meta.modified().ok() == known.modified => {}
+                        _ => {
+                            let result = workspace::read_document(&path, MAX_DOCUMENT);
+                            checks.push(DiskCheck {
+                                id,
+                                path,
+                                baseline,
+                                result,
+                            });
+                        }
                     }
                 }
-            }
-            WorkerResult::DiskChanges(checks)
-        });
+                WorkerResult::DiskChanges(checks)
+            },
+            |_| WorkerResult::DiskChanges(Vec::new()),
+        );
     }
 
     pub(super) fn apply_disk_checks(&mut self, checks: Vec<DiskCheck>) {

@@ -169,6 +169,7 @@ fn full_snapshot_updates_count_and_invalidates_an_older_indicator() {
                 branch: Some("main".into()),
                 tracking: None,
                 main_comparison: Ok(None),
+                untracked_collapsed: false,
                 files: vec![
                     git::FileStatus {
                         path: "change.txt".into(),

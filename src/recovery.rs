@@ -12,9 +12,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, SystemTime},
 };
 
 // The NUL distinguishes a recovery record from any supported legacy text file.
@@ -110,6 +111,110 @@ struct Commit {
 struct Shared {
     commits: Mutex<HashMap<PathBuf, Commit>>,
     sequence: AtomicU64,
+    /// Background writes and removals that have not finished yet.
+    in_flight: AtomicUsize,
+}
+
+/// The start of this session's recovery file names: the process ID and a
+/// random part, so a later session that receives a reused process ID cannot
+/// pick a name that an earlier session's recovery still uses.
+pub fn session_prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos()),
+        );
+        format!("{}-{:016x}", std::process::id(), hasher.finish())
+    })
+}
+
+/// The process ID that created a recovery file or one of its temporary files,
+/// for names that this or an earlier vEdit release generates:
+/// `<pid>-<n>.txt`, `<pid>-<random>-<n>.txt`, their `-after-unreadable-<n>`
+/// variants and `.<name>.vedit-<pid>-<n>.tmp`.
+fn recovery_owner(name: &str) -> Option<u32> {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if let Some(temporary) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    {
+        let (_, owner) = temporary.rsplit_once(".vedit-")?;
+        let (pid, sequence) = owner.split_once('-')?;
+        return (digits(pid) && digits(sequence))
+            .then(|| pid.parse().ok())
+            .flatten();
+    }
+    let stem = name.strip_suffix(".txt")?;
+    let stem = match stem.split_once("-after-unreadable-") {
+        Some((stem, stamp)) if digits(stamp) => stem,
+        Some(_) => return None,
+        None => stem,
+    };
+    let mut parts = stem.split('-');
+    let pid = parts.next().filter(|pid| digits(pid))?;
+    let rest: Vec<_> = parts.collect();
+    let valid = match rest.as_slice() {
+        [sequence] => digits(sequence),
+        [random, sequence] => {
+            random.len() == 16
+                && random.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && digits(sequence)
+        }
+        _ => false,
+    };
+    valid.then(|| pid.parse().ok()).flatten()
+}
+
+/// Remove recovery files in `directory` that nothing can restore any more:
+/// files with vEdit's naming that no restored document references, whose
+/// process has exited, that are older than `minimum_age` and, for documents,
+/// that still read as complete recovery records. Unreadable records stay so
+/// that a user can inspect them. Returns the removed paths.
+pub fn remove_orphans(
+    directory: &Path,
+    referenced: &[PathBuf],
+    minimum_age: Duration,
+) -> Vec<PathBuf> {
+    let referenced: Vec<_> = referenced
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .collect();
+    let current = std::process::id();
+    let mut removed = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = recovery_owner(&name) else {
+            continue;
+        };
+        let path = entry.path();
+        let old_enough = entry
+            .metadata()
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= minimum_age);
+        if !old_enough
+            || pid == current
+            || referenced.contains(&name.to_lowercase())
+            || crate::process_liveness::running(pid)
+        {
+            continue;
+        }
+        let temporary = name.starts_with('.');
+        if (temporary || read_document(&path, u64::MAX).is_ok()) && fs::remove_file(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    removed
 }
 
 /// One coordination point for recovery writes and deletions, shared by clones.
@@ -220,6 +325,55 @@ impl RecoveryWriter {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(format!("Could not remove recovery file: {error}")),
         }
+    }
+
+    /// [`Self::write`] on a background thread, for snapshots whose result
+    /// nobody waits for, such as the session manifest.
+    pub fn write_in_background(&self, path: PathBuf, revision: u64, bytes: Vec<u8>) {
+        self.in_background(move |writer| {
+            let _ = writer.write(&path, revision, &bytes);
+        });
+    }
+
+    /// [`Self::remove`] on a background thread. A failed removal, for example
+    /// while a virus scanner holds the file, is retried a few times.
+    pub fn remove_in_background(&self, path: PathBuf, revision: u64) {
+        self.in_background(move |writer| {
+            for delay in [0, 250, 1000, 4000] {
+                std::thread::sleep(Duration::from_millis(delay));
+                if writer.remove(&path, revision).is_ok() {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn in_background(&self, work: impl FnOnce(&Self) + Send + 'static) {
+        let writer = self.clone();
+        writer.shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            struct Done(RecoveryWriter);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.shared.in_flight.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let done = Done(writer);
+            work(&done.0);
+        });
+    }
+
+    /// Wait until background writes and removals have finished.
+    #[cfg(test)]
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.shared.in_flight.load(Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 }
 
@@ -484,5 +638,105 @@ mod tests {
         fs::create_dir(&nested).unwrap();
         assert!(read_document(&nested, 1024).is_err());
         assert!(nested.is_dir());
+    }
+
+    fn exited_process_id() -> u32 {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        child.id()
+    }
+
+    #[test]
+    fn recovery_names_are_unique_per_session_and_name_their_owner() {
+        let prefix = session_prefix();
+        assert_eq!(prefix, session_prefix());
+        let (pid, random) = prefix.split_once('-').unwrap();
+        assert_eq!(pid, std::process::id().to_string());
+        assert_eq!(random.len(), 16);
+        let current = std::process::id();
+        for name in [
+            format!("{prefix}-7.txt"),
+            format!("{prefix}-4-after-unreadable-12.txt"),
+            format!("{current}-7.txt"),
+            format!("{current}-3-after-unreadable-12.txt"),
+            format!(".{prefix}-7.txt.vedit-{current}-4.tmp"),
+        ] {
+            assert_eq!(recovery_owner(&name), Some(current), "{name}");
+        }
+        for name in [
+            "session.json",
+            "notes.txt",
+            "12-notes.txt",
+            "12-0123456789abcdeg-1.txt",
+            "12-0123-1.txt",
+            "12-1-after-unreadable-x.txt",
+            "12-1.txt.bak",
+            ".12-1.txt.vedit-12-x.tmp",
+            ".12-1.txt.vedit-12-1.tmp.old",
+        ] {
+            assert_eq!(recovery_owner(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_old_unreferenced_readable_recovery_of_exited_sessions_is_removed() {
+        let directory = Directory::new();
+        let exited = exited_process_id();
+        let current = std::process::id();
+        let record =
+            encode_document("draft ü\n", None, crate::workspace::LineEnding::Lf, false).unwrap();
+        let write = |name: String, bytes: &[u8]| {
+            let path = directory.file(&name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let orphans = [
+            write(format!("{exited}-1.txt"), &record),
+            write(format!("{exited}-0123456789abcdef-2.txt"), b"legacy text"),
+            write(
+                format!("{exited}-0123456789abcdef-9-after-unreadable-3.txt"),
+                &record,
+            ),
+            write(format!(".{exited}-1.txt.vedit-{exited}-4.tmp"), b"partial"),
+        ];
+        let referenced = write(format!("{exited}-0123456789ABCDEF-5.txt"), &record);
+        let mut unreadable = DOCUMENT_HEADER.to_vec();
+        unreadable.extend_from_slice(b"invalid\ntext");
+        let kept = [
+            referenced.clone(),
+            write(format!("{current}-6.txt"), &record),
+            write(format!("{exited}-7.txt"), &unreadable),
+            write("session.json".into(), b"{}"),
+            write("notes.txt".into(), &record),
+        ];
+        let subfolder = directory.file(&format!("{exited}-8.txt"));
+        fs::create_dir(&subfolder).unwrap();
+
+        // Recent files may still belong to a session that is starting up.
+        let referenced_upper = directory.file(&format!("{exited}-0123456789abcdef-5.TXT"));
+        assert!(
+            remove_orphans(
+                &directory.0,
+                std::slice::from_ref(&referenced_upper),
+                Duration::from_secs(3600)
+            )
+            .is_empty()
+        );
+        assert!(orphans.iter().chain(&kept).all(|path| path.is_file()));
+
+        let mut removed = remove_orphans(&directory.0, &[referenced_upper], Duration::ZERO);
+        removed.sort();
+        let mut expected = orphans.to_vec();
+        expected.sort();
+        assert_eq!(removed, expected);
+        assert!(orphans.iter().all(|path| !path.exists()));
+        assert!(kept.iter().all(|path| path.is_file()));
+        assert!(subfolder.is_dir());
     }
 }
