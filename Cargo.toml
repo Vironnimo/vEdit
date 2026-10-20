@@ -17,6 +17,7 @@ ignore = "0.4"
 regex = "1"
 tiktoken-rs = "0.12.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
+similar = "2.7"
 
 [[bin]]
 name = "vedit"
