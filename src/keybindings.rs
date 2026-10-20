@@ -43,6 +43,10 @@ actions! {
     GoToLine, "go_to_line", "Go to line", "Navigation", ["Ctrl+G"];
     Definition, "definition", "Go to definition", "Language", ["F12"];
     Completion, "completion", "Show completions", "Language", ["Ctrl+Space"];
+    Hover, "show_hover", "Show hover", "Language", [];
+    FindReferences, "find_references", "Find references", "Language", ["Shift+F12"];
+    DocumentSymbol, "go_to_symbol", "Go to symbol in file", "Language", [];
+    WorkspaceSymbol, "go_to_workspace_symbol", "Go to symbol in workspace", "Language", ["Ctrl+T"];
     RestartLanguage, "restart_language", "Restart language analysis", "Language", [];
     LanguageSupport, "language_support", "Language support", "Language", [];
     Problems, "problems", "Show problems", "Layout", ["Ctrl+Shift+M"];

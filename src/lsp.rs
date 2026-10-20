@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -62,6 +62,93 @@ pub struct CompletionItem {
     pub additional_text_edits: Vec<TextEdit>,
 }
 
+/// Hover text as the server sent it. Plain text is never parsed as Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverContents {
+    pub markdown: bool,
+    pub text: String,
+}
+
+/// One reference with a preview of its source line. `line` and `column` are
+/// one-based Unicode scalar coordinates in the text the server analyzed; the
+/// UTF-16 `position` remains authoritative when a buffer changed since then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub path: PathBuf,
+    pub position: Position,
+    pub line: usize,
+    pub column: usize,
+    /// The trimmed source line, or empty when the file could not be read.
+    pub preview: String,
+    /// The referenced characters within `preview`, in Unicode scalars.
+    pub highlight: std::ops::Range<usize>,
+}
+
+/// A document or workspace symbol. Document symbols carry no path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub detail: Option<String>,
+    /// LSP SymbolKind, 1 (File) to 26 (TypeParameter).
+    pub kind: u32,
+    /// The enclosing symbol or container name, if any.
+    pub container: Option<String>,
+    pub path: Option<PathBuf>,
+    pub position: Position,
+    /// Nesting depth of hierarchical document symbols.
+    pub depth: usize,
+}
+
+/// Optional requests a server may or may not provide. Their availability is
+/// known once the server has initialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    Hover,
+    References,
+    DocumentSymbols,
+    WorkspaceSymbols,
+}
+
+impl Feature {
+    fn bit(self) -> u32 {
+        match self {
+            Self::Hover => 1,
+            Self::References => 2,
+            Self::DocumentSymbols => 4,
+            Self::WorkspaceSymbols => 8,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hover => "hover information",
+            Self::References => "references",
+            Self::DocumentSymbols => "document symbols",
+            Self::WorkspaceSymbols => "workspace symbols",
+        }
+    }
+
+    fn provided(self, capabilities: &Value) -> bool {
+        let value = &capabilities[match self {
+            Self::Hover => "hoverProvider",
+            Self::References => "referencesProvider",
+            Self::DocumentSymbols => "documentSymbolProvider",
+            Self::WorkspaceSymbols => "workspaceSymbolProvider",
+        }];
+        value == &Value::Bool(true) || value.is_object()
+    }
+}
+
+const ALL_FEATURES: [Feature; 4] = [
+    Feature::Hover,
+    Feature::References,
+    Feature::DocumentSymbols,
+    Feature::WorkspaceSymbols,
+];
+const REFERENCE_LIMIT: usize = 2000;
+const SYMBOL_LIMIT: usize = 5000;
+const HOVER_LIMIT: usize = 64 * 1024;
+
 #[derive(Debug, Clone)]
 pub enum LspEvent {
     Ready,
@@ -85,6 +172,22 @@ pub enum LspEvent {
     },
     DefinitionNotFound {
         request_id: u64,
+    },
+    /// `None` when the server has nothing to show at that position.
+    Hover {
+        request_id: u64,
+        contents: Option<HoverContents>,
+    },
+    /// Locations in server order. `truncated` when more than the limit existed.
+    References {
+        request_id: u64,
+        references: Vec<Reference>,
+        truncated: bool,
+    },
+    /// Document symbols in document order, or workspace symbols in server order.
+    Symbols {
+        request_id: u64,
+        symbols: Vec<Symbol>,
     },
     /// The request ended without a successful response. Cancelled or stale
     /// requests carry no user-facing error, but still clear pending UI state.
@@ -118,6 +221,35 @@ enum ClientCommand {
         path: PathBuf,
         position: Position,
     },
+    Hover {
+        id: u64,
+        path: PathBuf,
+        position: Position,
+    },
+    References {
+        id: u64,
+        path: PathBuf,
+        position: Position,
+    },
+    DocumentSymbols {
+        id: u64,
+        path: PathBuf,
+    },
+    WorkspaceSymbols {
+        id: u64,
+        query: String,
+    },
+}
+
+/// What an application test can observe about a queued request.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestRequest {
+    Hover { id: u64, position: Position },
+    References { id: u64, position: Position },
+    DocumentSymbols { id: u64 },
+    WorkspaceSymbols { id: u64, query: String },
+    Other,
 }
 
 /// Process and protocol settings for one language server. Arguments are passed
@@ -155,6 +287,38 @@ pub struct LanguageServer {
     wake: SyncSender<()>,
     stopped: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
+    /// Bits of the optional features the initialized server provides.
+    features: Arc<AtomicU32>,
+    /// Distinguishes this process from a restarted server for the same language.
+    instance: u64,
+}
+
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+/// Commands accepted by a [`LanguageServer::test_channel_with_requests`] fake.
+#[cfg(test)]
+pub struct TestRequests(Receiver<ClientCommand>);
+
+#[cfg(test)]
+impl TestRequests {
+    pub fn next(&self) -> Option<TestRequest> {
+        Some(match self.0.try_recv().ok()? {
+            ClientCommand::Hover { id, position, .. } => TestRequest::Hover { id, position },
+            ClientCommand::References { id, position, .. } => {
+                TestRequest::References { id, position }
+            }
+            ClientCommand::DocumentSymbols { id, .. } => TestRequest::DocumentSymbols { id },
+            ClientCommand::WorkspaceSymbols { id, query } => {
+                TestRequest::WorkspaceSymbols { id, query }
+            }
+            _ => TestRequest::Other,
+        })
+    }
+
+    /// The next request other than document synchronization.
+    pub fn next_request(&self) -> Option<TestRequest> {
+        std::iter::from_fn(|| self.next()).find(|request| *request != TestRequest::Other)
+    }
 }
 
 impl LanguageServer {
@@ -162,7 +326,15 @@ impl LanguageServer {
     /// filesystem access is needed, and its stopped state initially is false.
     #[cfg(test)]
     pub fn test_channel() -> (Self, SyncSender<LspEvent>) {
-        let (commands, _command_rx) = mpsc::sync_channel(8);
+        let (server, events, _requests) = Self::test_channel_with_requests();
+        (server, events)
+    }
+
+    /// Like [`Self::test_channel`], but it accepts requests and lets the test
+    /// observe them. Every optional feature is initially available.
+    #[cfg(test)]
+    pub fn test_channel_with_requests() -> (Self, SyncSender<LspEvent>, TestRequests) {
+        let (commands, command_rx) = mpsc::sync_channel(64);
         let (wake, _wake_rx) = mpsc::sync_channel(1);
         let (events, receiver) = mpsc::sync_channel(64);
         (
@@ -172,9 +344,23 @@ impl LanguageServer {
                 wake,
                 stopped: Arc::new(AtomicBool::new(false)),
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
+                features: Arc::new(AtomicU32::new(
+                    ALL_FEATURES.iter().map(|feature| feature.bit()).sum(),
+                )),
+                instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             },
             events,
+            TestRequests(command_rx),
         )
+    }
+
+    #[cfg(test)]
+    pub fn set_test_feature(&self, feature: Feature, available: bool) {
+        if available {
+            self.features.fetch_or(feature.bit(), Ordering::AcqRel);
+        } else {
+            self.features.fetch_and(!feature.bit(), Ordering::AcqRel);
+        }
     }
 
     /// Start without waiting for rust-analyzer or its project index. A missing
@@ -199,6 +385,8 @@ impl LanguageServer {
         let shutdown_requested = Arc::clone(&emitter.shutdown_requested);
         let fallback = emitter.clone();
         let server_name = config.name.clone();
+        let features = Arc::new(AtomicU32::new(0));
+        let worker_features = Arc::clone(&features);
         if let Err(error) = thread::Builder::new()
             .name("vedit-language-server".into())
             .spawn(move || {
@@ -210,6 +398,7 @@ impl LanguageServer {
                     wake_rx,
                     &emitter,
                     &worker_stopped,
+                    worker_features,
                 );
                 let manually_stopped = worker_stopped.swap(true, Ordering::AcqRel);
                 if let Err(error) = result
@@ -230,7 +419,19 @@ impl LanguageServer {
             wake,
             stopped,
             shutdown_requested,
+            features,
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Whether the initialized server advertised `feature`. False until Ready.
+    pub fn supports(&self, feature: Feature) -> bool {
+        self.features.load(Ordering::Acquire) & feature.bit() != 0
+    }
+
+    /// A process-unique identity; a restarted language gets a new one.
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// An opened document starts at version 1.
@@ -285,6 +486,42 @@ impl LanguageServer {
         } else {
             0
         }
+    }
+
+    /// Like the other requests, zero means the queue was unavailable.
+    pub fn hover(&self, path: &Path, position: Position) -> u64 {
+        self.queue_request(|id| ClientCommand::Hover {
+            id,
+            path: path.to_path_buf(),
+            position,
+        })
+    }
+
+    pub fn references(&self, path: &Path, position: Position) -> u64 {
+        self.queue_request(|id| ClientCommand::References {
+            id,
+            path: path.to_path_buf(),
+            position,
+        })
+    }
+
+    pub fn document_symbols(&self, path: &Path) -> u64 {
+        self.queue_request(|id| ClientCommand::DocumentSymbols {
+            id,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn workspace_symbols(&self, query: &str) -> u64 {
+        self.queue_request(|id| ClientCommand::WorkspaceSymbols {
+            id,
+            query: query.to_owned(),
+        })
+    }
+
+    fn queue_request(&self, command: impl FnOnce(u64) -> ClientCommand) -> u64 {
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        if self.send(command(id)) { id } else { 0 }
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -342,7 +579,16 @@ impl EventEmitter {
             LspEvent::Diagnostics { path, .. }
             | LspEvent::Completions { path, .. }
             | LspEvent::Definition { path, .. } => {
-                *path = path.canonicalize().unwrap_or_else(|_| normalize_path(path));
+                *path = canonical_path(path);
+            }
+            LspEvent::Symbols { symbols, .. } => {
+                let mut known = HashMap::new();
+                for path in symbols.iter_mut().filter_map(|symbol| symbol.path.as_mut()) {
+                    *path = known
+                        .entry(path.clone())
+                        .or_insert_with(|| canonical_path(path))
+                        .clone();
+                }
             }
             _ => {}
         }
@@ -380,6 +626,11 @@ impl EventEmitter {
     }
 }
 
+/// The workspace/tab key for a path reported by the server.
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| normalize_path(path))
+}
+
 enum Inbound {
     Message(Value),
     Written(u64),
@@ -414,6 +665,10 @@ enum RequestKind {
         version: i32,
     },
     Definition,
+    Hover,
+    References,
+    DocumentSymbols,
+    WorkspaceSymbols,
 }
 struct PendingRequest {
     kind: RequestKind,
@@ -466,6 +721,8 @@ struct Protocol {
     sync: SyncOptions,
     supports_completion: bool,
     supports_definition: bool,
+    /// Shared with the UI's [`LanguageServer::supports`].
+    features: Arc<AtomicU32>,
     failed_requests: VecDeque<LspEvent>,
     root: PathBuf,
     root_uri: String,
@@ -479,6 +736,7 @@ struct Protocol {
     ready: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_server(
     root: PathBuf,
     config: ServerConfig,
@@ -487,6 +745,7 @@ fn run_server(
     wake_rx: Receiver<()>,
     events: &EventEmitter,
     stopped: &AtomicBool,
+    features: Arc<AtomicU32>,
 ) -> Result<(), String> {
     if stopped.load(Ordering::Acquire) {
         return Ok(());
@@ -627,6 +886,7 @@ fn run_server(
         sync: SyncOptions::default(),
         supports_completion: false,
         supports_definition: false,
+        features,
         failed_requests: VecDeque::new(),
         root,
         root_uri,
@@ -646,22 +906,15 @@ fn run_server(
             deadline: Instant::now() + INITIALIZE_TIMEOUT,
         },
     );
-    protocol.queue(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
-        "processId":std::process::id(), "rootUri":protocol.root_uri,
-        "clientInfo":{"name":"vEdit","version":env!("CARGO_PKG_VERSION")},
-        "workspaceFolders":protocol.workspace_folders(),
-        "capabilities":{
-            "general":{"positionEncodings":["utf-16"]},
-            "workspace":{"configuration":true,"workspaceFolders":true,"applyEdit":false},
-            "window":{"workDoneProgress":true},
-            "textDocument":{
-                "synchronization":{"dynamicRegistration":false,"didSave":true},
-                "publishDiagnostics":{"versionSupport":true},
-                "completion":{"contextSupport":true,"completionItem":{"snippetSupport":false,"insertReplaceSupport":true}},
-                "definition":{"linkSupport":true}
-            }
-        }, "initializationOptions":protocol.config.initialization_options
-    }}))?;
+    protocol.queue(
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+            "processId":std::process::id(), "rootUri":protocol.root_uri,
+            "clientInfo":{"name":"vEdit","version":env!("CARGO_PKG_VERSION")},
+            "workspaceFolders":protocol.workspace_folders(),
+            "capabilities":client_capabilities(),
+            "initializationOptions":protocol.config.initialization_options
+        }}),
+    )?;
 
     while !stopped.load(Ordering::Acquire) {
         protocol.extend_deadlines(events.take_backpressure());
@@ -920,7 +1173,12 @@ impl Protocol {
                     document.saved = true;
                 }
             }
-            request @ (ClientCommand::Completion { .. } | ClientCommand::Definition { .. }) => {
+            request @ (ClientCommand::Completion { .. }
+            | ClientCommand::Definition { .. }
+            | ClientCommand::Hover { .. }
+            | ClientCommand::References { .. }
+            | ClientCommand::DocumentSymbols { .. }
+            | ClientCommand::WorkspaceSymbols { .. }) => {
                 if self.ready {
                     self.request(request)?;
                 } else {
@@ -980,6 +1238,59 @@ impl Protocol {
 
     fn request(&mut self, command: ClientCommand) -> Result<(), String> {
         self.flush_documents()?;
+        let (id, method, params, kind, feature) = match command {
+            ClientCommand::Hover { id, path, position } => (
+                id,
+                "textDocument/hover",
+                json!({"textDocument":{"uri":path_to_uri(&self.absolute_path(&path))?},"position":position}),
+                RequestKind::Hover,
+                Feature::Hover,
+            ),
+            ClientCommand::References { id, path, position } => (
+                id,
+                "textDocument/references",
+                json!({"textDocument":{"uri":path_to_uri(&self.absolute_path(&path))?},"position":position,"context":{"includeDeclaration":true}}),
+                RequestKind::References,
+                Feature::References,
+            ),
+            ClientCommand::DocumentSymbols { id, path } => (
+                id,
+                "textDocument/documentSymbol",
+                json!({"textDocument":{"uri":path_to_uri(&self.absolute_path(&path))?}}),
+                RequestKind::DocumentSymbols,
+                Feature::DocumentSymbols,
+            ),
+            ClientCommand::WorkspaceSymbols { id, query } => (
+                id,
+                "workspace/symbol",
+                json!({ "query": query }),
+                RequestKind::WorkspaceSymbols,
+                Feature::WorkspaceSymbols,
+            ),
+            command => return self.position_request(command),
+        };
+        if self.features.load(Ordering::Acquire) & feature.bit() == 0 {
+            self.failed_requests.push_back(LspEvent::RequestFailed {
+                request_id: id,
+                error: Some(format!(
+                    "{} does not provide {}.",
+                    self.config.name,
+                    feature.label()
+                )),
+            });
+            return Ok(());
+        }
+        self.pending.insert(
+            id,
+            PendingRequest {
+                kind,
+                deadline: Instant::now() + REQUEST_TIMEOUT,
+            },
+        );
+        self.queue(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+    }
+
+    fn position_request(&mut self, command: ClientCommand) -> Result<(), String> {
         let (id, path, position, method, kind) = match command {
             ClientCommand::Completion {
                 id,
@@ -1012,7 +1323,7 @@ impl Protocol {
         let supported = match kind {
             RequestKind::Completion { .. } => self.supports_completion,
             RequestKind::Definition => self.supports_definition,
-            RequestKind::Initialize => true,
+            _ => true,
         };
         if !supported {
             let feature = if matches!(kind, RequestKind::Completion { .. }) {
@@ -1140,6 +1451,15 @@ impl Protocol {
                 self.supports_completion = capabilities["completionProvider"].is_object();
                 self.supports_definition = capabilities["definitionProvider"] == Value::Bool(true)
                     || capabilities["definitionProvider"].is_object();
+                // Publish before Ready so the editor never offers an absent feature.
+                self.features.store(
+                    ALL_FEATURES
+                        .iter()
+                        .filter(|feature| feature.provided(capabilities))
+                        .map(|feature| feature.bit())
+                        .sum(),
+                    Ordering::Release,
+                );
                 self.notify("initialized", json!({}))?;
                 self.notify(
                     "workspace/didChangeConfiguration",
@@ -1177,8 +1497,53 @@ impl Protocol {
                     events.emit(LspEvent::DefinitionNotFound { request_id: id });
                 }
             }
+            RequestKind::Hover => events.emit(LspEvent::Hover {
+                request_id: id,
+                contents: parse_hover(result),
+            }),
+            RequestKind::References => self.resolve_references(id, result, events),
+            RequestKind::DocumentSymbols => events.emit(LspEvent::Symbols {
+                request_id: id,
+                symbols: parse_symbols(result, false),
+            }),
+            RequestKind::WorkspaceSymbols => events.emit(LspEvent::Symbols {
+                request_id: id,
+                symbols: parse_symbols(result, true),
+            }),
         }
         Ok(())
+    }
+
+    /// Previews need source lines: the text this server analyzed for open
+    /// documents, otherwise the file on disk. Reading files happens on a
+    /// short-lived thread so the protocol loop keeps serving other requests.
+    fn resolve_references(&self, id: u64, result: &Value, events: &EventEmitter) {
+        let (locations, truncated) = parse_locations(result);
+        let open: HashMap<PathBuf, String> = locations
+            .iter()
+            .filter_map(|(path, _)| {
+                self.documents
+                    .get(path)
+                    .map(|document| (path.clone(), document.text.clone()))
+            })
+            .collect();
+        let emitter = events.clone();
+        if let Err(error) = thread::Builder::new()
+            .name("vedit-lsp-references".into())
+            .spawn(move || {
+                let references = build_references(locations, &open, read_preview_source);
+                emitter.emit(LspEvent::References {
+                    request_id: id,
+                    references,
+                    truncated,
+                });
+            })
+        {
+            events.emit(LspEvent::RequestFailed {
+                request_id: id,
+                error: Some(format!("Could not read reference previews: {error}")),
+            });
+        }
     }
 }
 
@@ -1370,6 +1735,308 @@ fn parse_definition(result: &Value) -> Option<(PathBuf, Position)> {
         .or_else(|| value.get("range"))
         .or_else(|| value.get("targetRange"))?;
     Some((uri_to_path(uri)?, parse_range(range)?.start))
+}
+
+/// MarkupContent, a MarkedString or an array of MarkedStrings. Language-tagged
+/// strings become fenced code; a deprecated plain string is Markdown.
+fn parse_hover(result: &Value) -> Option<HoverContents> {
+    fn marked(value: &Value) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            return Some(text.to_owned());
+        }
+        let code = value.get("value")?.as_str()?;
+        let language = value.get("language")?.as_str()?;
+        Some(format!("```{language}\n{code}\n```"))
+    }
+    let contents = result.get("contents")?;
+    let (markdown, text) = if let Some(kind) = contents.get("kind").and_then(Value::as_str) {
+        (
+            kind == "markdown",
+            contents.get("value")?.as_str()?.to_owned(),
+        )
+    } else if let Some(items) = contents.as_array() {
+        (
+            true,
+            items
+                .iter()
+                .filter_map(marked)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    } else {
+        (true, marked(contents)?)
+    };
+    let mut text = text.trim().to_owned();
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() > HOVER_LIMIT {
+        let mut end = HOVER_LIMIT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+    Some(HoverContents { markdown, text })
+}
+
+/// Exactly the requests and notifications this client implements.
+fn client_capabilities() -> Value {
+    let symbol_kinds = json!({"valueSet":(1..=26).collect::<Vec<u32>>()});
+    json!({
+        "general":{"positionEncodings":["utf-16"]},
+        "workspace":{"configuration":true,"workspaceFolders":true,"applyEdit":false,
+            "symbol":{"symbolKind":symbol_kinds}},
+        "window":{"workDoneProgress":true},
+        "textDocument":{
+            "synchronization":{"dynamicRegistration":false,"didSave":true},
+            "publishDiagnostics":{"versionSupport":true},
+            "completion":{"contextSupport":true,"completionItem":{"snippetSupport":false,"insertReplaceSupport":true}},
+            "definition":{"linkSupport":true},
+            "hover":{"contentFormat":["markdown","plaintext"]},
+            "references":{},
+            "documentSymbol":{"hierarchicalDocumentSymbolSupport":true,"symbolKind":symbol_kinds}
+        }
+    })
+}
+
+/// Location[] or LocationLink[]; null means none. Duplicates are removed.
+fn parse_locations(result: &Value) -> (Vec<(PathBuf, TextRange)>, bool) {
+    let mut locations = Vec::new();
+    let mut truncated = false;
+    for value in result.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(uri) = value
+            .get("uri")
+            .or_else(|| value.get("targetUri"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(range) = value
+            .get("range")
+            .or_else(|| value.get("targetSelectionRange"))
+            .and_then(parse_range)
+        else {
+            continue;
+        };
+        let Some(path) = uri_to_path(uri) else {
+            continue;
+        };
+        if locations.contains(&(path.clone(), range)) {
+            continue;
+        }
+        if locations.len() == REFERENCE_LIMIT {
+            truncated = true;
+            break;
+        }
+        locations.push((path, range));
+    }
+    (locations, truncated)
+}
+
+/// The previewed source, at most the editor's document limit.
+fn read_preview_source(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+const PREVIEW_CHARS: usize = 160;
+
+/// Attach one-line previews. `open` holds the text the server analyzed for
+/// documents it has open; others come from `read`. Paths become workspace keys.
+fn build_references(
+    locations: Vec<(PathBuf, TextRange)>,
+    open: &HashMap<PathBuf, String>,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Vec<Reference> {
+    let mut sources: HashMap<PathBuf, (PathBuf, Option<String>)> = HashMap::new();
+    locations
+        .into_iter()
+        .map(|(path, range)| {
+            let (key, text) = sources.entry(path.clone()).or_insert_with(|| {
+                let text = open.get(&path).cloned().or_else(|| read(&path));
+                (canonical_path(&path), text)
+            });
+            let line_text = text.as_deref().and_then(|text| {
+                text.split('\n')
+                    .nth(range.start.line as usize)
+                    .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            });
+            let (column, preview, highlight) = match line_text {
+                Some(line) => line_preview(line, range),
+                None => (range.start.character as usize, String::new(), 0..0),
+            };
+            Reference {
+                path: key.clone(),
+                position: range.start,
+                line: range.start.line as usize + 1,
+                column: column + 1,
+                preview,
+                highlight,
+            }
+        })
+        .collect()
+}
+
+/// (zero-based scalar column, trimmed preview, highlighted scalar range in it).
+fn line_preview(line: &str, range: TextRange) -> (usize, String, std::ops::Range<usize>) {
+    let column_at = |character: u32| position_to_char(line, Position { line: 0, character });
+    let chars: Vec<char> = line.chars().collect();
+    let start = column_at(range.start.character);
+    let end = if range.end.line == range.start.line {
+        column_at(range.end.character).max(start)
+    } else {
+        chars.len()
+    };
+    let indent = chars.iter().take_while(|ch| ch.is_whitespace()).count();
+    // Keep the match visible in long lines: start shortly before it.
+    let mut first = indent.min(start);
+    if start - first > PREVIEW_CHARS / 2 {
+        first = start - PREVIEW_CHARS / 4;
+    }
+    let last = chars.len().min(first + PREVIEW_CHARS);
+    let mut preview: String = chars[first..last].iter().collect();
+    let mut offset = 0;
+    if first > indent {
+        preview.insert(0, '…');
+        offset = 1;
+    }
+    let trimmed = preview.trim_end().chars().count();
+    preview.truncate(preview.trim_end().len());
+    if last < chars.len() {
+        preview.push('…');
+    }
+    let highlight =
+        (start - first + offset).min(trimmed)..(end.min(last) - first + offset).min(trimmed);
+    (start, preview, highlight)
+}
+
+/// DocumentSymbol[] (hierarchical) or SymbolInformation[] / WorkspaceSymbol[].
+/// Document symbols keep document order and their nesting; `with_paths` keeps
+/// each symbol's file for workspace results.
+fn parse_symbols(result: &Value, with_paths: bool) -> Vec<Symbol> {
+    fn nested(value: &Value, container: Option<&str>, depth: usize, symbols: &mut Vec<Symbol>) {
+        if symbols.len() >= SYMBOL_LIMIT || depth > 64 {
+            return;
+        }
+        let Some(name) = value.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(range) = value
+            .get("selectionRange")
+            .or_else(|| value.get("range"))
+            .and_then(parse_range)
+        else {
+            return;
+        };
+        symbols.push(Symbol {
+            name: name.to_owned(),
+            detail: value
+                .get("detail")
+                .and_then(Value::as_str)
+                .filter(|detail| !detail.trim().is_empty())
+                .map(str::to_owned),
+            kind: value.get("kind").and_then(Value::as_u64).unwrap_or(0) as u32,
+            container: container.map(str::to_owned),
+            path: None,
+            position: range.start,
+            depth,
+        });
+        for child in value
+            .get("children")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            nested(child, Some(name), depth + 1, symbols);
+        }
+    }
+    let items = result.as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut symbols = Vec::new();
+    for value in items {
+        if symbols.len() >= SYMBOL_LIMIT {
+            break;
+        }
+        let Some(location) = value.get("location") else {
+            nested(value, None, 0, &mut symbols);
+            continue;
+        };
+        let Some(name) = value.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = location
+            .get("uri")
+            .and_then(Value::as_str)
+            .and_then(uri_to_path);
+        if with_paths && path.is_none() {
+            continue;
+        }
+        symbols.push(Symbol {
+            name: name.to_owned(),
+            detail: None,
+            kind: value.get("kind").and_then(Value::as_u64).unwrap_or(0) as u32,
+            container: value
+                .get("containerName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            path: path.filter(|_| with_paths),
+            // A WorkspaceSymbol may omit the range until resolved.
+            position: location
+                .get("range")
+                .and_then(parse_range)
+                .map(|range| range.start)
+                .unwrap_or_default(),
+            depth: 0,
+        });
+    }
+    if !with_paths
+        && items
+            .first()
+            .is_some_and(|value| value.get("location").is_some())
+    {
+        symbols.sort_by_key(|symbol| (symbol.position.line, symbol.position.character));
+    }
+    symbols
+}
+
+/// A calm lowercase name for an LSP SymbolKind.
+pub fn symbol_kind_label(kind: u32) -> &'static str {
+    match kind {
+        1 => "file",
+        2 => "module",
+        3 => "namespace",
+        4 => "package",
+        5 => "class",
+        6 => "method",
+        7 => "property",
+        8 => "field",
+        9 => "constructor",
+        10 => "enum",
+        11 => "interface",
+        12 => "function",
+        13 => "variable",
+        14 => "constant",
+        15 => "string",
+        16 => "number",
+        17 => "boolean",
+        18 => "array",
+        19 => "object",
+        20 => "key",
+        21 => "null",
+        22 => "enum member",
+        23 => "struct",
+        24 => "event",
+        25 => "operator",
+        26 => "type parameter",
+        _ => "symbol",
+    }
 }
 
 fn plain_snippet(snippet: &str) -> String {
@@ -1910,7 +2577,7 @@ mod tests {
         assert!(parse_definition(&Value::Null).is_none());
     }
 
-    fn protocol() -> (Protocol, Receiver<Outbound>) {
+    pub(super) fn protocol() -> (Protocol, Receiver<Outbound>) {
         let (writer, receiver) = mpsc::sync_channel(32);
         let root = std::env::temp_dir();
         let root_uri = path_to_uri(&root).unwrap();
@@ -1925,6 +2592,9 @@ mod tests {
                 },
                 supports_completion: true,
                 supports_definition: true,
+                features: Arc::new(AtomicU32::new(
+                    ALL_FEATURES.iter().map(|feature| feature.bit()).sum(),
+                )),
                 failed_requests: VecDeque::new(),
                 root,
                 root_uri,
@@ -1974,6 +2644,8 @@ mod tests {
             wake,
             stopped: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            features: Arc::new(AtomicU32::new(0)),
+            instance: 0,
         };
         let (ready_tx, ready_rx) = mpsc::channel();
         let (received_tx, received_rx) = mpsc::channel();
@@ -2079,6 +2751,8 @@ mod tests {
             wake,
             stopped: Arc::new(AtomicBool::new(true)),
             shutdown_requested: Arc::clone(&emitter.shutdown_requested),
+            features: Arc::new(AtomicU32::new(0)),
+            instance: 0,
         };
         let worker = thread::spawn(move || emitter.emit(LspEvent::Error("server exited".into())));
         assert!(server.is_stopped());
@@ -2108,6 +2782,8 @@ mod tests {
             wake,
             stopped: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::clone(&emitter.shutdown_requested),
+            features: Arc::new(AtomicU32::new(0)),
+            instance: 0,
         };
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -2149,7 +2825,7 @@ mod tests {
         assert_eq!(protocol.pending[&2].deadline, deadline + paused);
     }
 
-    fn initialize_protocol(protocol: &mut Protocol, capabilities: Value) {
+    pub(super) fn initialize_protocol(protocol: &mut Protocol, capabilities: Value) {
         protocol.pending.insert(
             0,
             PendingRequest {
@@ -2616,9 +3292,9 @@ mod tests {
         assert_eq!(diagnostics[0].message, "example warning");
     }
 
-    struct TestWorkspace(PathBuf);
+    pub(super) struct TestWorkspace(pub(super) PathBuf);
     impl TestWorkspace {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -2752,3 +3428,7 @@ mod tests {
 #[cfg(test)]
 #[path = "polyglot_live_tests.rs"]
 mod polyglot_live_tests;
+
+#[cfg(test)]
+#[path = "lsp_intel_tests.rs"]
+mod intel_tests;

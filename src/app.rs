@@ -59,6 +59,8 @@ mod git_panel;
 mod indentation;
 #[path = "keybindings.rs"]
 mod keybindings;
+#[path = "language_intel.rs"]
+mod language_intel;
 #[path = "language_settings.rs"]
 mod language_settings;
 #[path = "language_support.rs"]
@@ -929,6 +931,7 @@ pub struct VEditApp {
     definition_request: Option<(u64, u64)>,
     definition_origin: Option<(u64, u64, usize, egui::Id)>,
     pending_location: Option<(u64, crate::lsp::Position)>,
+    intel: language_intel::IntelState,
     problems_visible: bool,
     last_disk_check: Instant,
     disk_check_running: bool,
@@ -1194,6 +1197,7 @@ impl VEditApp {
             definition_request: None,
             definition_origin: None,
             pending_location: None,
+            intel: Default::default(),
             problems_visible: false,
             last_disk_check: Instant::now(),
             disk_check_running: false,
@@ -3666,6 +3670,10 @@ impl VEditApp {
                         | Action::GoToLine
                         | Action::Definition
                         | Action::Completion
+                        | Action::Hover
+                        | Action::FindReferences
+                        | Action::DocumentSymbol
+                        | Action::WorkspaceSymbol
                         | Action::MarkdownPreview
                         | Action::ToggleBookmark
                         | Action::ScreenJump
@@ -3947,6 +3955,8 @@ impl VEditApp {
         let mut prompt_text = String::new();
         let mut vim_searched = false;
         let mut definition = false;
+        let mut references = false;
+        let mut hover = false;
         let mut vim_register = None;
         let mut system_clipboard = None;
         let swap_jk = self.settings.swap_jk;
@@ -4280,6 +4290,21 @@ impl VEditApp {
                                     definition = true;
                                     continue;
                                 }
+                                if ch == 'r'
+                                    && tab.vim.mode == VimMode::Normal
+                                    && tab.vim.pending_command() == "g"
+                                {
+                                    tab.vim.cancel_pending_command();
+                                    references = true;
+                                    continue;
+                                }
+                                if ch == 'K'
+                                    && tab.vim.mode == VimMode::Normal
+                                    && tab.vim.pending_command().is_empty()
+                                {
+                                    hover = true;
+                                    continue;
+                                }
                             }
                             let ch = if tab.vim.expects_literal_character() {
                                 ch
@@ -4378,6 +4403,12 @@ impl VEditApp {
         }
         if definition {
             self.request_definition();
+        }
+        if references {
+            self.find_references();
+        }
+        if hover {
+            self.show_hover();
         }
     }
 
@@ -4513,6 +4544,7 @@ impl VEditApp {
             });
     }
     fn open_project_search(&mut self) {
+        self.intel.references = None;
         self.show_sidebar(SidebarView::Search);
         self.project_search_focus = true;
         self.cancel_vim_search(false);
@@ -4527,6 +4559,10 @@ impl VEditApp {
         self.ctx.request_repaint();
     }
     fn project_search_ui(&mut self, ui: &mut egui::Ui) {
+        if self.intel.references.is_some() {
+            self.references_ui(ui);
+            return;
+        }
         let query_id = egui::Id::new("project_search_query");
         // Closing menus retain their pointer release, and modal layers remain
         // blocked for one frame. Wait until the query can receive focus.
@@ -5547,6 +5583,12 @@ impl VEditApp {
             })
             .cloned()
             .unwrap_or_default();
+        // With a hover provider, diagnostics join the hover popup instead of
+        // a separate tooltip.
+        let hover_available = self
+            .tab()
+            .is_some_and(|tab| self.pointer_hover_available(tab));
+        let mut hover_pointer = None;
         let settings = self.settings.clone();
         let ctx = self.ctx.clone();
         let Some(document_id) = self.tab().map(|tab| tab.id) else {
@@ -6215,14 +6257,38 @@ impl VEditApp {
                             ],
                             Stroke::new(1.0, color),
                         );
-                        ui.interact(
-                            segment.translate(output.galley_pos.to_vec2()),
-                            ui.id().with(("diagnostic", tab.id, start, row_index)),
-                            egui::Sense::hover(),
-                        )
-                        .on_hover_text(&diagnostic.message);
+                        if !hover_available {
+                            ui.interact(
+                                segment.translate(output.galley_pos.to_vec2()),
+                                ui.id().with(("diagnostic", tab.id, start, row_index)),
+                                egui::Sense::hover(),
+                            )
+                            .on_hover_text(&diagnostic.message);
+                        }
                     }
                 }
+            }
+            if hover_available
+                && source_interaction
+                && output.response.contains_pointer()
+                && !ctx.input(|input| input.pointer.any_down())
+                && let Some(pointer) = ctx.input(|input| input.pointer.hover_pos())
+                && clip.contains(pointer)
+                && let Some((index, word, rect)) = language_intel::pointer_word(
+                    &output.galley,
+                    &visible_rows,
+                    pointer - output.galley_pos.to_vec2(),
+                )
+            {
+                hover_pointer = Some(language_intel::PointerTarget {
+                    tab_id: tab.id,
+                    pane_id: search_pane_id,
+                    revision: tab.revision,
+                    index,
+                    word,
+                    rect: rect.translate(output.galley_pos.to_vec2()),
+                    pointer,
+                });
             }
             for &(i, mapped) in &visible_rows {
                 if mapped.first_in_line {
@@ -6326,6 +6392,13 @@ impl VEditApp {
         self.editor_focused = focused;
         self.editor_rect = rect;
         self.editor_cursor_rect = caret_rect;
+        self.intel.interactive |= source_interaction;
+        if hover_pointer.is_some() {
+            self.intel.pointer = hover_pointer;
+        }
+        if pane_focused {
+            self.intel.caret = caret_rect;
+        }
         self.screen_jump = jump;
         if let Some(mark_id) = agent_mark_remove {
             self.agent_marks_remove(mark_id);
@@ -6930,6 +7003,14 @@ impl VEditApp {
             "Jump to visible text" => self.start_screen_jump(),
             "Go to definition" => self.request_definition(),
             "Show completions" => self.request_completion(),
+            "Show hover" => self.show_hover(),
+            "Find references" => self.find_references(),
+            "Go to symbol in file" => {
+                self.open_symbol_palette(language_intel::SymbolScope::Document)
+            }
+            "Go to symbol in workspace" => {
+                self.open_symbol_palette(language_intel::SymbolScope::Workspace)
+            }
             "Restart language analysis" | "Restart Rust analysis" => self.restart_active_language(),
             "Language support" => self.open_settings_section("Languages"),
             "Show problems" => {
@@ -7057,7 +7138,15 @@ impl VEditApp {
                 let page_down = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageDown));
                 let page_up = navigate && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::PageUp));
                 let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+                let symbol_title = (palette == Palette::Files)
+                    .then(|| language_intel::symbol_scope(&self.palette_query))
+                    .flatten()
+                    .map(|(scope, _)| match scope {
+                        language_intel::SymbolScope::Document => "Go to symbol",
+                        language_intel::SymbolScope::Workspace => "Go to symbol in workspace",
+                    });
                 design::overlay_title(ui, match palette {
+                    Palette::Files if symbol_title.is_some() => symbol_title.unwrap(),
                     Palette::Files => "Quick open",
                     Palette::Commands => "Commands",
                     Palette::Line => "Go to line",
@@ -7088,8 +7177,14 @@ impl VEditApp {
                         line = self.palette_query.trim().parse::<usize>().ok();
                     }
                 } else {
-                    let options: Vec<(String, String, Option<PathBuf>)> = if palette
-                        == Palette::Commands
+                    let query = self.palette_query.clone();
+                    let symbols = (palette == Palette::Files)
+                        .then(|| language_intel::symbol_scope(&query))
+                        .flatten()
+                        .map(|(scope, query)| self.symbol_palette(scope, query));
+                    let options: Vec<language_intel::PaletteRow> = if let Some(symbols) = &symbols {
+                        symbols.rows.clone()
+                    } else if palette == Palette::Commands
                     {
                         COMMANDS
                             .iter()
@@ -7097,7 +7192,7 @@ impl VEditApp {
                                 name.to_lowercase()
                                     .contains(&self.palette_query.to_lowercase())
                             })
-                            .map(|(name, _)| (name.to_string(), keybindings::Action::from_label(name).map(|action| self.shortcut_label(action)).unwrap_or_default(), None))
+                            .map(|(name, _)| (name.to_string(), keybindings::Action::from_label(name).map(|action| self.shortcut_label(action)).unwrap_or_default(), None, None))
                             .collect()
                     } else {
                         self.project()
@@ -7113,6 +7208,7 @@ impl VEditApp {
                                                     path.strip_prefix(&p.root).unwrap_or(&path),
                                                 ),
                                                 Some(path),
+                                                None,
                                             )
                                         })
                                         .collect()
@@ -7120,7 +7216,7 @@ impl VEditApp {
                             })
                             .unwrap_or_default()
                     };
-                    let index_truncated = palette == Palette::Files
+                    let index_truncated = palette == Palette::Files && symbols.is_none()
                         && self.project().and_then(|project| project.index.as_ref()).is_some_and(|index| index.truncated);
                     let limit_note_height = if index_truncated { 30.0 } else { 0.0 };
                     let results_height = (ctx.content_rect().height() - 285.0 - limit_note_height).clamp(96.0, 340.0);
@@ -7156,8 +7252,13 @@ impl VEditApp {
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                         .animated(false)
                         .max_height(results_height)
+                        // Results can arrive after the palette opened (language
+                        // symbols); claim their height so the modal grows with them.
+                        .min_scrolled_height(
+                            (options.len() as f32 * design::DETAIL_ROW_HEIGHT).min(results_height),
+                        )
                         .show(ui, |ui| {
-                            for (i, (name, detail, path)) in options.iter().enumerate() {
+                            for (i, (name, detail, path, position)) in options.iter().enumerate() {
                                 let response = ui
                                     .push_id(i, |ui| {
                                         design::detail_row(
@@ -7170,14 +7271,25 @@ impl VEditApp {
                                     })
                                     .inner;
                                 if response.clicked() || enter && i == self.palette_selected {
-                                    choose = Some((name.clone(), path.clone()));
+                                    choose = Some((name.clone(), path.clone(), *position));
                                 }
                                 if (down || up || first || last || page_down || page_up || query_changed)
                                     && i == self.palette_selected {
                                     response.scroll_to_me(None);
                                 }
                             }
-                            if options.is_empty() {
+                            if let Some(symbols) = &symbols {
+                                if symbols.loading {
+                                    ui.add_space(6.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(RichText::new("Loading symbols…").color(MUTED));
+                                    });
+                                } else if let Some(message) = &symbols.message {
+                                    ui.add_space(10.0);
+                                    ui.label(RichText::new(message).color(MUTED));
+                                }
+                            } else if options.is_empty() {
                                 ui.add_space(10.0);
                                 if palette == Palette::Files {
                                     match self.project() {
@@ -7252,8 +7364,10 @@ impl VEditApp {
             if close || choose.is_some() || line.is_some() {
                 self.close_palette();
             }
-            if let Some((name, path)) = choose {
-                if let Some(path) = path {
+            if let Some((name, path, position)) = choose {
+                if let (Some(path), Some(position)) = (path.clone(), position) {
+                    self.open_language_location(path, position);
+                } else if let Some(path) = path {
                     self.open_file(path);
                 } else {
                     self.command_action(&name);
@@ -7648,6 +7762,7 @@ impl VEditApp {
         if self.palette.is_none() && !self.settings_open {
             self.git_peek_escape();
         }
+        self.hover_escape();
         let dragging_tab = self.tab_drag_keys() || self.sidebar_drag_keys();
         let switching_project = !dragging_tab && self.workspace_keys();
         if !dragging_tab && !switching_project {
@@ -7711,6 +7826,7 @@ impl VEditApp {
         {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
+        self.intel.begin_frame();
         self.editor_ui(ui);
         self.finish_workspace_action();
         self.finish_region_render_owner();
@@ -7721,6 +7837,7 @@ impl VEditApp {
         self.sync_agent_marks();
         self.navigation_ui();
         self.completion_ui();
+        self.hover_ui();
         self.finish_agent_mark_input_owner();
         self.finish_shortcut_input();
         self.autosave();
@@ -8174,6 +8291,10 @@ impl VEditApp {
                     self.status(error, true);
                 }
                 crate::lsp::LspEvent::RequestFailed { request_id, error } => {
+                    // Hover, references and symbols report in their own views.
+                    if self.language_intel_failed(request_id, error.clone()) {
+                        continue;
+                    }
                     if self.active_project == index {
                         if self.completion_request == Some(request_id) {
                             self.completion_request = None;
@@ -8319,8 +8440,32 @@ impl VEditApp {
                         self.status("No definition found here", false);
                     }
                 }
+                crate::lsp::LspEvent::Hover {
+                    request_id,
+                    contents,
+                } => {
+                    self.language_response_succeeded(index, &language);
+                    self.hover_result(request_id, contents);
+                }
+                crate::lsp::LspEvent::References {
+                    request_id,
+                    references,
+                    truncated,
+                } => {
+                    self.language_response_succeeded(index, &language);
+                    self.references_result(request_id, references, truncated);
+                }
+                crate::lsp::LspEvent::Symbols {
+                    request_id,
+                    symbols,
+                } => {
+                    self.language_response_succeeded(index, &language);
+                    self.symbols_result(request_id, symbols);
+                }
             }
         }
+        self.check_language_intel_requests();
+        self.apply_language_reveal();
         if let Some((id, position)) = self.pending_location
             && let Some(t) = self.tab_by_id_mut(id)
             && !t.loading
@@ -8812,6 +8957,10 @@ mod palette_ui_tests;
 #[cfg(test)]
 #[path = "intel_tests.rs"]
 mod intel_tests;
+
+#[cfg(test)]
+#[path = "language_intel_tests.rs"]
+mod language_intel_tests;
 
 #[cfg(test)]
 #[path = "project_search_ui_tests.rs"]
