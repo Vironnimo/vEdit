@@ -57,6 +57,14 @@ struct Loaded {
     revision: u64,
 }
 
+/// JavaScript and jq round integers above 2^53, so revisions stay below it.
+const REVISION_MASK: u64 = (1 << 53) - 1;
+
+/// Zero is reserved for "no configuration file".
+fn configuration_revision(hash: u64) -> u64 {
+    (hash & REVISION_MASK).max(1)
+}
+
 fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
     let path = root.join(launch::CONFIG_PATH);
     let existing = match fs::metadata(&path) {
@@ -66,14 +74,20 @@ fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
     };
     let revision = existing
         .as_ref()
-        .map_or(0, |doc| doc.fingerprint.hash.max(1));
+        .map_or(0, |doc| configuration_revision(doc.fingerprint.hash));
     if let Action::Configure {
         configuration,
         revision: expected,
     } = action
     {
         configuration.validate()?;
-        if *expected != revision {
+        // Earlier builds issued the unmasked 64-bit hash; keep accepting it.
+        let expected = if *expected > REVISION_MASK {
+            configuration_revision(*expected)
+        } else {
+            *expected
+        };
+        if expected != revision {
             return Err(format!(
                 "Launch configuration changed (current revision {revision}). Nothing was written. Use launch list, merge the profiles, then configure with --revision {revision}."
             ));
@@ -91,7 +105,7 @@ fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
         .map_err(|e| format!("Could not save launch configuration: {e}"))?;
         return Ok(Loaded {
             configuration: Ok(configuration.clone()),
-            revision: saved.fingerprint.hash.max(1),
+            revision: configuration_revision(saved.fingerprint.hash),
         });
     }
     let configuration = existing.map_or_else(

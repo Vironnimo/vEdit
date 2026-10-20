@@ -391,3 +391,73 @@ fn launch_rolling_output_keeps_recent_unicode_and_bounds_lines() {
     state.append(&"x\n".repeat(20_000));
     assert!(state.output.lines().count() <= tasks::MAX_OUTPUT_LINES + 1);
 }
+
+#[test]
+fn launch_configuration_revisions_stay_json_safe_and_accept_unmasked_values() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join(launch::CONFIG_PATH);
+    let mut config = configuration();
+    // Nearly every 64-bit content hash exceeds 2^53; vary a name until one does.
+    let mut revision = fixture.config(&config);
+    let mut full = workspace::read_document(&path, launch::MAX_CONFIG_BYTES)
+        .unwrap()
+        .fingerprint
+        .hash;
+    for attempt in 0.. {
+        if full > REVISION_MASK {
+            break;
+        }
+        assert!(attempt < 64, "no content hash above 2^53");
+        config.profiles[0].name = format!("Web UI {attempt}");
+        revision = read_or_configure(
+            &fixture.0,
+            &Action::Configure {
+                configuration: config.clone(),
+                revision,
+            },
+        )
+        .unwrap()
+        .revision;
+        full = workspace::read_document(&path, launch::MAX_CONFIG_BYTES)
+            .unwrap()
+            .fingerprint
+            .hash;
+    }
+    assert!(revision <= REVISION_MASK && revision > 0);
+    assert_eq!(revision, (full & REVISION_MASK).max(1));
+    let listed = read_or_configure(&fixture.0, &Action::List).unwrap();
+    assert_eq!(listed.revision, revision);
+    assert_eq!(
+        serde_json::to_value(revision).unwrap().as_f64().unwrap() as u64,
+        revision
+    );
+
+    let original = fs::read(&path).unwrap();
+    for wrong in [full ^ 2, revision ^ 2, 0] {
+        assert!(
+            read_or_configure(
+                &fixture.0,
+                &Action::Configure {
+                    configuration: config.clone(),
+                    revision: wrong,
+                },
+            )
+            .err()
+            .expect("a wrong revision was accepted")
+            .contains(&format!("current revision {revision}"))
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    // A revision issued by an earlier build before masking still identifies the file.
+    config.profiles[0].name = "Web UI accepted".into();
+    let updated = read_or_configure(
+        &fixture.0,
+        &Action::Configure {
+            configuration: config.clone(),
+            revision: full.max(1),
+        },
+    )
+    .unwrap();
+    assert_eq!(updated.configuration.unwrap(), config);
+    assert!(updated.revision <= REVISION_MASK && updated.revision > 0);
+}
