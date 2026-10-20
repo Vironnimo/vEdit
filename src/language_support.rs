@@ -10,7 +10,41 @@ pub(super) struct LanguageSession {
     pub error: Option<String>,
     pub opened: HashMap<PathBuf, (u64, i32)>,
     pub diagnostics: HashMap<PathBuf, Vec<crate::lsp::Diagnostic>>,
+    /// Which transmitted document each entry in `diagnostics` describes.
+    pub diagnostic_origins: HashMap<PathBuf, DiagnosticsOrigin>,
     pub retired_paths: std::collections::HashSet<PathBuf>,
+}
+/// The buffer text one server's diagnostics were computed for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DiagnosticsOrigin {
+    /// LSP document version named by publishDiagnostics; None when the server
+    /// sent no version.
+    pub version: Option<i32>,
+    /// Tab revision transmitted as `version`. Without a published version, the
+    /// last revision transmitted before the diagnostics arrived.
+    pub revision: Option<u64>,
+}
+impl DiagnosticsOrigin {
+    /// Map a publication onto the tab revision recorded for its LSP version.
+    pub fn new(version: Option<i32>, transmitted: Option<&(u64, i32)>) -> Self {
+        let revision = match (version, transmitted) {
+            (Some(version), Some((revision, current))) => {
+                (version == *current).then_some(*revision)
+            }
+            (None, Some((revision, _))) => Some(*revision),
+            (_, None) => None,
+        };
+        Self { version, revision }
+    }
+    /// (fresh, computed revision) relative to the tab's current revision.
+    fn freshness(&self, current: u64) -> (Option<bool>, Option<u64>) {
+        match (self.version, self.revision) {
+            (Some(_), Some(revision)) => (Some(revision == current), Some(revision)),
+            // Unversioned results describe at most the last transmitted text.
+            (None, Some(revision)) if revision != current => (Some(false), None),
+            _ => (None, None),
+        }
+    }
 }
 impl LanguageSession {
     pub fn new(config: LanguageServerSettings) -> Self {
@@ -22,6 +56,7 @@ impl LanguageSession {
             error: None,
             opened: HashMap::new(),
             diagnostics: HashMap::new(),
+            diagnostic_origins: HashMap::new(),
             retired_paths: std::collections::HashSet::new(),
         }
     }
@@ -47,6 +82,7 @@ impl Project {
             !session.config.matches(path) && !session.diagnostics.contains_key(path)
         });
         session.diagnostics.clear();
+        session.diagnostic_origins.clear();
         let mut remaining: HashMap<PathBuf, Vec<crate::lsp::Diagnostic>> = HashMap::new();
         for session in self.languages.values() {
             for (path, diagnostics) in &session.diagnostics {
@@ -65,6 +101,43 @@ impl Project {
     }
     pub(super) fn language_document_version(&self, path: &Path) -> Option<&(u64, i32)> {
         self.language_for(path)?.opened.get(path)
+    }
+    /// Whether the combined diagnostics for `path` describe tab revision
+    /// `current`: (fresh, revision they were computed for). Unknown is None;
+    /// with several servers, any stale contribution makes the result stale.
+    pub(super) fn diagnostics_freshness(
+        &self,
+        path: &Path,
+        current: u64,
+    ) -> (Option<bool>, Option<u64>) {
+        let mut fresh = Some(true);
+        let mut revision: Option<Option<u64>> = None;
+        let mut any = false;
+        for session in self.languages.values() {
+            if !session.diagnostics.contains_key(path) {
+                continue;
+            }
+            any = true;
+            let (session_fresh, session_revision) = session
+                .diagnostic_origins
+                .get(path)
+                .map_or((None, None), |origin| origin.freshness(current));
+            fresh = match (fresh, session_fresh) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            };
+            revision = Some(match (revision, session_revision) {
+                (None, value) => value,
+                (Some(Some(a)), Some(b)) => Some(a.min(b)),
+                _ => None,
+            });
+        }
+        if any {
+            (fresh, revision.flatten())
+        } else {
+            (None, None)
+        }
     }
     pub(super) fn language_status_json(&self) -> serde_json::Value {
         let mut sessions: Vec<_> = self
@@ -100,6 +173,7 @@ impl Project {
                 }
                 session.opened.remove(&path);
                 session.diagnostics.remove(&path);
+                session.diagnostic_origins.remove(&path);
                 self.diagnostics.remove(&path);
                 session.retired_paths.insert(path);
             }
@@ -143,6 +217,7 @@ impl VEditApp {
             session.opened.clear();
             session.effective_config = None;
             session.diagnostics.clear();
+            session.diagnostic_origins.clear();
         }
         project.diagnostics.clear();
         if project_index == self.active_project {

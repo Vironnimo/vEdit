@@ -339,8 +339,11 @@ impl VEditApp {
             }
         }
         let next = offset.saturating_add(items.len());
+        let (fresh, diagnostics_revision) = tab.path.as_deref().map_or((None, None), |path| {
+            project.diagnostics_freshness(path, tab.revision)
+        });
         Response::success(json!({
-            "tab_id":id,"revision":tab.revision,"analysis_ready":tab.path.as_deref().and_then(|path|project.language_for(path)).is_some_and(|session|session.active()),
+            "tab_id":id,"revision":tab.revision,"fresh":fresh,"diagnostics_revision":diagnostics_revision,"analysis_ready":tab.path.as_deref().and_then(|path|project.language_for(path)).is_some_and(|session|session.active()),
             "analysis_error":tab.path.as_deref().and_then(|path|project.language_for(path)).and_then(|session|session.error.as_ref()),"column_encoding":"unicode_scalar","end_exclusive":true,
             "items":items,"total":total,"offset":offset,"has_more":next<total,
             "next_offset":if next<total{Some(next)}else{None}
@@ -808,6 +811,96 @@ mod tests {
         );
         assert_eq!(stale.result["items"][0]["location_clamped"], true);
         assert_eq!(app.tab().unwrap().vim.cursor, 0);
+    }
+
+    #[test]
+    fn diagnostics_query_reports_whether_results_match_the_current_buffer() {
+        let (mut app, id) = app_with_tab("fn main() {}\n", "fn main() {}\n");
+        let (server, events) = crate::lsp::LanguageServer::test_channel();
+        app.projects[0].rust_language_mut().server = Some(server);
+        app.projects[0].rust_language_mut().ready = true;
+        let path = app.projects[0].tabs[0].path.clone().unwrap();
+        let transmitted = app.projects[0].tabs[0].revision;
+        app.projects[0]
+            .rust_language_mut()
+            .opened
+            .insert(path.clone(), (transmitted, 4));
+        let query = |app: &VEditApp| {
+            let response = app
+                .control_query(&Request::Diagnostics {
+                    tab_id: id,
+                    limit: 100,
+                    offset: 0,
+                })
+                .unwrap();
+            assert!(response.ok);
+            response.result
+        };
+        let edit = |app: &mut VEditApp| {
+            let tab = &mut app.projects[0].tabs[0];
+            tab.text.insert_str(0, "// edited\n");
+            tab.revision += 1;
+            tab.revision
+        };
+        let publish = |app: &mut VEditApp, version| {
+            events
+                .send(crate::lsp::LspEvent::Diagnostics {
+                    path: path.clone(),
+                    version,
+                    diagnostics: vec![crate::lsp::Diagnostic {
+                        range: crate::lsp::TextRange::default(),
+                        severity: 1,
+                        message: "expected error".into(),
+                        source: None,
+                    }],
+                })
+                .unwrap();
+            app.poll_languages();
+        };
+
+        let none = query(&app);
+        assert_eq!(none["fresh"], Value::Null);
+        assert_eq!(none["diagnostics_revision"], Value::Null);
+
+        publish(&mut app, Some(4));
+        let current = query(&app);
+        assert_eq!(current["fresh"], true);
+        assert_eq!(current["diagnostics_revision"], transmitted);
+        assert_eq!(current["total"], 1);
+
+        // An edit not yet analyzed keeps the old results visible but marks them stale.
+        let edited = edit(&mut app);
+        let stale = query(&app);
+        assert_eq!(stale["fresh"], false);
+        assert_eq!(stale["diagnostics_revision"], transmitted);
+        assert_eq!(stale["revision"], edited);
+        assert_eq!(stale["total"], 1);
+        assert_eq!(app.projects[0].diagnostics[&path].len(), 1);
+
+        // A publication for the transmitted edit makes the results current again.
+        app.projects[0]
+            .rust_language_mut()
+            .opened
+            .insert(path.clone(), (edited, 5));
+        publish(&mut app, Some(5));
+        let refreshed = query(&app);
+        assert_eq!(refreshed["fresh"], true);
+        assert_eq!(refreshed["diagnostics_revision"], edited);
+
+        // Versionless results cannot prove a match, but a later edit proves staleness.
+        publish(&mut app, None);
+        let unknown = query(&app);
+        assert_eq!(unknown["fresh"], Value::Null);
+        assert_eq!(unknown["diagnostics_revision"], Value::Null);
+        edit(&mut app);
+        assert_eq!(query(&app)["fresh"], false);
+
+        // Restarting analysis forgets both the results and their origin.
+        app.projects[0].clear_language_diagnostics("rust");
+        let cleared = query(&app);
+        assert_eq!(cleared["fresh"], Value::Null);
+        assert_eq!(cleared["diagnostics_revision"], Value::Null);
+        assert_eq!(cleared["total"], 0);
     }
 
     #[test]

@@ -7830,12 +7830,13 @@ impl VEditApp {
                     {
                         self.language_response_succeeded(index, &language);
                         let project = &mut self.projects[index];
-                        project
-                            .languages
-                            .get_mut(&language)
-                            .unwrap()
-                            .diagnostics
-                            .insert(path.clone(), diagnostics);
+                        let session = project.languages.get_mut(&language).unwrap();
+                        let origin = language_support::DiagnosticsOrigin::new(
+                            version,
+                            session.opened.get(&path),
+                        );
+                        session.diagnostic_origins.insert(path.clone(), origin);
+                        session.diagnostics.insert(path.clone(), diagnostics);
                         let combined = project
                             .languages
                             .values()

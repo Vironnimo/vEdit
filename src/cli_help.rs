@@ -195,7 +195,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "diagnostics",
         "TAB_ID",
         "Read cached language diagnostics and analysis readiness.",
-        "Returns ranges with exclusive ends and paging. Empty diagnostics while analysis is unavailable/loading do not establish a clean file.\nlocation_clamped marks an out-of-range server position.",
+        "Returns ranges with exclusive ends and paging. Empty diagnostics while analysis is unavailable/loading do not establish a clean file.\nfresh is true when results describe this revision, false after later edits, null when unknown; diagnostics_revision is the analyzed revision or null.\nlocation_clamped marks an out-of-range server position.",
         ["--limit", "--offset"]
     ),
     command!(
