@@ -943,7 +943,6 @@ impl VEditApp {
             let _ = self.focus_editor_pane(pane);
         }
     }
-    /// Explicit agent navigation also updates parked views, without changing project focus.
     /// Move every pane's view of `id` through a replacement of its whole text,
     /// so cursors, selections and scroll positions stay on the same lines.
     pub(super) fn remap_document_views(
@@ -952,6 +951,15 @@ impl VEditApp {
         position: &dyn Fn(usize) -> usize,
         scroll: &dyn Fn(f32) -> f32,
     ) {
+        // The mapped positions refer to the new text, so the generic shift
+        // after an edit must not move them a second time.
+        let mut revision = None;
+        if let Some(tab) = self.tab_by_id_mut(id) {
+            revision = Some(tab.revision);
+            if tab.pane_baseline.is_some() {
+                tab.pane_baseline = Some((tab.revision, tab.text.clone()));
+            }
+        }
         let layouts = std::iter::once(&mut self.editor_layout).chain(
             self.projects
                 .iter_mut()
@@ -965,6 +973,9 @@ impl VEditApp {
                     state.selection = start..position(state.selection.end).max(start);
                     if let Some([x, y]) = state.source_scroll {
                         state.source_scroll = Some([x, scroll(y)]);
+                    }
+                    if let Some(revision) = revision {
+                        state.revision = revision;
                     }
                 }
             }
@@ -988,6 +999,7 @@ impl VEditApp {
                 .insert(key, Vec2::new(offset.x, scroll(offset.y)));
         }
     }
+    /// Explicit agent navigation also updates parked views, without changing project focus.
     pub(super) fn sync_external_document_navigation(&mut self, id: u64) {
         let Some((pi, ti)) = self.tab_location(id) else {
             return;
