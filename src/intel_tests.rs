@@ -25,7 +25,17 @@ impl IntelFixture {
         app.add_project(self.0.clone());
         app.open_file(path.clone());
         let deadline = Instant::now() + Duration::from_secs(8);
-        while app.project().unwrap().indexing || app.tab().unwrap().loading {
+        // The Explorer's first folder read finishes on its own worker; tests
+        // that read the result channel directly must not receive it.
+        while app.project().unwrap().indexing
+            || app.tab().unwrap().loading
+            || app
+                .project()
+                .unwrap()
+                .explorer
+                .as_ref()
+                .is_some_and(|explorer| explorer.pending_count() > 0)
+        {
             app.poll();
             assert!(Instant::now() < deadline, "fixture did not finish loading");
             std::thread::sleep(Duration::from_millis(5));
