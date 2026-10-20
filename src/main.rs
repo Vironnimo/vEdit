@@ -12,6 +12,7 @@ mod file_kind;
 mod git;
 mod git_diff_view;
 mod git_graph;
+mod line_diff;
 mod lsp;
 mod markdown;
 mod palette;
