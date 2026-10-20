@@ -335,6 +335,52 @@ fn native_undo_restores_the_exact_text_before_replace_and_replace_all() {
     );
 }
 
+#[test]
+fn find_toolbar_regex_toggle_replaces_groups_reports_invalid_patterns_and_persists() {
+    let original = "user@example and admin@host\n";
+    let mut app = fixture(original, false);
+    app.settings.vim = false;
+    app.find_visible = true;
+    app.replace_visible = true;
+    app.find_text = r"(\w+)@(\w+)".into();
+    app.replace_text = "$2 at $1".into();
+    let mut screen = harness(app, [1200.0, 760.0]);
+    assert!(screen.state_mut().editor_search_matches().is_empty());
+    screen.get_by_label("Use regular expression").click();
+    screen.run_steps(2);
+    assert!(screen.state().find_regex);
+    assert_eq!(screen.state_mut().editor_search_matches().len(), 2);
+    let session: Session =
+        serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
+    assert!(session.find_regex, "the toggle is kept in the session");
+
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    screen.get_by_label("Replace").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and admin@host\n"
+    );
+    screen.get_by_label("Replace all").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and host at admin\n"
+    );
+
+    screen.state_mut().find_text = "(unclosed".into();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Invalid pattern").is_some());
+    assert!(screen.state_mut().editor_search_matches().is_empty());
+    screen.get_by_label("Use regular expression").click();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Invalid pattern").is_none());
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and host at admin\n"
+    );
+}
+
 fn bracket_outlines(screen: &Harness<'_, VEditApp>) -> Vec<egui::Rect> {
     let stroke = crate::palette::MUTED.linear_multiply(0.45);
     let mut rects: Vec<_> = screen

@@ -46,12 +46,12 @@ impl Pattern {
             regex: true,
         }
     }
-    fn literal(query: String, options: editor::SearchOptions) -> Self {
+    fn toolbar(query: String, options: editor::SearchOptions) -> Self {
         Self {
             query,
             case_sensitive: options.case_sensitive,
             whole_word: options.whole_word,
-            regex: false,
+            regex: options.regex,
         }
     }
 }
@@ -1037,9 +1037,10 @@ impl VEditApp {
             (!pending.modal || self.settings.vim)
                 && (!pending.preserve_focus || self.find_visible)
                 && (!self.find_visible
-                    || pending.key.pattern.regex
+                    // A Vim search; toolbar navigation must match the toolbar query.
+                    || pending.key.pattern.regex && !pending.preserve_focus
                     || pending.key.pattern
-                        == Pattern::literal(self.find_text.clone(), self.find_options()))
+                        == Pattern::toolbar(self.find_text.clone(), self.find_options()))
                 && pane == pending.pane
                 && self.tab().is_some_and(|tab| {
                     tab.id == pending.key.document
@@ -1174,7 +1175,16 @@ impl VEditApp {
         editor::SearchOptions {
             case_sensitive: self.find_case,
             whole_word: self.find_word,
+            regex: self.find_regex,
         }
+    }
+
+    /// Why the Find toolbar's current regular expression cannot search.
+    pub(super) fn editor_search_error(&self) -> Option<String> {
+        if !self.find_visible || !self.find_regex || self.find_text.is_empty() {
+            return None;
+        }
+        crate::search::search("", &self.find_text, self.find_case, false, true).err()
     }
 
     pub(super) fn find_next(&mut self, backwards: bool) {
@@ -1185,12 +1195,12 @@ impl VEditApp {
         self.find.current_pane = pane;
         self.find.context = Some(self.ctx.clone());
         let pattern = if self.find_visible {
-            Pattern::literal(self.find_text.clone(), self.find_options())
+            Pattern::toolbar(self.find_text.clone(), self.find_options())
         } else {
             self.find
                 .last
                 .clone()
-                .unwrap_or_else(|| Pattern::literal(self.find_text.clone(), self.find_options()))
+                .unwrap_or_else(|| Pattern::toolbar(self.find_text.clone(), self.find_options()))
         };
         let include_current = self
             .tab()
@@ -1237,7 +1247,7 @@ impl VEditApp {
 
     pub(super) fn editor_search_matches(&mut self) -> Arc<[Range<usize>]> {
         let pattern = if self.find_visible {
-            Some(Pattern::literal(
+            Some(Pattern::toolbar(
                 self.find_text.clone(),
                 self.find_options(),
             ))

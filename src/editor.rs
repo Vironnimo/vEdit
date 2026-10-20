@@ -16,6 +16,8 @@ pub struct EditResult {
 pub struct SearchOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
+    /// The query is a Rust regular expression and replacements expand `$1`.
+    pub regex: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -503,21 +505,47 @@ pub fn smart_newline(text: &str, selection: Range<usize>, indent: &str) -> EditR
     replace_bytes(text, bytes.start..end, &replacement, cursor)
 }
 
-/// Find non-overlapping literal matches. Empty queries produce no matches.
-/// Case-insensitive matching uses Unicode lowercase while retaining the original
-/// character boundaries; a match never selects half of a lowercase expansion.
+/// Find non-overlapping matches. Empty queries produce no matches.
+/// Case-insensitive literal matching uses Unicode lowercase while retaining the
+/// original character boundaries; a match never selects half of a lowercase
+/// expansion. An invalid regular expression has no matches.
 pub fn find_matches(text: &str, query: &str, options: SearchOptions) -> Vec<Range<usize>> {
     crate::search::search(
         text,
         query,
         options.case_sensitive,
         options.whole_word,
-        false,
+        options.regex,
     )
     .unwrap_or_default()
 }
 
-/// Replace all literal matches, returning the number replaced. The selection
+/// The matches with their replacement text: literal, or with `$1` / `${name}`
+/// expanded for a regular expression.
+pub fn replacements(
+    text: &str,
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+) -> Vec<(Range<usize>, String)> {
+    if options.regex {
+        crate::search::regex_replacements(
+            text,
+            query,
+            options.case_sensitive,
+            options.whole_word,
+            replacement,
+        )
+        .unwrap_or_default()
+    } else {
+        find_matches(text, query, options)
+            .into_iter()
+            .map(|range| (range, replacement.to_owned()))
+            .collect()
+    }
+}
+
+/// Replace all matches, returning the number replaced. The selection
 /// follows the same original characters after edits, or the end of a replacement
 /// when its original endpoint was inside a match.
 pub fn replace_all(
@@ -529,15 +557,11 @@ pub fn replace_all(
 ) -> (EditResult, usize) {
     let chars: Vec<char> = text.chars().collect();
     let selection = clamp_selection(selection, chars.len());
-    let matches = find_matches(text, query, options);
-    let count = matches.len();
-    let edits = matches
+    let edits: Vec<_> = replacements(text, query, replacement, options)
         .into_iter()
-        .map(|range| Edit {
-            range,
-            replacement: replacement.to_owned(),
-        })
+        .map(|(range, replacement)| Edit { range, replacement })
         .collect();
+    let count = edits.len();
     (apply_edits(&chars, selection, edits), count)
 }
 
@@ -637,7 +661,8 @@ mod tests {
                 "ÜBER",
                 SearchOptions {
                     case_sensitive: false,
-                    whole_word: true
+                    whole_word: true,
+                    ..SearchOptions::default()
                 }
             ),
             vec![2..6, 13..17]
@@ -648,7 +673,8 @@ mod tests {
                 "ÜBER",
                 SearchOptions {
                     case_sensitive: true,
-                    whole_word: false
+                    whole_word: false,
+                    ..SearchOptions::default()
                 }
             )
             .is_empty()
@@ -687,6 +713,7 @@ mod tests {
         let options = SearchOptions {
             case_sensitive: true,
             whole_word: true,
+            ..SearchOptions::default()
         };
         let highlighted = crate::search::search(text, "git", true, true, false).unwrap();
         assert_eq!(highlighted, vec![5..8]);

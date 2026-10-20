@@ -170,6 +170,8 @@ struct Session {
     layout: Option<split::SessionLayout>,
     bookmarks: Vec<crate::bookmarks::Bookmark>,
     agent_marks: crate::agent_marks::AgentMarks,
+    /// The Find toolbar searches with regular expressions.
+    find_regex: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -804,6 +806,8 @@ pub struct VEditApp {
     replace_text: String,
     find_case: bool,
     find_word: bool,
+    /// Find toolbar queries are Rust regular expressions; kept in the session.
+    find_regex: bool,
     find_focus: bool,
     find_match: Option<usize>,
     find: find::FindState,
@@ -904,6 +908,7 @@ impl VEditApp {
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
+        app.find_regex = session.find_regex;
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -1064,6 +1069,7 @@ impl VEditApp {
             replace_text: String::new(),
             find_case: false,
             find_word: false,
+            find_regex: false,
             find_focus: false,
             find_match: None,
             find: find::FindState::default(),
@@ -3163,6 +3169,7 @@ impl VEditApp {
             layout: None,
             bookmarks: self.bookmarks.items.clone(),
             agent_marks: self.agent_marks.clone(),
+            find_regex: self.find_regex,
         }
     }
     fn persist_session(&self) {
@@ -6234,7 +6241,21 @@ impl VEditApp {
                     "Whole word",
                 )
             });
-            if case.changed() || word.changed() {
+            let regex = ui.toggle_value(&mut app.find_regex, ".*").on_hover_text(
+                "Use a regular expression (Rust syntax); Replace inserts groups with $1",
+            );
+            regex.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    true,
+                    app.find_regex,
+                    "Use regular expression",
+                )
+            });
+            if regex.changed() {
+                app.session_dirty = true;
+            }
+            if case.changed() || word.changed() || regex.changed() {
                 app.find_match = None;
                 if !app.find_text.is_empty() {
                     app.find_next(false);
@@ -6294,6 +6315,15 @@ impl VEditApp {
                 })
                 .map_or(0, |index| index + 1);
             let searching = app.find_search_running();
+            if let Some(error) = app.editor_search_error() {
+                let invalid = ui
+                    .label(RichText::new("Invalid pattern").size(11.0).color(RED))
+                    .on_hover_text(format!("This regular expression cannot search: {error}"));
+                invalid.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Invalid pattern")
+                });
+                return;
+            }
             ui.label(
                 RichText::new(if searching {
                     "Searching…".into()
@@ -6323,7 +6353,7 @@ impl VEditApp {
             .show(ui, |ui| {
                 if !interactive { ui.disable(); }
                 ui.spacing_mut().item_spacing.y = 5.0;
-                let compact = ui.available_width() < 570.0;
+                let compact = ui.available_width() < 600.0;
                 ui.horizontal(|ui| {
                     let available = ui.available_width();
                     let toggle = small_button(
@@ -6335,13 +6365,13 @@ impl VEditApp {
                     if toggle.clicked() {
                         self.replace_visible = !self.replace_visible;
                     }
-                    let query_width = (available - if compact { 72.0 } else { 290.0 }).clamp(30.0, 360.0);
+                    let query_width = (available - if compact { 72.0 } else { 320.0 }).clamp(30.0, 360.0);
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.find_text)
                             .id(find_id)
                             .hint_text("Find in this file")
                             .desired_width(query_width),
-                    ).on_hover_text(format!("Find literal text · Enter / {}: next · {}: previous · Esc: close. Vim Normal: / searches; the default Ctrl+F scrolls a page.", self.shortcut_label(keybindings::Action::FindNext), self.shortcut_label(keybindings::Action::FindPrevious)));
+                    ).on_hover_text(format!("Find text, or a regular expression with .* · Enter / {}: next · {}: previous · Esc: close. Vim Normal: / searches; the default Ctrl+F scrolls a page.", self.shortcut_label(keybindings::Action::FindNext), self.shortcut_label(keybindings::Action::FindPrevious)));
                     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Find in file"));
                     if self.find_focus {
                         response.request_focus();
@@ -6437,7 +6467,21 @@ impl VEditApp {
                 .or_else(|| matches.first())
                 .cloned()
             {
-                let replacement = self.replace_text.clone();
+                let options = self.find_options();
+                let replacement = if options.regex {
+                    // Expand `$1` for this match exactly as Replace all would.
+                    let query = self.find_text.clone();
+                    let template = self.replace_text.clone();
+                    self.tab()
+                        .and_then(|tab| {
+                            editor::replacements(&tab.text, &query, &template, options)
+                                .into_iter()
+                                .find(|(found, _)| *found == range)
+                        })
+                        .map_or(template, |(_, expanded)| expanded)
+                } else {
+                    self.replace_text.clone()
+                };
                 // Without Vim, the text widget owns Undo: record the text
                 // before this programmatic edit so Ctrl+Z restores it exactly.
                 if let Some(id) = self.tab().map(|tab| tab.id) {
