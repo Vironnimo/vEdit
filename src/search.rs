@@ -171,6 +171,15 @@ pub fn next_match(
     Some((matches[index].clone(), wrapped))
 }
 
+/// Lowercase one scalar for case-insensitive literal search. Query and text
+/// use this same per-character mapping: `str::to_lowercase` would turn a
+/// final `Σ` into `ς`, which a per-character `Σ` never becomes. Final and
+/// medial sigma therefore fold to the same `σ`.
+fn fold_case(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase()
+        .map(|lower| if lower == 'ς' { 'σ' } else { lower })
+}
+
 fn literal_matches(
     text: &str,
     query: &str,
@@ -186,7 +195,7 @@ fn literal_matches(
         return direct_literal_matches(
             text,
             &searchable,
-            &query.to_lowercase(),
+            &query.chars().flat_map(fold_case).collect::<String>(),
             whole_word,
             cancel,
         );
@@ -199,10 +208,11 @@ fn literal_matches(
             return Vec::new();
         }
         boundaries.push(searchable.len());
-        searchable.extend(ch.to_lowercase());
+        searchable.extend(fold_case(ch));
     }
     boundaries.push(searchable.len());
-    let query = query.to_lowercase();
+    // Fold the query exactly like the text, one scalar at a time.
+    let query: String = query.chars().flat_map(fold_case).collect();
     searchable
         .match_indices(&query)
         .enumerate()
@@ -333,6 +343,22 @@ mod tests {
         );
         assert!(search("🦀", "", false, false, false).unwrap().is_empty());
         assert_eq!(search("aaa", "aa", true, false, false).unwrap(), vec![0..2]);
+    }
+
+    #[test]
+    fn case_insensitive_search_lowercases_a_final_sigma_like_the_text() {
+        // `"ΟΔΟΣ".to_lowercase()` ends in `ς`; the text is lowered per scalar.
+        for text in ["ΟΔΟΣ", "οδος", "οδοσ", "ΟΔΟΣ ΣΤΗ"] {
+            assert_eq!(
+                search(text, "ΟΔΟΣ", false, false, false).unwrap(),
+                vec![0..4],
+                "{text}"
+            );
+        }
+        assert_eq!(
+            search("a ΟΔΟΣ b", "ΟΔΟΣ", false, true, false).unwrap(),
+            vec![2..6]
+        );
     }
 
     #[test]
