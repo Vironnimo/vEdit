@@ -1338,9 +1338,61 @@ fn worker(shared: Weak<Shared>, receiver: mpsc::Receiver<()>) {
     }
 }
 
+static SYNTAX_SETTINGS: OnceLock<SyntectSettings> = OnceLock::new();
+
+/// Highlights a short snippet, such as a hover code fence, on the UI thread.
+/// Grammar loading stays with the background workers: until they finished it,
+/// or for unknown languages and large snippets, the text stays plain monospace.
+pub fn highlight_snippet(ctx: &egui::Context, text: &str, language: &str, font: f32) -> LayoutJob {
+    const SNIPPET_LIMIT: usize = 16 * 1024;
+    let language = snippet_language(language);
+    match SYNTAX_SETTINGS.get() {
+        Some(settings)
+            if !language.is_empty()
+                && text.len() <= SNIPPET_LIMIT
+                && (settings.ps.find_syntax_by_name(language).is_some()
+                    || settings.ps.find_syntax_by_extension(language).is_some()) =>
+        {
+            let style = egui::Style {
+                override_font_id: Some(FontId::monospace(font)),
+                ..Default::default()
+            };
+            let mut job = syntax_highlighting::highlight_with(
+                ctx,
+                &style,
+                &CodeTheme::dark(font),
+                text,
+                language,
+                settings,
+            );
+            source_format(&mut job, font);
+            job
+        }
+        _ => plain(text, font, Color32::LIGHT_GRAY, f32::INFINITY),
+    }
+}
+
+/// Maps Markdown fence names to the names or extensions Syntect knows.
+fn snippet_language(language: &str) -> &str {
+    let language = language.trim();
+    match language.to_ascii_lowercase().as_str() {
+        "rust" => "rs",
+        "python" | "python3" => "py",
+        "javascript" | "jsx" => "js",
+        "typescript" | "tsx" => "ts",
+        "c++" | "cxx" => "cpp",
+        "csharp" | "c#" => "cs",
+        "shell" | "bash" | "zsh" | "console" => "sh",
+        "golang" => "go",
+        "markdown" => "md",
+        "yml" => "yaml",
+        "text" | "plaintext" | "txt" => "",
+        _ => language,
+    }
+}
+
 fn syntax_settings() -> &'static SyntectSettings {
-    static SETTINGS: OnceLock<SyntectSettings> = OnceLock::new();
-    SETTINGS.get_or_init(|| {
+    SYNTAX_SETTINGS.get_or_init(|| {
         let mut settings = SyntectSettings::default();
         let mut builder = settings.ps.into_builder();
         builder.add(
@@ -1388,6 +1440,28 @@ fn syntax_settings() -> &'static SyntectSettings {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn hover_snippets_use_loaded_grammars_and_stay_plain_otherwise() {
+        let colors = |job: &LayoutJob| {
+            let mut colors: Vec<_> = job.sections.iter().map(|s| s.format.color).collect();
+            colors.dedup();
+            colors.len()
+        };
+        syntax_settings();
+        let ctx = egui::Context::default();
+        let code = "pub fn parse(text: &str) -> usize { 42 }";
+        let rust = highlight_snippet(&ctx, code, "rust", 13.0);
+        assert_eq!(rust.text, code);
+        assert!(colors(&rust) > 1, "Rust fences are highlighted");
+        for language in ["", "text", "no-such-language"] {
+            let job = highlight_snippet(&ctx, code, language, 13.0);
+            assert_eq!(job.text, code);
+            assert_eq!(colors(&job), 1, "{language:?} stays plain");
+        }
+        let huge = "x".repeat(17 * 1024);
+        assert_eq!(colors(&highlight_snippet(&ctx, &huge, "rust", 13.0)), 1);
+    }
 
     fn dart_scopes_at(source: &str, needle: &str) -> Vec<String> {
         syntax_scopes_at(source, needle, "dart")

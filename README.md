@@ -148,6 +148,9 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 | Einstellungen | Ctrl+, |
 | Vervollständigung anfordern | Ctrl+Space |
 | Zur Definition springen | F12 oder `gd` im Vim-Normalmodus |
+| Referenzen finden | Shift+F12 oder `gr` im Vim-Normalmodus |
+| Dokumentation unter dem Cursor anzeigen | `K` im Vim-Normalmodus oder Palette → Show hover |
+| Symbol in der Datei / im Workspace suchen | Ctrl+P, dann `@` / Ctrl+T |
 | Fehler und Warnungen anzeigen | Ctrl+Shift+M |
 | Auswahl für einen Agenten markieren | Ctrl+Shift+A oder Leader a |
 | Agent-Markierungen öffnen | Ctrl+Alt+Shift+A oder Leader A |
@@ -207,6 +210,7 @@ Nach dem dritten Suchzeichen ist die Suche festgelegt; **Enter** legt sie schon 
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
 | Blättern | Ctrl+F / Ctrl+B; Ctrl+D / Ctrl+U für halbe Seiten |
 | Ansicht ausrichten | `zt` / `zz` / `zb` setzen die Cursorzeile oben, mittig beziehungsweise unten; `z Enter`, `z.` und `z-` gehen zusätzlich zum ersten Zeichen |
+| Sprachfunktionen | `gd` springt zur Definition, `gr` findet Referenzen, `K` zeigt die Dokumentation unter dem Cursor |
 | Suchen | `/` sucht vorwärts, `?` rückwärts; `n` wiederholt die Richtung, `N` kehrt sie um. `*` / `#` suchen das Wort unter dem Cursor |
 
 Wie in Vim beendet ein abschließender Zeilenumbruch die letzte Zeile; dahinter beginnt keine weitere leere Zeile. `G`, `dG`, `2dd`, `J` und `:%s` arbeiten deshalb bis zur letzten Textzeile und lassen den Zeilenumbruch am Dateiende stehen. Das gilt auch für Dateien mit CRLF. Wort-Textobjekte wie `iw` und `aw` bleiben in ihrer Zeile. Stehen die Klammern von `di{` oder `ci{` auf eigenen Zeilen, wirkt der Befehl auf die Zeilen dazwischen. `ip` und `ap` wählen einen Absatz, `ap` mit den folgenden Leerzeilen.
@@ -377,6 +381,14 @@ Unterstützt werden **UTF-8-Textdateien bis 8 MiB**, einschließlich UTF-8-BOM u
 ## Sprachen und Projektbefehle
 
 **Python, Dart und Rust** haben Diagnosen, Vervollständigung und Navigation zur Definition. Jede Sprache erhält im Projekt ihre eigene Analysesitzung; auch gemischte Projekte funktionieren. **Ctrl+Space** fordert Vorschläge an, **F12** beziehungsweise Vim `gd` springt zur Definition. Die Statusleiste zeigt den Zustand der aktiven Sprache. **Problems** (**Ctrl+Shift+M**) enthält Fehler, Warnungen und Serverzustände. **Restart language analysis** verbindet die aktuelle Sprache neu, ohne eigene Änderungen zu verwerfen.
+
+**Mit der Maus** etwa eine halbe Sekunde über einem Bezeichner verweilen, um Typ und Dokumentation zu sehen; dieselbe Anzeige öffnen Vim `K` und die Palettenaktion **Show hover** an der Cursorposition. Diagnosen an dieser Stelle stehen oben, darunter folgt die Dokumentation mit Markdown und farbigen Codeblöcken. Lange Inhalte scrollen innerhalb der Anzeige; die Maus kann dafür auf die Anzeige wechseln. Sie schließt, sobald die Maus Wort und Anzeige verlässt, der Cursor sich bewegt oder **Esc** gedrückt wird; der Tastaturfokus bleibt im Editor.
+
+**Shift+F12** beziehungsweise Vim `gr` findet alle Referenzen des Symbols unter dem Cursor. Die Ergebnisse erscheinen in der Such-Seitenleiste, nach Dateien gruppiert, die aktuelle Datei zuerst, jeweils mit Zeile und Vorschau. **↑↓** und **Enter** oder ein Klick öffnen die Stelle und heben sie kurz hervor. Sehr viele Treffer werden begrenzt und als solche gekennzeichnet.
+
+In **Quick open** (**Ctrl+P**) listet ein vorangestelltes `@` die Symbole der aktuellen Datei, mit Art und umgebendem Element; weitere Zeichen filtern unscharf, etwa `@prs` für `parse`. Die Aktion **Go to symbol in file** öffnet diese Liste direkt. `#` (**Ctrl+T**, **Go to symbol in workspace**) sucht Symbole im gesamten Projekt; dafür ist ein Suchbegriff nötig.
+
+Nicht jeder Sprachserver bietet alle Funktionen. Fehlt eine, meldet die Statusleiste das, etwa **Rust analysis does not provide references.**; **Problems** bleibt davon unberührt. **Restart language analysis** bricht laufende Anfragen ab. Antworten, die erst nach einer Textänderung oder einem Neustart eintreffen, werden verworfen statt an veralteter Stelle angezeigt.
 
 Die portable Ausgabe bringt **basedpyright und Node** für Python mit. Ein vorhandener Projekt- oder PATH-Sprachserver wird bevorzugt. Unter **Settings → Tasks** lässt sich der Python-Interpreter wählen; automatisch werden `.venv`, `venv`, `env` und anschließend PATH berücksichtigt. Derselbe Interpreter gilt für Ausführung und Analyse. Dart verwendet das installierte Dart- oder Flutter-SDK. Rust verwendet `rust-analyzer` (`rustup component add rust-analyzer rust-src`).
 

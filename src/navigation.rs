@@ -951,7 +951,7 @@ fn bookmark_matches<'a>(
         .collect()
 }
 
-fn fuzzy_score(text: &str, query: &str) -> Option<usize> {
+pub(super) fn fuzzy_score(text: &str, query: &str) -> Option<usize> {
     let mut score = 0;
     for token in query.split_whitespace() {
         if let Some(offset) = text.find(token) {

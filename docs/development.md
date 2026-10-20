@@ -89,6 +89,7 @@ filters only after the relevant tool is available, for example:
 
 ```powershell
 cargo test --bin vedit live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
+cargo test --bin vedit live_rust_analyzer_hover_references_and_symbols -- --ignored --nocapture
 cargo test --bin vedit live_python_diagnostics_completion_and_definition -- --ignored --nocapture
 ```
 
