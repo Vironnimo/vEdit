@@ -122,12 +122,23 @@ impl LaunchState {
         let (sender, receiver) = mpsc::channel();
         let worker_action = action.clone();
         let fallback = sender.clone();
+        // The periodic re-read usually finds the same file. Applying that
+        // result can wait for the next scheduled frame instead of waking an
+        // idle window every few seconds.
+        let known =
+            (reply.is_none() && matches!(action, Action::List) && self.config_error.is_none())
+                .then_some(self.revision);
         if let Err(error) = std::thread::Builder::new()
             .name("vedit-launch-config".into())
             .spawn(move || {
                 let result = read_or_configure(&root, &worker_action);
+                let unchanged = known.is_some_and(|revision| {
+                    matches!(&result, Ok(Loaded { revision: loaded, configuration: Ok(_) }) if *loaded == revision)
+                });
                 let _ = sender.send(result);
-                ctx.request_repaint();
+                if !unchanged {
+                    ctx.request_repaint();
+                }
             })
         {
             let _ = fallback.send(Err(format!(
@@ -382,7 +393,14 @@ impl VEditApp {
                     .launch
                     .begin(project.root.clone(), Action::List, None, self.ctx.clone());
             }
-            if project.launch.task.is_some() || project.launch.pending.is_some() {
+            // A periodic re-read wakes the window itself when it found a
+            // change, so only requests that someone waits for are polled.
+            let awaited = project
+                .launch
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.reply.is_some() || !matches!(p.action, Action::List));
+            if project.launch.task.is_some() || awaited {
                 self.ctx.request_repaint_after(Duration::from_millis(50));
             }
         }
