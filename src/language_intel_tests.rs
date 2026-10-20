@@ -486,6 +486,12 @@ fn find_references_lists_results_and_opens_a_location_with_reveal() {
     let expected = "fn other() {\n    let 🙂 = ".chars().count();
     assert_eq!(tab.vim.cursor, expected);
     assert!(tab.pending_agent_location.is_none());
+
+    // The jump is in the navigation history, so Back returns to the origin.
+    app.navigate_history(true);
+    let tab = app.tab().unwrap();
+    assert_eq!(tab.path.as_ref(), Some(&path));
+    assert_eq!(tab.vim.cursor, 4);
 }
 
 #[test]
