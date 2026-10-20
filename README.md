@@ -182,20 +182,30 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 | --- | --- |
 | Bewegen | `h j k l`, `w b e ge`, `W B E gE` |
 | Zeilen- und Dateigrenzen | `0 ^ $ g_`, `gg`, `G`, `42G`, `8\|`, `Enter`, `+` / `-` |
+| Bildschirmzeilen | `H` / `M` / `L` springen zur obersten, mittleren und untersten sichtbaren Zeile; `3H` / `3L` zählen vom Rand |
 | Klammern / Absätze | `%`, `{`, `}` |
 | Zeichen in der Datei finden | `f` / `F`, `t` / `T` suchen über Zeilengrenzen hinweg; `;` wiederholt, `,` sucht in Gegenrichtung |
-| Einfügen | `i a I A`, `o O` |
-| Löschen / Ändern | `x`, `dd`, `dw`, `cw`, `cc`, `D`, `C`, `r` + Zeichen |
+| Einfügen | `i a I A`, `o O`; `3ox` öffnet drei Zeilen |
+| Löschen / Ändern | `x`, `dd`, `dw`, `cw`, `cc`, `S`, `D`, `C`, `r` + Zeichen |
 | Kopieren / Einfügen | `yy`, `yw`, `p`, `P` |
 | Anzahl voranstellen | `3w`, `2dd`, `d2w`, `2d3w` |
-| Textobjekte | `ciw`, `daw`, `di(`, `ca{`, `yi"`, `viw` |
+| Textobjekte | `ciw`, `daw`, `di(`, `ca{`, `yi"`, `viw`, `dip`, `yap` |
 | Klammern und Anführungszeichen | `ysiw)` umschließt ein Wort, `yss"` eine Zeile; `ds"` entfernt, `cs"'` ersetzt; im Visual-Modus `S` + Zeichen |
 | Einrücken / Zeilen verbinden | `>>`, `<<`, `J`; `gJ` verbindet ohne zusätzliche Leerzeichen |
-| Groß-/Kleinschreibung | `~`, `guw`, `gUiw`, `g~$`; in Visual `u`, `U`, `~` |
+| Groß-/Kleinschreibung | `~`, `guw`, `gUiw`, `g~$`, `gugu` / `gUgU` / `g~g~`; in Visual `u`, `U`, `~` |
+| Zahlen ändern | **Alt+A** erhöht, **Alt+X** verringert die nächste Zahl ab dem Cursor; `5` **Alt+A** addiert 5 |
+| Letzte Auswahl | `gv` wählt den zuletzt markierten Bereich erneut aus |
 | Letzte Änderung wiederholen | `.`; auch Insert-Änderungen werden erfasst |
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
 | Blättern | Ctrl+F / Ctrl+B; Ctrl+D / Ctrl+U für halbe Seiten |
+| Ansicht ausrichten | `zt` / `zz` / `zb` setzen die Cursorzeile oben, mittig beziehungsweise unten; `z Enter`, `z.` und `z-` gehen zusätzlich zum ersten Zeichen |
 | Suchen | `/` sucht vorwärts, `?` rückwärts; `n` wiederholt die Richtung, `N` kehrt sie um. `*` / `#` suchen das Wort unter dem Cursor |
+
+Wie in Vim beendet ein abschließender Zeilenumbruch die letzte Zeile; dahinter beginnt keine weitere leere Zeile. `G`, `dG`, `2dd`, `J` und `:%s` arbeiten deshalb bis zur letzten Textzeile und lassen den Zeilenumbruch am Dateiende stehen. Das gilt auch für Dateien mit CRLF. Wort-Textobjekte wie `iw` und `aw` bleiben in ihrer Zeile. Stehen die Klammern von `di{` oder `ci{` auf eigenen Zeilen, wirkt der Befehl auf die Zeilen dazwischen. `ip` und `ap` wählen einen Absatz, `ap` mit den folgenden Leerzeilen.
+
+Vim's **Ctrl+A** und **Ctrl+X** bleiben in vEdit **Alles auswählen** und **Ausschneiden**; dafür ändern **Alt+A** und **Alt+X** Zahlen, solange diese Tasten keinem eigenen Kürzel zugewiesen sind. Erkannt werden ganze Dezimalzahlen einschließlich eines vorangestellten Minus; führende Nullen behalten ihre Breite.
+
+Nicht unterstützte Normalmodus-Befehle wie `q`, `@`, `m`, `` ` ``, `'` oder `R` ändern keinen Text. Sie verbrauchen ihr Argument, etwa das Register bei `qa`, und die Statusleiste meldet beispielsweise **Not supported in vEdit: q**.
 
 Das unbenannte Kopierregister wird zwischen Tabs geteilt: etwa in einer Datei `yy`, in einer anderen `p`. Es bleibt von der Systemzwischenablage getrennt. Jeder Tab hat seine eigene Undo-Historie; eine zusammenhängende Insert-Änderung wird als Schritt behandelt.
 
@@ -219,15 +229,15 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 - `:q` Tab schließen, `:wq` / `:x` speichern und schließen.
 - `:q!` Tab schließen und ungespeicherte Änderungen verwerfen.
 - `:e src/main.rs` eine Datei relativ zum Projekt öffnen.
-- `:42` zu Zeile 42 springen; `:noh` die Treffer-Markierungen ausblenden.
+- `:42` zu Zeile 42 springen, `:$` zur letzten Zeile; `:noh` die Treffer-Markierungen ausblenden.
 - `:bn` / `:bp` zum nächsten beziehungsweise vorherigen Tab wechseln; `:new` eine Datei anlegen.
 - `:split` / `:vsplit` den Editor unterhalb beziehungsweise rechts teilen; optional folgt ein Dateipfad.
 - `:set wrap` / `:set nowrap` den Zeilenumbruch einstellen; `number`, `nonumber` und `relativenumber` steuern Zeilennummern.
-- `:s/alt/neu/` ersetzt den ersten Treffer der aktuellen Zeile; `:%s/alt/neu/g` ersetzt alle Treffer im Dokument. Bereiche wie `:2,8s/alt/neu/g` und die Visual-Auswahl sind möglich. `i` ignoriert Groß-/Kleinschreibung, `I` erzwingt sie, `n` zählt ohne Änderung, `e` erlaubt null Treffer. Muster verwenden wie die Vim-Suche Rust-Regex-Syntax; `&` und `\1` bis `\9` setzen Treffer und Gruppen in der Ersetzung ein. `\r` erzeugt einen Zeilenumbruch. Die Änderung bildet einen Undo-Schritt; ungültige Muster oder nicht unterstützte Flags verändern keinen Text. Interaktive Bestätigung mit `c` ist nicht enthalten.
+- `:s/alt/neu/` ersetzt den ersten Treffer der aktuellen Zeile; `:%s/alt/neu/g` ersetzt alle Treffer im Dokument. Bereiche wie `:2,8s/alt/neu/g` und die Visual-Auswahl sind möglich. `i` ignoriert Groß-/Kleinschreibung, `I` erzwingt sie, `n` zählt ohne Änderung, `e` erlaubt null Treffer. Muster verwenden wie die Vim-Suche Rust-Regex-Syntax; `&` und `\1` bis `\9` setzen Treffer und Gruppen in der Ersetzung ein. `\r` erzeugt einen Zeilenumbruch, `\t` einen Tab. Anders als in Vim, wo `\n` ein Nullzeichen einfügt, erzeugt auch `\n` einen Zeilenumbruch. `\u` / `\l` schreiben das nächste Zeichen groß beziehungsweise klein, `\U` / `\L` den folgenden Text bis `\E` oder `\e`; so beginnt nach `:s/\w+/\u&/g` jedes Wort mit einem Großbuchstaben. `~` steht wörtlich für eine Tilde, nicht für die vorherige Ersetzung. Die Änderung bildet einen Undo-Schritt; ungültige Muster oder nicht unterstützte Flags verändern keinen Text. Interaktive Bestätigung mit `c` ist nicht enthalten.
 
 Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
 
-vEdit implementiert einen eigenen Vim-Kern. Visual-Block, Makros, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+vEdit implementiert einen eigenen Vim-Kern. Visual-Block, Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Markdown lesen
 

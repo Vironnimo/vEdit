@@ -530,6 +530,50 @@ fn swap_jk_preserves_literal_find_replacement_and_insert_characters() {
 }
 
 #[test]
+fn alt_a_and_alt_x_change_numbers_and_unsupported_commands_report_in_the_status_bar() {
+    let mut screen = harness(fixture("width 9 and -3\n"));
+    events(
+        &mut screen,
+        [
+            key(Key::A, egui::Modifiers::ALT),
+            egui::Event::Text("a".into()),
+        ],
+    );
+    assert_eq!(screen.state().tab().unwrap().text, "width 10 and -3\n");
+    text(&mut screen, "w5");
+    events(
+        &mut screen,
+        [
+            key(Key::X, egui::Modifiers::ALT),
+            egui::Event::Text("x".into()),
+        ],
+    );
+    assert_eq!(screen.state().tab().unwrap().text, "width 10 and -8\n");
+    // Ctrl+A keeps selecting all text.
+    events(&mut screen, [key(Key::A, egui::Modifiers::CTRL)]);
+    assert_eq!(screen.state().tab().unwrap().text, "width 10 and -8\n");
+
+    text(&mut screen, "0qa");
+    let status = screen
+        .state()
+        .status
+        .as_ref()
+        .map(|status| status.0.clone());
+    assert_eq!(status.as_deref(), Some("Not supported in vEdit: q"));
+    assert_eq!(screen.state().tab().unwrap().text, "width 10 and -8\n");
+    text(&mut screen, "x");
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "idth 10 and -8\n",
+        "the recorded register name is consumed, later keys work again"
+    );
+    text(&mut screen, "u");
+    text(&mut screen, "u");
+    text(&mut screen, "u");
+    assert_eq!(screen.state().tab().unwrap().text, "width 9 and -3\n");
+}
+
+#[test]
 fn swap_jk_is_persistent_and_defaults_to_standard_vim_directions() {
     let defaults: Settings = serde_json::from_str("{}").unwrap();
     assert!(defaults.vim);

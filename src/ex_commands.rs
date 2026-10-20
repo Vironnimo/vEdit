@@ -158,26 +158,68 @@ fn parse_spec(
     Ok(spec)
 }
 
+/// The number of lines in Vim's model: a final line break terminates the last
+/// line rather than starting an empty one.
+fn last_line_number(text: &str) -> usize {
+    text.split('\n').count() - usize::from(text.ends_with('\n'))
+}
+
+#[derive(Clone, Copy)]
+enum Case {
+    Upper,
+    Lower,
+}
+
+/// Expand a Vim replacement: `&` and `\0`-`\9` insert the match and its
+/// groups, `\r` and `\n` a line break, `\t` a Tab. `\u` / `\l` change the
+/// case of the next character, `\U` / `\L` that of the following text until
+/// `\E` or `\e`. Other escaped characters are inserted literally.
 fn replacement(captures: &regex::Captures<'_>, template: &str, ending: &str) -> String {
-    let mut result = String::new();
+    struct Output {
+        text: String,
+        next_char: Option<Case>,
+        following: Option<Case>,
+    }
+    impl Output {
+        fn push(&mut self, text: &str) {
+            for ch in text.chars() {
+                match self.next_char.take().or(self.following) {
+                    Some(Case::Upper) => self.text.extend(ch.to_uppercase()),
+                    Some(Case::Lower) => self.text.extend(ch.to_lowercase()),
+                    None => self.text.push(ch),
+                }
+            }
+        }
+    }
+    let mut out = Output {
+        text: String::new(),
+        next_char: None,
+        following: None,
+    };
     let mut chars = template.chars();
     while let Some(ch) = chars.next() {
         match ch {
-            '&' => result.push_str(captures.get(0).unwrap().as_str()),
+            '&' => out.push(captures.get(0).unwrap().as_str()),
             '\\' => match chars.next() {
-                Some('r') => result.push_str(ending),
+                Some('r' | 'n') => out.text.push_str(ending),
+                Some('t') => out.push("\t"),
+                Some('u') => out.next_char = Some(Case::Upper),
+                Some('l') => out.next_char = Some(Case::Lower),
+                Some('U') => out.following = Some(Case::Upper),
+                Some('L') => out.following = Some(Case::Lower),
+                Some('E' | 'e') => out.following = None,
                 Some(digit @ '0'..='9') => {
                     if let Some(found) = captures.get(digit as usize - '0' as usize) {
-                        result.push_str(found.as_str());
+                        out.push(found.as_str());
                     }
                 }
-                Some(literal) => result.push(literal),
-                None => result.push('\\'),
+                Some(literal) => out.push(literal.encode_utf8(&mut [0; 4])),
+                None => out.text.push('\\'),
             },
-            _ => result.push(ch),
+            _ => out.push(ch.encode_utf8(&mut [0; 4])),
         }
     }
-    result
+    out.text
 }
 
 #[cfg(test)]
@@ -200,23 +242,26 @@ fn substitute_with_search(
     search: Option<&str>,
 ) -> Result<Option<Substitution>, String> {
     let rows: Vec<_> = text.split('\n').collect();
+    // A final line break terminates the last line; the empty text after it is
+    // not a line that ranges such as `%` or `$` address.
+    let line_count = last_line_number(text).max(1);
     let current = text
         .chars()
         .take(cursor)
         .filter(|&ch| ch == '\n')
         .count()
-        .min(rows.len() - 1);
+        .min(line_count - 1);
     let mut input = command;
     let range = if let Some(rest) = input.strip_prefix('%') {
         input = rest.trim_start();
-        0..rows.len()
+        0..line_count
     } else if input.starts_with(['.', '$', '\''])
         || input.starts_with(|ch: char| ch.is_ascii_digit())
     {
-        let (first, rest) = address(input, current, rows.len(), visual)?;
+        let (first, rest) = address(input, current, line_count, visual)?;
         input = rest;
         let last = if let Some(rest) = input.strip_prefix(',') {
-            let (last, rest) = address(rest.trim_start(), current, rows.len(), visual)?;
+            let (last, rest) = address(rest.trim_start(), current, line_count, visual)?;
             input = rest;
             last
         } else {
@@ -474,7 +519,11 @@ impl VEditApp {
             }
             "set" => self.ex_set(argument),
             _ => {
-                if let Ok(line) = command.parse::<usize>() {
+                let line = command.parse::<usize>().ok().or_else(|| {
+                    (command == "$")
+                        .then(|| self.tab().map_or(1, |tab| last_line_number(&tab.text)))
+                });
+                if let Some(line) = line {
                     if let Some(tab) = self.tab_mut() {
                         let cursor = editor::go_to_line(&tab.text, line);
                         tab.set_cursor(cursor..cursor);
@@ -720,10 +769,47 @@ mod tests {
         assert_eq!(count.edit.text, "foo foo");
         assert_eq!(count.edit.selection, 3..3);
         assert_eq!(count.count, 2);
+        // A final line break terminates the last line; it starts no empty one.
         assert_eq!(
             change("%s/^/>/g", "α\r\nβ\r\n", 0).edit.text,
-            ">α\r\n>β\r\n>"
+            ">α\r\n>β\r\n"
         );
+    }
+
+    #[test]
+    fn ranges_use_vims_line_model_after_a_final_line_break() {
+        assert_eq!(change("%s/^/# /", "a\nb\n", 0).edit.text, "# a\n# b\n");
+        assert_eq!(change("%s/$/;/", "a\nb\n", 0).edit.text, "a;\nb;\n");
+        assert_eq!(change("$s/x/y/", "x\nx\n", 0).edit.text, "x\ny\n");
+        assert_eq!(change("s/x/y/", "x\nx\n", 4).edit.text, "x\ny\n");
+        assert_eq!(change("%s/$/;/", "a\r\nb\r\n", 0).edit.text, "a;\r\nb;\r\n");
+        assert_eq!(change("%s/^/>/", "", 0).edit.text, ">");
+        assert_eq!(change("%s/^/>/", "\n", 0).edit.text, ">\n");
+        assert_eq!(change("%s/$/;/", "a\nb", 0).edit.text, "a;\nb;");
+        assert!(substitute("3s/x/y/", "x\nx\n", 0, None, None).is_err());
+        assert_eq!(last_line_number("a\nb\n"), 2);
+        assert_eq!(last_line_number("a\nb"), 2);
+        assert_eq!(last_line_number(""), 1);
+    }
+
+    #[test]
+    fn replacement_escapes_insert_tabs_line_breaks_and_change_case() {
+        for (command, source, expected) in [
+            (r"s/ /\t/g", "a b c", "a\tb\tc"),
+            (r"s/,/\n/g", "a,b", "a\nb"),
+            (r"s/,/\n/g", "a,b\r\nc", "a\r\nb\r\nc"),
+            (r"s/\w+/\u&/g", "foo bar", "Foo Bar"),
+            (r"s/\w+/\U&/", "foo bar", "FOO bar"),
+            (r"s/(\w+) (\w+)/\U\1\E \2/", "foo bar", "FOO bar"),
+            (r"s/(\w+) (\w+)/\U\1\e-\l\2/", "foo BAR", "FOO-bAR"),
+            (r"s/\w+/\L&/", "FOO Bar", "foo Bar"),
+            (r"s/(\w)(\w+)/\u\L&/", "hELLO", "Hello"),
+            (r"s/x/\uü/", "x", "Ü"),
+            (r"s/x/a\\tb/", "x", r"a\tb"),
+            (r"s/x/~/", "x", "~"),
+        ] {
+            assert_eq!(change(command, source, 0).edit.text, expected, "{command}");
+        }
     }
 
     #[test]
@@ -926,6 +1012,15 @@ mod tests {
         key(&mut screen, Key::Escape);
         assert_eq!(screen.state().tab().unwrap().text, "unchanged");
         assert!(!screen.state().tab().unwrap().vim.can_undo());
+    }
+
+    #[test]
+    fn dollar_jumps_to_the_last_line_not_past_the_final_line_break() {
+        let mut app = fixture("one\ntwo\nthree\n");
+        app.execute_ex_command("$");
+        assert_eq!(app.tab().unwrap().selection, 8..8);
+        app.execute_ex_command("1");
+        assert_eq!(app.tab().unwrap().selection, 0..0);
     }
 
     #[test]

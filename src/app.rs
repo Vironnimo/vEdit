@@ -332,6 +332,10 @@ struct EditorTab {
     focus: bool,
     scroll_to_cursor: bool,
     center_on_reveal: bool,
+    /// Vim `zt` / `zz` / `zb`: place the cursor line at this edge on the next reveal.
+    scroll_align: Option<crate::vim::ScrollAlign>,
+    /// A Vim status message waiting for the status bar, such as an unsupported command.
+    vim_message: Option<String>,
     pending_navigation_feedback: bool,
     feedback: Option<editor_feedback::Highlight>,
     lines: crate::render::LineIndex,
@@ -376,6 +380,8 @@ impl EditorTab {
             focus: true,
             scroll_to_cursor: false,
             center_on_reveal: false,
+            scroll_align: None,
+            vim_message: None,
             pending_navigation_feedback: false,
             feedback: None,
             lines: crate::render::LineIndex::default(),
@@ -3682,6 +3688,12 @@ impl VEditApp {
                 }
                 *vim_register = action.yanked;
             }
+            if action.scroll.is_some() {
+                tab.scroll_align = action.scroll;
+            }
+            if action.message.is_some() {
+                tab.vim_message = action.message;
+            }
             let selection = tab
                 .vim
                 .selection(&tab.text)
@@ -4030,6 +4042,43 @@ impl VEditApp {
                     }
                     continue;
                 }
+                // Vim's Ctrl+A / Ctrl+X: Ctrl+A and Ctrl+X stay Select All and
+                // Cut, so Alt+A and Alt+X add to or subtract from a number,
+                // unless the user bound those keys to a command.
+                let number_step = match &event {
+                    egui::Event::Key {
+                        key: key @ (Key::A | Key::X),
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.alt
+                        && !modifiers.ctrl
+                        && !modifiers.command
+                        && !modifiers.shift
+                        && tab.vim.mode == VimMode::Normal
+                        && !keybindings::Action::ALL
+                            .iter()
+                            .any(|action| keybindings::matches(&keybindings, *action, &event)) =>
+                    {
+                        Some(if *key == Key::A {
+                            VimKey::Increment
+                        } else {
+                            VimKey::Decrement
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(key) = number_step {
+                    if events
+                        .peek()
+                        .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
+                    {
+                        events.next();
+                    }
+                    let action = tab.vim.handle_key(&mut tab.text, key);
+                    apply_action(tab, action, &mut vim_register);
+                    continue;
+                }
                 match event {
                     egui::Event::Text(text) => {
                         let mut characters = text.chars().peekable();
@@ -4159,6 +4208,9 @@ impl VEditApp {
             self.find_visible = false;
         }
         self.find_message();
+        if let Some(message) = self.tab_mut().and_then(|tab| tab.vim_message.take()) {
+            self.status(message, true);
+        }
         retained.extend(native_insert);
         ctx.input_mut(|input| input.events = retained);
         if let Some(yank) = vim_register {
@@ -5774,8 +5826,17 @@ impl VEditApp {
                 ).intersect(ui.clip_rect());
                 ui.painter().rect_filled(highlight, 0.0, ACCENT.linear_multiply(0.055));
             }
+            // Cursor reveals keep this margin to the viewport edge, like Vim's
+            // 'scrolloff'; zt / zb and H / L respect the same margin.
+            const REVEAL_MARGIN: f32 = 35.0;
             if tab.scroll_to_cursor {
-                ui.scroll_to_rect(cursor_rect.expand(35.0), tab.center_on_reveal.then_some(Align::Center));
+                let align = match tab.scroll_align.take() {
+                    Some(crate::vim::ScrollAlign::Top) => Some(Align::Min),
+                    Some(crate::vim::ScrollAlign::Center) => Some(Align::Center),
+                    Some(crate::vim::ScrollAlign::Bottom) => Some(Align::Max),
+                    None => tab.center_on_reveal.then_some(Align::Center),
+                };
+                ui.scroll_to_rect(cursor_rect.expand(REVEAL_MARGIN), align);
                 tab.scroll_to_cursor = false;
                 tab.center_on_reveal = false;
             }
@@ -5785,6 +5846,25 @@ impl VEditApp {
                 rows.partition_point(|r| output.galley_pos.y + r.pos.y + r.size.y < clip.top());
             let last = rows.partition_point(|r| output.galley_pos.y + r.pos.y < clip.bottom());
             let visible_rows = syntax.visible_rows(document_id, &output.galley, first..last);
+            if pane_focused {
+                // Vim H / M / L address the visible rows of this pane outside
+                // the reveal margin, unless the document starts or ends there.
+                let top = |row: usize| rows.get(row).map(|r| output.galley_pos.y + r.pos.y);
+                let starts = top(0).is_some_and(|y| y >= clip.top() - 0.5);
+                let ends = rows.last().is_some_and(|r| {
+                    output.galley_pos.y + r.pos.y + r.size.y <= clip.bottom() + 0.5
+                });
+                let upper = clip.top() + if starts { 0.0 } else { REVEAL_MARGIN };
+                let lower = clip.bottom() - if ends { 0.0 } else { REVEAL_MARGIN };
+                let fully_visible = |(row, _): &&(usize, crate::render::VisualRow)| {
+                    rows.get(*row).is_some_and(|r| {
+                        output.galley_pos.y + r.pos.y >= upper - 0.5
+                            && output.galley_pos.y + r.pos.y + r.size.y <= lower + 0.5
+                    })
+                };
+                let shown = visible_rows.iter().find(fully_visible).zip(visible_rows.iter().rev().find(fully_visible));
+                tab.vim.set_visible_range(shown.map(|((_, top), (_, bottom))| top.start..bottom.end));
+            }
             find::paint_matches(ui, &output.galley, output.galley_pos, &visible_rows, &search_matches, search_cursor);
             agent_mark_remove = agent_marks_ui::paint_agent_mark_overlays(
                 ui, id, &output.galley, output.galley_pos, &visible_rows,

@@ -449,3 +449,60 @@ fn capturing_a_selection_drag_cancels_an_existing_animated_cursor_reveal() {
     );
     assert_unchanged_document(&screen);
 }
+
+#[test]
+fn vim_scroll_commands_align_the_cursor_line_and_screen_motions_follow_the_viewport() {
+    let mut screen = harness(fixture(Editing::Normal, false, false));
+    let original = screen.state().tab().unwrap().text.clone();
+    let line = |screen: &Harness<'_, VEditApp>| {
+        let tab = screen.state().tab().unwrap();
+        tab.text
+            .chars()
+            .take(tab.vim.cursor)
+            .filter(|&ch| ch == '\n')
+            .count()
+            + 1
+    };
+    let keys = |screen: &mut Harness<'_, VEditApp>, value: &str| {
+        screen
+            .input_mut()
+            .events
+            .push(egui::Event::Text(value.into()));
+        screen.run_steps(4);
+    };
+    keys(&mut screen, "120G");
+    assert_eq!(line(&screen), 120);
+
+    keys(&mut screen, "zt");
+    assert_eq!(line(&screen), 120, "zt keeps the cursor line");
+    keys(&mut screen, "L");
+    let bottom = line(&screen);
+    keys(&mut screen, "H");
+    assert_eq!(
+        line(&screen),
+        120,
+        "after zt the cursor line is the top screen line"
+    );
+    let visible = bottom - 120;
+    assert!(visible > 10, "the viewport shows {visible} further lines");
+
+    keys(&mut screen, "120Gzb");
+    keys(&mut screen, "L");
+    assert_eq!(
+        line(&screen),
+        120,
+        "after zb the cursor line is the bottom screen line"
+    );
+    keys(&mut screen, "H");
+    assert_eq!(line(&screen), 120 - visible);
+
+    keys(&mut screen, "120Gzz");
+    keys(&mut screen, "M");
+    assert!(
+        line(&screen).abs_diff(120) <= 1,
+        "after zz the middle screen line is the cursor line, got {}",
+        line(&screen)
+    );
+    assert_eq!(screen.state().tab().unwrap().text, original);
+    assert!(!screen.state().tab().unwrap().vim.can_undo());
+}
