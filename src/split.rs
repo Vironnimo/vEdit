@@ -694,6 +694,13 @@ impl VEditApp {
             }
         }
     }
+    /// Whether a pane of the visible layout currently shows this document.
+    pub(super) fn layout_shows_document(&self, id: u64) -> bool {
+        self.editor_layout
+            .panes
+            .iter()
+            .any(|pane| pane.document == Some(id))
+    }
     pub(super) fn current_pane_tab_ids(&self) -> Vec<u64> {
         self.editor_layout
             .panes

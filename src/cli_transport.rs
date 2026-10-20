@@ -37,6 +37,11 @@ struct Outgoing<'a> {
     version: u32,
     token: &'a str,
     request: &'a Request,
+    /// The caller's working directory selects its project when a request
+    /// names none. Older receivers reject the field; `send_to` then retries
+    /// without it, because that rejection happens before any dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a Path>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +50,8 @@ struct Incoming {
     version: u32,
     token: String,
     request: serde_json::Value,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 /// Decode strict JSON without silently choosing the last of contradictory keys.
@@ -126,6 +133,8 @@ impl<'de> Visitor<'de> for UniqueValueVisitor {
 pub struct Envelope {
     pub request: Request,
     pub reply: mpsc::Sender<Response>,
+    /// The CLI's working directory, when it sent one.
+    pub cwd: Option<PathBuf>,
 }
 
 pub struct Server {
@@ -298,6 +307,36 @@ pub fn endpoint_alive() -> bool {
 }
 
 fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
+    // Canonical like the editor's project roots, so the receiver compares
+    // paths without touching the disk.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|directory| std::fs::canonicalize(&directory).unwrap_or(directory));
+    let response = send_packet(request, path, cwd.as_deref())?;
+    let mut response = if cwd.is_some() && rejected_field(&response, "cwd") {
+        // An older receiver refused the envelope before dispatching anything.
+        send_packet(request, path, None)?
+    } else {
+        response
+    };
+    if let Some(error) = response.error.as_mut()
+        && error.code == "invalid_request"
+        && (error.message.contains("unknown field") || error.message.contains("unknown variant"))
+    {
+        // The CLI validated this request with its own, newer schema.
+        error.message.push_str(" The running vEdit is older than this vedit-cli and does not support this request or option. Restart vEdit from the same installation as vedit-cli to use it.");
+    }
+    Ok(response)
+}
+
+fn rejected_field(response: &Response, field: &str) -> bool {
+    response.error.as_ref().is_some_and(|error| {
+        error.code == "invalid_request"
+            && error.message.contains(&format!("unknown field `{field}`"))
+    })
+}
+
+fn send_packet(request: &Request, path: &Path, cwd: Option<&Path>) -> Result<Response, String> {
     let endpoint = read_endpoint(path)?;
     let mut stream = TcpStream::connect_timeout(&endpoint_address(&endpoint), CONNECT_TIMEOUT)
         .map_err(|error| {
@@ -312,6 +351,7 @@ fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
         version: PROTOCOL_VERSION,
         token: &endpoint.token,
         request,
+        cwd,
     };
     let mut bytes = serde_json::to_vec(&packet)
         .map_err(|error| format!("Could not encode the control request: {error}"))?;
@@ -386,10 +426,14 @@ fn serve_connection(
     }
     let response = match read_frame(&mut stream, MAX_REQUEST_BYTES) {
         Ok(frame) => match decode_request(&frame, token) {
-            Ok(request) => {
+            Ok((request, cwd)) => {
                 let timeout = request_timeout(&request);
                 let (reply, receiver) = mpsc::channel();
-                match sender.try_send(Envelope { request, reply }) {
+                match sender.try_send(Envelope {
+                    request,
+                    reply,
+                    cwd,
+                }) {
                     Ok(()) => {
                         ctx.request_repaint();
                         wait_for_application(receiver, stop, timeout)
@@ -418,7 +462,7 @@ fn serve_connection(
     write_response(&mut stream, &response);
 }
 
-fn decode_request(frame: &[u8], token: &str) -> Result<Request, Response> {
+fn decode_request(frame: &[u8], token: &str) -> Result<(Request, Option<PathBuf>), Response> {
     let incoming: Incoming = from_unique_json(frame).map_err(|error| {
         Response::failure(
             "invalid_request",
@@ -439,12 +483,13 @@ fn decode_request(frame: &[u8], token: &str) -> Result<Request, Response> {
             ),
         ));
     }
-    serde_json::from_value(incoming.request).map_err(|error| {
+    let request = serde_json::from_value(incoming.request).map_err(|error| {
         Response::failure(
             "invalid_request",
             format!("The control operation is invalid: {error}. It was not applied."),
         )
-    })
+    })?;
+    Ok((request, incoming.cwd.filter(|path| path.is_absolute())))
 }
 
 fn request_timeout(request: &Request) -> Duration {
@@ -916,6 +961,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             token: &endpoint.token,
             request: &Request::Status {},
+            cwd: None,
         })
         .unwrap();
         socket.write_all(&packet[..12]).unwrap();
@@ -997,6 +1043,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             token: &endpoint.token,
             request: &Request::Status {},
+            cwd: None,
         })
         .unwrap();
         packet.push(b'\n');
@@ -1114,6 +1161,95 @@ mod tests {
         assert!(tokens_equal(first.as_bytes(), first.as_bytes()));
         assert!(!tokens_equal(first.as_bytes(), second.as_bytes()));
         assert!(!tokens_equal(first.as_bytes(), b""));
+    }
+
+    #[test]
+    fn the_callers_directory_reaches_the_gui_canonical() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let client = thread::spawn(move || send_to(&Request::Status {}, &path));
+        let envelope = fixture.receive();
+        let expected = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        assert_eq!(envelope.cwd.as_deref(), Some(expected.as_path()));
+        envelope.reply.send(Response::success(json!({}))).unwrap();
+        assert!(client.join().unwrap().unwrap().ok);
+    }
+
+    /// A receiver built before `cwd` existed: strict envelope fields, and
+    /// operations it does not know are rejected the same way.
+    fn older_receiver(
+        directory: &Path,
+        frames: usize,
+    ) -> thread::JoinHandle<Vec<serde_json::Value>> {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Endpoint {
+            version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            port: listener.local_addr().unwrap().port(),
+            token: random_token().unwrap(),
+        };
+        private_directory(directory).unwrap();
+        write_endpoint(&directory.join("control.json"), &endpoint).unwrap();
+        thread::spawn(move || {
+            let mut received = Vec::new();
+            for _ in 0..frames {
+                let (mut socket, _) = listener.accept().unwrap();
+                configure_stream(&socket).unwrap();
+                let frame: serde_json::Value =
+                    serde_json::from_slice(&read_frame(&mut socket, MAX_REQUEST_BYTES).unwrap())
+                        .unwrap();
+                let response = if frame.get("cwd").is_some() {
+                    Response::failure(
+                        "invalid_request",
+                        "The control request is not valid JSON: unknown field `cwd`, expected one of `version`, `token`, `request` at line 1 column 150. It was not applied.",
+                    )
+                } else if frame["request"]["op"] == "notify" {
+                    Response::failure(
+                        "invalid_request",
+                        "The control operation is invalid: unknown variant `notify`, expected one of `status`. It was not applied.",
+                    )
+                } else {
+                    Response::success(json!({"op": frame["request"]["op"]}))
+                };
+                write_response(&mut socket, &response);
+                received.push(frame);
+            }
+            received
+        })
+    }
+
+    #[test]
+    fn an_older_receiver_gets_the_request_again_without_the_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "vedit-control-test-{}-{}",
+            std::process::id(),
+            random_token().unwrap()
+        ));
+        let receiver = older_receiver(&directory, 4);
+        let response = send_to(&Request::Status {}, &directory.join("control.json")).unwrap();
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.result["op"], "status");
+        let notify = Request::Notify {
+            message: "Ready".into(),
+            title: None,
+            level: crate::cli::NotificationLevel::Info,
+            workspace: None,
+            open: None,
+            review: None,
+        };
+        let response = send_to(&notify, &directory.join("control.json")).unwrap();
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "invalid_request");
+        assert!(
+            error.message.contains("older than this vedit-cli"),
+            "{}",
+            error.message
+        );
+        let frames = receiver.join().unwrap();
+        assert!(frames[0].get("cwd").is_some());
+        assert!(frames[1].get("cwd").is_none());
+        assert_eq!(frames[1]["request"]["op"], "status");
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[cfg(unix)]

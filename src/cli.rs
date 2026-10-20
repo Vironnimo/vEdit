@@ -19,7 +19,7 @@ mod spawn;
 #[path = "cli_transport.rs"]
 mod transport;
 #[allow(unused_imports)]
-pub use transport::{Server, send};
+pub use transport::{Envelope, Server, send};
 
 pub const MAX_FILES: usize = 100;
 pub const MAX_ANNOTATIONS: usize = 500;
@@ -74,6 +74,9 @@ fn is_one(value: &usize) -> bool {
 }
 fn default_limit() -> usize {
     100
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn default_mark_text_count() -> usize {
     4096
@@ -336,6 +339,37 @@ pub enum EditorCommand {
     Preview,
 }
 
+/// How prominently `notify` presents its message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationLevel {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// A change review a notification can open; see `vedit-cli notify --help`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationReview {
+    Working,
+    Branch,
+}
+
+/// The file a notification opens when the user clicks it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationOpen {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub location: Option<Location>,
+}
+
+pub const MAX_NOTIFICATION_TITLE: usize = 120;
+pub const MAX_NOTIFICATION_MESSAGE: usize = 2000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitOrientation {
@@ -419,12 +453,17 @@ pub enum Request {
     },
     Open {
         files: Vec<OpenFile>,
+        /// Load without switching the visible project or raising the window.
+        #[serde(default, skip_serializing_if = "is_false")]
+        background: bool,
     },
     Review {
         title: String,
         #[serde(default)]
         note: String,
         files: Vec<OpenFile>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        background: bool,
     },
     Focus {
         tab_id: u64,
@@ -560,6 +599,8 @@ pub enum Request {
         line_count: usize,
         #[serde(default = "one", skip_serializing_if = "is_one")]
         start_column: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PathBuf>,
     },
     GitStatus {
         #[serde(default)]
@@ -598,9 +639,26 @@ pub enum Request {
         base: Option<String>,
         #[serde(default)]
         workspace: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        background: bool,
     },
     Task {
         action: TaskAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PathBuf>,
+    },
+    Notify {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default)]
+        level: NotificationLevel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<NotificationOpen>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<NotificationReview>,
     },
     File {
         action: FileAction,
@@ -826,6 +884,37 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 set_flag(&mut options.no_excludes, "--no-excludes")?;
             }
             "--working" => set_flag(&mut options.working, "--working")?,
+            "--background" => set_flag(&mut options.background, "--background")?,
+            "--title" => set_option(
+                &mut options.title,
+                iter.next().ok_or("--title needs text")?,
+                "--title",
+            )?,
+            "--level" => set_option(
+                &mut options.level,
+                serde_json::from_value(json!(
+                    iter.next()
+                        .ok_or("--level needs info, success, warning or error")?
+                        .to_ascii_lowercase()
+                ))
+                .map_err(|_| "--level needs info, success, warning or error")?,
+                "--level",
+            )?,
+            "--open" => set_option(
+                &mut options.open,
+                iter.next().ok_or("--open needs PATH or PATH:LINE")?,
+                "--open",
+            )?,
+            "--review" => set_option(
+                &mut options.review,
+                serde_json::from_value(json!(
+                    iter.next()
+                        .ok_or("--review needs working or branch")?
+                        .to_ascii_lowercase()
+                ))
+                .map_err(|_| "--review needs working or branch")?,
+                "--review",
+            )?,
             "--branch" => set_flag(&mut options.branch, "--branch")?,
             "--commit" => set_option(
                 &mut options.commit,
@@ -890,7 +979,10 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                     annotations: Vec::new(),
                 })
                 .collect();
-            Request::Open { files }
+            Request::Open {
+                files,
+                background: options.background,
+            }
         }
         "review"
             if options.working
@@ -914,10 +1006,14 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 source,
                 rev: options.commit.clone(),
                 base: options.base.clone(),
-                workspace: positional.first().map(|path| absolute(path.into())),
+                workspace: options.workspace_or(&positional)?,
+                background: options.background,
             }
         }
         "review" => {
+            if options.workspace.is_some() {
+                return Err("--workspace applies to review --working|--commit|--branch; a manifest's files choose their projects".into());
+            }
             let path = absolute(
                 one_argument(&positional, "review needs exactly one manifest file")?.into(),
             );
@@ -935,6 +1031,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 title: manifest.title,
                 note: manifest.note,
                 files: manifest.files,
+                background: options.background,
             }
         }
         "focus" => Request::Focus {
@@ -1093,7 +1190,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
             }
             Request::Search {
                 query: positional[0].clone(),
-                workspace: positional.get(1).map(|p| absolute(p.into())),
+                workspace: options.workspace_or(&positional[1..])?,
                 excludes: if options.no_excludes {
                     Some(Vec::new())
                 } else {
@@ -1110,13 +1207,14 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 start_line: options.line.unwrap_or(1),
                 start_column: options.column.unwrap_or(1),
                 line_count: options.count.unwrap_or(100),
+                workspace: options.workspace_or(&[])?,
             }
         }
         "git-status" | "git-branches" | "git-history" => {
             if positional.len() > 1 {
                 return Err(format!("{command} takes an optional WORKSPACE"));
             }
-            let workspace = positional.first().map(|p| absolute(p.into()));
+            let workspace = options.workspace_or(&positional)?;
             let limit = options.limit.unwrap_or(100);
             let offset = options.offset.unwrap_or(0);
             match command.as_str() {
@@ -1143,7 +1241,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
             }
             Request::GitSwitchBranch {
                 target: positional[0].clone(),
-                workspace: positional.get(1).map(|p| absolute(p.into())),
+                workspace: options.workspace_or(&positional[1..])?,
             }
         }
 
@@ -1168,7 +1266,27 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
                 "task needs check, test, build, run_file or stop"
             )?))
             .map_err(|_| "Unknown task; use --help")?,
+            workspace: options.workspace_or(&[])?,
         },
+        "notify" => {
+            let message = match positional.as_slice() {
+                [message] => message.clone(),
+                [] => {
+                    return Err(
+                        "notify needs MESSAGE, e.g. notify \"Tests pass; ready for review\"".into(),
+                    );
+                }
+                _ => return Err("notify takes one MESSAGE; quote text that contains spaces".into()),
+            };
+            Request::Notify {
+                message,
+                title: options.title.clone(),
+                level: options.level.unwrap_or_default(),
+                workspace: options.workspace_or(&[])?,
+                open: options.open.as_deref().map(notification_open).transpose()?,
+                review: options.review,
+            }
+        }
         "file" => Request::File {
             action: transport::from_unique_json::<FileAction>(json_bytes(&read_json_file(
                 &absolute(one_argument(&positional, "file needs an ACTION.json file")?.into()),
@@ -1217,10 +1335,17 @@ pub fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parse
     };
     resolve_paths(&mut request);
     validate(&request)?;
+    // A background presentation never opens a new window in front of the user.
     let start = !no_start
         && matches!(
             request,
-            Request::Open { .. } | Request::Review { .. } | Request::Workspace { .. }
+            Request::Open {
+                background: false,
+                ..
+            } | Request::Review {
+                background: false,
+                ..
+            } | Request::Workspace { .. }
         );
     Ok(Parsed::Command { request, start })
 }
@@ -1252,8 +1377,24 @@ struct Options {
     branch: bool,
     commit: Option<String>,
     base: Option<String>,
+    background: bool,
+    title: Option<String>,
+    level: Option<NotificationLevel>,
+    open: Option<String>,
+    review: Option<NotificationReview>,
 }
 impl Options {
+    /// The project from `--workspace` or a legacy positional WORKSPACE, never both.
+    fn workspace_or(&self, positional: &[String]) -> Result<Option<PathBuf>, String> {
+        match (&self.workspace, positional) {
+            (Some(_), [_, ..]) => {
+                Err("Give the project either as WORKSPACE or with --workspace, not both".into())
+            }
+            (Some(path), []) => Ok(Some(absolute(path.into()))),
+            (None, [path, ..]) => Ok(Some(absolute(path.into()))),
+            (None, []) => Ok(None),
+        }
+    }
     fn allowed(&self, command: &str) -> Result<(), String> {
         let definition = help::command(command)
             .ok_or_else(|| format!("Unknown command {command}; use vedit-cli --help"))?;
@@ -1283,6 +1424,11 @@ impl Options {
             (self.branch, "--branch"),
             (self.commit.is_some(), "--commit"),
             (self.base.is_some(), "--base"),
+            (self.background, "--background"),
+            (self.title.is_some(), "--title"),
+            (self.level.is_some(), "--level"),
+            (self.open.is_some(), "--open"),
+            (self.review.is_some(), "--review"),
         ] {
             if present && !definition.flags.contains(&flag) {
                 return Err(format!(
@@ -1351,6 +1497,32 @@ fn parse_bookmarks(positional: &[String], options: &Options) -> Result<BookmarkA
         return Err("--limit and --offset are supported only by bookmarks list".into());
     }
     Ok(change)
+}
+
+/// `PATH` or `PATH:LINE`; a drive letter's colon is never read as a line.
+fn notification_open(value: &str) -> Result<NotificationOpen, String> {
+    let (path, location) = match value.rsplit_once(':') {
+        Some((path, line))
+            if !path.is_empty()
+                && !line.is_empty()
+                && line.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            let line = line
+                .parse::<usize>()
+                .ok()
+                .filter(|line| *line > 0)
+                .ok_or("--open LINE must be a positive integer, e.g. src/main.rs:42")?;
+            (path, Some(Location { line, column: 1 }))
+        }
+        _ => (value, None),
+    };
+    if path.trim().is_empty() {
+        return Err("--open needs PATH or PATH:LINE".into());
+    }
+    Ok(NotificationOpen {
+        path: absolute(path.into()),
+        location,
+    })
 }
 
 fn bookmark_id(value: &str) -> Result<u64, String> {
@@ -1644,7 +1816,7 @@ fn normalize_equals(args: Vec<String>) -> Vec<String> {
 }
 fn resolve_paths(request: &mut Request) {
     match request {
-        Request::Open { files } | Request::Review { files, .. } => {
+        Request::Open { files, .. } | Request::Review { files, .. } => {
             for file in files {
                 file.path = absolute(file.path.clone());
             }
@@ -1687,7 +1859,25 @@ fn resolve_paths(request: &mut Request) {
         | Request::Launch {
             workspace: Some(path),
             ..
+        }
+        | Request::Task {
+            workspace: Some(path),
+            ..
+        }
+        | Request::Output {
+            workspace: Some(path),
+            ..
         } => *path = absolute(path.clone()),
+        Request::Notify {
+            workspace, open, ..
+        } => {
+            if let Some(path) = workspace {
+                *path = absolute(path.clone());
+            }
+            if let Some(open) = open {
+                open.path = absolute(open.path.clone());
+            }
+        }
         Request::Batch { actions, .. } => {
             for action in actions {
                 resolve_paths(action);
@@ -1718,7 +1908,7 @@ pub fn validate(request: &Request) -> Result<(), String> {
                 _ => {}
             }
         }
-        Request::Open { files } | Request::Review { files, .. } => {
+        Request::Open { files, .. } | Request::Review { files, .. } => {
             if files.is_empty() || files.len() > MAX_FILES {
                 return Err(format!("Supply 1..{MAX_FILES} files"));
             }
@@ -1974,9 +2164,58 @@ pub fn validate(request: &Request) -> Result<(), String> {
             start_line,
             line_count,
             start_column,
+            workspace,
         } => {
             if *start_line == 0 || *start_column == 0 || !(1..=500).contains(line_count) {
                 return Err("output uses positive start_line/start_column and 1..500 lines".into());
+            }
+            if let Some(path) = workspace {
+                validate_path(path)?;
+            }
+        }
+        Request::Task {
+            workspace: Some(path),
+            ..
+        } => validate_path(path)?,
+        Request::Notify {
+            message,
+            title,
+            workspace,
+            open,
+            review,
+            ..
+        } => {
+            if open.is_some() && review.is_some() {
+                return Err("A notification opens one thing when clicked: give --open or --review, not both. Nothing was sent".into());
+            }
+            if message.trim().is_empty() || message.len() > MAX_NOTIFICATION_MESSAGE {
+                return Err(format!(
+                    "A notification message needs 1..{MAX_NOTIFICATION_MESSAGE} bytes of text"
+                ));
+            }
+            if message
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+            {
+                return Err("A notification message can contain line breaks and tabs, but no other control characters".into());
+            }
+            if let Some(title) = title
+                && (title.trim().is_empty()
+                    || title.len() > MAX_NOTIFICATION_TITLE
+                    || title.chars().any(char::is_control))
+            {
+                return Err(format!(
+                    "A notification title is one line of 1..{MAX_NOTIFICATION_TITLE} bytes"
+                ));
+            }
+            if let Some(path) = workspace {
+                validate_path(path)?;
+            }
+            if let Some(open) = open {
+                validate_path(&open.path)?;
+                if let Some(location) = &open.location {
+                    validate_location(location)?;
+                }
             }
         }
         Request::GitStatus {
@@ -2004,6 +2243,7 @@ pub fn validate(request: &Request) -> Result<(), String> {
             rev,
             base,
             workspace,
+            ..
         } => {
             match source {
                 ChangeReviewSource::Commit if rev.is_none() => {
@@ -2367,7 +2607,10 @@ pub fn forward_paths(paths: Vec<PathBuf>) -> Result<Option<Response>, String> {
     let response = if files.is_empty() {
         send(&Request::Raise {})?
     } else {
-        send(&Request::Open { files })?
+        send(&Request::Open {
+            files,
+            background: false,
+        })?
     };
     Ok(Some(response))
 }
@@ -2394,7 +2637,7 @@ pub fn schema_topic(topic: Option<&str>) -> Result<Value, String> {
             "Unknown schema operation {topic}; use vedit-cli schema for available operations"
         ));
     }
-    let mut selected = json!({"protocol":full["protocol"], "commands":examples, "coordinates":full["coordinates"], "ids":full["ids"], "strictness":full["strictness"]});
+    let mut selected = json!({"protocol":full["protocol"], "commands":examples, "coordinates":full["coordinates"], "ids":full["ids"], "strictness":full["strictness"], "workspace_resolution":full["workspace_resolution"]});
     let section = match operation.as_str() {
         "edit" | "new" | "save" | "save_as" | "selection" | "find" | "replace" | "command" => {
             "editing"
@@ -2855,7 +3098,7 @@ mod tests {
             Parsed::Help { .. }
         ));
         assert!(
-            matches!(parse(&["open", "--no-start", "--", "--no-start"]).unwrap(), Parsed::Command { request: Request::Open { files }, start: false } if files[0].path.file_name().unwrap() == "--no-start")
+            matches!(parse(&["open", "--no-start", "--", "--no-start"]).unwrap(), Parsed::Command { request: Request::Open { files, .. }, start: false } if files[0].path.file_name().unwrap() == "--no-start")
         );
     }
 
@@ -3213,7 +3456,7 @@ mod tests {
     #[test]
     fn open_preserves_preview_and_exact_location() {
         let Parsed::Command {
-            request: Request::Open { files },
+            request: Request::Open { files, .. },
             start,
         } = parse(&[
             "open",
@@ -3596,6 +3839,7 @@ mod tests {
     #[test]
     fn annotation_end_cannot_reverse_range() {
         let request = Request::Open {
+            background: false,
             files: vec![OpenFile {
                 path: absolute("x.rs".into()),
                 location: None,
@@ -3614,7 +3858,7 @@ mod tests {
     #[test]
     fn no_start_preserves_command_effect() {
         let Parsed::Command {
-            request: Request::Open { files },
+            request: Request::Open { files, .. },
             start,
         } = parse(&["--no-start", "open", "x.md", "--source"]).unwrap()
         else {
@@ -3636,7 +3880,7 @@ mod tests {
             serde_json::from_slice(json_bytes(b"\xef\xbb\xbf{\"op\":\"status\"}")).unwrap();
         assert!(matches!(request, Request::Status {}));
         let Parsed::Command {
-            request: Request::Open { files },
+            request: Request::Open { files, .. },
             ..
         } = parse(&["open", "--", "--no-start", "--help"]).unwrap()
         else {

@@ -5,6 +5,8 @@
 //! not a document tab: tabs, panes, recovery and saving stay untouched, and
 //! closing it shows the same panes again. Git runs in workers, and every
 //! result carries the project root and the generation it was requested for.
+//! Generations are unique in the app, so a result for a closed project can
+//! never match a review of a project reopened at the same root.
 
 use super::*;
 use crate::cli::{ChangeReviewSource, Location, Request, Response};
@@ -27,6 +29,12 @@ const LAZY_FILES: usize = 24;
 /// Line-number gutters stay aligned across files of ordinary length.
 const MIN_NUMBER_DIGITS: usize = 4;
 
+static REVIEW_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    REVIEW_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// Comparison key, then path, then the content key of the version marked seen.
 type SeenMarks = HashMap<String, HashMap<String, u64>>;
 
@@ -38,7 +46,6 @@ pub(super) struct ChangeReviewState {
     /// The last closed review, reused with its position when reopened.
     parked: Option<ChangeReview>,
     seen: SeenMarks,
-    generation: u64,
 }
 
 struct ChangeReview {
@@ -291,11 +298,11 @@ fn review_body_id(root: &Path) -> egui::Id {
     egui::Id::new(("change-review-body", root))
 }
 
-fn review_summary(root: &Path, view: &ChangeReview, seen: &SeenMarks) -> Value {
+fn review_summary(root: &Path, view: &ChangeReview, seen: &SeenMarks, visible: bool) -> Value {
     let (added, removed) = view.totals();
     json!({
         "applied": true,
-        "visible": true,
+        "visible": visible,
         "workspace": crate::paths::display(root),
         "repository": crate::paths::display(&view.repository),
         "source": view.source.kind(),
@@ -343,6 +350,21 @@ impl VEditApp {
         project_index: usize,
         source: ReviewSource,
     ) -> Result<(), String> {
+        self.load_change_review(project_index, source, false)
+            .map(|_| ())
+    }
+
+    /// Load a review. In `background` the visible project, its panes and the
+    /// keyboard stay as they are: another project shows the review when the
+    /// user switches to it, and the visible project keeps it ready for the
+    /// next review command unless it already shows this comparison.
+    /// Returns whether the review is the one its project shows.
+    pub(super) fn load_change_review(
+        &mut self,
+        project_index: usize,
+        source: ReviewSource,
+        background: bool,
+    ) -> Result<bool, String> {
         let project = self
             .projects
             .get(project_index)
@@ -357,25 +379,45 @@ impl VEditApp {
         {
             git::validate_review_revision(revision).map_err(|error| error.to_string())?;
         }
-        if project_index != self.active_project {
-            self.switch_project(project_index);
-        }
-        // The review takes the keyboard: finish pending Vim input as a tab switch would.
-        self.cancel_vim_search(false);
-        if let Some(tab) = self.tab_mut() {
-            let action = tab.vim.finish_insert(&mut tab.text);
-            if action.text_changed {
-                tab.changed();
+        if !background {
+            if project_index != self.active_project {
+                self.switch_project(project_index);
             }
+            // The review takes the keyboard: finish pending Vim input as a tab switch would.
+            self.cancel_vim_search(false);
+            if let Some(tab) = self.tab_mut() {
+                let action = tab.vim.finish_insert(&mut tab.text);
+                if action.text_changed {
+                    tab.changed();
+                }
+            }
+            self.completions = None;
+            self.completion_request = None;
         }
-        self.completions = None;
-        self.completion_request = None;
+        let visible_project = project_index == self.active_project;
         let project = &mut self.projects[project_index];
-        project.git_view.detail_open = false;
+        if !background {
+            project.git_view.detail_open = false;
+        }
         let root = project.root.clone();
         let state = &mut project.change_review;
         let fits = |view: &ChangeReview| view.source == source && view.repository == repository;
-        let mut view = if state.view.as_ref().is_some_and(fits) {
+        let shown = !background || !visible_project || state.view.as_ref().is_some_and(fits);
+        let mut view = if !shown {
+            // Prepared out of sight; the user's panes stay on screen.
+            match state.parked.take() {
+                Some(previous) if fits(&previous) => previous,
+                Some(mut previous) => {
+                    answer(
+                        &mut previous.replies,
+                        "review_replaced",
+                        "Another change review replaced this one before it finished loading",
+                    );
+                    ChangeReview::new(source, repository)
+                }
+                None => ChangeReview::new(source, repository),
+            }
+        } else if state.view.as_ref().is_some_and(fits) {
             state.view.take().expect("checked review")
         } else {
             let reused = state.parked.take_if(|view| fits(view));
@@ -397,23 +439,28 @@ impl VEditApp {
                 entry.patch = EntryPatch::Deferred;
             }
         }
-        state.generation += 1;
-        view.generation = state.generation;
+        view.generation = next_generation();
         view.loading = true;
         view.lazy_request = None;
-        view.focus_pending = true;
+        view.focus_pending = !background;
         let generation = view.generation;
         let source = view.source.clone();
         let repository = view.repository.clone();
-        state.view = Some(view);
+        if shown {
+            state.view = Some(view);
+        } else {
+            state.parked = Some(view);
+        }
         self.worker(move || WorkerResult::ChangeReview {
             root,
             generation,
             result: load_review(&repository, &source),
         });
-        self.focus_editor();
+        if !background {
+            self.focus_editor();
+        }
         self.ctx.request_repaint();
-        Ok(())
+        Ok(shown)
     }
 
     /// Open a review from a menu or command; problems go to the status bar.
@@ -482,16 +529,23 @@ impl VEditApp {
         generation: u64,
         result: Result<LoadedReview, String>,
     ) {
-        let Some(project) = self
+        let Some(index) = self
             .projects
-            .iter_mut()
-            .find(|project| project.root == root)
+            .iter()
+            .position(|project| project.root == root)
         else {
             return;
         };
-        let ChangeReviewState { view, seen, .. } = &mut project.change_review;
-        let Some(view) = view.as_mut().filter(|view| view.generation == generation) else {
-            return;
+        let visible_project = index == self.active_project;
+        let project = &mut self.projects[index];
+        let ChangeReviewState { view, parked, seen } = &mut project.change_review;
+        // A background review loads while parked; it answers as not visible.
+        let (view, shown) = match view.as_mut().filter(|view| view.generation == generation) {
+            Some(view) => (view, true),
+            None => match parked.as_mut().filter(|view| view.generation == generation) {
+                Some(view) => (view, false),
+                None => return,
+            },
         };
         view.loading = false;
         let loaded = match result {
@@ -530,7 +584,7 @@ impl VEditApp {
         view.tops.clear();
         view.current = view.current.min(view.files.len().saturating_sub(1));
         view.follow_list = true;
-        let summary = review_summary(&project.root, view, seen);
+        let summary = review_summary(&project.root, view, seen, shown && visible_project);
         for reply in view.replies.drain(..) {
             let _ = reply.send(Response::success(summary.clone()));
         }
@@ -599,8 +653,7 @@ impl VEditApp {
         if requested.is_empty() {
             return;
         }
-        state.generation += 1;
-        let request = state.generation;
+        let request = next_generation();
         if automatic {
             view.lazy_request = Some(request);
         }
@@ -704,15 +757,17 @@ impl VEditApp {
             rev,
             base,
             workspace,
+            background,
         } = request
         else {
             return false;
         };
+        let background = *background;
         if let Err(error) = crate::cli::validate(request) {
             let _ = reply.send(Response::failure("invalid_request", error));
             return true;
         }
-        if let Some(dialog) = self.control_dialog() {
+        if !background && let Some(dialog) = self.control_dialog() {
             let _ = reply.send(Response::failure(
                 "user_dialog_open",
                 format!(
@@ -721,20 +776,20 @@ impl VEditApp {
             ));
             return true;
         }
-        let root = match self.control_query_project(workspace.as_deref()) {
-            Ok(project) => project.root.clone(),
-            Err(response) => {
-                let _ = reply.send(response);
-                return true;
-            }
-        };
-        let Some(project_index) = self
-            .projects
-            .iter()
-            .position(|project| project.root == root)
-        else {
-            return true;
-        };
+        let (project_index, workspace_source) =
+            match self.control_project_index(workspace.as_deref()) {
+                Ok(found) => found,
+                Err(response) => {
+                    let _ = reply.send(response);
+                    return true;
+                }
+            };
+        let reply = control::reply_naming_workspace(
+            reply,
+            self.projects[project_index].root.clone(),
+            workspace_source,
+            background,
+        );
         if self.projects[project_index].git_root.is_none() {
             let _ = reply.send(Response::failure(
                 "no_repository",
@@ -747,14 +802,24 @@ impl VEditApp {
             ChangeReviewSource::Commit => ReviewSource::Commit(rev.clone().unwrap_or_default()),
             ChangeReviewSource::Branch => ReviewSource::Branch { base: base.clone() },
         };
-        if let Err(error) = self.open_change_review(project_index, source) {
-            let _ = reply.send(Response::failure("review_unavailable", error));
-            return true;
-        }
-        if let Some(view) = self.projects[project_index].change_review.view.as_mut() {
+        let shown = match self.load_change_review(project_index, source, background) {
+            Ok(shown) => shown,
+            Err(error) => {
+                let _ = reply.send(Response::failure("review_unavailable", error));
+                return true;
+            }
+        };
+        let state = &mut self.projects[project_index].change_review;
+        if let Some(view) = if shown {
+            state.view.as_mut()
+        } else {
+            state.parked.as_mut()
+        } {
             view.replies.push(reply);
         }
-        self.raise_control_window();
+        if !background {
+            self.raise_control_window();
+        }
         true
     }
 }

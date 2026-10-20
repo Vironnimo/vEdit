@@ -277,6 +277,20 @@ Tabs lassen sich mit der Maus innerhalb einer Tab-Leiste umsortieren oder in ein
 
 Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App-Prozess. Die oben gezeigte `12` ist ein Beispiel. `request` führt strukturierte JSON-Aktionen aus; `schema` zeigt deren aktuelle Formen und Vorgaben.
 
+### Mehrere Projekte, Worktrees und Benachrichtigungen
+
+Mehrere Agenten können gleichzeitig in verschiedenen Projekten oder Git-Worktrees arbeiten. Projektbefehle wie `task`, `output`, `search`, `launch`, `git-status` und `review --working` verwenden das mit `--workspace` genannte Projekt, sonst das offene Projekt, in dessen Ordner der Agent den Befehl ausführt, und erst danach das sichtbare Projekt. Ein in ein anderes Projekt verschachtelter Worktree hat dabei Vorrang. Jede Antwort nennt das verwendete Projekt; das sichtbare Projekt wechselt dadurch nicht. Jedes Projekt hat seine eigene Aufgabe und Ausgabe, der Bereich **Output** zeigt die des sichtbaren Projekts.
+
+`open` ordnet eine Datei dem tiefsten offenen Projekt zu, das sie enthält. Liegt sie in einem tiefer verschachtelten Git-Worktree, öffnet vEdit diesen als eigenes Projekt; außerhalb aller Projekte wird ihr Repository geöffnet, sonst ihr Ordner. Mit `--background` bleiben bei `open` und `review` das sichtbare Projekt, das aktuelle Dokument samt Cursor und der Tastaturfokus unverändert, und das Fenster kommt nicht nach vorn. Die Dateien warten als Tabs in ihrem Projekt.
+
+`notify` meldet dem Benutzer, dass ein Agent fertig ist, nicht weiterkommt oder eine Entscheidung braucht:
+
+```powershell
+.\dist\vEdit\vedit-cli.exe notify "Alle Tests laufen; bitte die Änderungen ansehen." --title "Parser fertig" --level success --review working
+```
+
+Der Projekt-Tab erhält einen farbigen Punkt, neben **For agent** erscheint eine Glocke mit der Zahl ungelesener Meldungen, und bei einem Fenster im Hintergrund blinkt die Taskleistenschaltfläche. Ein Klick auf die Glocke (oder **View → Agent notifications**) zeigt die Meldungen mit Zeit, Projekt, Titel und Text; damit gelten sie als gelesen. Eine Meldung mit `--open PFAD:ZEILE` oder `--review working|branch` wechselt per Klick in ihr Projekt und öffnet die Datei beziehungsweise die Änderungsübersicht. **Clear all** leert die Liste. Wiederholte gleiche Meldungen werden zusammengefasst; die Liste gilt nur bis zum Beenden von vEdit. `status` meldet die ungelesenen Meldungen pro Projekt.
+
 | Bereich | Verfügbare Kontrolle |
 | --- | --- |
 | Dokumente | Öffnen, neue Entwürfe, offenen Text lesen, Änderungen, Suchen/Ersetzen, Auswahl, Undo/Redo, Speichern und Save as |
@@ -285,12 +299,13 @@ Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App
 | Editoraktionen | Einrücken, Kommentare umschalten, Zeilen duplizieren/löschen, Treffer wechseln, unveränderte Dateien neu laden |
 | Einstellungen | Vim, Leader, Such- und Explorer-Filter, Autosave samt Verzögerung, UI-Zoom, Schrift, Zeilenabstand/-nummern, Cursorzeile, Einrückung, Umbruch und Scrollen lesen oder gezielt ändern |
 | Bookmarks | Gespeicherte Stellen auflisten, setzen, benennen, entfernen und anspringen |
-| Projektarbeit | Inhaltsuche, Git-Status, Branches und History lesen, Branch wechseln, Diagnosen, Diff zum gespeicherten Text, Build/Test/Check starten oder stoppen, Ausgabe lesen |
+| Projektarbeit | Inhaltsuche, Git-Status, Branches und History lesen, Branch wechseln, Diagnosen, Diff zum gespeicherten Text, Build/Test/Check je Projekt starten oder stoppen, Ausgabe lesen |
+| Benachrichtigungen | Meldungen mit Titel, Dringlichkeit und einer per Klick zu öffnenden Datei oder Änderungsübersicht |
 | Präsentation | Mehrere Dateien mit Hinweisen öffnen, Review-Seitenleiste, Änderungsübersicht für Arbeitsverzeichnis, Commit oder Branch, Markierungen entfernen, Panels zeigen oder ausblenden |
 
 Textänderungen verlangen `expected_revision` aus der vorherigen Antwort. Eine falsche Revision verändert den Text nicht. Mehrere nicht überlappende Edit-Bereiche beziehen sich auf dieselbe Ausgangsfassung und werden gemeinsam als Undo-Schritt angewendet. Edit- und Auswahlbereiche haben ein **exklusives Ende**; Review-Markierungen unten haben ein **inklusives Ende**. Agentenänderungen bleiben zunächst ungespeichert, auch bei eingeschaltetem Autosave. Erst ein explizites Speichern gibt sie für die Datei frei.
 
-`search QUERY [WORKSPACE]` übernimmt die gespeicherten Suchfilter. Wiederholtes `--exclude PATTERN` ersetzt sie für diese eine Suche, `--no-excludes` entfernt die optionalen Filter; `.gitignore` bleibt wirksam. Die JSON-Form bietet `excludes`, etwa `{"op":"search","query":"needle","excludes":[]}`. Die Antwort nennt die verwendeten Filter und deren Herkunft. Eine Suche im anderen Projekt verändert den sichtbaren Projektfokus nicht. Dauerhaft ändern lassen sich die Filter mit `settings` und `search_excludes`; `settings swap-jk true` tauscht die J/K-Richtung. Weggelassene Einstellungen bleiben unverändert.
+`search QUERY [--workspace PFAD]` übernimmt die gespeicherten Suchfilter. Wiederholtes `--exclude PATTERN` ersetzt sie für diese eine Suche, `--no-excludes` entfernt die optionalen Filter; `.gitignore` bleibt wirksam. Die JSON-Form bietet `excludes`, etwa `{"op":"search","query":"needle","excludes":[]}`. Die Antwort nennt die verwendeten Filter und deren Herkunft. Eine Suche im anderen Projekt verändert den sichtbaren Projektfokus nicht. Dauerhaft ändern lassen sich die Filter mit `settings` und `search_excludes`; `settings swap-jk true` tauscht die J/K-Richtung. Weggelassene Einstellungen bleiben unverändert.
 
 `batch` führt bekannte Aktionen in Reihenfolge aus und stoppt standardmäßig beim ersten Fehler. Bereits ausgeführte Schritte werden nicht zurückgerollt; ihre Ergebnisse stehen in der Antwort. Neu erhaltene IDs oder Revisionen müssen ausgelesen werden, bevor abhängige Schritte gesendet werden.
 
@@ -355,13 +370,13 @@ Die portable Ausgabe bringt **basedpyright und Node** für Python mit. Ein vorha
 
 **Settings → Editing** steuert Einrückung. Neue Python-Dateien verwenden vier, Dart-Dateien zwei Leerzeichen. Vorhandene Einrückung wird automatisch erkannt; diese Erkennung lässt sich ausschalten. Breite und Tab-Verwendung sind je Sprache überschreibbar. Die Statusleiste zeigt die tatsächlich verwendete Einstellung und öffnet sie per Klick. Einstellungen ändern zukünftige Eingaben; vorhandener Text wird nicht automatisch umformatiert.
 
-**Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; vEdit zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben.
+**Run → Run active file** (**Ctrl+F5**), **Check project** (**F5**), **Run tests** (**Alt+F6**) und **Build project** passen sich der aktiven Sprache an. Python verwendet den gewählten Interpreter, Dart das SDK, Rust Cargo. Unter **Settings → Tasks** lassen sich Profil und Befehle pro Projekt überschreiben; andere Sprachen können dort eigene Befehle erhalten. Python-Tests verwenden standardmäßig pytest, Python-Builds das Modul build. Vor dem Start müssen betroffene Dokumente gespeichert sein; vEdit zeigt offene Speicherarbeit an und bietet **Save all files**. Agent-Entwürfe werden dabei nicht stillschweigend freigegeben. Jedes Projekt führt seine Aufgabe unabhängig aus; während in einem Projekt Tests laufen, kann ein anderes bauen. **Output** zeigt jeweils die Aufgabe des sichtbaren Projekts.
 
 ## Anwendungen starten
 
 Ein eingerichtetes Projekt zeigt unter den Projekttabs **▶ Run** und eine Auswahlliste seiner Startoptionen. Wähle etwa **Web UI**, **Desktop** oder **Headless** und starte mit **Run**. Die Auswahl wird lokal für das Projekt gespeichert. Es muss keine Quelldatei geöffnet sein; ungespeicherte Projektdateien müssen vor dem Start gespeichert werden. **Run → Run application** und **Stop application** sind auch über die Befehlspalette erreichbar und lassen sich in den Tastatureinstellungen belegen. Die bisherigen Kürzel für Prüfen und Ausführen einer Datei bleiben erhalten.
 
-**Application output** zeigt den Zustand, die Ausgabe und nach dem Ende den Exitcode. **Stop** beendet die Anwendung einschließlich ihrer gestarteten Unterprozesse. Pro Projekt läuft eine Variante; andere Projekte und Build-/Testaufgaben können gleichzeitig laufen. Anwendungen haben kein Zehn-Minuten-Limit. Beim Schließen ihres Projekts oder des Editors werden ihre Prozesse beendet. Die Ausgabe behält die letzten 1 MiB beziehungsweise etwa 10.000 Zeilen. Ein laufender Prozess bedeutet noch nicht, dass beispielsweise der Webserver schon bereit ist.
+**Application output** zeigt den Zustand, die Ausgabe und nach dem Ende den Exitcode. **Stop** beendet die Anwendung einschließlich ihrer gestarteten Unterprozesse. Pro Projekt läuft eine Variante; andere Projekte und Build-/Testaufgaben können gleichzeitig laufen. Anwendungen haben kein Zehn-Minuten-Limit. Beim Schließen ihres Projekts oder des Editors werden ihre Prozesse beendet. Die Ausgabe behält die letzten 1 MiB beziehungsweise etwa 10.000 Zeilen; Zeilennummern für `launch output` bleiben dabei gültig. Ein laufender Prozess bedeutet noch nicht, dass beispielsweise der Webserver schon bereit ist.
 
 Bitte einen Agenten beispielsweise: „Richte Web UI und Headless als Startoptionen in vEdit ein.“ Der mitgelieferte Skill beschreibt das Ermitteln der Startwege, Schreiben benötigter Skripte und Prüfen von Start, Stop und erneutem Start. Über `vedit-cli launch configure --file CONFIG.json --workspace PROJEKT` hinterlegt er die Optionen revisionsgeschützt in `.vedit/launch.json`. `launch list`, `select`, `start`, `stop` und `output` bedienen dieselben Projektstarts. Die Datei und relative Startskripte können mit dem Projekt versioniert werden; Änderungen lädt vEdit automatisch nach. Ein Projekt wird beim Öffnen nicht automatisch gestartet.
 

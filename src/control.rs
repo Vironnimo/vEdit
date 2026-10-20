@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 mod documents;
 #[path = "control_queries.rs"]
 mod queries;
-pub(super) use queries::same_workspace;
+pub(super) use queries::{containing_project, reply_naming_workspace, same_workspace};
 
+#[cfg(test)]
+#[path = "agent_projects_tests.rs"]
+mod agent_projects_tests;
 #[cfg(test)]
 #[path = "cli_round_trip_tests.rs"]
 mod cli_round_trip_tests;
@@ -26,27 +29,28 @@ impl VEditApp {
             let Some(envelope) = self.control.as_ref().and_then(cli::Server::try_recv) else {
                 break;
             };
-            if let Err(error) = cli::validate(&envelope.request) {
-                let _ = envelope
-                    .reply
-                    .send(Response::failure("invalid_request", error));
-                continue;
-            }
-            if self.control_git_async(&envelope.request, envelope.reply.clone()) {
-                continue;
-            }
-            if self.control_launch_async(&envelope.request, envelope.reply.clone()) {
-                continue;
-            }
-            if self.control_change_review(&envelope.request, envelope.reply.clone()) {
-                continue;
-            }
-            if self.control_query_async(&envelope.request, envelope.reply.clone()) {
-                continue;
-            }
-            let response = self.control_request(envelope.request);
-            let _ = envelope.reply.send(response);
+            self.control_caller = envelope.cwd.clone();
+            self.dispatch_control(envelope);
+            self.control_caller = None;
         }
+    }
+
+    fn dispatch_control(&mut self, envelope: cli::Envelope) {
+        if let Err(error) = cli::validate(&envelope.request) {
+            let _ = envelope
+                .reply
+                .send(Response::failure("invalid_request", error));
+            return;
+        }
+        if self.control_git_async(&envelope.request, envelope.reply.clone())
+            || self.control_launch_async(&envelope.request, envelope.reply.clone())
+            || self.control_change_review(&envelope.request, envelope.reply.clone())
+            || self.control_query_async(&envelope.request, envelope.reply.clone())
+        {
+            return;
+        }
+        let response = self.control_request(envelope.request);
+        let _ = envelope.reply.send(response);
     }
 
     pub(super) fn apply_pending_agent_locations(&mut self) {
@@ -110,9 +114,12 @@ impl VEditApp {
         ) && dialog == Some("settings");
         let own_marks_dialog =
             matches!(request, Request::AgentMarks { .. }) && dialog == Some("agent_marks");
+        // A notification only joins the inbox; it never touches the dialog.
+        let notification = matches!(request, Request::Notify { .. });
         if !observation
             && !closing_settings
             && !own_marks_dialog
+            && !notification
             && let Some(dialog) = dialog
         {
             return Response::failure(
@@ -146,10 +153,23 @@ impl VEditApp {
         }
         let result = match request {
             Request::AgentMarks { action } => return self.control_agent_marks(action),
+            Request::Notify {
+                message,
+                title,
+                level,
+                workspace,
+                open,
+                review,
+            } => return self.control_notify(message, title, level, workspace, open, review),
             Request::Status {} => self.control_status(),
             Request::Tabs { limit, offset } => self.control_tabs(limit, offset),
-            Request::Open { files } => self.control_open(files, None),
-            Request::Review { title, note, files } => self.control_open(files, Some((title, note))),
+            Request::Open { files, background } => self.control_open(files, None, background),
+            Request::Review {
+                title,
+                note,
+                files,
+                background,
+            } => self.control_open(files, Some((title, note)), background),
             Request::Focus {
                 tab_id,
                 location,
@@ -389,7 +409,12 @@ impl VEditApp {
         Response::success(result)
     }
 
-    fn control_open(&mut self, files: Vec<OpenFile>, review: Option<(String, String)>) -> Value {
+    pub(super) fn control_open(
+        &mut self,
+        files: Vec<OpenFile>,
+        review: Option<(String, String)>,
+        background: bool,
+    ) -> Value {
         // Validate all ready-buffer constraints before changing the previous review.
         // File-system failures remain independent per-item failures.
         let mut prepared = Vec::new();
@@ -462,54 +487,64 @@ impl VEditApp {
                     .position(|t| t.path.as_ref() == Some(&path))
                     .map(|ti| (pi, ti))
             });
-            let target = existing.map(|(pi, _)| pi).or_else(|| {
-                self.projects
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, project)| path.starts_with(&project.root))
-                    .max_by_key(|(_, project)| project.root.components().count())
-                    .map(|(index, _)| index)
-            });
-            if let Some(index) = target {
-                self.switch_project(index);
-            } else if let Some(parent) = path.parent() {
-                if let Some(tab) = self.tab_mut() {
-                    let action = tab.vim.finish_insert(&mut tab.text);
-                    if action.text_changed {
-                        tab.changed();
+            let (project, index) = if background {
+                let (project, index) = match existing {
+                    Some(found) => found,
+                    None => {
+                        let project = self.control_file_project(&path, true);
+                        self.open_background_tab(project, path.clone(), file.view)
+                    }
+                };
+                self.keep_tab_open(self.projects[project].tabs[index].id);
+                (project, index)
+            } else {
+                match existing {
+                    Some((project, _)) => self.switch_project(project),
+                    None => {
+                        let project = self.control_file_project(&path, false);
+                        self.switch_project(project);
                     }
                 }
-                self.add_project(parent.to_owned());
-            }
-            if let Some((project, index)) = existing {
-                self.keep_tab_open(self.projects[project].tabs[index].id);
-                self.focus_existing_project_tab(project, index);
-                self.activate_tab(project, index);
-            } else {
-                self.open_file(path.clone());
-            }
-            let project = self.active_project;
-            let index = self.projects[project].active_tab;
-            self.set_document_view(file.view);
-            let refresh = existing.is_some()
-                && self
-                    .tab()
-                    .is_some_and(|tab| !tab.dirty && !tab.saving && !tab.loading);
+                if let Some((project, index)) = existing {
+                    self.keep_tab_open(self.projects[project].tabs[index].id);
+                    self.focus_existing_project_tab(project, index);
+                    self.activate_tab(project, index);
+                } else {
+                    self.open_file(path.clone());
+                }
+                self.set_document_view(file.view);
+                (
+                    self.active_project,
+                    self.projects[self.active_project].active_tab,
+                )
+            };
+            let refresh = existing.is_some() && {
+                let tab = &self.projects[project].tabs[index];
+                !tab.dirty && !tab.saving && !tab.loading
+            };
             if refresh {
                 let tab = &mut self.projects[project].tabs[index];
                 tab.loading = true;
                 let id = tab.id;
                 self.load_tab(id, Some(path.clone()), None);
             }
+            // Moving the cursor of the document the user sees would take over
+            // their typing; a background presentation leaves it in place.
+            let visible = background && self.control_tab_visible(project, index);
             let tab = &mut self.projects[project].tabs[index];
             let location = file.location.or_else(|| {
                 file.annotations
                     .first()
                     .map(|annotation| annotation.start.clone())
             });
+            let mut location_skipped = false;
             if let Some(location) = location {
-                tab.pending_agent_location = Some(location);
-                tab.agent_location_error = None;
+                if visible {
+                    location_skipped = true;
+                } else {
+                    tab.pending_agent_location = Some(location);
+                    tab.agent_location_error = None;
+                }
             }
             if !file.annotations.is_empty() || is_review {
                 tab.annotations = file.annotations;
@@ -523,7 +558,12 @@ impl VEditApp {
             }
             review_ids.push(tab.id);
             first.get_or_insert((project, index));
-            items[ordinal] = json!({"path":crate::paths::display(&path),"ok":true,"tab":self.control_tab_value(project,index)});
+            let mut item = json!({"path":crate::paths::display(&path),"ok":true,"tab":self.control_tab_value(project,index)});
+            if location_skipped {
+                item["note"] =
+                    json!("The user is viewing this document; its cursor was left where it was.");
+            }
+            items[ordinal] = item;
         }
         self.apply_pending_agent_locations();
         if let Some((title, note)) = review
@@ -534,25 +574,114 @@ impl VEditApp {
                 note,
                 files: review_ids,
             });
-            self.show_sidebar(SidebarView::Review);
-            if let Some((project, index)) = first {
-                self.set_active_project_context(project);
-                self.focus_existing_project_tab(project, index);
-                self.activate_tab(project, index);
+            if !background {
+                self.show_sidebar(SidebarView::Review);
+                if let Some((project, index)) = first {
+                    self.set_active_project_context(project);
+                    self.focus_existing_project_tab(project, index);
+                    self.activate_tab(project, index);
+                }
             }
         }
-        if first.is_some() {
+        if first.is_some() && !background {
             self.raise_control_window();
         }
         let mut result = batch_result(items);
         result["applied"] = json!(first.is_some());
+        result["background"] = json!(background);
         result["active_tab"] = json!(self.tab().map(|t| t.id));
+        result["active_workspace"] = json!(self.project().map(|p| crate::paths::display(&p.root)));
         result["review"] = json!(self.review);
         result
     }
 
+    /// The project a file belongs to: the deepest open project, unless the
+    /// file lies in a deeper Git working tree (e.g. a nested worktree), which
+    /// then opens as its own project. A file outside every project and
+    /// repository opens its folder. Only `background` keeps the visible project.
+    pub(super) fn control_file_project(&mut self, path: &Path, background: bool) -> usize {
+        let root = match path_owner(&self.projects, path) {
+            PathOwner::Project(index) => return index,
+            PathOwner::Repository(root) => root,
+            PathOwner::Outside => path.parent().unwrap_or(path).to_owned(),
+        };
+        if background {
+            return self.add_background_project(root);
+        }
+        self.finish_insert_before_switch();
+        self.add_project(root);
+        self.active_project
+    }
+
+    /// Leave Insert mode in the visible document before another project's
+    /// panes replace it, so its edit is one complete undo step.
+    pub(super) fn finish_insert_before_switch(&mut self) {
+        if let Some(tab) = self.tab_mut() {
+            let action = tab.vim.finish_insert(&mut tab.text);
+            if action.text_changed {
+                tab.changed();
+            }
+        }
+    }
+
+    /// Register a project without switching to it or changing the visible layout.
+    pub(super) fn add_background_project(&mut self, path: PathBuf) -> usize {
+        let root = fs::canonicalize(&path).unwrap_or(path);
+        if let Some(index) = self.projects.iter().position(|p| p.root == root) {
+            return index;
+        }
+        self.projects.push(Project::new(root));
+        let index = self.projects.len() - 1;
+        if self.projects.len() == 1 {
+            // The first project is the visible one; there is nothing to keep.
+            self.switch_project(index);
+        }
+        self.index_project(index);
+        self.session_dirty = true;
+        index
+    }
+
+    /// Add a loading tab to `project` without activating it. In the visible
+    /// project it joins the focused pane's tabs behind the current document.
+    fn open_background_tab(
+        &mut self,
+        project: usize,
+        path: PathBuf,
+        view: DocumentView,
+    ) -> (usize, usize) {
+        let mut tab = EditorTab::new(Some(path.clone()), file_title(&path));
+        tab.loading = true;
+        tab.agent_view = view;
+        let id = tab.id;
+        let empty = self.projects[project].tabs.is_empty();
+        self.projects[project].tabs.push(tab);
+        let index = self.projects[project].tabs.len() - 1;
+        if project == self.active_project {
+            if empty {
+                // Nothing is being edited in an empty project; show the file
+                // there without taking the keyboard.
+                self.activate_tab(project, index);
+                self.projects[project].tabs[index].focus = false;
+            } else {
+                self.adopt_orphan_documents();
+            }
+        }
+        self.load_tab(id, Some(path), None);
+        self.session_dirty = true;
+        (project, index)
+    }
+
+    /// Whether a pane of the visible project currently shows this tab.
+    fn control_tab_visible(&self, project: usize, index: usize) -> bool {
+        project == self.active_project
+            && self.projects[project]
+                .tabs
+                .get(index)
+                .is_some_and(|tab| self.layout_shows_document(tab.id))
+    }
+
     fn control_status(&self) -> Value {
-        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.languages.get("rust").is_some_and(|session|session.active()),"rust_analysis_error":p.languages.get("rust").and_then(|session|session.error.as_ref()),"languages":p.language_status_json()})).take(100).collect::<Vec<_>>(),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":{"status":self.task_status,"running":self.task.is_some()},"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"sidebars":self.sidebars_status(),"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
+        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.languages.get("rust").is_some_and(|session|session.active()),"rust_analysis_error":p.languages.get("rust").and_then(|session|session.error.as_ref()),"languages":p.language_status_json(),"task":{"status":p.run.status,"running":p.run.task.is_some()},"unread_notifications":self.notifications.unread_for(&p.root)})).take(100).collect::<Vec<_>>(),"caller_workspace":self.control_caller.as_deref().and_then(|caller| containing_project(&self.projects, caller)).map(|index| crate::paths::display(&self.projects[index].root)),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":self.project().map_or(json!({"status":"Ready","running":false}), |p| json!({"status":p.run.status,"running":p.run.task.is_some()})),"notifications":self.notifications.status_json(&self.projects),"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"sidebars":self.sidebars_status(),"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
     }
     fn control_tabs(&self, limit: usize, offset: usize) -> Value {
         let total = self.projects.iter().map(|p| p.tabs.len()).sum::<usize>();
@@ -640,6 +769,8 @@ impl VEditApp {
             Some("settings")
         } else if self.agent_marks_modal_open() {
             Some("agent_marks")
+        } else if self.notifications.is_open() {
+            Some("notifications")
         } else if self.palette.is_some() {
             Some("palette")
         } else if self.workspace_picker_open() {
@@ -699,6 +830,60 @@ fn control_observation(request: &Request) -> bool {
         _ => false,
     }
 }
+pub(super) enum PathOwner {
+    /// The deepest open project containing the path.
+    Project(usize),
+    /// A Git working tree deeper than every open project containing the path.
+    Repository(PathBuf),
+    Outside,
+}
+
+/// Route a canonical path. Walks parent folders for `.git` (a directory, or
+/// the file a linked worktree has); no subprocess, so it is safe on the GUI thread.
+pub(super) fn path_owner(projects: &[Project], path: &Path) -> PathOwner {
+    let deepest = projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| path.starts_with(&project.root))
+        .max_by_key(|(_, project)| project.root.components().count());
+    let repository = path
+        .ancestors()
+        .skip(1)
+        .take_while(|folder| {
+            deepest.is_none_or(|(_, project)| {
+                folder.components().count() > project.root.components().count()
+            })
+        })
+        .find(|folder| fs::symlink_metadata(folder.join(".git")).is_ok());
+    match (repository, deepest) {
+        (Some(root), _) => PathOwner::Repository(root.to_owned()),
+        (None, Some((index, _))) => PathOwner::Project(index),
+        (None, None) => PathOwner::Outside,
+    }
+}
+
+/// Canonicalize the deepest existing ancestor of a path that may not exist yet,
+/// so it compares with canonical project roots.
+pub(super) fn canonical_target(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = fs::canonicalize(current) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |path: PathBuf, part| path.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_owned(),
+        }
+    }
+}
+
 fn item_error(id: u64, code: &str, message: &str) -> Value {
     json!({"tab_id":id,"ok":false,"error":{"code":code,"message":message}})
 }
@@ -1160,6 +1345,7 @@ mod tests {
         let duplicate = OpenFile::source(root.join(".").join("a.rs"));
         let response = app.control_request(Request::Open {
             files: vec![first, missing, duplicate],
+            background: false,
         });
         assert_eq!(response.result["complete"], false);
         assert_eq!(response.result["items"][0]["ok"], true);
@@ -1216,6 +1402,7 @@ mod tests {
         let mut app = VEditApp::empty(egui::Context::default());
         app.control_request(Request::Open {
             files: vec![OpenFile::source(path.clone())],
+            background: false,
         });
         await_file(&mut app);
         let initial_id = app.tab().unwrap().id;
@@ -1233,6 +1420,7 @@ mod tests {
             title: "Latest plan".into(),
             note: String::new(),
             files: vec![file],
+            background: false,
         });
         assert!(response.ok);
         assert_eq!(response.result["complete"], true);

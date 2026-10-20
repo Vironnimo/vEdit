@@ -48,6 +48,7 @@ actions! {
     Problems, "problems", "Show problems", "Layout", ["Ctrl+Shift+M"];
     AgentMark, "agent_mark", "Mark selection for agent", "Navigation", ["Ctrl+Shift+A"];
     AgentMarks, "agent_marks", "Agent marks", "Navigation", ["Ctrl+Alt+Shift+A"];
+    AgentNotifications, "agent_notifications", "Agent notifications", "Navigation", [];
     MarkdownPreview, "markdown_preview", "Markdown source / preview", "Layout", ["Ctrl+Alt+M"];
     SplitRight, "split_right", "Split right", "Layout", ["Ctrl+Backslash"];
     SplitDown, "split_down", "Split down", "Layout", ["Ctrl+Shift+Backslash"];
@@ -556,6 +557,7 @@ impl VEditApp {
             || self.navigation_modal_open()
             || self.navigation_pending()
             || self.agent_marks_modal_open()
+            || self.notifications.is_open()
             || self.context_file_dialog.is_some()
             || self.vim_command.is_some()
             || self.screen_jump.is_some()

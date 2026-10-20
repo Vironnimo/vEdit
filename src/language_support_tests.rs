@@ -627,3 +627,52 @@ fn renamed_paths_do_not_reappear_from_cached_or_late_diagnostics() {
             .contains_key(&old)
     );
 }
+
+#[test]
+fn diagnostics_freshness_needs_the_transmitted_version_and_combines_servers() {
+    assert_eq!(
+        DiagnosticsOrigin::new(Some(3), Some(&(7, 3))).revision,
+        Some(7)
+    );
+    // A version this client never sent cannot be mapped to buffer text.
+    assert_eq!(
+        DiagnosticsOrigin::new(Some(4), Some(&(7, 3))).revision,
+        None
+    );
+    assert_eq!(DiagnosticsOrigin::new(Some(3), None).revision, None);
+    assert_eq!(
+        DiagnosticsOrigin::new(None, Some(&(7, 3))).revision,
+        Some(7)
+    );
+
+    let mut app = rust_app();
+    let path = app.projects[0].tabs[0].path.clone().unwrap();
+    let rust = app.projects[0].rust_language_mut();
+    rust.diagnostics.insert(path.clone(), vec![diagnostic()]);
+    rust.diagnostic_origins
+        .insert(path.clone(), DiagnosticsOrigin::new(Some(2), Some(&(9, 2))));
+    assert_eq!(
+        app.projects[0].diagnostics_freshness(&path, 9),
+        (Some(true), Some(9))
+    );
+    let mut other = LanguageSession::new(language_settings::defaults().remove(1));
+    other.diagnostics.insert(path.clone(), Vec::new());
+    other
+        .diagnostic_origins
+        .insert(path.clone(), DiagnosticsOrigin::new(Some(1), Some(&(8, 1))));
+    app.projects[0].languages.insert("python".into(), other);
+    assert_eq!(
+        app.projects[0].diagnostics_freshness(&path, 9),
+        (Some(false), Some(8))
+    );
+    app.projects[0]
+        .languages
+        .get_mut("python")
+        .unwrap()
+        .diagnostic_origins
+        .insert(path.clone(), DiagnosticsOrigin::new(None, Some(&(9, 1))));
+    assert_eq!(
+        app.projects[0].diagnostics_freshness(&path, 9),
+        (None, None)
+    );
+}

@@ -19,7 +19,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "launch",
         "list | configure --file CONFIG.json | select ID | start [ID] | stop | output",
         "Configure, select and run named project applications; read their state/output.",
-        "Definitions live in .vedit/launch.json: profiles:[{id,name,program,args,cwd,env}], optional default:ID. JSON: schema launch.\nconfigure replaces definitions atomically; preserve existing profiles. Omit --revision only to create; for updates use revision from list.\nlist reads definitions and runtime state. select remembers this machine's choice. start uses ID or the selected/default/first profile; no active file required.\nArguments are passed literally. Relative cwd/program paths use the project root; bare executable names use PATH. Environment inherits vEdit plus profile env and VEDIT_ROOT.\nstart requires saved project buffers, returns Starting, and keeps the process tree until it exits or stop completes; no runtime timeout. Each project has its own run. Check output.run.running/status/error; running is not application readiness.\nstop requests termination of this project's tree. output pages its current retained log. Launches have closed stdin; use Run > Open terminal for interactive programs.",
+        "Definitions live in .vedit/launch.json: profiles:[{id,name,program,args,cwd,env}], optional default:ID. JSON: schema launch.\nconfigure replaces definitions atomically; preserve existing profiles. Omit --revision only to create; for updates use revision from list.\nlist reads definitions and runtime state. select remembers this machine's choice. start uses ID or the selected/default/first profile; no active file required.\nArguments are passed literally. Relative cwd/program paths use the project root; bare executable names use PATH. Environment inherits vEdit plus profile env and VEDIT_ROOT.\nstart requires saved project buffers, returns Starting, and keeps the process tree until it exits or stop completes; no runtime timeout. Each project has its own run. Check output.run.running/status/error; running is not application readiness.\nstop requests termination of this project's tree. output pages the retained log; line numbers count from the run's first line and stay valid while old lines are trimmed (first_line, skipped_lines). Launches have closed stdin; use Run > Open terminal for interactive programs.",
         [
             "--workspace",
             "--file",
@@ -33,15 +33,28 @@ pub const COMMANDS: &[CommandHelp] = &[
         "open",
         "PATH...",
         "Open files in the window; preserves unsaved text.",
-        "Clean open buffers refresh from disk. loading:true is pending; inspect tabs until loading:false and error:null.\nOmit view flags for source. Omit --line to preserve the cursor or reveal the first annotation.\nRelative paths use the working directory. Starts the sibling vedit.exe if needed.",
-        ["--line", "--column", "--preview", "--source"]
+        "Clean open buffers refresh from disk. loading:true is pending; inspect tabs until loading:false and error:null.\nOmit view flags for source. Omit --line to preserve the cursor or reveal the first annotation.\nA file opens in the deepest open project containing it. A deeper Git working tree (a nested worktree) opens as its own project; a file outside every project opens its repository, else its folder.\nRelative paths use the working directory. Starts the sibling vedit.exe if needed, except with --background.",
+        [
+            "--line",
+            "--column",
+            "--preview",
+            "--source",
+            "--background"
+        ]
     ),
     command!(
         "review",
-        "MANIFEST.json | --working|--commit REV|--branch [--base REF] [WORKSPACE]",
+        "MANIFEST.json | --working|--commit REV|--branch [--base REF] [--workspace PATH]",
         "Replace review annotations, or show the user a change review.",
-        "Manifest: title, optional note, files:[{path,view,location,annotations}]. Relative file paths use the manifest directory.\nAnnotations: start:{line,column}, optional inclusive end, note, severity:info|warning|critical. Omit end for the whole start line.\nReturns per-file outcomes and tab IDs; file loads can remain pending. Unsaved buffers stay intact.\nStarts the sibling vedit.exe if needed. JSON examples: vedit-cli schema review.\nWith a source flag, shows every change as one read-only diff in place of the editor panes, for the user to read and tick off. Omit WORKSPACE for the active project; it must be open with a repository. Returns title, file count and line totals once loaded. Never starts vEdit. JSON: schema change-review.",
-        ["--working", "--commit", "--branch", "--base"]
+        "Manifest: title, optional note, files:[{path,view,location,annotations}]. Relative file paths use the manifest directory.\nAnnotations: start:{line,column}, optional inclusive end, note, severity:info|warning|critical. Omit end for the whole start line.\nReturns per-file outcomes and tab IDs; file loads can remain pending. Unsaved buffers stay intact.\nStarts the sibling vedit.exe if needed. JSON examples: vedit-cli schema review.\nWith a source flag, shows every change as one read-only diff in place of the editor panes, for the user to read and tick off. The project must be open with a repository. Returns workspace, title, file count, line totals and visible once loaded. Never starts vEdit. JSON: schema change-review.",
+        [
+            "--working",
+            "--commit",
+            "--branch",
+            "--base",
+            "--workspace",
+            "--background"
+        ]
     ),
     command!(
         "status",
@@ -188,70 +201,78 @@ pub const COMMANDS: &[CommandHelp] = &[
         "diff",
         "TAB_ID",
         "Read a bounded buffer-versus-saved diff; does not query Git.",
-        "Returns one contiguous replacement hunk and truncation state. Use read for full current text.\n--count limits lines on each side; omit for 500 (1..500).",
+        "Returns one contiguous replacement hunk and truncation state. Use read for full current text.\n--count limits lines on each side; omit for 500 (1..1000).",
         ["--count"]
     ),
     command!(
         "diagnostics",
         "TAB_ID",
         "Read cached language diagnostics and analysis readiness.",
-        "Returns ranges with exclusive ends and paging. Empty diagnostics while analysis is unavailable/loading do not establish a clean file.\nlocation_clamped marks an out-of-range server position.",
+        "Returns ranges with exclusive ends and paging. Empty diagnostics while analysis is unavailable/loading do not establish a clean file.\nfresh is true when results describe this revision, false after later edits, null when unknown; diagnostics_revision is the analyzed revision or null.\nlocation_clamped marks an out-of-range server position.",
         ["--limit", "--offset"]
     ),
     command!(
         "search",
         "QUERY [WORKSPACE]",
         "Search saved workspace files in a bounded background walk.",
-        "Omit WORKSPACE for the active project; an explicit registered project does not change visible focus.\nOmit filter flags to inherit saved exclusions; --exclude replaces them, --no-excludes clears optional filters.\n.gitignore, VCS directories and symlink guards still apply. Unsaved text is not searched; use find for that.\nReturns actual filters, files searched, warnings and truncation. No continuation page: narrow a truncated query.",
+        "Searching never changes the visible project. The result names its workspace.\nOmit filter flags to inherit saved exclusions; --exclude replaces them, --no-excludes clears optional filters.\n.gitignore, VCS directories and symlink guards still apply. Unsaved text is not searched; use find for that.\nReturns actual filters, files searched, warnings and truncation. No continuation page: narrow a truncated query.",
         [
             "--case-sensitive",
             "--whole-word",
             "--limit",
             "--exclude",
-            "--no-excludes"
+            "--no-excludes",
+            "--workspace"
         ]
     ),
     command!(
         "output",
         "",
-        "Read bounded task output and current running/status state.",
-        "Returns text and next_line/next_column, including inside long lines; concatenate returned text directly.\nOutput is a current snapshot. Task dispatch is not completion; require running:false and inspect status for its exit result.",
-        ["--line", "--column", "--count"]
+        "Read a project's bounded task output and running/status state.",
+        "Each project keeps its own task output. Returns workspace, text and next_line/next_column, including inside long lines; concatenate returned text directly.\nOutput is a current snapshot. Task dispatch is not completion; require running:false and inspect status for its exit result.",
+        ["--line", "--column", "--count", "--workspace"]
     ),
     command!(
         "git-status",
         "[WORKSPACE]",
         "Read cached Git branch, changed files and cache readiness.",
-        "Omit WORKSPACE for the active project. Returns next_offset, loading, cache age and errors; does not force a refresh.\nGit reads saved files, not agent drafts.",
-        ["--limit", "--offset"]
+        "Returns workspace, next_offset, loading, cache age and errors; does not force a refresh.\nGit reads saved files, not agent drafts.",
+        ["--limit", "--offset", "--workspace"]
     ),
     command!(
         "git-branches",
         "[WORKSPACE]",
         "Read local and fetched remote branches with exact refs.",
-        "Omit WORKSPACE for the active project. Returns next_offset and refs usable by git-switch-branch.\nDoes not fetch; remote state reflects the last fetch.",
-        ["--limit", "--offset"]
+        "Returns workspace, next_offset and refs usable by git-switch-branch.\nDoes not fetch; remote state reflects the last fetch.",
+        ["--limit", "--offset", "--workspace"]
     ),
     command!(
         "git-history",
         "[WORKSPACE]",
         "Read the editor's Git history with hashes and remote reachability.",
-        "Omit WORKSPACE for the active project. Returns next_offset, date/time, Unix timestamp and on_remote.\nUses the visible history snapshot when available; remote state reflects the last fetch.",
-        ["--limit", "--offset"]
+        "Returns workspace, next_offset, date/time, Unix timestamp and on_remote.\nUses the visible history snapshot when available; remote state reflects the last fetch.",
+        ["--limit", "--offset", "--workspace"]
     ),
     command!(
         "git-switch-branch",
         "REF [WORKSPACE]",
         "Switch Git branch and wait for its resulting state.",
-        "Use the exact refs/heads/... or refs/remotes/... value from git-branches. Omit WORKSPACE for the active project.\nA remote ref creates a local tracking branch. Unsaved documents and Git conflicts block switching. No force or automatic stash.",
-        []
+        "Use the exact refs/heads/... or refs/remotes/... value from git-branches.\nA remote ref creates a local tracking branch. Unsaved documents and Git conflicts block switching. No force or automatic stash.",
+        ["--workspace"]
     ),
     command!(
         "task",
         "check|test|build|run_file|stop",
         "Start a configured project task or request cancellation.",
-        "Uses the active project and language/interpreter. Requires saved buffers and no active task; does not save them itself.\nReturns dispatch state. Inspect output for running:false and the exit result; stop can still be pending.\nConfigure unavailable commands in Settings > Tasks in the window.",
-        []
+        "Each project runs one task at a time, with its own output; the result names the workspace. run_file uses that project's active document.\nRequires saved buffers and no task running in the project; does not save them itself.\nReturns dispatch state. Inspect output (same --workspace) for running:false and the exit result; stop can still be pending.\nConfigure unavailable commands in Settings > Tasks in the window.",
+        ["--workspace"]
+    ),
+    command!(
+        "notify",
+        "MESSAGE",
+        "Tell the user something in the window's agent inbox; changes nothing else.",
+        "Use it when work is finished, blocked or needs a decision. The project's tab gets a dot and the toolbar an unread count; an unfocused window flashes its taskbar button.\nThe message never switches projects or takes focus. An identical unread message counts as a repeat (repeat_count). Messages last until vEdit exits.\nThe project is --workspace, else the open project containing the current directory, else the one containing --open, else the visible one.\nMESSAGE: 1..2000 bytes; quote it. Returns id, workspace, unread counts and flashed. Never starts vEdit.",
+        ["--title", "--level", "--workspace", "--open", "--review"]
     ),
     command!(
         "file",
@@ -321,6 +342,10 @@ pub fn takes_value(flag: &str) -> bool {
             | "--path"
             | "--commit"
             | "--base"
+            | "--title"
+            | "--level"
+            | "--open"
+            | "--review"
     )
 }
 
@@ -333,8 +358,11 @@ pub fn render(name: Option<&str>) -> String {
         ));
         for flag in entry.flags {
             let description = match *flag {
+                "--workspace" if entry.name == "notify" => {
+                    "PATH: open project the message is about. Omit to choose as described above."
+                }
                 "--workspace" => {
-                    "PATH: open project to target. Omit for the active project; does not switch projects."
+                    "PATH: open project to target. Omit for the open project containing the current directory, else the visible project; never switches projects."
                 }
                 "--file" if entry.name == "launch" => {
                     "CONFIG.json: launch definitions. Required for configure; accepts UTF-8 or UTF-16 with BOM."
@@ -371,7 +399,7 @@ pub fn render(name: Option<&str>) -> String {
                     "TEXT_FILE: complete input text file. Required for edit; omit for an empty new draft."
                 }
                 "--path" => {
-                    "PATH: nonexistent destination for a new draft. Omit for untitled; does not write it."
+                    "PATH: nonexistent destination for a new draft; the draft joins the project that will contain it. Omit for untitled; does not write it."
                 }
                 "--case-sensitive" => {
                     "Match exact letter case. Omit for case-insensitive matching."
@@ -384,8 +412,11 @@ pub fn render(name: Option<&str>) -> String {
                 "--no-excludes" => {
                     "Clear optional filters for this search. Omit both filter flags to inherit settings."
                 }
+                "--tab" if entry.name == "agent-marks" => {
+                    "ID: tab whose selection add captures. Omit for the active document; only for add."
+                }
                 "--tab" => {
-                    "ID: target tab from tabs. Omit for the active document; applies to toggle/add."
+                    "ID: tab whose cursor line toggle uses. Omit for the active document; only for toggle."
                 }
                 "--label" => {
                     "TEXT: bookmark label. Required for rename; omit for toggle's default label."
@@ -403,6 +434,24 @@ pub fn render(name: Option<&str>) -> String {
                     "Review the current branch since it left local main, or master without main."
                 }
                 "--base" => "REF: compare --branch with this branch or revision instead.",
+                "--background" if entry.name == "review" => {
+                    "Keep the user's visible project, panes and keyboard. Omit to show the result now. Another project shows it when the user switches there; a change review for the visible project waits for the user's next review command."
+                }
+                "--background" => {
+                    "Keep the user's visible project, document and keyboard; the window is not raised. Omit to show the files now. A document the user is viewing keeps its cursor."
+                }
+                "--title" => {
+                    "TEXT: one-line heading, at most 120 bytes. Omit to head the entry with the message."
+                }
+                "--level" => {
+                    "info|success|warning|error: color and order of the entry. Omit for info."
+                }
+                "--open" => {
+                    "PATH[:LINE]: file the entry opens when the user clicks it. Omit for no file."
+                }
+                "--review" => {
+                    "working|branch: change review the entry opens when clicked; conflicts with --open. Omit for none."
+                }
                 _ => unreachable!("undocumented flag"),
             };
             text.push_str(&format!("  {flag} {description}\n"));

@@ -504,6 +504,7 @@ fn cross_project_agent_open_and_review_keep_each_root_own_groups() {
             OpenFile::source(a_path.clone()),
             OpenFile::source(b_path.clone()),
         ],
+        background: false,
     });
     assert!(response.ok);
     assert_eq!(response.result["complete"], true);
@@ -516,6 +517,7 @@ fn cross_project_agent_open_and_review_keep_each_root_own_groups() {
     assert_own_documents(&app, 0);
 
     let response = app.control_request(Request::Review {
+        background: false,
         title: "Two roots".into(),
         note: "Keep the workspaces separate".into(),
         files: vec![

@@ -5,6 +5,7 @@ use crate::cli::{
     launch::{self, Action, Configuration},
 };
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 
 pub(super) struct LaunchState {
     pub configuration: Configuration,
@@ -16,8 +17,7 @@ pub(super) struct LaunchState {
     pub status: String,
     pub error: Option<String>,
     pub exit_code: Option<i32>,
-    pub output: String,
-    pub output_truncated: bool,
+    pub output: OutputLog,
     pub show_output: bool,
     pending: Option<Pending>,
     refreshed: Option<Instant>,
@@ -36,13 +36,223 @@ impl Default for LaunchState {
             status: "Ready".into(),
             error: None,
             exit_code: None,
-            output: String::new(),
-            output_truncated: false,
+            output: OutputLog::default(),
             show_output: false,
             pending: None,
             refreshed: None,
             cache: Default::default(),
         }
+    }
+}
+
+/// Rolling application log. Line numbers are absolute for the run: trimming
+/// pops whole lines from the front and never renumbers the lines that remain.
+pub(super) struct OutputLog {
+    /// Complete lines, each ending with '\n'.
+    lines: VecDeque<String>,
+    /// The unterminated last line.
+    partial: String,
+    /// Bytes in `lines` and `partial`.
+    bytes: usize,
+    /// Absolute number of the first retained line, 1 for the run's first line.
+    first: usize,
+    /// Unicode scalars cut from the front of the first retained line after a
+    /// single line exceeded the byte limit. Its columns stay absolute.
+    first_column_offset: usize,
+    truncated: bool,
+    /// Joined text for the output view and copying, rebuilt only after changes.
+    display: String,
+    display_stale: bool,
+}
+
+impl Default for OutputLog {
+    fn default() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            partial: String::new(),
+            bytes: 0,
+            first: 1,
+            first_column_offset: 0,
+            truncated: false,
+            display: String::new(),
+            display_stale: false,
+        }
+    }
+}
+
+impl OutputLog {
+    pub fn is_empty(&self) -> bool {
+        self.bytes == 0
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Costs O(text + removed lines), independent of the retained size.
+    pub fn append(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut rest = text;
+        while let Some(index) = rest.find('\n') {
+            let (line, tail) = rest.split_at(index + 1);
+            let mut complete = std::mem::take(&mut self.partial);
+            complete.push_str(line);
+            self.bytes += line.len();
+            self.lines.push_back(complete);
+            if self.lines.len() > tasks::MAX_OUTPUT_LINES {
+                self.pop_front();
+            }
+            rest = tail;
+        }
+        self.partial.push_str(rest);
+        self.bytes += rest.len();
+        while self.bytes > tasks::MAX_OUTPUT_BYTES && self.line_count() > 1 {
+            self.pop_front();
+        }
+        if self.bytes > tasks::MAX_OUTPUT_BYTES {
+            // One line exceeds the limit on its own: keep its latest tail.
+            let line = match self.lines.front_mut() {
+                Some(line) => line,
+                None => &mut self.partial,
+            };
+            let mut cut = self.bytes - tasks::MAX_OUTPUT_BYTES;
+            while !line.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.first_column_offset += line[..cut].chars().count();
+            line.drain(..cut);
+            self.bytes -= cut;
+            self.truncated = true;
+        }
+        self.display_stale = true;
+    }
+
+    fn pop_front(&mut self) {
+        if let Some(line) = self.lines.pop_front() {
+            self.bytes -= line.len();
+            self.first += 1;
+            self.first_column_offset = 0;
+            self.truncated = true;
+        }
+    }
+
+    /// Retained lines, counting a nonempty unterminated last line.
+    fn line_count(&self) -> usize {
+        self.lines.len() + usize::from(!self.partial.is_empty())
+    }
+
+    /// Absolute number of the last line; an empty log has the empty line `first`.
+    fn last_line(&self) -> usize {
+        self.first + self.line_count().max(1) - 1
+    }
+
+    /// The retained text as one string, joined at most once per change.
+    pub fn text(&mut self) -> &str {
+        if self.display_stale {
+            self.display.clear();
+            self.display.reserve(self.bytes);
+            for line in &self.lines {
+                self.display.push_str(line);
+            }
+            self.display.push_str(&self.partial);
+            self.display_stale = false;
+        }
+        &self.display
+    }
+
+    /// Page with absolute line numbers that stay valid while old lines are
+    /// trimmed. A start before the first retained line begins there and
+    /// reports the dropped lines; one past the last line is an empty page.
+    pub fn page(
+        &self,
+        start_line: usize,
+        start_column: usize,
+        line_count: usize,
+        budget: usize,
+    ) -> Result<Value, String> {
+        let last = self.last_line();
+        if start_line == 0 || start_column == 0 || start_line > last + 1 {
+            return Err(format!(
+                "Output has lines {}..{last}; requested line {start_line}, column {start_column}. Read from line {} for new output. Nothing changed.",
+                self.first,
+                last + 1
+            ));
+        }
+        if start_line == last + 1 {
+            if start_column != 1 {
+                return Err(format!(
+                    "Line {start_line} has no output yet; use column 1. Nothing changed."
+                ));
+            }
+            return Ok(
+                json!({"text":"","start_line":start_line,"start_column":1,"end_line":last,
+                "total_lines":last,"first_line":self.first,"skipped_lines":0,"truncated":false,
+                "byte_limit_reached":false,"next_line":null,"next_column":null}),
+            );
+        }
+        let skipped = self.first.saturating_sub(start_line);
+        let line = start_line.max(self.first);
+        let index = line - self.first;
+        // Columns on a line whose head was trimmed remain absolute.
+        let offset = if index == 0 {
+            self.first_column_offset
+        } else {
+            0
+        };
+        let column = if skipped > 0 || start_column <= offset {
+            offset + 1
+        } else {
+            start_column
+        };
+        let mut retained = self
+            .lines
+            .range(index.min(self.lines.len())..)
+            .map(String::as_str)
+            .chain((!self.partial.is_empty()).then_some(self.partial.as_str()));
+        let first = retained.next().unwrap_or("");
+        let content = first
+            .strip_suffix('\n')
+            .map_or(first, |line| line.strip_suffix('\r').unwrap_or(line));
+        let length = offset + content.chars().count();
+        if column > length + 1 {
+            return Err(format!(
+                "Line {line} has {length} characters; column {column} is outside it. Nothing changed."
+            ));
+        }
+        // One extra line lets text_page report whether more lines follow.
+        let count = line_count.max(1);
+        let mut text = first.to_owned();
+        for next in retained.take(count) {
+            text.push_str(next);
+        }
+        let mut value = control::text_page(&text, 1, column - offset, count, budget, true)?;
+        if offset > 0
+            && value["next_line"].as_u64() == Some(1)
+            && let Some(next) = value["next_column"].as_u64()
+        {
+            value["next_column"] = json!(next as usize + offset);
+        }
+        for key in ["start_line", "end_line", "next_line"] {
+            if let Some(number) = value[key].as_u64() {
+                value[key] = json!(number as usize + line - 1);
+            }
+        }
+        value["start_column"] = json!(column);
+        value["total_lines"] = json!(last);
+        value["first_line"] = json!(self.first);
+        value["skipped_lines"] = json!(skipped);
+        Ok(value)
+    }
+
+    #[cfg(test)]
+    fn joined(&self) -> String {
+        self.lines
+            .iter()
+            .map(String::as_str)
+            .chain([self.partial.as_str()])
+            .collect()
     }
 }
 
@@ -57,6 +267,14 @@ struct Loaded {
     revision: u64,
 }
 
+/// JavaScript and jq round integers above 2^53, so revisions stay below it.
+const REVISION_MASK: u64 = (1 << 53) - 1;
+
+/// Zero is reserved for "no configuration file".
+fn configuration_revision(hash: u64) -> u64 {
+    (hash & REVISION_MASK).max(1)
+}
+
 fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
     let path = root.join(launch::CONFIG_PATH);
     let existing = match fs::metadata(&path) {
@@ -66,14 +284,20 @@ fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
     };
     let revision = existing
         .as_ref()
-        .map_or(0, |doc| doc.fingerprint.hash.max(1));
+        .map_or(0, |doc| configuration_revision(doc.fingerprint.hash));
     if let Action::Configure {
         configuration,
         revision: expected,
     } = action
     {
         configuration.validate()?;
-        if *expected != revision {
+        // Earlier builds issued the unmasked 64-bit hash; keep accepting it.
+        let expected = if *expected > REVISION_MASK {
+            configuration_revision(*expected)
+        } else {
+            *expected
+        };
+        if expected != revision {
             return Err(format!(
                 "Launch configuration changed (current revision {revision}). Nothing was written. Use launch list, merge the profiles, then configure with --revision {revision}."
             ));
@@ -91,7 +315,7 @@ fn read_or_configure(root: &Path, action: &Action) -> Result<Loaded, String> {
         .map_err(|e| format!("Could not save launch configuration: {e}"))?;
         return Ok(Loaded {
             configuration: Ok(configuration.clone()),
-            revision: saved.fingerprint.hash.max(1),
+            revision: configuration_revision(saved.fingerprint.hash),
         });
     }
     let configuration = existing.map_or_else(
@@ -149,28 +373,6 @@ impl LaunchState {
             "exit_code":self.exit_code,"error":self.error,"pending":self.pending.is_some()})
     }
 
-    fn append(&mut self, text: &str) {
-        self.output.push_str(text);
-        if self.output.len() > tasks::MAX_OUTPUT_BYTES {
-            let mut cut = self.output.len() - tasks::MAX_OUTPUT_BYTES;
-            while !self.output.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.output.drain(..cut);
-            self.output_truncated = true;
-        }
-        // Keep line layout bounded for streams of very short lines as well.
-        if let Some((cut, _)) = self
-            .output
-            .match_indices('\n')
-            .rev()
-            .nth(tasks::MAX_OUTPUT_LINES)
-        {
-            self.output.drain(..cut + 1);
-            self.output_truncated = true;
-        }
-    }
-
     fn poll_task(&mut self) {
         // Bound work per frame even for a continuously writing process.
         for _ in 0..32 {
@@ -183,9 +385,9 @@ impl LaunchState {
                         self.status = "Running".into();
                     }
                 }
-                Ok(tasks::TaskEvent::Output(text)) => self.append(&text),
+                Ok(tasks::TaskEvent::Output(text)) => self.output.append(&text),
                 Ok(tasks::TaskEvent::Error(error)) => {
-                    self.append(&format!("\n{error}\n"));
+                    self.output.append(&format!("\n{error}\n"));
                     self.error = Some(error);
                 }
                 Ok(tasks::TaskEvent::Finished { code, cancelled }) => {
@@ -223,17 +425,19 @@ impl VEditApp {
         let crate::cli::Request::Launch { workspace, action } = request else {
             return false;
         };
-        let index = match self.control_query_project(workspace.as_deref()) {
-            Ok(project) => self
-                .projects
-                .iter()
-                .position(|p| p.root == project.root)
-                .unwrap(),
+        let (index, source) = match self.control_project_index(workspace.as_deref()) {
+            Ok(found) => found,
             Err(response) => {
                 let _ = reply.send(response);
                 return true;
             }
         };
+        let reply = control::reply_naming_workspace(
+            reply,
+            self.projects[index].root.clone(),
+            source,
+            false,
+        );
         self.begin_launch_action(index, action.clone(), Some(reply));
         true
     }
@@ -276,19 +480,15 @@ impl VEditApp {
             line_count,
         } = action
         {
-            let mut value = match control::text_page(
-                &state.output,
-                start_line,
-                start_column,
-                line_count,
-                48 * 1024,
-                true,
-            ) {
+            let mut value = match state
+                .output
+                .page(start_line, start_column, line_count, 48 * 1024)
+            {
                 Ok(value) => value,
                 Err(error) => return Some(Response::failure("invalid_location", error)),
             };
             value["run"] = state.snapshot(&project.root);
-            value["output_truncated"] = json!(state.output_truncated);
+            value["output_truncated"] = json!(state.output.truncated());
             value["snapshot"] = json!(true);
             return Some(Response::success(value));
         }
@@ -494,13 +694,14 @@ impl VEditApp {
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect();
             environment.push(("VEDIT_ROOT".into(), root.as_os_str().into()));
-            state.output = format!(
+            // A new run starts again at line 1.
+            state.output = OutputLog::default();
+            state.output.append(&format!(
                 "{} · {}\n> {}\nRuns saved files on disk.\n\n",
                 profile.name,
                 crate::paths::display(&cwd),
                 command.display()
-            );
-            state.output_truncated = false;
+            ));
             state.status = "Starting".into();
             state.error = None;
             state.exit_code = None;
@@ -667,13 +868,13 @@ impl VEditApp {
                 state.status = "Stopping".into();
             }
             if ui.button("Copy application output").clicked() {
-                ui.ctx().copy_text(state.output.clone());
+                ui.ctx().copy_text(state.output.text().to_owned());
             }
         });
         if let Some(error) = &state.error {
             ui.colored_label(ORANGE, error);
         }
-        if state.output_truncated {
+        if state.output.truncated() {
             ui.label("Showing the latest 1 MiB of output.");
         }
         egui::ScrollArea::both()
@@ -681,7 +882,7 @@ impl VEditApp {
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                state.cache.show(ui, &state.output, TEXT);
+                state.cache.show(ui, state.output.text(), TEXT);
             });
         true
     }

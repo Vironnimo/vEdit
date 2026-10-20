@@ -3561,7 +3561,7 @@ mod tests {
     }
 }
 
-fn relative_time(timestamp: i64, now: i64) -> String {
+pub(super) fn relative_time(timestamp: i64, now: i64) -> String {
     if timestamp <= 0 {
         return "time unavailable".into();
     }

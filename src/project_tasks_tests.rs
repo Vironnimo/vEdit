@@ -301,7 +301,7 @@ fn tasks_refuse_dirty_or_still_saving_buffers_without_starting_a_process() {
         app.resolve_project_task(ProjectTaskAction::RunFile)
             .is_err()
     );
-    assert!(app.task.is_none());
+    assert!(app.projects[0].run.task.is_none());
     assert!(app.projects[0].tabs[0].agent_unsaved);
     app.projects[0].tabs[0].dirty = false;
     app.projects[0].tabs[0].saving = true;

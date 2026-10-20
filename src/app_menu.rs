@@ -141,6 +141,17 @@ impl VEditApp {
             }
             if design::menu_item(
                 ui,
+                "Agent notifications",
+                &self.shortcut_label(keybindings::Action::AgentNotifications),
+                "Messages agents sent during this session; open their file or review",
+            )
+            .clicked()
+            {
+                self.open_notifications();
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
                 "Bookmarks",
                 &self.shortcut_label(keybindings::Action::Bookmarks),
                 "Search saved file and cursor positions",

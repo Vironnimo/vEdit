@@ -69,6 +69,9 @@ struct ProjectHeaderTab {
     /// Branch and upstream divergence from the project's own Git refreshes.
     git: Option<String>,
     current: bool,
+    /// Unread agent notifications and the most severe level among them.
+    unread: usize,
+    unread_color: Option<Color32>,
 }
 
 fn picker_id() -> egui::Id {
@@ -332,6 +335,11 @@ impl VEditApp {
                 changes: project.uncommitted_change_count(),
                 git: project.git_tab_summary(),
                 current: index == self.active_project,
+                unread: self.notifications.unread_for(&project.root),
+                unread_color: self
+                    .notifications
+                    .unread_level(&project.root)
+                    .map(notifications::level_color),
             })
             .collect();
         let available_tabs = (ui.available_width() - PROJECT_LIST_WIDTH - PROJECT_TAB_GAP).max(1.0);
@@ -1020,6 +1028,10 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
             });
             status.on_hover_text(description);
         }
+        if let Some(color) = tab.unread_color {
+            // Apart from the Git dot, in the corner, like a badge.
+            painter.circle_filled(rect.right_top() + Vec2::new(-7.0, 7.0), 3.2, color);
+        }
     }
     let mut tooltip = format!(
         "{}\n{} open files · {} unsaved",
@@ -1032,6 +1044,13 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
     if let Some(description) = git_description {
         tooltip.push('\n');
         tooltip.push_str(&description);
+    }
+    if tab.unread > 0 {
+        tooltip.push_str(&format!(
+            "\n{} unread agent notification{}",
+            tab.unread,
+            if tab.unread == 1 { "" } else { "s" }
+        ));
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)

@@ -78,6 +78,80 @@ pub(super) enum ProjectTaskAction {
     RunFile,
 }
 
+/// One project's build/test/command run. Each project runs at most one
+/// task; the Output panel shows the active project's.
+pub(super) struct ProjectRun {
+    pub(super) task: Option<tasks::RunningTask>,
+    pub(super) output: String,
+    pub(super) status: String,
+    /// What the current or last run executes, as reported to agents.
+    pub(super) command: String,
+}
+
+impl Default for ProjectRun {
+    fn default() -> Self {
+        Self {
+            task: None,
+            output: String::new(),
+            status: "Ready".into(),
+            command: String::new(),
+        }
+    }
+}
+
+impl ProjectRun {
+    /// Apply worker events; true when the task finished in this call.
+    pub(super) fn poll(&mut self) -> bool {
+        let Some(task) = &self.task else {
+            return false;
+        };
+        let mut finished = false;
+        loop {
+            let event = match task.receiver.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if !finished {
+                        self.status = "Task stopped unexpectedly".into();
+                    }
+                    finished = true;
+                    break;
+                }
+            };
+            match event {
+                tasks::TaskEvent::Started => {}
+                tasks::TaskEvent::Output(text) => {
+                    if self.output.len() < 1024 * 1024 {
+                        self.output.push_str(&text);
+                    }
+                }
+                tasks::TaskEvent::Finished { code, cancelled } => {
+                    self.status = if cancelled {
+                        "Cancelled".into()
+                    } else if code == Some(0) {
+                        "Completed".into()
+                    } else {
+                        format!(
+                            "Exited with code {}",
+                            code.map(|c| c.to_string())
+                                .unwrap_or_else(|| "unknown".into())
+                        )
+                    };
+                    finished = true;
+                }
+                tasks::TaskEvent::Error(e) => {
+                    self.output.push_str(&format!("\n{e}\n"));
+                    self.status = "Failed".into();
+                }
+            }
+        }
+        if finished {
+            self.task = None;
+        }
+        finished
+    }
+}
+
 pub(super) struct ResolvedTask {
     pub(super) root: PathBuf,
     pub(super) command: tasks::CommandSpec,
@@ -356,7 +430,11 @@ impl VEditApp {
     }
 
     pub(super) fn project_task_configuration(&self) -> Option<TaskConfiguration> {
-        self.project().map(|project| {
+        self.project_task_configuration_for(self.active_project)
+    }
+
+    pub(super) fn project_task_configuration_for(&self, index: usize) -> Option<TaskConfiguration> {
+        self.projects.get(index).map(|project| {
             let mut config = project.tasks.clone();
             if config.dart_executable.trim().is_empty() {
                 config.dart_executable = self.inherited_dart_executable();
@@ -366,7 +444,11 @@ impl VEditApp {
     }
 
     pub(super) fn project_task_unsaved_count(&self) -> usize {
-        let Some(project) = self.project() else {
+        self.project_task_unsaved_count_for(self.active_project)
+    }
+
+    pub(super) fn project_task_unsaved_count_for(&self, index: usize) -> usize {
+        let Some(project) = self.projects.get(index) else {
             return 0;
         };
         self.projects
@@ -386,29 +468,41 @@ impl VEditApp {
         &self,
         action: ProjectTaskAction,
     ) -> Result<ResolvedTask, String> {
-        if self.task.is_some() {
+        self.resolve_project_task_in(self.active_project, action)
+    }
+
+    /// Resolve against `index`'s own active document, so a task an agent
+    /// starts in a background project never uses the visible project's file.
+    pub(super) fn resolve_project_task_in(
+        &self,
+        index: usize,
+        action: ProjectTaskAction,
+    ) -> Result<ResolvedTask, String> {
+        let project = self
+            .projects
+            .get(index)
+            .ok_or_else(|| "Open a project before running a task.".to_owned())?;
+        if project.run.task.is_some() {
             return Err("Stop the current task first.".into());
         }
-        let project = self
-            .project()
-            .ok_or_else(|| "Open a project before running a task.".to_owned())?;
-        let unsaved = self.project_task_unsaved_count();
+        let tab = project.tabs.get(project.active_tab);
+        let unsaved = self.project_task_unsaved_count_for(index);
         if unsaved > 0
             || (action == ProjectTaskAction::RunFile
-                && self.tab().is_some_and(|tab| tab.dirty || tab.saving))
+                && tab.is_some_and(|tab| tab.dirty || tab.saving))
         {
             return Err("Save your changes before running a task. Use Save all files in Output, wait for saving to finish, then run again.".into());
         }
-        self.project_task_configuration().unwrap().resolve(
+        self.project_task_configuration_for(index).unwrap().resolve(
             &project.root,
-            self.tab().and_then(|tab| tab.path.as_deref()),
+            tab.and_then(|tab| tab.path.as_deref()),
             action,
         )
     }
 
     pub(super) fn run_project_task(&mut self, action: ProjectTaskAction) {
         match self.resolve_project_task(action) {
-            Ok(task) => self.start_resolved_task(task),
+            Ok(task) => self.start_resolved_task(self.active_project, task),
             Err(error) => {
                 self.output_visible = true;
                 self.problems_visible = false;
@@ -417,23 +511,29 @@ impl VEditApp {
         }
     }
 
-    pub(super) fn start_resolved_task(&mut self, task: ResolvedTask) {
-        if let Some(project) = self.projects.get_mut(self.active_project) {
-            project.launch.show_output = false;
-        }
-        self.output_visible = true;
-        self.problems_visible = false;
-        self.output = format!(
-            "> {}\n{}\nRuns saved files on disk.\n\n",
-            task.display(),
+    /// Start `task` in project `index`. The Output panel opens only when that
+    /// project is visible; a background project keeps its output for later.
+    pub(super) fn start_resolved_task(&mut self, index: usize, task: ResolvedTask) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        let command = task.display();
+        project.run.output = format!(
+            "> {command}\n{}\nRuns saved files on disk.\n\n",
             crate::paths::display(&task.root)
         );
-        self.task_status = "Running".into();
-        self.task = Some(tasks::spawn_configured(
+        project.run.status = "Running".into();
+        project.run.command = command;
+        project.run.task = Some(tasks::spawn_configured(
             task.root,
             task.command,
             task.environment,
         ));
+        if index == self.active_project {
+            project.launch.show_output = false;
+            self.output_visible = true;
+            self.problems_visible = false;
+        }
     }
 
     pub(super) fn open_project_task_settings(&mut self) {
