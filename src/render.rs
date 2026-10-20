@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak, mpsc},
 };
 
-const MAX_DOCUMENT_BYTES: usize = 192 * 1024;
+pub(crate) const MAX_DOCUMENT_BYTES: usize = 192 * 1024;
 const MAX_DOCUMENTS: usize = 16;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GALLEY_BYTES: usize = 32 * 1024 * 1024;

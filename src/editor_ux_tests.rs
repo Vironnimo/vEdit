@@ -539,12 +539,12 @@ fn completion_popup_preserves_remapped_modified_keys_and_command_event_order() {
     assert!(screen.state().completions.is_some());
     screen.state_mut().settings.keybindings.insert(
         keybindings::Action::ToggleWrap.id().into(),
-        Some("F8".into()),
+        Some("F9".into()),
     );
     screen
         .input_mut()
         .events
-        .extend([Key::F8, Key::Enter].map(|key| egui::Event::Key {
+        .extend([Key::F9, Key::Enter].map(|key| egui::Event::Key {
             key,
             physical_key: None,
             pressed: true,

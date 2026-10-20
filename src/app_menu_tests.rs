@@ -179,6 +179,37 @@ fn compact_status_bar_keeps_mode_save_state_and_cursor_position_separate() {
 }
 
 #[test]
+fn status_bar_explains_why_large_files_are_plain_text() {
+    const HINT: &str = "Plain text: file too large for highlighting";
+    let mut app = fixture();
+    let tab = app.tab_mut().unwrap();
+    tab.path = Some(PathBuf::from("C:/vedit-status/large.rs"));
+    tab.text = "fn value() -> u32 { 42 }
+"
+    .repeat(9_000);
+    assert!(tab.text.len() > crate::render::MAX_DOCUMENT_BYTES);
+    tab.saved_text = tab.text.clone();
+    tab.changed();
+    let mut screen = harness(app, 1200.0, 500.0);
+    let hint = screen.get_by_label(HINT);
+    hint.hover();
+    screen.run_steps(3);
+    assert!(
+        screen
+            .query_by_label_contains("larger than 192 KiB")
+            .is_some()
+    );
+
+    let tab = screen.state_mut().tab_mut().unwrap();
+    tab.text = "fn value() -> u32 { 42 }
+"
+    .into();
+    tab.changed();
+    screen.run_steps(3);
+    assert!(screen.query_by_label(HINT).is_none());
+}
+
+#[test]
 fn main_menu_and_nested_file_menu_screenshots() {
     let mut screen = visual_tests::harness(fixture());
     visual_tests::settle_render(&mut screen);

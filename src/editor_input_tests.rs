@@ -226,12 +226,12 @@ fn global_new_file_keeps_earlier_text_in_original_document_and_later_save_target
         .state_mut()
         .settings
         .keybindings
-        .insert(keybindings::Action::NewFile.id().into(), Some("F8".into()));
+        .insert(keybindings::Action::NewFile.id().into(), Some("F9".into()));
     events(
         &mut screen,
         [
             egui::Event::Text("X".into()),
-            key(Key::F8, egui::Modifiers::NONE),
+            key(Key::F9, egui::Modifiers::NONE),
             key(Key::S, egui::Modifiers::CTRL),
         ],
     );
@@ -263,7 +263,7 @@ fn remapped_save_writes_text_before_its_key_and_keeps_trailing_text_unsaved() {
         let app = screen.state_mut();
         app.settings
             .keybindings
-            .insert(keybindings::Action::Save.id().into(), Some("F8".into()));
+            .insert(keybindings::Action::Save.id().into(), Some("F9".into()));
         let tab = app.tab_mut().unwrap();
         tab.path = Some(path.clone());
         tab.fingerprint = Some(workspace::fingerprint(&path, MAX_DOCUMENT).unwrap());
@@ -272,7 +272,7 @@ fn remapped_save_writes_text_before_its_key_and_keeps_trailing_text_unsaved() {
         &mut screen,
         [
             egui::Event::Text("X".into()),
-            key(Key::F8, egui::Modifiers::NONE),
+            key(Key::F9, egui::Modifiers::NONE),
             egui::Event::Text("Y".into()),
         ],
     );
@@ -336,13 +336,13 @@ fn remapped_duplicate_applies_after_native_prefix_and_keeps_undo() {
     let mut screen = harness("tail", false);
     screen.state_mut().settings.keybindings.insert(
         keybindings::Action::DuplicateLine.id().into(),
-        Some("F8".into()),
+        Some("F9".into()),
     );
     events(
         &mut screen,
         [
             egui::Event::Text("X".into()),
-            key(Key::F8, egui::Modifiers::NONE),
+            key(Key::F9, egui::Modifiers::NONE),
         ],
     );
     assert_eq!(text(&screen), "Xtail\nXtail");

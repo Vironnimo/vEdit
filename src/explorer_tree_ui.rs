@@ -34,6 +34,168 @@ impl VEditApp {
         });
     }
 
+    /// Start following external file changes once per project, on a worker:
+    /// opening the watch handle is disk I/O. A failed start is retried by the
+    /// next manual refresh; until then window activation re-reads instead.
+    pub(super) fn ensure_file_watcher(&mut self, index: usize) {
+        if !self.file_watching {
+            return;
+        }
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        if project.watcher.is_some() || project.watcher_starting {
+            return;
+        }
+        project.watcher_starting = true;
+        let root = project.root.clone();
+        let ctx = self.ctx.clone();
+        self.worker(move || WorkerResult::FileWatcher {
+            result: crate::fs_watch::ProjectWatcher::start(&root, move |delay| {
+                ctx.request_repaint_after(delay)
+            }),
+            root,
+        });
+    }
+
+    pub(super) fn file_watcher_started(
+        &mut self,
+        root: PathBuf,
+        result: Result<crate::fs_watch::ProjectWatcher, String>,
+    ) {
+        // A project closed meanwhile drops the late watcher here.
+        let Some(index) = self
+            .projects
+            .iter()
+            .position(|project| project.root == root)
+        else {
+            return;
+        };
+        let project = &mut self.projects[index];
+        project.watcher_starting = false;
+        match result {
+            Ok(watcher) => {
+                project.watcher = Some(watcher);
+                project.watcher_error = None;
+                self.sync_watched_listing(index);
+                // Names may have changed between the first listing and the
+                // watch. Re-reading the few listed folders is cheap; the index
+                // build that started with the project is not repeated.
+                self.apply_file_changes(
+                    index,
+                    crate::fs_watch::Changes {
+                        rescan: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            Err(error) => project.watcher_error = Some(error),
+        }
+    }
+
+    /// The watcher only reports names in folders the Explorer has listed.
+    pub(super) fn sync_watched_listing(&self, index: usize) {
+        if let Some(project) = self.projects.get(index)
+            && let (Some(watcher), Some(explorer)) = (&project.watcher, &project.explorer)
+        {
+            watcher.set_listed(explorer.listed().map(Path::to_path_buf));
+        }
+    }
+
+    pub(super) fn poll_file_watchers(&mut self) {
+        let now = Instant::now();
+        for index in 0..self.projects.len() {
+            let Some(watcher) = &self.projects[index].watcher else {
+                continue;
+            };
+            match watcher.poll(now) {
+                crate::fs_watch::Poll::Idle => {}
+                crate::fs_watch::Poll::Wait(delay) => self.ctx.request_repaint_after(delay),
+                crate::fs_watch::Poll::Ready(changes) => self.apply_file_changes(index, changes),
+            }
+        }
+    }
+
+    /// Re-read affected listed folders in the background, keeping their rows,
+    /// the selection, expansion and scroll position until fresh rows arrive.
+    /// Open documents are left to disk synchronization.
+    pub(super) fn apply_file_changes(&mut self, index: usize, changes: crate::fs_watch::Changes) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        if let Some(explorer) = project.explorer.as_mut() {
+            explorer.forget(&changes.removed);
+            if changes.rescan {
+                explorer.invalidate();
+            } else {
+                explorer.refresh(&changes.directories);
+            }
+        }
+        if changes.index {
+            self.refresh_index_quietly(index);
+        }
+        self.sync_watched_listing(index);
+        if index == self.active_project {
+            let root = self.projects[index].root.clone();
+            self.request_explorer_directory(index, root);
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Rebuild the Quick Open index without the visible "indexing" state or a
+    /// new Explorer generation. Builds never overlap; changes during a build
+    /// schedule exactly one more.
+    pub(super) fn refresh_index_quietly(&mut self, index: usize) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        if project.index_in_flight {
+            project.index_again = true;
+            return;
+        }
+        project.index_request += 1;
+        project.index_in_flight = true;
+        project.index_cancel = Arc::new(AtomicBool::new(false));
+        let root = project.root.clone();
+        let generation = project.index_generation;
+        let request = project.index_request;
+        let cancel = project.index_cancel.clone();
+        self.worker(move || WorkerResult::Index {
+            result: workspace::build_index(
+                &root,
+                workspace::IndexOptions {
+                    cancel: Some(cancel),
+                    ..Default::default()
+                },
+            ),
+            root,
+            generation,
+            request,
+        });
+    }
+
+    /// Without a working watcher (for example on some network shares), the
+    /// window becoming active re-reads listed folders and the index instead.
+    pub(super) fn refresh_unwatched_project(&mut self, index: usize) {
+        if !self.file_watching
+            || self
+                .projects
+                .get(index)
+                .is_none_or(|project| project.watcher.is_some() || project.watcher_starting)
+        {
+            return;
+        }
+        self.ensure_file_watcher(index);
+        self.apply_file_changes(
+            index,
+            crate::fs_watch::Changes {
+                rescan: true,
+                index: true,
+                ..Default::default()
+            },
+        );
+    }
+
     pub(super) fn retry_explorer(&mut self) {
         let Some(project) = self.projects.get_mut(self.active_project) else {
             return;

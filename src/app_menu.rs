@@ -183,6 +183,28 @@ impl VEditApp {
                 self.start_screen_jump();
                 ui.close();
             }
+            if design::menu_item(
+                ui,
+                "Go back",
+                &self.shortcut_label(keybindings::Action::NavigateBack),
+                "Return to the previous location in this editor pane",
+            )
+            .clicked()
+            {
+                self.navigate_history(true);
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
+                "Go forward",
+                &self.shortcut_label(keybindings::Action::NavigateForward),
+                "Return to the location you came back from",
+            )
+            .clicked()
+            {
+                self.navigate_history(false);
+                ui.close();
+            }
             ui.separator();
             if design::menu_item(
                 ui,
@@ -227,6 +249,28 @@ impl VEditApp {
             {
                 self.output_visible = true;
                 self.problems_visible = true;
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
+                "Next problem",
+                &self.shortcut_label(keybindings::Action::NextProblem),
+                "Next error or warning, then the next file with problems",
+            )
+            .clicked()
+            {
+                self.go_to_problem(false);
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
+                "Previous problem",
+                &self.shortcut_label(keybindings::Action::PreviousProblem),
+                "Previous error or warning, then the previous file with problems",
+            )
+            .clicked()
+            {
+                self.go_to_problem(true);
                 ui.close();
             }
             if design::menu_item(

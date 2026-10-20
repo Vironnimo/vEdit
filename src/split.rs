@@ -216,6 +216,8 @@ struct Pane {
     states: HashMap<u64, PaneDocumentState>,
     tab_strip_active: Option<u64>,
     preview_ui_id: Option<egui::Id>,
+    /// Back/forward navigation history of this pane.
+    jumps: super::jump_list::JumpList,
 }
 impl Pane {
     fn empty(id: u64) -> Self {
@@ -228,6 +230,7 @@ impl Pane {
             states: HashMap::new(),
             tab_strip_active: None,
             preview_ui_id: None,
+            jumps: Default::default(),
         }
     }
 }
@@ -649,6 +652,14 @@ impl VEditApp {
         } else {
             egui::Id::new(("document", tab_id, pane))
         }
+    }
+    pub(super) fn focused_jump_list(&mut self) -> Option<&mut super::jump_list::JumpList> {
+        let focused = self.editor_layout.focused;
+        self.editor_layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == focused)
+            .map(|pane| &mut pane.jumps)
     }
     pub(super) fn render_pane_is_focused(&self) -> bool {
         self.pane_context() == self.editor_layout.focused

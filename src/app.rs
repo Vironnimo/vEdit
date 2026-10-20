@@ -57,6 +57,8 @@ mod git_gutter;
 mod git_panel;
 #[path = "indentation.rs"]
 mod indentation;
+#[path = "jump_list.rs"]
+mod jump_list;
 #[path = "keybindings.rs"]
 mod keybindings;
 #[path = "language_intel.rs"]
@@ -69,6 +71,8 @@ mod language_support;
 mod navigation;
 #[path = "notifications.rs"]
 mod notifications;
+#[path = "problems.rs"]
+mod problems;
 #[path = "project_launch.rs"]
 mod project_launch;
 #[path = "project_status.rs"]
@@ -224,7 +228,16 @@ struct Project {
     indexing: bool,
     index_cancel: Arc<AtomicBool>,
     index_generation: u64,
+    /// The latest index build, manual or file-watch driven; older results are dropped.
+    index_request: u64,
+    index_in_flight: bool,
+    /// Files changed while a build ran; build once more when it finishes.
+    index_again: bool,
     index_error: Option<String>,
+    /// Follows external file creation, deletion and renames below `root`.
+    watcher: Option<crate::fs_watch::ProjectWatcher>,
+    watcher_starting: bool,
+    watcher_error: Option<String>,
     rust_project: bool,
     git_root: Option<PathBuf>,
     git_parent_root: Option<PathBuf>,
@@ -283,7 +296,13 @@ impl Project {
             indexing: false,
             index_cancel: Arc::new(AtomicBool::new(false)),
             index_generation: 0,
+            index_request: 0,
+            index_in_flight: false,
+            index_again: false,
             index_error: None,
+            watcher: None,
+            watcher_starting: false,
+            watcher_error: None,
             rust_project: false,
             git_root: None,
             git_parent_root: None,
@@ -653,7 +672,18 @@ enum WorkerResult {
     Index {
         root: PathBuf,
         generation: u64,
+        request: u64,
         result: Result<workspace::WorkspaceIndex, String>,
+    },
+    FileWatcher {
+        root: PathBuf,
+        result: Result<crate::fs_watch::ProjectWatcher, String>,
+    },
+    OutputLink {
+        root: PathBuf,
+        request: u64,
+        link: crate::output_links::Link,
+        path: Option<PathBuf>,
     },
     Loaded {
         id: u64,
@@ -987,6 +1017,15 @@ pub struct VEditApp {
     definition_origin: Option<(u64, u64, usize, egui::Id)>,
     pending_location: Option<(u64, crate::lsp::Position)>,
     intel: language_intel::IntelState,
+    /// Projects follow external file changes; tests opt in explicitly.
+    file_watching: bool,
+    /// A back/forward destination waiting for its document to load.
+    pending_jump: Option<(u64, jump_list::Jump)>,
+    /// The latest clicked output location; older resolutions are dropped.
+    output_link_request: u64,
+    /// The next observed move comes from back/forward and is not recorded.
+    jump_navigating: bool,
+    problem_cache: problems::ProblemCache,
     problems_visible: bool,
     last_disk_check: Instant,
     disk_check_running: bool,
@@ -1038,7 +1077,7 @@ impl VEditApp {
         app.settings = session.settings.unwrap_or_default();
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
-        keybindings::migrate_reopen_shortcut(&mut app.settings.keybindings);
+        keybindings::migrate_later_defaults(&mut app.settings.keybindings);
         app.ctx.set_zoom_factor(app.settings.ui_scale);
         app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
@@ -1270,6 +1309,11 @@ impl VEditApp {
             definition_origin: None,
             pending_location: None,
             intel: Default::default(),
+            file_watching: !cfg!(test),
+            pending_jump: None,
+            output_link_request: 0,
+            jump_navigating: false,
+            problem_cache: Default::default(),
             problems_visible: false,
             last_disk_check: Instant::now(),
             disk_check_running: false,
@@ -1383,6 +1427,9 @@ impl VEditApp {
         p.index_cancel.store(true, Ordering::Relaxed);
         p.index_cancel = Arc::new(AtomicBool::new(false));
         p.index_generation += 1;
+        p.index_request += 1;
+        p.index_in_flight = true;
+        p.index_again = false;
         p.indexing = true;
         p.index_error = None;
         if let Some(explorer) = &mut p.explorer {
@@ -1393,6 +1440,7 @@ impl VEditApp {
         let root = p.root.clone();
         let explorer_root = root.clone();
         let generation = p.index_generation;
+        let request = p.index_request;
         let cancel = p.index_cancel.clone();
         self.worker(move || WorkerResult::Index {
             result: workspace::build_index(
@@ -1404,8 +1452,10 @@ impl VEditApp {
             ),
             root,
             generation,
+            request,
         });
         self.request_explorer_directory(index, explorer_root);
+        self.ensure_file_watcher(index);
     }
     fn load_tab(&self, id: u64, path: Option<PathBuf>, recovery: Option<PathBuf>) {
         self.worker_or(
@@ -1932,26 +1982,30 @@ impl VEditApp {
                     generation,
                     result,
                 } => {
-                    if let Some(explorer) = self
+                    if let Some(index) = self
                         .projects
-                        .iter_mut()
-                        .find(|project| project.root == root)
-                        .and_then(|project| project.explorer.as_mut())
+                        .iter()
+                        .position(|project| project.root == root)
+                        && let Some(explorer) = self.projects[index].explorer.as_mut()
+                        && explorer.complete(&path, generation, result)
                     {
-                        explorer.complete(&path, generation, result);
+                        self.sync_watched_listing(index);
                     }
                 }
                 WorkerResult::Index {
                     root,
                     generation,
+                    request,
                     result,
                 } => {
-                    if let Some(p) = self
-                        .projects
-                        .iter_mut()
-                        .find(|p| p.root == root && p.index_generation == generation)
-                    {
+                    if let Some(index) = self.projects.iter().position(|p| {
+                        p.root == root
+                            && p.index_generation == generation
+                            && p.index_request == request
+                    }) {
+                        let p = &mut self.projects[index];
                         p.indexing = false;
+                        p.index_in_flight = false;
                         match result {
                             Ok(index) => {
                                 p.index_error = None;
@@ -1960,8 +2014,20 @@ impl VEditApp {
                             }
                             Err(e) => p.index_error = Some(e),
                         }
+                        if std::mem::take(&mut p.index_again) {
+                            self.refresh_index_quietly(index);
+                        }
                     }
                 }
+                WorkerResult::FileWatcher { root, result } => {
+                    self.file_watcher_started(root, result)
+                }
+                WorkerResult::OutputLink {
+                    root,
+                    request,
+                    link,
+                    path,
+                } => self.output_link_resolved(root, request, link, path),
                 WorkerResult::Loaded {
                     id,
                     result,
@@ -2653,6 +2719,7 @@ impl VEditApp {
                 project.last_git_refresh = Instant::now() - Duration::from_secs(30);
             }
             self.repositories.request_refresh();
+            self.refresh_unwatched_project(self.active_project);
         }
         self.refresh_git(self.active_project, resumed);
         self.refresh_inactive_git_indicators();
@@ -3049,6 +3116,7 @@ impl VEditApp {
         }
     }
     fn try_jump_to_bookmark(&mut self, id: u64) -> Result<u64, String> {
+        self.record_jump();
         let bookmark = self
             .bookmarks
             .get(id)
@@ -3830,6 +3898,7 @@ impl VEditApp {
         run.output = format!("> {command}\n{}\n\n", crate::paths::display(&root));
         run.status = "Running".into();
         run.command = command.clone();
+        run.cwd = Some(root.clone());
         run.task = Some(tasks::spawn_configured(
             root,
             tasks::CommandSpec::Shell(command),
@@ -3889,6 +3958,10 @@ impl VEditApp {
                 tab.vim.mode == VimMode::Insert
                     && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
             });
+        let vim_normal = vim_modal
+            && self
+                .tab()
+                .is_some_and(|tab| tab.vim.mode == VimMode::Normal);
         let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
@@ -3953,12 +4026,23 @@ impl VEditApp {
                         | Action::ScreenJump
                         | Action::Reload
                         | Action::CompareWithSaved
+                        | Action::NextProblem
+                        | Action::PreviousProblem
+                        | Action::NavigateBack
+                        | Action::NavigateForward
                 )
             {
                 continue;
             }
             if action == Action::Find
                 && vim_modal
+                && !self.settings.keybindings.contains_key(action.id())
+            {
+                continue;
+            }
+            // Ctrl+O goes back in Vim Normal mode, like Vim's jump list.
+            if action == Action::OpenFile
+                && vim_normal
                 && !self.settings.keybindings.contains_key(action.id())
             {
                 continue;
@@ -4231,6 +4315,9 @@ impl VEditApp {
         let mut definition = false;
         let mut references = false;
         let mut hover = false;
+        // `[d` / `]d` and Ctrl+O / Ctrl+I: true for previous / back.
+        let mut problem = None;
+        let mut history = None;
         let mut vim_register = None;
         let mut system_clipboard = None;
         let swap_jk = self.settings.swap_jk;
@@ -4580,6 +4667,14 @@ impl VEditApp {
                                     continue;
                                 }
                             }
+                            if ch == 'd' && tab.vim.mode == VimMode::Normal {
+                                let pending = tab.vim.pending_command();
+                                if pending == "[" || pending == "]" {
+                                    tab.vim.cancel_pending_command();
+                                    problem = Some(pending == "[");
+                                    continue;
+                                }
+                            }
                             let ch = if tab.vim.expects_literal_character() {
                                 ch
                             } else {
@@ -4595,7 +4690,18 @@ impl VEditApp {
                         modifiers,
                         ..
                     } => {
-                        let translated = if modifiers.ctrl && !modifiers.alt && key == Key::R {
+                        let translated = if modifiers.ctrl
+                            && !modifiers.alt
+                            && !modifiers.shift
+                            && matches!(key, Key::O | Key::I)
+                            && tab.vim.mode == VimMode::Normal
+                        {
+                            // Vim's jump list. Ctrl+O stays Open file in
+                            // every other mode and when it is rebound.
+                            tab.vim.cancel_pending_command();
+                            history = Some(key == Key::O);
+                            None
+                        } else if modifiers.ctrl && !modifiers.alt && key == Key::R {
                             Some(VimKey::Redo)
                         } else if modifiers.ctrl
                             && !modifiers.alt
@@ -4683,6 +4789,12 @@ impl VEditApp {
         }
         if hover {
             self.show_hover();
+        }
+        if let Some(backwards) = problem {
+            self.go_to_problem(backwards);
+        }
+        if let Some(backwards) = history {
+            self.navigate_history(backwards);
         }
     }
 
@@ -5000,6 +5112,7 @@ impl VEditApp {
 
 impl VEditApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let problems = self.problem_list();
         let statistics = self.tab().filter(|tab| !tab.loading).map(|tab| {
             self.text_statistics.display(
                 ui.ctx(),
@@ -5073,12 +5186,23 @@ impl VEditApp {
                             }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
                             if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
+                                ui.label(RichText::new("Plain text: file too large for highlighting").size(11.0).color(MUTED)).on_hover_text(format!(
+                                    "Syntax colors are off for files larger than {} KiB so editing stays fast. This file has {} KiB. Editing, search and language analysis work as usual.",
+                                    crate::render::MAX_DOCUMENT_BYTES / 1024,
+                                    t.text.len().div_ceil(1024)
+                                ));
+                            }
                         }
                         if !compact_statistics { self.indentation_status_ui(ui); }
                         self.save_status_ui(ui, !narrow);
-                        if !compact_statistics && let Some(project) = self.project() {
-                            let problem_count = project.diagnostics.values().map(Vec::len).sum::<usize>();
-                            if problem_count > 0 && design::status_item(ui, &format!("{problem_count} problems"), ORANGE, &format!("Show errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems))).clicked() { self.problems_visible = true; self.output_visible = true; }
+                        let problem_count = problems.counted();
+                        if !compact_statistics && problem_count > 0 {
+                            let label = if problem_count == 1 { "1 problem".to_owned() } else { format!("{problem_count} problems") };
+                            let hint = format!("{}
+Show Problems · {}
+Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_label(keybindings::Action::Problems), self.shortcut_label(keybindings::Action::NextProblem), self.shortcut_label(keybindings::Action::PreviousProblem));
+                            if design::status_item(ui, &label, problems.badge_color(), &hint).clicked() { self.problems_visible = true; self.output_visible = true; }
                         }
                         if !compact_statistics { self.rust_analysis_status_ui(ui); }
                     });
@@ -5118,10 +5242,8 @@ impl VEditApp {
                         if let Some(project) = self.projects.get_mut(self.active_project) { project.launch.show_output = false; }
                     }
                     self.launch_output_tab(ui);
-                    let count = self
-                        .project()
-                        .map(|p| p.diagnostics.values().map(Vec::len).sum::<usize>())
-                        .unwrap_or(0);
+                    let problems = self.problem_list();
+                    let count = problems.counted();
                     let problems_tab = design::ghost_button(
                         ui,
                         &if count > 0 {
@@ -5129,7 +5251,7 @@ impl VEditApp {
                         } else {
                             "Problems".to_owned()
                         },
-                        &format!("Language errors and warnings · {}", self.shortcut_label(keybindings::Action::Problems)),
+                        &format!("{} · {}", problems.summary(), self.shortcut_label(keybindings::Action::Problems)),
                     );
                     if self.problems_visible {
                         ui.painter().line_segment(
@@ -5228,14 +5350,19 @@ impl VEditApp {
                     }
                 });
                 ui.separator();
-                egui::ScrollArea::both()
+                let clicked = egui::ScrollArea::both()
                     .stick_to_bottom(true)
                     .id_salt("task_output")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let output = self.projects.get(self.active_project).map_or("", |p| p.run.output.as_str());
-                        self.task_output_cache.show(ui, output, TEXT);
-                    });
+                        self.task_output_cache.show_with_links(ui, output, TEXT)
+                    })
+                    .inner;
+                if let Some(link) = clicked {
+                    let cwd = self.project().and_then(|p| p.run.cwd.clone());
+                    self.open_output_link(link, cwd);
+                }
             });
         self.finish_output_region(ui, panel.response.rect);
     }
@@ -5866,6 +5993,9 @@ impl VEditApp {
             .tab()
             .is_some_and(|tab| self.pointer_hover_available(tab));
         let mut hover_pointer = None;
+        // Paint quieter severities first so an error marker stays on top.
+        let mut diagnostics = diagnostics;
+        diagnostics.sort_by_key(|diagnostic| std::cmp::Reverse(diagnostic.severity));
         let settings = self.settings.clone();
         let ctx = self.ctx.clone();
         let Some(document_id) = self.tab().map(|tab| tab.id) else {
@@ -6510,12 +6640,12 @@ impl VEditApp {
                         start,
                         end,
                     ) {
-                        let color = if diagnostic.severity == 1 {
-                            RED
-                        } else {
-                            ORANGE
-                        };
-                        if segment.top() == start_row.top() {
+                        let severity = problems::Severity::from_lsp(diagnostic.severity);
+                        let color = severity.color();
+                        // Hints stay a faint underline without a gutter dot.
+                        if severity != problems::Severity::Hint
+                            && segment.top() == start_row.top()
+                        {
                             ui.painter().circle_filled(
                                 egui::pos2(
                                     output.galley_pos.x - gutter_marker_offset + 6.0,
@@ -6532,7 +6662,14 @@ impl VEditApp {
                                 output.galley_pos + segment.right_bottom().to_vec2()
                                     - Vec2::new(0.0, 1.0),
                             ],
-                            Stroke::new(1.0, color),
+                            Stroke::new(
+                                1.0,
+                                if severity == problems::Severity::Hint {
+                                    color.gamma_multiply(0.6)
+                                } else {
+                                    color
+                                },
+                            ),
                         );
                         if !hover_available {
                             ui.interact(
@@ -6540,7 +6677,7 @@ impl VEditApp {
                                 ui.id().with(("diagnostic", tab.id, start, row_index)),
                                 egui::Sense::hover(),
                             )
-                            .on_hover_text(&diagnostic.message);
+                            .on_hover_text(format!("{}: {}", severity.label(), diagnostic.message));
                         }
                     }
                 }
@@ -7294,6 +7431,10 @@ impl VEditApp {
                 self.output_visible = true;
                 self.problems_visible = true;
             }
+            "Next problem" => self.go_to_problem(false),
+            "Previous problem" => self.go_to_problem(true),
+            "Go back" => self.navigate_history(true),
+            "Go forward" => self.navigate_history(false),
             "Markdown source / preview" => {
                 if self
                     .tab()
@@ -7890,6 +8031,7 @@ impl VEditApp {
     /// Open the file of the diff dialog at the chosen line, as the change
     /// review's o and Enter do.
     fn open_diff_location(&mut self, open: crate::git_diff_view::DiffOpen) {
+        self.record_jump();
         let Some(repository) = self.diff_repository.clone() else {
             return;
         };
@@ -7998,6 +8140,7 @@ impl VEditApp {
         let restore_after_menu = egui::Popup::is_any_open(&self.ctx)
             && self.ctx.input(|input| input.key_pressed(Key::Escape));
         self.poll();
+        self.poll_file_watchers();
         self.sync_agent_marks();
         self.poll_control();
         if !self.settings_open {
@@ -8008,6 +8151,7 @@ impl VEditApp {
         self.syntax.begin_frame(ui);
         self.apply_pending_bookmark_jump();
         self.apply_pending_agent_locations();
+        self.apply_pending_jump();
         self.poll_languages();
         self.resume_region_input();
         self.focus_pane_from_pointer();
@@ -8054,6 +8198,9 @@ impl VEditApp {
             if self.ctx.input(|input| input.events.len()) < pending_events {
                 self.find.break_escape_sequence();
             }
+        }
+        if !dragging_tab && !switching_project {
+            self.history_pointer_buttons();
         }
         let navigating_explorer =
             !dragging_tab && !switching_project && self.explorer_navigation_keys();
@@ -8120,6 +8267,7 @@ impl VEditApp {
         self.autosave();
         self.sync_languages(false);
         self.watch_disk();
+        self.observe_navigation();
         if !self.projects.is_empty() {
             self.ctx.request_repaint_after(Duration::from_secs(2));
         }
@@ -8464,6 +8612,12 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
 }
 
 #[cfg(test)]
+#[path = "explorer_watch_tests.rs"]
+mod explorer_watch_tests;
+#[cfg(test)]
+#[path = "navigation_history_tests.rs"]
+mod navigation_history_tests;
+#[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
 
@@ -8695,17 +8849,14 @@ impl VEditApp {
                         })
                     {
                         self.language_response_succeeded(index, &language);
-                        self.open_file(path);
-                        if let Some(tab) = self.tab() {
-                            self.pending_location = Some((
-                                tab.id,
-                                crate::lsp::Position {
-                                    line,
-                                    character: column,
-                                },
-                            ));
-                        }
                         self.definition_request = None;
+                        self.reveal_lsp_position(
+                            path,
+                            crate::lsp::Position {
+                                line,
+                                character: column,
+                            },
+                        );
                     }
                 }
                 crate::lsp::LspEvent::DefinitionNotFound { request_id } => {
@@ -8747,14 +8898,7 @@ impl VEditApp {
         }
         self.check_language_intel_requests();
         self.apply_language_reveal();
-        if let Some((id, position)) = self.pending_location
-            && let Some(t) = self.tab_by_id_mut(id)
-            && !t.loading
-        {
-            let cursor = crate::lsp::position_to_char(&t.text, position);
-            t.set_cursor(cursor..cursor);
-            self.pending_location = None;
-        }
+        self.apply_pending_location();
         if self.completions.as_ref().is_some_and(|popup| {
             self.tab().is_none_or(|t| {
                 t.id != popup.tab_id
@@ -9144,70 +9288,6 @@ impl VEditApp {
             });
         if let Some(i) = selected {
             self.apply_completion(i);
-        }
-    }
-    fn problems_ui(&mut self, ui: &mut egui::Ui) {
-        self.language_controls_ui(ui);
-        let Some(p) = self.project() else { return };
-        let root = p.root.clone();
-        let rows: Vec<_> = p
-            .diagnostics
-            .iter()
-            .flat_map(|(path, list)| list.iter().map(move |d| (path.clone(), d.clone())))
-            .take(2000)
-            .collect();
-        let active = p.languages.values().any(|session| session.active());
-        let mut jump = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .id_salt("problems")
-            .show(ui, |ui| {
-                if rows.is_empty() {
-                    ui.label(
-                        RichText::new(if active {
-                            "No problems reported"
-                        } else {
-                            "No language server is connected. Configure Languages in Settings to receive diagnostics."
-                        })
-                        .size(12.0)
-                        .color(MUTED),
-                    );
-                }
-                for (path, d) in rows {
-                    let label = format!(
-                        "{}  {}:{}:{}   {}",
-                        if d.severity == 1 { "Error" } else { "Warning" },
-                        crate::paths::display(path.strip_prefix(&root).unwrap_or(&path)),
-                        d.range.start.line + 1,
-                        d.range.start.character + 1,
-                        d.message.lines().next().unwrap_or("")
-                    );
-                    let response = ui.add(
-                        egui::Label::new(
-                            RichText::new(label).size(12.0).color(if d.severity == 1 {
-                                RED
-                            } else {
-                                ORANGE
-                            }),
-                        )
-                        .sense(egui::Sense::click()),
-                    );
-                    let tooltip = format!("{}\n{}", crate::paths::display(&path), d.message);
-                    self.output_problem_focus_target(&response);
-                    if design::keyboard_focus(&response) {
-                        ui.painter().rect_stroke(response.rect.expand(2.0), 2.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Outside);
-                    }
-                    if response.clicked() {
-                        jump = Some((path, d.range.start));
-                    }
-                    response.on_hover_text(tooltip);
-                }
-            });
-        if let Some((path, position)) = jump {
-            self.open_file(path);
-            if let Some(t) = self.tab() {
-                self.pending_location = Some((t.id, position));
-            }
         }
     }
 }
