@@ -386,6 +386,9 @@ impl VEditApp {
                         "A rename affects the save-as destination; wait for file_job completion before saving",
                     );
                 }
+                if let Some(error) = self.git_checkout_save_error(&path) {
+                    return Response::failure("git_checkout_running", error);
+                }
                 // Existing destination refusal also covers symlinks and case aliases.
                 if fs::symlink_metadata(&path).is_ok() {
                     return Response::failure(
@@ -1749,10 +1752,11 @@ mod tests {
             app.search_generation, generation,
             "unchanged filters should not restart search"
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !app.recovery_session_path.is_file() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // Every settings change persists the session in the background. Wait
+        // for all of those writes, not only the first, before removing their
+        // folder; a later write would otherwise recreate a temporary file.
+        assert!(app.recovery_writer.wait_idle(Duration::from_secs(10)));
+        assert!(app.recovery_session_path.is_file());
         drop(app);
         fs::remove_dir_all(root).unwrap();
     }

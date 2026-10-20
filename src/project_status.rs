@@ -58,6 +58,7 @@ impl Project {
         self.git_tracking = None;
         self.git_main_comparison = Ok(None);
         self.git_changes.clear();
+        self.git_untracked_collapsed = false;
         self.explorer_git = None;
         self.git_stats = git::WorkingTreeStats::default();
         self.git_stats_error = None;

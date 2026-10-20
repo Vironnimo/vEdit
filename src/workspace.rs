@@ -1375,6 +1375,48 @@ fn check_expected(path: &Path, expected: Option<&FileFingerprint>) -> Result<(),
     }
 }
 
+/// Remove `.vedit-save-<pid>-<n>.tmp` files that an interrupted save of an
+/// exited vEdit process left in `directory`, where they would otherwise show
+/// up in `git status`. Files of this or another running process and all other
+/// files stay. Each directory is checked once per session.
+pub fn remove_stale_save_temporaries(directory: &Path) {
+    static CHECKED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    if !CHECKED
+        .lock()
+        .map(|mut checked| checked.insert(directory.to_path_buf()))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let current = std::process::id();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(save_temporary_owner) else {
+            continue;
+        };
+        if pid != current
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+            && !crate::process_liveness::running(pid)
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The process ID in a name created by [`create_temporary`].
+fn save_temporary_owner(name: &str) -> Option<u32> {
+    let (pid, sequence) = name
+        .strip_prefix(".vedit-save-")?
+        .strip_suffix(".tmp")?
+        .split_once('-')?;
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(pid) && digits(sequence))
+        .then(|| pid.parse().ok())
+        .flatten()
+}
+
 fn create_temporary(parent: &Path) -> io::Result<(PathBuf, File)> {
     for _ in 0..64 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -2427,6 +2469,53 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".vedit-save")
         }));
+    }
+
+    #[test]
+    fn only_save_temporaries_of_exited_processes_are_removed() {
+        let fixture = Fixture::new("stale-save-temporaries");
+        let exited = {
+            #[cfg(windows)]
+            let mut child = std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .unwrap();
+            #[cfg(not(windows))]
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        };
+        let current = std::process::id();
+        let stale = fixture.write(&format!(".vedit-save-{exited}-3.tmp"), "interrupted");
+        let kept = [
+            fixture.write(&format!(".vedit-save-{current}-9.tmp"), "saving now"),
+            fixture.write(&format!(".vedit-save-{exited}-3.tmp.bak"), "other"),
+            fixture.write(&format!(".vedit-save-{exited}-x.tmp"), "other"),
+            fixture.write(&format!("vedit-save-{exited}-3.tmp"), "other"),
+            fixture.write("notes.tmp", "other"),
+        ];
+        let directory = fixture.0.join(format!(".vedit-save-{exited}-4.tmp"));
+        fs::create_dir(&directory).unwrap();
+        let document = fixture.write("document.txt", "before");
+        let (_, fingerprint) = read_bytes(&document, 1024).unwrap();
+        // The editor's save worker cleans the folder before each save.
+        remove_stale_save_temporaries(&fixture.0);
+        save_document(
+            &document,
+            "after",
+            LineEnding::Lf,
+            false,
+            Some(&fingerprint),
+        )
+        .unwrap();
+        assert!(!stale.exists());
+        assert!(kept.iter().all(|path| path.is_file()));
+        assert!(directory.is_dir());
+        assert_eq!(fs::read_to_string(&document).unwrap(), "after");
+        // A folder is checked once; files left later wait for the next session.
+        let later = fixture.write(&format!(".vedit-save-{exited}-5.tmp"), "later");
+        remove_stale_save_temporaries(&fixture.0);
+        assert!(later.exists());
     }
 
     #[test]

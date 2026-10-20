@@ -773,3 +773,174 @@ fn unreadable_recovery_survives_disk_reload_and_new_recovery_writes() {
     assert!(restarted.tab().unwrap().error.is_none());
     assert_eq!(fs::read(original_recovery_path).unwrap(), damaged);
 }
+
+#[test]
+fn saved_or_already_saved_recovery_is_removed_without_blocking_the_window() {
+    let fixture = RecoveryFixture::new("background-cleanup");
+    let path = fixture.write("notes.txt", "Gespeichert\n");
+    let mut app = fixture.app();
+    fixture.open(&mut app, path.clone());
+    edit(&mut app, "Entwurf ü\n");
+    app.flush_recovery();
+    let recovery = app.tab().unwrap().recovery_path.clone();
+    assert!(recovery.is_file());
+    app.save_current();
+    wait_for(&mut app, |app| {
+        let tab = app.tab().unwrap();
+        !tab.saving && !tab.recovery_stale && !recovery.exists()
+    });
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Entwurf ü\n");
+    assert!(app.session().projects[0].tabs[0].recovery_path.is_none());
+
+    // The draft reached the file another way before this session restarted.
+    let other = fixture.write("other.txt", "Alt\n");
+    fixture.open(&mut app, other.clone());
+    edit(&mut app, "Schon gespeichert 🦀\n");
+    app.flush_recovery();
+    let recovery = app.tab().unwrap().recovery_path.clone();
+    let session = fixture.saved_session();
+    drop(app);
+    fs::write(&other, "Schon gespeichert 🦀\n").unwrap();
+    let mut restored = fixture.restore(session);
+    let tab = restored.tab().unwrap();
+    assert_eq!(tab.path.as_ref(), Some(&other));
+    assert!(!tab.dirty);
+    assert!(tab.error.is_none());
+    assert!(recovery.is_file());
+    restored.autosave();
+    wait_for(&mut restored, |app| {
+        !app.tab().unwrap().recovery_stale && !recovery.exists()
+    });
+    assert_eq!(
+        fs::read_to_string(&other).unwrap(),
+        "Schon gespeichert 🦀\n"
+    );
+}
+
+#[test]
+fn a_panicking_worker_reports_the_error_and_releases_its_document() {
+    let fixture = RecoveryFixture::new("worker-panic");
+    let path = fixture.write("notes.txt", "Gespeichert\n");
+    let mut app = fixture.app();
+    let id = fixture.open(&mut app, path.clone());
+    edit(&mut app, "Entwurf\n");
+    app.tab_mut().unwrap().saving = true;
+    let failed_path = path.clone();
+    app.worker_or(
+        || panic!("injected save failure"),
+        move |error| WorkerResult::Saved {
+            result: Err(error),
+            id,
+            text: String::new(),
+            path: failed_path,
+        },
+    );
+    wait_for(&mut app, |app| !app.tab().unwrap().saving);
+    let tab = app.tab().unwrap();
+    assert!(tab.dirty);
+    assert_eq!(tab.text, "Entwurf\n");
+    let error = tab.error.as_deref().unwrap();
+    assert!(error.contains("injected save failure"), "{error}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Gespeichert\n");
+
+    app.status = None;
+    app.worker(|| panic!("injected search failure"));
+    wait_for(&mut app, |app| {
+        app.status.as_ref().is_some_and(|(message, error, _)| {
+            *error
+                && message.contains("Internal error in a background task: injected search failure")
+        })
+    });
+}
+
+#[test]
+fn pull_or_branch_switch_defers_saves_into_its_working_tree() {
+    let fixture = RecoveryFixture::new("checkout-saves");
+    let path = fixture.write("notes.txt", "Gespeichert\n");
+    let outside = RecoveryFixture::new("checkout-saves-outside");
+    let other = outside.write("other.txt", "Außerhalb\n");
+    let mut app = fixture.app();
+    let id = fixture.open(&mut app, path.clone());
+    edit(&mut app, "Entwurf\n");
+    app.settings.autosave = true;
+    let cancellation = git::Cancellation::default();
+    app.git_action = Some(ActiveGitAction {
+        root: fixture.root.clone(),
+        label: "Pull",
+        cancellation: cancellation.clone(),
+        rewrites_working_tree: true,
+    });
+
+    app.tab_mut().unwrap().last_edit = Instant::now() - Duration::from_secs(5);
+    app.autosave();
+    assert!(!app.tab().unwrap().saving);
+    app.save_current();
+    assert!(!app.tab().unwrap().saving);
+    let (message, error, _) = app.status.clone().unwrap();
+    assert!(error);
+    assert!(message.contains("Git is running pull"), "{message}");
+    let response = app.control_request(crate::cli::Request::Save { tab_ids: vec![id] });
+    let item = &response.result["items"][0];
+    assert_eq!(
+        item["error"]["code"], "git_checkout_running",
+        "{response:?}"
+    );
+    assert!(!app.tab().unwrap().saving);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Gespeichert\n");
+
+    // Files outside the repository are not affected.
+    app.open_file(other.clone());
+    wait_for(&mut app, |app| !app.tab().unwrap().loading);
+    edit(&mut app, "Außerhalb geändert\n");
+    app.save_current();
+    settle_document_writes(&mut app);
+    assert_eq!(fs::read_to_string(&other).unwrap(), "Außerhalb geändert\n");
+
+    // Actions such as a commit do not rewrite the working tree.
+    app.git_action.as_mut().unwrap().rewrites_working_tree = false;
+    app.save_tab(id, None);
+    settle_document_writes(&mut app);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Entwurf\n");
+
+    // Cancelling marks the action as stopping until Git reports the result.
+    app.cancel_git_action();
+    assert!(cancellation.is_cancelled());
+    assert!(app.status.as_ref().unwrap().0.contains("Stopping pull"));
+}
+
+#[cfg(windows)]
+#[test]
+fn saving_through_a_junction_keeps_the_path_the_user_opened() {
+    use std::os::windows::process::CommandExt;
+    let fixture = RecoveryFixture::new("junction-save");
+    fs::create_dir(fixture.root.join("real")).unwrap();
+    let real = fixture.write("real/notes.txt", "Gespeichert\n");
+    let link = fixture.root.join("linked");
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(fixture.root.join("real"))
+        .creation_flags(0x0800_0000)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let opened = link.join("notes.txt");
+    let mut app = fixture.app();
+    fixture.open(&mut app, opened.clone());
+    edit(&mut app, "Über den Link\n");
+    app.save_current();
+    settle_document_writes(&mut app);
+    let tab = app.tab().unwrap();
+    assert!(!tab.dirty);
+    assert!(tab.error.is_none());
+    assert_eq!(tab.path.as_ref(), Some(&opened));
+    assert_eq!(fs::read_to_string(&real).unwrap(), "Über den Link\n");
+    app.open_file(opened.clone());
+    assert_eq!(app.projects[0].tabs.len(), 1);
+    assert_eq!(
+        app.session().projects[0].tabs[0].path.as_ref(),
+        Some(&opened)
+    );
+    // Remove the junction itself before the fixture removes its folder.
+    fs::remove_dir(&link).unwrap();
+}

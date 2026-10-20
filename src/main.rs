@@ -17,6 +17,7 @@ mod lsp;
 mod markdown;
 mod palette;
 mod paths;
+mod process_liveness;
 mod profile;
 mod recovery;
 mod render;

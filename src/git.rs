@@ -12,13 +12,22 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(90);
+/// Read-only queries are stopped with their process tree after this limit.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+/// User-initiated changes can run hooks, LFS filters or large checkouts. They
+/// are stopped only by the user, by this safety limit or when vEdit exits.
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// After Git exits, a descendant that still holds its output pipes is stopped
+/// once this grace period ends. Helpers that detached from the pipes survive.
+const EXIT_PIPE_GRACE: Duration = Duration::from_secs(2);
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+/// A status of a working tree with very many unignored files.
+const STATUS_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
 const UNTRACKED_FILE_LIMIT: usize = 1024 * 1024;
 const UNTRACKED_TOTAL_LIMIT: usize = 8 * 1024 * 1024;
 const UNTRACKED_PATH_LIMIT: usize = 128;
@@ -26,6 +35,85 @@ const UNTRACKED_PATH_LIMIT: usize = 128;
 #[cfg(test)]
 thread_local! {
     static GIT_COMMAND_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TIMEOUTS: std::cell::Cell<Option<(Duration, Duration)>> =
+        const { std::cell::Cell::new(None) };
+    static STATUS_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
+    static CANCELLATION: std::cell::RefCell<Option<Cancellation>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Replace the query and mutation limits of Git processes started on this
+/// thread, so tests need not wait for the real limits.
+#[cfg(test)]
+pub(crate) fn set_test_timeouts(query: Duration, mutation: Duration) {
+    TIMEOUTS.with(|timeouts| timeouts.set(Some((query, mutation))));
+}
+
+fn timeout(access: Access) -> Duration {
+    #[cfg(test)]
+    if let Some((query, mutation)) = TIMEOUTS.with(std::cell::Cell::get) {
+        return match access {
+            Access::Query => query,
+            Access::Mutation => mutation,
+        };
+    }
+    match access {
+        Access::Query => QUERY_TIMEOUT,
+        Access::Mutation => MUTATION_TIMEOUT,
+    }
+}
+
+fn status_output_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = STATUS_LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    STATUS_OUTPUT_LIMIT
+}
+
+/// Whether a Git process only reads the repository or carries out a change the
+/// user asked for. Interrupting a change can leave a partly updated working
+/// tree and a stale `index.lock`, so changes get no short time limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Access {
+    Query,
+    Mutation,
+}
+
+/// Lets the user stop a running Git action, together with its hooks and helpers.
+#[derive(Clone, Debug, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Run `work` so that every Git process it starts on this thread stops when
+/// `cancellation` is triggered.
+pub fn cancellable<T>(cancellation: &Cancellation, work: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Cancellation>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CANCELLATION.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+    let previous = CANCELLATION.with(|current| current.replace(Some(cancellation.clone())));
+    let _restore = Restore(previous);
+    work()
+}
+
+fn current_cancellation() -> Option<Cancellation> {
+    CANCELLATION.with(|current| current.borrow().clone())
 }
 
 /// Git processes started on this thread since the last call.
@@ -41,6 +129,7 @@ pub type GitResult<T> = Result<T, GitError>;
 pub struct GitError {
     operation: String,
     details: String,
+    output_too_large: bool,
 }
 
 impl GitError {
@@ -48,6 +137,7 @@ impl GitError {
         Self {
             operation: operation.into(),
             details: details.into(),
+            output_too_large: false,
         }
     }
 }
@@ -114,6 +204,9 @@ pub struct RepoStatus {
     /// `None` when HEAD is detached.
     pub branch: Option<String>,
     pub files: Vec<FileStatus>,
+    /// Git listed untracked folders instead of every untracked file because
+    /// there were too many of them.
+    pub untracked_collapsed: bool,
 }
 
 /// A recent commit suitable for a compact history list.
@@ -314,7 +407,7 @@ fn local_main_branch(root: &Path) -> GitResult<Option<&'static str>> {
 /// Initialize a Git repository in `root`.
 pub fn initialize(root: &Path) -> GitResult<()> {
     let args = string_args(&["init"]);
-    checked_git(root, &args, "initialize repository")?;
+    mutate_git(root, &args, "initialize repository")?;
     Ok(())
 }
 
@@ -440,19 +533,51 @@ pub fn branch_info(root: &Path) -> GitResult<BranchInfo> {
 pub fn status(root: &Path) -> GitResult<RepoStatus> {
     let files = status_files(root)?;
     let branch = current_branch(root)?;
-    Ok(RepoStatus { branch, files })
+    Ok(RepoStatus {
+        branch,
+        files,
+        untracked_collapsed: false,
+    })
 }
 
-fn status_with_tracking_args() -> Vec<OsString> {
+fn status_with_tracking_args(untracked: &str) -> Vec<OsString> {
     string_args(&[
         "status",
         "--porcelain=v2",
         "--branch",
         "--ahead-behind",
         "-z",
-        "--untracked-files=all",
+        untracked,
         "--renames",
     ])
+}
+
+/// Porcelain v2 status listing every untracked file. Above the output limit,
+/// for example with many unignored build outputs, untracked folders are
+/// listed as a whole instead; the flag reports that fallback.
+fn read_status_output(root: &Path, operation: &str) -> GitResult<(Vec<u8>, bool)> {
+    let run = |untracked: &str| {
+        run_git(
+            root,
+            &status_with_tracking_args(untracked),
+            operation,
+            None,
+            Access::Query,
+            status_output_limit(),
+        )
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(output.stdout)
+            } else {
+                Err(command_error(operation, &output))
+            }
+        })
+    };
+    match run("--untracked-files=all") {
+        Ok(stdout) => Ok((stdout, false)),
+        Err(error) if error.output_too_large => Ok((run("--untracked-files=normal")?, true)),
+        Err(error) => Err(error),
+    }
 }
 
 /// Read file status and local branch tracking in the same Git process.
@@ -473,8 +598,10 @@ pub enum StatusHead {
 /// [`status_with_tracking`] plus the HEAD commit reported by the same process.
 /// The head is `None` when Git did not report a valid one.
 pub fn status_with_head(root: &Path) -> GitResult<(RepoStatus, BranchInfo, Option<StatusHead>)> {
-    let output = checked_git(root, &status_with_tracking_args(), "read repository status")?;
-    parse_status_with_tracking(&output.stdout)
+    let (stdout, collapsed) = read_status_output(root, "read repository status")?;
+    let (mut status, tracking, head) = parse_status_with_tracking(&stdout)?;
+    status.untracked_collapsed = collapsed;
+    Ok((status, tracking, head))
 }
 
 /// Branch, upstream divergence and change totals of one working tree. Reading
@@ -493,10 +620,10 @@ pub struct WorktreeStatus {
 /// The same porcelain v2 status as [`status_with_tracking`], reduced to the
 /// totals an overview needs. File records are counted, not retained.
 pub fn worktree_status(root: &Path) -> GitResult<WorktreeStatus> {
-    let output = checked_git(root, &status_with_tracking_args(), "read worktree status")?;
-    let (status, tracking, _) = parse_status_with_tracking(&output.stdout)?;
+    let (stdout, _) = read_status_output(root, "read worktree status")?;
+    let (status, tracking, _) = parse_status_with_tracking(&stdout)?;
     Ok(WorktreeStatus {
-        head: status_branch_oid(&output.stdout),
+        head: status_branch_oid(&stdout),
         changes: status.files.len(),
         conflicts: status
             .files
@@ -718,14 +845,14 @@ pub fn stage_paths(root: &Path, paths: &[PathBuf]) -> GitResult<()> {
     validate_paths(paths, "stage files")?;
     let mut args = string_args(&["add", "--"]);
     args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
-    checked_git(root, &args, "stage files")?;
+    mutate_git(root, &args, "stage files")?;
     Ok(())
 }
 
 /// Stage all additions, modifications, and deletions in the working tree.
 pub fn stage_all(root: &Path) -> GitResult<()> {
     let args = string_args(&["add", "-A"]);
-    checked_git(root, &args, "stage all files")?;
+    mutate_git(root, &args, "stage all files")?;
     Ok(())
 }
 
@@ -749,23 +876,23 @@ pub fn commit(root: &Path, message: &str) -> GitResult<String> {
     }
     let mut args = string_args(&["commit", "-m"]);
     args.push(OsString::from(message));
-    let output = checked_git(root, &args, "commit")?;
+    let output = mutate_git(root, &args, "commit")?;
     Ok(output_text(&output))
 }
 
 /// Push the current branch using the repository's configured Git defaults.
 pub fn push(root: &Path) -> GitResult<String> {
-    run_and_capture(root, &["push"], "push")
+    run_and_capture_change(root, &["push"], "push")
 }
 
 /// Fetch from the configured remotes.
 pub fn fetch(root: &Path) -> GitResult<String> {
-    run_and_capture(root, &["fetch"], "fetch")
+    run_and_capture_change(root, &["fetch"], "fetch")
 }
 
 /// Pull the configured upstream into the current branch.
 pub fn pull(root: &Path) -> GitResult<String> {
-    run_and_capture(root, &["pull", "--ff-only"], "pull")
+    run_and_capture_change(root, &["pull", "--ff-only"], "pull")
 }
 
 /// Read a plain-text patch for a repository-relative path. External diff
@@ -2055,7 +2182,7 @@ pub fn switch_branch(root: &Path, target: &str) -> GitResult<String> {
         RefKind::Remote => string_args(&["switch", "--track", "--", target]),
         _ => unreachable!(),
     };
-    checked_git(root, &args, "switch branch")?;
+    mutate_git(root, &args, "switch branch")?;
     Ok(current_branch(root)?.unwrap_or_default())
 }
 
@@ -2069,7 +2196,7 @@ fn unstage(root: &Path, paths: &[PathBuf]) -> GitResult<()> {
         string_args(&["rm", "--cached", "-r", "--force", "--ignore-unmatch", "--"])
     };
     args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
-    checked_git(root, &args, "unstage files")?;
+    mutate_git(root, &args, "unstage files")?;
     Ok(())
 }
 
@@ -2107,9 +2234,8 @@ fn read_head(root: &Path) -> GitResult<Option<String>> {
     Err(command_error("check repository HEAD", &head))
 }
 
-fn run_and_capture(root: &Path, args: &[&str], operation: &str) -> GitResult<String> {
-    let args = string_args(args);
-    let output = checked_git(root, &args, operation)?;
+fn run_and_capture_change(root: &Path, args: &[&str], operation: &str) -> GitResult<String> {
+    let output = mutate_git(root, &string_args(args), operation)?;
     Ok(output_text(&output))
 }
 
@@ -2146,20 +2272,48 @@ fn raw_git_with_input(
     operation: &str,
     input: Option<Vec<u8>>,
 ) -> GitResult<Output> {
+    run_git(root, args, operation, input, Access::Query, OUTPUT_LIMIT)
+}
+
+/// Settings from user or repository configuration that would change the
+/// machine-readable output vEdit parses. Each is pinned to Git's default.
+/// Later `-c` arguments of an individual command still take precedence.
+const PINNED_CONFIG: &[&str] = &[
+    "credential.interactive=never",
+    "core.askPass=",
+    "color.ui=false",
+    "color.diff=false",
+    "color.status=false",
+    "color.branch=false",
+    // Signature verification output would precede formatted log records.
+    "log.showSignature=false",
+    "core.quotePath=true",
+    "diff.noprefix=false",
+    "diff.mnemonicPrefix=false",
+    "diff.srcPrefix=a/",
+    "diff.dstPrefix=b/",
+    "diff.relative=false",
+    "diff.suppressBlankEmpty=false",
+    "status.relativePaths=true",
+    "i18n.logOutputEncoding=UTF-8",
+];
+
+fn run_git(
+    root: &Path,
+    args: &[OsString],
+    operation: &str,
+    input: Option<Vec<u8>>,
+    access: Access,
+    output_limit: usize,
+) -> GitResult<Output> {
     #[cfg(test)]
     GIT_COMMAND_COUNT.with(|count| count.set(count.get() + 1));
     let mut command = Command::new("git");
+    command.arg("--no-pager").arg("--literal-pathspecs");
+    for setting in PINNED_CONFIG {
+        command.arg("-c").arg(setting);
+    }
     command
-        .arg("--no-pager")
-        .arg("--literal-pathspecs")
-        .args([
-            "-c",
-            "credential.interactive=never",
-            "-c",
-            "core.askPass=",
-            "-c",
-            "color.ui=false",
-        ])
         .arg("-C")
         .arg(root.as_os_str())
         .args(args)
@@ -2171,23 +2325,82 @@ fn raw_git_with_input(
         // Make Git's diagnostics deterministic for classification and display.
         .env("LC_ALL", "C")
         .env("LANG", "C")
+        .env("LANGUAGE", "C")
         // Reading status should not contend with another Git process for an
         // optional index refresh lock.
         .env("GIT_OPTIONAL_LOCKS", "0");
-    let network = args
-        .first()
-        .is_some_and(|arg| matches!(arg.to_str(), Some("push" | "fetch" | "pull")));
     run_bounded_with_input(
         command,
-        if network {
-            NETWORK_TIMEOUT
-        } else {
-            LOCAL_TIMEOUT
-        },
-        OUTPUT_LIMIT,
+        timeout(access),
+        output_limit,
         operation,
         input,
+        current_cancellation(),
     )
+}
+
+/// Run a change the user asked for. It has no short time limit and stops
+/// early only through [`cancellable`]. A failure that leaves the index lock
+/// behind explains how to recover; vEdit never removes the lock itself.
+fn mutate_git(root: &Path, args: &[OsString], operation: &str) -> GitResult<Output> {
+    run_git(root, args, operation, None, Access::Mutation, OUTPUT_LIMIT)
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(output)
+            } else {
+                Err(command_error(operation, &output))
+            }
+        })
+        .map_err(|error| with_index_lock_hint(root, error))
+}
+
+fn with_index_lock_hint(root: &Path, mut error: GitError) -> GitError {
+    // Git names the lock itself when another process holds it.
+    if error.details.contains("index.lock") {
+        return error;
+    }
+    if let Some(lock) = index_lock_path(root).filter(|lock| lock.is_file()) {
+        error.details.push_str(&format!(
+            "\n{} remains, so Git may have been interrupted. If no other Git program is working in this repository, delete that file before the next Git action. vEdit does not delete it.",
+            crate::paths::display(&lock)
+        ));
+    }
+    error
+}
+
+/// The index lock of the working tree at `root`. A linked worktree keeps its
+/// index in the main repository's `.git/worktrees/<name>` directory.
+fn index_lock_path(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if let Ok(text) = std::fs::read_to_string(&dot_git) {
+        let target = PathBuf::from(
+            text.lines()
+                .find_map(|line| line.strip_prefix("gitdir:"))?
+                .trim(),
+        );
+        if target.is_absolute() {
+            target
+        } else {
+            root.join(target)
+        }
+    } else {
+        let output = raw_git(
+            root,
+            &string_args(&["rev-parse", "--git-path", "index.lock"]),
+            "locate index lock",
+        )
+        .ok()
+        .filter(|output| output.status.success())?;
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        return Some(if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        });
+    };
+    Some(git_dir.join("index.lock"))
 }
 
 /// Drain both pipes concurrently: waiting before reading can deadlock as soon
@@ -2200,7 +2413,12 @@ fn run_bounded(
     output_limit: usize,
     operation: &str,
 ) -> GitResult<Output> {
-    run_bounded_with_input(command, timeout, output_limit, operation, None)
+    run_bounded_with_input(command, timeout, output_limit, operation, None, None)
+}
+
+enum ReadFailure {
+    TooLarge,
+    Io(io::Error),
 }
 
 fn run_bounded_with_input(
@@ -2209,6 +2427,7 @@ fn run_bounded_with_input(
     output_limit: usize,
     operation: &str,
     input: Option<Vec<u8>>,
+    cancellation: Option<Cancellation>,
 ) -> GitResult<Output> {
     command
         .stdin(if input.is_some() {
@@ -2246,7 +2465,10 @@ fn run_bounded_with_input(
             .name("git-input".into())
             .spawn(move || {
                 use std::io::Write;
-                let result = stdin.write_all(&input).map(|()| Vec::new());
+                let result = stdin
+                    .write_all(&input)
+                    .map(|()| Vec::new())
+                    .map_err(ReadFailure::Io);
                 drop(stdin);
                 let _ = sender.send((2_u8, result));
             })
@@ -2270,12 +2492,12 @@ fn run_bounded_with_input(
                         Ok(0) => break Ok(bytes),
                         Ok(length) => {
                             if bytes.len().saturating_add(length) > output_limit {
-                                break Err(io::Error::other("Git output is too large to display"));
+                                break Err(ReadFailure::TooLarge);
                             }
                             bytes.extend_from_slice(&buffer[..length]);
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) => break Err(error),
+                        Err(error) => break Err(ReadFailure::Io(error)),
                     }
                 };
                 let _ = sender.send((stream, result));
@@ -2287,6 +2509,7 @@ fn run_bounded_with_input(
     drop(sender);
     let deadline = Instant::now() + timeout;
     let mut status = None;
+    let mut exited_at = None;
     let mut stdout = None;
     let mut stderr = None;
     loop {
@@ -2295,7 +2518,7 @@ fn run_bounded_with_input(
                 GitError::new(operation, format!("could not wait for Git: {error}"))
             })?;
             if status.is_some() {
-                process.close_job();
+                exited_at = Some(Instant::now());
             }
         }
         if let Some(status) = status
@@ -2303,25 +2526,43 @@ fn run_bounded_with_input(
             && stderr.is_some()
             && input_done
         {
+            // Helpers that Git started and that detached from its pipes, such
+            // as the fsmonitor daemon or gpg-agent, keep running.
+            process.release();
             return Ok(Output {
                 status,
                 stdout: stdout.take().unwrap(),
                 stderr: stderr.take().unwrap(),
             });
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        if cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+        {
             return Err(GitError::new(
                 operation,
-                format!(
-                    "timed out after {} seconds; check remote connectivity or repository hooks and try again",
-                    timeout.as_secs()
-                ),
+                "cancelled; Git and the programs it started were stopped, so the repository may be partly updated",
             ));
+        }
+        if exited_at.is_some_and(|exited| exited.elapsed() >= EXIT_PIPE_GRACE) {
+            // A background descendant still holds Git's output pipes. Stop it
+            // so that the completed command's output can be read.
+            exited_at = None;
+            process.close_job();
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(GitError::new(operation, timeout_details(timeout)));
         }
         match receiver.recv_timeout(remaining.min(Duration::from_millis(10))) {
             Ok((stream, result)) => {
-                let bytes = result.map_err(|error| GitError::new(operation, error.to_string()))?;
+                let bytes = result.map_err(|failure| match failure {
+                    ReadFailure::TooLarge => GitError {
+                        output_too_large: true,
+                        ..GitError::new(operation, "Git output is too large to display")
+                    },
+                    ReadFailure::Io(error) => GitError::new(operation, error.to_string()),
+                })?;
                 match stream {
                     0 => stdout = Some(bytes),
                     1 => stderr = Some(bytes),
@@ -2342,10 +2583,26 @@ fn run_bounded_with_input(
     }
 }
 
+fn timeout_details(timeout: Duration) -> String {
+    if timeout >= Duration::from_secs(120) {
+        format!(
+            "stopped after {} minutes; Git and the programs it started were stopped, so the repository may be partly updated",
+            timeout.as_secs() / 60
+        )
+    } else {
+        format!(
+            "timed out after {} seconds; check remote connectivity or repository hooks and try again",
+            timeout.as_secs()
+        )
+    }
+}
+
 struct RunningProcess {
     child: Child,
     #[cfg(windows)]
     job: Option<windows_job::Job>,
+    /// Git exited normally and its remaining processes were released.
+    released: bool,
 }
 
 impl RunningProcess {
@@ -2356,9 +2613,11 @@ impl RunningProcess {
             child,
             #[cfg(windows)]
             job,
+            released: false,
         }
     }
 
+    /// Stop every process that is still part of Git's process tree.
     fn close_job(&mut self) {
         #[cfg(windows)]
         drop(self.job.take());
@@ -2374,10 +2633,22 @@ impl RunningProcess {
             }
         }
     }
+
+    /// Let processes that outlive a completed Git command keep running.
+    fn release(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.release();
+        }
+        self.released = true;
+    }
 }
 
 impl Drop for RunningProcess {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         self.close_job();
         let _ = self.child.kill();
         // Reap the process with a short bound. Output readers are never joined
@@ -2389,14 +2660,18 @@ impl Drop for RunningProcess {
     }
 }
 
-/// A Windows job ensures timing out Git also stops SSH, hooks and credential
+/// A Windows job ensures stopping Git also stops SSH, hooks and credential
 /// helpers that inherited its pipes. No terminal window is needed to stop the
-/// process tree, and closing the handle guarantees cleanup on every error path.
+/// process tree. Closing the handle stops the tree on every error path,
+/// including when vEdit exits while Git is still running.
 #[cfg(windows)]
 mod windows_job {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
+
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const EXTENDED_LIMIT_INFORMATION: u32 = 9;
 
     #[repr(C)]
     struct BasicLimits {
@@ -2438,27 +2713,37 @@ mod windows_job {
 
     impl Job {
         pub(super) fn attach(child: &Child) -> Option<Self> {
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return None;
+            }
+            let job = Self(handle);
+            if !job.set_flags(KILL_ON_JOB_CLOSE)
+                || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
+            {
+                return None;
+            }
+            Some(job)
+        }
+
+        fn set_flags(&self, flags: u32) -> bool {
             // All fields are integer counters, flags or sizes; zero is valid.
             let mut limits: ExtendedLimits = unsafe { std::mem::zeroed() };
-            limits.basic.flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            limits.basic.flags = flags;
             unsafe {
-                let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                if handle.is_null() {
-                    return None;
-                }
-                let job = Self(handle);
-                if SetInformationJobObject(
-                    handle,
-                    9,
+                SetInformationJobObject(
+                    self.0,
+                    EXTENDED_LIMIT_INFORMATION,
                     &limits as *const _ as *const c_void,
                     std::mem::size_of::<ExtendedLimits>() as u32,
-                ) == 0
-                    || AssignProcessToJobObject(handle, child.as_raw_handle()) == 0
-                {
-                    return None;
-                }
-                Some(job)
+                ) != 0
             }
+        }
+
+        /// Close the job without stopping the processes that remain in it.
+        /// If the limit cannot be cleared, closing stops them as before.
+        pub(super) fn release(self) {
+            self.set_flags(0);
         }
     }
 
@@ -2746,6 +3031,7 @@ fn parse_status_with_tracking(
         RepoStatus {
             branch: tracking.name.clone(),
             files,
+            untracked_collapsed: false,
         },
         tracking,
         head,
@@ -4902,6 +5188,279 @@ mod tests {
                 "diff --git a/x b/x\n+diff --git inside\n",
                 "diff --git a/y b/y\n"
             ]
+        );
+    }
+
+    fn wait_for_file(path: &Path, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !path.exists() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    fn a_commit_hook_may_run_longer_than_the_query_limit() {
+        let repository = TestRepository::new();
+        repository.write("file.txt", "contents\n");
+        stage_all(&repository.0).unwrap();
+        fs::write(
+            repository.0.join("test-hooks/pre-commit"),
+            "#!/bin/sh\nsleep 1\nprintf 'checked' > hook-completed.txt\n",
+        )
+        .unwrap();
+        set_test_timeouts(Duration::from_millis(300), Duration::from_secs(60));
+        let committed = commit(&repository.0, "Checked by a slow hook");
+        let slow_query = run_bounded_with_input(
+            script(if cfg!(windows) {
+                "Start-Sleep -Seconds 5"
+            } else {
+                "sleep 5"
+            }),
+            timeout(Access::Query),
+            OUTPUT_LIMIT,
+            "slow query",
+            None,
+            None,
+        );
+        set_test_timeouts(QUERY_TIMEOUT, MUTATION_TIMEOUT);
+        committed.unwrap();
+        assert!(repository.0.join("hook-completed.txt").is_file());
+        assert_eq!(
+            recent_log(&repository.0, 1).unwrap()[0].subject,
+            "Checked by a slow hook"
+        );
+        assert!(
+            slow_query
+                .unwrap_err()
+                .to_string()
+                .contains("timed out after 0 seconds")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelling_a_commit_stops_its_hook_and_explains_the_remaining_index_lock() {
+        let repository = TestRepository::new();
+        repository.write("file.txt", "contents\n");
+        stage_all(&repository.0).unwrap();
+        fs::write(
+            repository.0.join("test-hooks/pre-commit"),
+            "#!/bin/sh\n: > .git/index.lock\nprintf 'started' > hook-started.txt\nsleep 3\nprintf 'still alive' > hook-completed.txt\n",
+        )
+        .unwrap();
+        let cancellation = Cancellation::default();
+        let root = repository.0.clone();
+        let started = Instant::now();
+        let worker = {
+            let cancellation = cancellation.clone();
+            thread::spawn(move || cancellable(&cancellation, || commit(&root, "Interrupted")))
+        };
+        assert!(wait_for_file(
+            &repository.0.join("hook-started.txt"),
+            Duration::from_secs(10)
+        ));
+        cancellation.cancel();
+        let error = worker.join().unwrap().unwrap_err().to_string();
+        assert!(started.elapsed() < Duration::from_secs(3), "{error}");
+        assert!(error.contains("cancelled"), "{error}");
+        let lock = repository.0.join(".git").join("index.lock");
+        // The hook stands in for a Git step that holds the index lock when it
+        // is stopped, such as the checkout of a switch or pull. vEdit explains
+        // the remaining lock and leaves the decision to remove it to the user.
+        assert!(lock.is_file());
+        assert!(error.contains("index.lock remains"), "{error}");
+        assert!(error.contains("vEdit does not delete it"), "{error}");
+        thread::sleep(Duration::from_millis(3500));
+        assert!(
+            !repository.0.join("hook-completed.txt").exists(),
+            "the cancelled hook must not continue running"
+        );
+        fs::remove_file(&lock).unwrap();
+        assert!(recent_log(&repository.0, 1).unwrap().is_empty());
+        // Outside a cancellable scope, the next Git action is not cancelled.
+        commit(&repository.0, "After removing the lock").unwrap();
+    }
+
+    #[test]
+    fn index_lock_hint_follows_a_linked_worktree_and_defers_to_git_messages() {
+        let repository = TestRepository::new();
+        repository.write("file.txt", "contents\n");
+        repository.commit_all("base");
+        let linked = repository.0.join("linked tree");
+        repository.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+        // Git derives the administrative folder's name from the worktree's.
+        let mut administrative = fs::read_dir(repository.0.join(".git").join("worktrees"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path());
+        let expected = administrative.next().unwrap().join("index.lock");
+        assert!(administrative.next().is_none());
+        assert_eq!(
+            fs::canonicalize(index_lock_path(&linked).unwrap().parent().unwrap()).unwrap(),
+            fs::canonicalize(expected.parent().unwrap()).unwrap()
+        );
+        let interrupted =
+            with_index_lock_hint(&linked, GitError::new("switch branch", "cancelled"));
+        assert!(!interrupted.to_string().contains("index.lock"));
+        fs::write(&expected, "").unwrap();
+        let interrupted =
+            with_index_lock_hint(&linked, GitError::new("switch branch", "cancelled"));
+        assert!(interrupted.to_string().contains("index.lock remains"));
+        // Git names a lock held by another process itself; that message stays.
+        let error = stage_all(&linked).unwrap_err().to_string();
+        assert_eq!(error.matches("index.lock").count(), 1, "{error}");
+        assert!(expected.is_file(), "vEdit must never remove the lock");
+        fs::remove_file(&expected).unwrap();
+        repository.git(&["worktree", "remove", "--force", linked.to_str().unwrap()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helpers_that_outlive_git_keep_running_unless_they_hold_its_pipes() {
+        let repository = TestRepository::new();
+        repository.write("file.txt", "contents\n");
+        stage_all(&repository.0).unwrap();
+        // The detached helper behaves like an fsmonitor daemon or gpg-agent.
+        // The attached one inherited Git's output pipes and would block it.
+        fs::write(
+            repository.0.join("test-hooks/post-commit"),
+            "#!/bin/sh\n(sleep 1; printf 'alive' > detached-helper.txt) >/dev/null 2>&1 </dev/null &\n(sleep 6; printf 'alive' > attached-helper.txt) &\n",
+        )
+        .unwrap();
+        let started = Instant::now();
+        commit(&repository.0, "With helpers").unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= EXIT_PIPE_GRACE && elapsed < Duration::from_secs(5),
+            "{elapsed:?}"
+        );
+        assert!(
+            wait_for_file(
+                &repository.0.join("detached-helper.txt"),
+                Duration::from_secs(5)
+            ),
+            "a helper that detached from Git's pipes must survive its exit"
+        );
+        thread::sleep(
+            Duration::from_secs(6).saturating_sub(started.elapsed()) + Duration::from_millis(500),
+        );
+        assert!(!repository.0.join("attached-helper.txt").exists());
+    }
+
+    #[test]
+    fn user_configuration_cannot_change_parsed_git_output() {
+        let repository = TestRepository::new();
+        repository.write("Ünïcode plan.txt", "first\n");
+        repository.commit_all("base");
+        let base = repository.head_hash();
+        let tree = String::from_utf8(repository.git(&["rev-parse", "HEAD^{tree}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        // A commit with an SSH signature that cannot be verified here. With
+        // log.showSignature, Git prints "No signature" before formatted output.
+        let object = format!(
+            "tree {tree}\nparent {base}\nauthor A <a@example.invalid> 1700000000 +0000\ncommitter A <a@example.invalid> 1700000000 +0000\ngpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\nSigned ü\n\nBody\n"
+        );
+        let signed = raw_git_with_input(
+            &repository.0,
+            &string_args(&["hash-object", "-t", "commit", "-w", "--stdin"]),
+            "test fixture",
+            Some(object.into_bytes()),
+        )
+        .unwrap();
+        let signed = String::from_utf8(signed.stdout).unwrap().trim().to_owned();
+        repository.git(&["update-ref", "refs/heads/main", &signed]);
+        repository.write("Ünïcode plan.txt", "first\nsecond\n");
+        repository.write("untracked.txt", "new\n");
+        for (key, value) in [
+            ("log.showSignature", "true"),
+            ("gpg.format", "ssh"),
+            ("color.ui", "always"),
+            ("color.diff", "always"),
+            ("color.status", "always"),
+            ("color.branch", "always"),
+            ("core.quotePath", "false"),
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.srcPrefix", "SRC/"),
+            ("diff.dstPrefix", "DST/"),
+            ("diff.relative", "true"),
+            ("diff.external", "false-diff-tool-that-does-not-exist"),
+            ("status.relativePaths", "false"),
+            ("i18n.logOutputEncoding", "ISO-8859-1"),
+            ("log.decorate", "full"),
+            ("format.pretty", "oneline"),
+        ] {
+            repository.git(&["config", key, value]);
+        }
+
+        let details = commit_details(&repository.0, &signed).unwrap();
+        assert_eq!(details.hash, signed);
+        assert_eq!(details.message.trim_end(), "Signed ü\n\nBody");
+        let log = recent_log(&repository.0, 2).unwrap();
+        assert_eq!(log[0].hash, signed);
+        assert_eq!(log[0].subject, "Signed ü");
+        let headlines = commit_headlines(&repository.0, std::slice::from_ref(&signed)).unwrap();
+        assert_eq!(headlines[0].subject, "Signed ü");
+        let comparison =
+            resolve_review(&repository.0, &ReviewSource::Commit(signed.clone())).unwrap();
+        assert_eq!(comparison.old, base);
+        assert_eq!(comparison.new.as_deref(), Some(signed.as_str()));
+        assert!(
+            comparison.title.contains("Signed ü"),
+            "{}",
+            comparison.title
+        );
+        let (status, tracking, _) = status_with_head(&repository.0).unwrap();
+        assert_eq!(tracking.name.as_deref(), Some("main"));
+        let names: Vec<_> = status.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(names, ["Ünïcode plan.txt", "untracked.txt"]);
+        let patch = diff(&repository.0, Path::new("Ünïcode plan.txt"), false).unwrap();
+        assert!(
+            patch.starts_with("diff --git \"a/\\303\\234n\\303\\257code plan.txt\" \"b/"),
+            "{patch}"
+        );
+        assert!(!patch.contains('\u{1b}'), "{patch}");
+        assert!(patch.contains("\n+second\n"), "{patch}");
+    }
+
+    #[test]
+    fn too_many_untracked_files_fall_back_to_untracked_folders() {
+        let repository = TestRepository::new();
+        repository.write("tracked.txt", "tracked\n");
+        repository.commit_all("base");
+        fs::create_dir(repository.0.join("build output")).unwrap();
+        for index in 0..200 {
+            repository.write(&format!("build output/artifact-{index:03}.o"), "binary");
+        }
+        repository.write("tracked.txt", "changed\n");
+        let (status, _, _) = status_with_head(&repository.0).unwrap();
+        assert!(!status.untracked_collapsed);
+        assert_eq!(status.files.len(), 201);
+
+        STATUS_LIMIT.with(|limit| limit.set(Some(4096)));
+        let collapsed = status_with_head(&repository.0);
+        let overview = worktree_status(&repository.0);
+        STATUS_LIMIT.with(|limit| limit.set(None));
+        let (status, tracking, head) = collapsed.unwrap();
+        assert!(status.untracked_collapsed);
+        assert_eq!(tracking.name.as_deref(), Some("main"));
+        assert!(matches!(head, Some(StatusHead::Commit(_))));
+        let names: Vec<_> = status.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(names, ["tracked.txt", "build output/"]);
+        assert_eq!(overview.unwrap().changes, 2);
+    }
+
+    #[test]
+    fn index_lock_hint_follows_a_main_worktree_without_git_processes() {
+        let repository = TestRepository::new();
+        assert_eq!(
+            index_lock_path(&repository.0),
+            Some(repository.0.join(".git").join("index.lock"))
         );
     }
 }
