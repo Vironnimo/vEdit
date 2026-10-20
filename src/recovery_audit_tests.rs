@@ -284,10 +284,12 @@ fn recovery_restore_never_adopts_an_external_edit_as_its_save_baseline() {
     let tab = restored.tab().unwrap();
     assert_eq!(tab.text, "Mein Entwurf 🦀\nzweite Zeile\n");
     assert!(tab.dirty);
-    assert!(
-        tab.error.is_some(),
-        "the conflicting draft needs a visible error"
-    );
+    let conflict = tab
+        .disk_conflict
+        .as_ref()
+        .expect("the conflicting draft needs a visible decision");
+    assert_eq!(conflict.disk.text, external);
+    assert!(tab.recovery_path.exists(), "recovery keeps the draft");
 }
 
 #[test]
@@ -349,7 +351,18 @@ fn legacy_recovery_without_a_baseline_preserves_disk_on_auto_and_explicit_save()
         "\u{feff}Externe aktuelle Datei\r\n".as_bytes(),
     );
     assert!(restored.tab().unwrap().dirty);
-    assert!(restored.tab().unwrap().error.is_some());
+    // Without a recorded baseline the disk version may be newer: the user decides.
+    assert_eq!(
+        restored
+            .tab()
+            .unwrap()
+            .disk_conflict
+            .as_ref()
+            .unwrap()
+            .disk
+            .text,
+        "Externe aktuelle Datei\n"
+    );
 }
 
 #[test]
@@ -550,7 +563,7 @@ fn duplicate_reload_completion_cannot_publish_after_the_buffer_is_editable() {
 }
 
 #[test]
-fn automatic_disk_reload_clears_native_undo_history_without_rendering_a_ui() {
+fn automatic_disk_reload_is_one_native_undo_step_without_rendering_a_ui() {
     let fixture = RecoveryFixture::new("native-history");
     let path = fixture.write("native.txt", "Original ü\n");
     let mut app = fixture.app();
@@ -571,19 +584,26 @@ fn automatic_disk_reload_clears_native_undo_history_without_rendering_a_ui() {
     fs::write(&path, external).unwrap();
     let document = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(document),
-        )]))
+            result: Ok(document),
+        }]))
         .unwrap();
     app.poll();
-    assert_eq!(app.context_native_history(id), (false, false));
-    app.context_native_undo(id, false);
     assert_eq!(app.tab().unwrap().text, "Neue externe Fassung 🦀\n");
     assert!(!app.tab().unwrap().dirty);
     assert!(app.tab().unwrap().bom);
     assert_eq!(app.tab().unwrap().line_ending, workspace::LineEnding::CrLf);
+    assert!(app.context_native_history(id).0);
+    // Undo restores the text from before the reload as an unsaved edit.
+    app.context_native_undo(id, false);
+    assert_eq!(app.tab().unwrap().text, "Zuletzt gespeicherte Änderung\n");
+    assert!(app.tab().unwrap().dirty);
+    app.context_native_undo(id, true);
+    assert_eq!(app.tab().unwrap().text, "Neue externe Fassung 🦀\n");
+    assert!(!app.tab().unwrap().dirty);
     assert_eq!(fs::read(path).unwrap(), external.as_bytes());
 }
 
@@ -734,11 +754,12 @@ fn unreadable_recovery_survives_disk_reload_and_new_recovery_writes() {
     let document = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
     restored
         .sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(document),
-        )]))
+            result: Ok(document),
+        }]))
         .unwrap();
     restored.poll();
     restored.autosave();

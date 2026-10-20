@@ -349,6 +349,7 @@ pub(super) enum TabAction {
     CloseSaved,
     Save,
     SaveAs,
+    CompareWithSaved,
     SplitVertical,
     SplitHorizontal,
     CopyPath,
@@ -360,6 +361,7 @@ pub(super) fn tab_menu(
     response: &egui::Response,
     has_path: bool,
     can_save: bool,
+    can_compare: bool,
     bindings: &keybindings::Bindings,
 ) -> Option<TabAction> {
     let mut action = None;
@@ -411,6 +413,26 @@ pub(super) fn tab_menu(
                 action = Some(command);
                 ui.close();
             }
+        }
+        if ui
+            .add_enabled_ui(can_compare, |ui| {
+                design::menu_item(
+                    ui,
+                    "Compare with saved",
+                    &keybindings::label(bindings, keybindings::Action::CompareWithSaved),
+                    "Show the unsaved changes of this document as a diff",
+                )
+            })
+            .inner
+            .on_disabled_hover_text(if has_path {
+                "Wait until the file has loaded"
+            } else {
+                "New files have no saved version to compare with"
+            })
+            .clicked()
+        {
+            action = Some(TabAction::CompareWithSaved);
+            ui.close();
         }
         ui.separator();
         for (label, tooltip, shortcut_action, command) in [
@@ -1076,6 +1098,7 @@ impl VEditApp {
             }
             TabAction::Save => self.save_tab(id, None),
             TabAction::SaveAs => self.request_save_as(id),
+            TabAction::CompareWithSaved => self.compare_with_saved(id),
             TabAction::SplitVertical | TabAction::SplitHorizontal => {
                 self.activate_tab(project, index);
                 let orientation = if matches!(action, TabAction::SplitVertical) {
@@ -1738,10 +1761,15 @@ impl VEditApp {
                         if tab.dirty || tab.agent_unsaved {
                             // Editing can continue after dispatch. Never discard a buffer
                             // just because its on-disk file was successfully recycled.
+                            //
+                            // The buffer becomes an untitled document. Who wrote its
+                            // edits does not change: the user's own edits stay a normal
+                            // unsaved buffer, and only an agent draft stays an agent draft.
+                            // Neither is saved automatically, because it has no path.
                             tab.path = None;
                             tab.fingerprint = None;
+                            tab.disk_conflict = None;
                             tab.dirty = true;
-                            tab.agent_unsaved = true;
                             tab.revision = tab.revision.saturating_add(1);
                         } else {
                             close_tabs.push(tab.id);
@@ -2174,7 +2202,8 @@ mod tests {
         assert_eq!(kept.text, "unsaved human buffer");
         assert_eq!(kept.selection, 2..6);
         assert!(kept.dirty);
-        assert!(kept.agent_unsaved);
+        // The user's own edits do not turn into an agent draft.
+        assert!(!kept.agent_unsaved);
         assert!(kept.fingerprint.is_none());
         assert!(source.exists()); // Result simulation does not touch the filesystem.
         cleanup_filesystem_fixture(&base);

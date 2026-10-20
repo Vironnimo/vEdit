@@ -25,11 +25,26 @@ impl IntelFixture {
         app.add_project(self.0.clone());
         app.open_file(path.clone());
         let deadline = Instant::now() + Duration::from_secs(8);
-        while app.project().unwrap().indexing || app.tab().unwrap().loading {
+        // Explorer directory results would otherwise race with tests that
+        // read the worker channel directly.
+        let explorer_pending = |app: &VEditApp| {
+            app.project()
+                .unwrap()
+                .explorer
+                .as_ref()
+                .is_some_and(|explorer| explorer.pending_count() > 0)
+        };
+        while app.project().unwrap().indexing
+            || app.tab().unwrap().loading
+            || explorer_pending(&app)
+        {
             app.poll();
             assert!(Instant::now() < deadline, "fixture did not finish loading");
             std::thread::sleep(Duration::from_millis(5));
         }
+        // Workers request their wakeup right after delivering a result; let
+        // those requests land before a test starts counting wakeups.
+        std::thread::sleep(Duration::from_millis(50));
         app.tab_mut().unwrap().recovery_path = self.0.join("recovery/source.txt");
         (app, path)
     }
@@ -313,11 +328,12 @@ fn disk_reload_updates_a_clean_document_and_preserves_encoding() {
     let fingerprint = document.fingerprint.clone();
     app.disk_check_running = true;
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(document),
-        )]))
+            result: Ok(document),
+        }]))
         .unwrap();
 
     app.poll();
@@ -399,11 +415,12 @@ fn disk_reload_never_overwrites_a_dirty_buffer_or_adopts_the_external_baseline()
     fs::write(&path, "external replacement").unwrap();
     let document = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
-            baseline.clone(),
-            Ok(document),
-        )]))
+            path: path.clone(),
+            baseline: baseline.clone(),
+            result: Ok(document),
+        }]))
         .unwrap();
 
     app.poll();
@@ -413,7 +430,11 @@ fn disk_reload_never_overwrites_a_dirty_buffer_or_adopts_the_external_baseline()
     assert_eq!(tab.saved_text, "original");
     assert_eq!(tab.fingerprint.as_ref(), Some(&baseline));
     assert!(tab.dirty);
-    assert!(tab.error.as_ref().unwrap().contains("changed outside"));
+    assert!(tab.error.is_none());
+    assert_eq!(
+        tab.disk_conflict.as_ref().unwrap().disk.text,
+        "external replacement"
+    );
 }
 
 #[test]
@@ -434,21 +455,23 @@ fn an_old_disk_scan_cannot_replace_a_document_after_a_newer_save_completed() {
     app.sender
         .send(WorkerResult::Saved {
             id,
-            path,
+            path: path.clone(),
             text: current.text,
             result: Ok(workspace::SavedDocument {
                 fingerprint: current.fingerprint,
                 line_ending: current.line_ending,
                 format_fallback: false,
             }),
+            conflict: None,
         })
         .unwrap();
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(old_document),
-        )]))
+            result: Ok(old_document),
+        }]))
         .unwrap();
 
     app.poll();
@@ -470,11 +493,12 @@ fn clean_reload_after_a_transient_error_clears_the_error_and_clamps_the_cursor()
     fs::write(&path, "hi").unwrap();
     let document = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(document),
-        )]))
+            result: Ok(document),
+        }]))
         .unwrap();
 
     app.poll();
@@ -626,7 +650,7 @@ fn one_undo_restores_the_main_completion_and_its_additional_imports() {
 }
 
 #[test]
-fn clean_external_reload_discards_history_that_could_restore_an_old_document() {
+fn clean_external_reload_is_one_vim_undo_step_that_keeps_older_history() {
     let fixture = IntelFixture::new("reload-undo");
     let (mut app, path) = fixture.app("initial text");
     let tab = app.tab_mut().unwrap();
@@ -640,23 +664,33 @@ fn clean_external_reload_discards_history_that_could_restore_an_old_document() {
     fs::write(&path, "external text").unwrap();
     let document = workspace::read_document(&path, MAX_DOCUMENT).unwrap();
     app.sender
-        .send(WorkerResult::DiskChanges(vec![(
+        .send(WorkerResult::DiskChanges(vec![disk_sync::DiskCheck {
             id,
+            path: path.clone(),
             baseline,
-            Ok(document),
-        )]))
+            result: Ok(document),
+        }]))
         .unwrap();
     app.poll();
-    assert!(!app.tab().unwrap().vim.can_undo());
+    assert_eq!(app.tab().unwrap().text, "external text");
+    assert!(!app.tab().unwrap().dirty);
+    assert!(app.tab().unwrap().vim.can_undo());
 
     let tab = app.tab_mut().unwrap();
     let result = tab
         .vim
         .handle_key(&mut tab.text, crate::vim::VimKey::Char('u'));
-    assert!(!result.text_changed);
-    assert_eq!(tab.text, "external text");
+    assert!(result.text_changed);
+    tab.changed();
+    assert_eq!(tab.text, "last saved text");
     assert_eq!(tab.saved_text, "external text");
-    assert!(!tab.dirty);
+    assert!(tab.dirty);
+    // The history from before the reload is still there.
+    let result = tab
+        .vim
+        .handle_key(&mut tab.text, crate::vim::VimKey::Char('u'));
+    assert!(result.text_changed);
+    assert_eq!(tab.text, "initial text");
 }
 
 #[test]

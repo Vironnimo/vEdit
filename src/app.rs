@@ -30,6 +30,8 @@ mod change_review;
 mod context_actions;
 #[path = "control.rs"]
 mod control;
+#[path = "disk_sync.rs"]
+mod disk_sync;
 #[path = "editor_feedback.rs"]
 mod editor_feedback;
 #[path = "editor_input.rs"]
@@ -325,6 +327,11 @@ struct EditorTab {
     loading: bool,
     saving: bool,
     error: Option<String>,
+    /// A newer disk version while this buffer has unsaved edits. Only saving
+    /// to the original path waits for the user's choice.
+    disk_conflict: Option<disk_sync::DiskConflict>,
+    /// The last clean reload from disk, shown until the next edit.
+    disk_reload: Option<disk_sync::DiskReload>,
     last_edit: Instant,
     vim: VimState,
     selection: Range<usize>,
@@ -369,6 +376,8 @@ impl EditorTab {
             loading: false,
             saving: false,
             error: None,
+            disk_conflict: None,
+            disk_reload: None,
             last_edit: Instant::now(),
             vim: VimState::new(),
             selection: 0..0,
@@ -391,7 +400,15 @@ impl EditorTab {
         self.preview_tab = false;
         self.revision += 1;
         self.dirty = self.text != self.saved_text;
+        self.clear_agent_draft_when_saved();
         self.last_edit = Instant::now();
+    }
+    /// An agent draft ends once the buffer matches its saved text again, e.g.
+    /// after Undo. Later edits belong to whoever makes them.
+    fn clear_agent_draft_when_saved(&mut self) {
+        if !self.dirty {
+            self.agent_unsaved = false;
+        }
     }
     fn apply(&mut self, edit: editor::EditResult) {
         if edit.text != self.text {
@@ -562,6 +579,8 @@ enum WorkerResult {
         text: String,
         path: PathBuf,
         result: Result<workspace::SavedDocument, String>,
+        /// The newer disk version that stopped a save to the document's own path.
+        conflict: Option<workspace::LoadedDocument>,
     },
     Recovered {
         id: u64,
@@ -640,13 +659,7 @@ enum WorkerResult {
         request: u64,
         patches: Vec<change_review::LoadedPatch>,
     },
-    DiskChanges(
-        Vec<(
-            u64,
-            workspace::FileFingerprint,
-            Result<workspace::LoadedDocument, String>,
-        )>,
-    ),
+    DiskChanges(Vec<disk_sync::DiskCheck>),
 }
 impl WorkerResult {
     /// A periodic disk check that found nothing waits for the next scheduled
@@ -791,6 +804,8 @@ pub struct VEditApp {
     applied_editor_font: crate::cli::EditorFont,
     save_as: Option<u64>,
     save_queue: std::collections::VecDeque<u64>,
+    /// Save As destinations confirmed while that document was still saving.
+    deferred_save_as: Vec<(u64, PathBuf, Option<workspace::FileFingerprint>)>,
     close_action: Option<CloseAction>,
     close_after_save: bool,
     exit_ready: bool,
@@ -803,6 +818,8 @@ pub struct VEditApp {
     diff_generation: u64,
     diff_loading: bool,
     diff_error: Option<String>,
+    /// The document comparison shown in the diff dialog instead of a Git patch.
+    comparison: Option<disk_sync::Comparison>,
     output_visible: bool,
     command: String,
     task: Option<tasks::RunningTask>,
@@ -1050,6 +1067,7 @@ impl VEditApp {
             agent_marks_ui: agent_marks_ui::AgentMarksUi::default(),
             save_as: None,
             save_queue: std::collections::VecDeque::new(),
+            deferred_save_as: Vec::new(),
             close_action: None,
             close_after_save: false,
             exit_ready: false,
@@ -1062,6 +1080,7 @@ impl VEditApp {
             diff_generation: 0,
             diff_loading: false,
             diff_error: None,
+            comparison: None,
             output_visible: false,
             command: String::new(),
             task: None,
@@ -1412,6 +1431,16 @@ impl VEditApp {
             return;
         };
         if tab.loading || tab.saving {
+            if let Some(target) = target {
+                // A confirmed destination must not be lost to a save in flight.
+                let title = tab.title.clone();
+                self.deferred_save_as.retain(|(queued, _, _)| *queued != id);
+                self.deferred_save_as.push((id, target, overwrite));
+                self.status(
+                    format!("Saving {title} as a new file after the current save finishes"),
+                    false,
+                );
+            }
             return;
         }
         let Some(path) = target.or_else(|| tab.path.clone()) else {
@@ -1424,11 +1453,18 @@ impl VEditApp {
             self.request_save_as(id);
             return;
         };
-        let expected = overwrite.or_else(|| {
-            (tab.path.as_ref() == Some(&path))
-                .then(|| tab.fingerprint.clone())
-                .flatten()
-        });
+        let own_path = tab.path.as_ref() == Some(&path);
+        if own_path && overwrite.is_none() && tab.disk_conflict.is_some() {
+            let title = tab.title.clone();
+            self.save_queue.clear();
+            self.close_after_save = false;
+            self.status(
+                format!("{title} changed on disk. Choose Keep my version or Use disk version first, or Save as… another file."),
+                true,
+            );
+            return;
+        }
+        let expected = overwrite.or_else(|| own_path.then(|| tab.fingerprint.clone()).flatten());
         let text = tab.text.clone();
         let ending = tab.line_ending;
         let bom = tab.bom;
@@ -1440,7 +1476,7 @@ impl VEditApp {
                 if expected.is_none()
                     && let Some(parent) = path.parent()
                 {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    fs::create_dir_all(parent).map_err(|e| (e.to_string(), false))?;
                 }
                 workspace::save_document(
                     &path,
@@ -1452,8 +1488,18 @@ impl VEditApp {
                         .as_ref()
                         .map(|(path, baseline)| (path.as_path(), baseline)),
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|error| {
+                    let conflict = matches!(error, workspace::SaveError::Conflict(_));
+                    (error.to_string(), conflict)
+                })
             })();
+            // A conflict on the document's own path shows the newer disk
+            // version, so the user can compare and decide.
+            let conflict = match &result {
+                Err((_, true)) if own_path => workspace::read_document(&path, MAX_DOCUMENT).ok(),
+                _ => None,
+            };
+            let result = result.map_err(|(error, _)| error);
             let path = if result.is_ok() {
                 fs::canonicalize(&path).unwrap_or(path)
             } else {
@@ -1464,6 +1510,7 @@ impl VEditApp {
                 id,
                 text,
                 path,
+                conflict,
             }
         });
     }
@@ -1573,6 +1620,9 @@ impl VEditApp {
                     for t in &mut p.tabs {
                         t.text.clone_from(&t.saved_text);
                         t.dirty = false;
+                        // Discarded drafts must not return as agent drafts in the session.
+                        t.agent_unsaved = false;
+                        t.disk_conflict = None;
                         let _ = self
                             .recovery_writer
                             .remove(&t.recovery_path, self.recovery_writer.stamp());
@@ -1719,6 +1769,7 @@ impl VEditApp {
                                 tab.bom = doc.bom;
                                 tab.fingerprint = Some(doc.fingerprint);
                                 tab.error = None;
+                                tab.disk_conflict = None;
                             }
                             Err(error) => {
                                 if tab.path.is_some() {
@@ -1729,6 +1780,18 @@ impl VEditApp {
                         if let Some(recovery) = recovery {
                             match recovery {
                                 Ok(doc) => {
+                                    // The version just read, kept for a conflict
+                                    // with the recovered edits.
+                                    let disk_version = tab.fingerprint.clone().map(|fingerprint| {
+                                        workspace::LoadedDocument {
+                                            text: tab.saved_text.clone(),
+                                            line_ending: tab.line_ending,
+                                            bom: tab.bom,
+                                            mixed_line_endings: tab.line_ending
+                                                == workspace::LineEnding::Mixed,
+                                            fingerprint,
+                                        }
+                                    });
                                     let disk_matches =
                                         doc.baseline.as_ref().is_some_and(|baseline| {
                                             tab.fingerprint
@@ -1747,11 +1810,23 @@ impl VEditApp {
                                         // made since this recovery was recorded.
                                         tab.fingerprint = doc.baseline;
                                         if !disk_matches && tab.path.is_some() {
-                                            tab.error = Some(if tab.fingerprint.is_some() {
-                                                "The file changed since these edits were recovered. Save As preserves your recovered changes without replacing the disk version.".into()
-                                            } else {
-                                                "Recovered edits have no verified disk baseline. Use Save As to preserve them; the original file is protected.".into()
-                                            });
+                                            match (&tab.fingerprint, disk_version) {
+                                                // The user decides which version
+                                                // continues, as for any disk conflict.
+                                                // Without a recorded baseline the disk
+                                                // version may be newer, so it is one too.
+                                                (_, Some(disk)) => {
+                                                    tab.disk_conflict =
+                                                        Some(disk_sync::DiskConflict::new(disk));
+                                                }
+                                                // The read error is already shown.
+                                                (Some(_), None) => {}
+                                                (None, None) => {
+                                                    tab.error = Some(
+                                                        "Recovered edits have no verified disk baseline. Use Save as… to preserve them; the original file is protected.".into(),
+                                                    );
+                                                }
+                                            }
                                         }
                                         if let Some(ending) = doc.line_ending {
                                             tab.line_ending = ending;
@@ -1772,6 +1847,7 @@ impl VEditApp {
                                 }
                             }
                         }
+                        tab.clear_agent_draft_when_saved();
                         let range = tab
                             .pending_selection
                             .clone()
@@ -1792,14 +1868,23 @@ impl VEditApp {
                     text,
                     path,
                     result,
+                    conflict,
                 } => {
                     let mut message = None;
                     let recovery_writer = self.recovery_writer.clone();
                     let mut new_document = false;
+                    let mut observed = None;
                     if let Some(tab) = self.tab_by_id_mut(id) {
                         tab.saving = false;
                         match result {
+                            // The file changed after it was loaded: keep the
+                            // edits and let the user choose a version.
+                            Err(_) if conflict.is_some() && tab.path.as_ref() == Some(&path) => {
+                                tab.last_edit = Instant::now();
+                                observed = conflict;
+                            }
                             Ok(saved) => {
+                                tab.disk_conflict = None;
                                 new_document = tab.path.as_ref() != Some(&path);
                                 tab.path = Some(path.clone());
                                 tab.title = file_title(&path);
@@ -1843,6 +1928,22 @@ impl VEditApp {
                             }
                         }
                     }
+                    if let Some(disk) = observed {
+                        self.observe_disk_version(id, disk);
+                        if let Some(tab) = self.tab_by_id_mut(id) {
+                            let title = tab.title.clone();
+                            message = Some(if tab.disk_conflict.is_some() {
+                                (
+                                    format!(
+                                        "{title} changed on disk, so it was not saved. Compare the versions and choose which one to keep."
+                                    ),
+                                    true,
+                                )
+                            } else {
+                                (format!("{title} already matches the disk version"), false)
+                            });
+                        }
+                    }
                     let saved = message.as_ref().is_some_and(|(_, error)| !error);
                     if let Some((message, error)) = message {
                         self.status(message, error);
@@ -1875,7 +1976,8 @@ impl VEditApp {
                     }
                     self.sync_languages(true);
                     for project in &self.projects {
-                        if project.tabs.iter().any(|t| t.id == id && t.error.is_none())
+                        if saved
+                            && project.tabs.iter().any(|t| t.id == id && t.error.is_none())
                             && let Some(server) = project
                                 .language_for(&path)
                                 .and_then(|session| session.server.as_ref())
@@ -2211,48 +2313,10 @@ impl VEditApp {
                     request,
                     patches,
                 } => self.apply_change_review_patches(root, generation, request, patches),
-                WorkerResult::DiskChanges(changes) => {
-                    self.disk_check_running = false;
-                    let ctx = self.ctx.clone();
-                    for (id, baseline, result) in changes {
-                        if let Some(t) = self.tab_by_id_mut(id) {
-                            if t.fingerprint.as_ref() != Some(&baseline) || t.saving || t.loading {
-                                continue;
-                            }
-                            match result {
-                                Ok(doc) if doc.fingerprint.hash != baseline.hash => {
-                                    if t.dirty {
-                                        t.error=Some("This file changed outside vEdit. Save your edits as another file, or close and reopen it.".into());
-                                    } else {
-                                        context_actions::reset_native_history(&ctx, id);
-                                        let cursor = t
-                                            .vim
-                                            .cursor
-                                            .min(doc.text.chars().count().saturating_sub(1));
-                                        t.text = doc.text.clone();
-                                        t.saved_text = doc.text;
-                                        t.fingerprint = Some(doc.fingerprint);
-                                        t.line_ending = doc.line_ending;
-                                        t.bom = doc.bom;
-                                        t.revision += 1;
-                                        t.error = None;
-                                        t.vim = VimState::new();
-                                        t.lines.invalidate();
-                                        t.indentation_cache.invalidate();
-                                        t.set_cursor(cursor..cursor);
-                                    }
-                                }
-                                Ok(doc) => {
-                                    t.fingerprint = Some(doc.fingerprint);
-                                    t.error = None;
-                                }
-                                Err(error) => t.error = Some(error),
-                            }
-                        }
-                    }
-                }
+                WorkerResult::DiskChanges(checks) => self.apply_disk_checks(checks),
             }
         }
+        self.resume_deferred_save_as();
         if self.save_as.is_none() && self.picker.is_none() {
             while let Some(id) = self.save_queue.pop_front() {
                 if self.tab_by_id_mut(id).is_some_and(|t| t.dirty && !t.saving) {
@@ -2628,6 +2692,7 @@ impl VEditApp {
         self.diff_loading = true;
         self.diff_error = None;
         self.diff = Some((title, String::new()));
+        self.comparison = None;
     }
     fn toggle_bookmark(&mut self) {
         match self.try_toggle_bookmark(self.tab().map(|tab| tab.id)) {
@@ -3039,6 +3104,7 @@ impl VEditApp {
                     && t.path.is_some()
                     && !t.saving
                     && t.error.is_none()
+                    && t.disk_conflict.is_none()
                 {
                     let remaining = Duration::from_millis(self.settings.autosave_delay_ms)
                         .saturating_sub(t.last_edit.elapsed());
@@ -3523,6 +3589,7 @@ impl VEditApp {
                         | Action::ToggleBookmark
                         | Action::ScreenJump
                         | Action::Reload
+                        | Action::CompareWithSaved
                 )
             {
                 continue;
@@ -4754,6 +4821,7 @@ impl VEditApp {
         if self.render_pane_is_focused() && self.vim_search_active() {
             self.vim_search_ui(ui);
         }
+        self.disk_conflict_banner(ui);
         let error = self.tab().and_then(|t| t.error.clone());
         if let Some(error) = error {
             egui::Frame::new()
@@ -5139,7 +5207,7 @@ impl VEditApp {
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title)
                         });
-                        if let Some(action) = context_actions::tab_menu(&response, path.is_some(), !loading && !saving, &self.settings.keybindings) {
+                        if let Some(action) = context_actions::tab_menu(&response, path.is_some(), !loading && !saving, path.is_some() && !loading, &self.settings.keybindings) {
                             context_action = Some((*id, action));
                         }
                         if selected && reveal_active {
@@ -6374,6 +6442,11 @@ impl VEditApp {
                 );
                 return;
             }
+            if t.disk_conflict.is_some() {
+                let id = t.id;
+                self.use_disk_version(id);
+                return;
+            }
             if t.dirty {
                 self.status("Save your changes to another file before reloading", true);
                 return;
@@ -6694,6 +6767,7 @@ impl VEditApp {
                 self.session_dirty = true;
             }
             "Reload file from disk" => self.reload_current(),
+            "Compare with saved" => self.compare_current_with_saved(),
             "Settings" => self.settings_open = true,
             _ => {}
         }
@@ -7123,6 +7197,7 @@ impl VEditApp {
         }
         self.git_detail_ui();
         if let Some((title, text)) = &self.diff {
+            let mut choice = None;
             let modal = crate::git_diff_view::dialog(
                 &ctx,
                 egui::Id::new("git_patch_window"),
@@ -7131,6 +7206,9 @@ impl VEditApp {
                 Vec2::new(950.0, 620.0),
                 true,
                 |ui| {
+                    if let Some(comparison) = &self.comparison {
+                        choice = disk_sync::comparison_header(ui, comparison, &self.projects);
+                    }
                     if self.diff_loading {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -7146,14 +7224,24 @@ impl VEditApp {
             if modal.inner || modal.should_close() {
                 self.close_diff();
             }
+            if let Some(choice) = choice {
+                self.close_diff();
+                self.resolve_disk_conflict(choice);
+            }
         }
     }
     fn close_diff(&mut self) {
+        let comparison = self.comparison.take().is_some();
         self.diff = None;
         self.diff_loading = false;
         self.diff_error = None;
         self.diff_view.reset_focus();
-        self.restore_git_overlay_focus();
+        if comparison {
+            // A document comparison returns to the document it was opened from.
+            self.restore_document_focus();
+        } else {
+            self.restore_git_overlay_focus();
+        }
     }
     fn restore_git_overlay_focus(&mut self) {
         self.ctx.memory_mut(|memory| {
@@ -7182,6 +7270,14 @@ impl VEditApp {
             self.focus_git_content();
             return;
         }
+        self.restore_document_focus();
+    }
+    fn restore_document_focus(&mut self) {
+        self.ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
@@ -8383,37 +8479,6 @@ impl VEditApp {
             }
         }
     }
-    fn watch_disk(&mut self) {
-        if self.disk_check_running || self.last_disk_check.elapsed() < Duration::from_secs(2) {
-            return;
-        }
-        self.last_disk_check = Instant::now();
-        let documents: Vec<_> = self
-            .projects
-            .iter()
-            .flat_map(|p| &p.tabs)
-            .filter(|t| !t.loading && !t.saving)
-            .filter_map(|t| Some((t.id, t.path.clone()?, t.fingerprint.clone()?)))
-            .collect();
-        if documents.is_empty() {
-            return;
-        }
-        self.disk_check_running = true;
-        self.worker(move || {
-            let mut changes = Vec::new();
-            for (id, path, baseline) in documents {
-                match fs::metadata(&path) {
-                    Ok(meta)
-                        if meta.len() == baseline.len
-                            && meta.modified().ok() == baseline.modified => {}
-                    _ => {
-                        changes.push((id, baseline, workspace::read_document(&path, MAX_DOCUMENT)))
-                    }
-                }
-            }
-            WorkerResult::DiskChanges(changes)
-        });
-    }
 }
 
 #[cfg(test)]
@@ -8494,3 +8559,7 @@ pub(crate) fn builtin_language_smoke_config(
         &project_tasks::TaskConfiguration::default().python_program(root),
     )
 }
+
+#[cfg(test)]
+#[path = "disk_sync_tests.rs"]
+mod disk_sync_tests;

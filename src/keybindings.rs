@@ -97,6 +97,7 @@ actions! {
     Bookmarks, "bookmarks", "Bookmarks", "Navigation", [];
     ScreenJump, "screen_jump", "Jump to visible text", "Navigation", [];
     Reload, "reload", "Reload file from disk", "Files", [];
+    CompareWithSaved, "compare_with_saved", "Compare with saved", "Files", [];
     Settings, "settings", "Settings", "Preferences", ["Ctrl+Comma"];
     KeyboardShortcuts, "keyboard_shortcuts", "Keyboard shortcuts", "Preferences", [];
     ZoomIn, "zoom_in", "Zoom in", "Preferences", ["Ctrl+Plus", "Ctrl+Equals", "Ctrl+Shift+Plus", "Ctrl+Shift+Equals"];
