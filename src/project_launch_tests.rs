@@ -324,7 +324,11 @@ fn launch_runs_per_project_without_active_files_and_stops_then_restarts() {
             .iter()
             .all(|p| p.launch.output.joined().lines().any(|line| line == "ready"))
     });
-    assert!(app.task.is_none());
+    assert!(
+        app.projects
+            .iter()
+            .all(|project| project.run.task.is_none())
+    );
     assert_eq!(
         action(&mut app, 0, Action::Start { id: None })
             .error

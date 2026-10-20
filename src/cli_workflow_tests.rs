@@ -250,3 +250,93 @@ fn schema_topics_keep_examples_typed_and_default_read_wire_compatible() {
         );
     }
 }
+
+#[test]
+fn notify_and_project_flags_parse_without_starting_the_editor() {
+    let Parsed::Command {
+        request:
+            Request::Notify {
+                message,
+                title,
+                level,
+                workspace,
+                open,
+                review,
+            },
+        start,
+    } = parse(&[
+        "notify",
+        "Tests pass 東京",
+        "--title",
+        "Ready",
+        "--level",
+        "SUCCESS",
+        "--open",
+        "C:/project/src/lib.rs:42",
+    ])
+    .unwrap()
+    else {
+        panic!("notify")
+    };
+    assert!(!start, "notify never starts vEdit");
+    assert_eq!(message, "Tests pass 東京");
+    assert_eq!(title.as_deref(), Some("Ready"));
+    assert_eq!(level, NotificationLevel::Success);
+    assert!(workspace.is_none() && review.is_none());
+    let open = open.unwrap();
+    assert!(open.path.ends_with("lib.rs"));
+    assert_eq!(open.location.unwrap().line, 42);
+    // A drive letter is part of the path, not a line number.
+    let Parsed::Command {
+        request: Request::Notify { open, .. },
+        ..
+    } = parse(&["notify", "x", "--open", "C:/project/notes.md"]).unwrap()
+    else {
+        panic!("notify")
+    };
+    assert!(open.unwrap().location.is_none());
+    assert!(parse(&["notify"]).is_err());
+    assert!(parse(&["notify", "x", "--level", "loud"]).is_err());
+    assert!(parse(&["notify", "x", "--review", "working", "--open", "a.rs"]).is_err());
+    assert!(parse(&["notify", "x", "--title", "two\nlines"]).is_err());
+    // Background presentation never starts vEdit; ordinary open does.
+    let Parsed::Command { start, request } = parse(&["open", "x.md", "--background"]).unwrap()
+    else {
+        panic!("open")
+    };
+    assert!(!start);
+    assert!(matches!(
+        request,
+        Request::Open {
+            background: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse(&["open", "x.md"]).unwrap(),
+        Parsed::Command { start: true, .. }
+    ));
+    // Project commands take --workspace, or the legacy positional, not both.
+    assert!(matches!(
+        parse(&["task", "test", "--workspace", "C:/project"]).unwrap(),
+        Parsed::Command {
+            request: Request::Task {
+                workspace: Some(_),
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse(&["output", "--workspace", "C:/project"]).unwrap(),
+        Parsed::Command {
+            request: Request::Output {
+                workspace: Some(_),
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(parse(&["git-status", "C:/a", "--workspace", "C:/b"]).is_err());
+    assert!(parse(&["focus", "1", "--background"]).is_err());
+}

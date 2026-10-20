@@ -335,11 +335,12 @@ fn polished_screenshots() {
     tab.set_cursor(0..0);
     let app = screen.state_mut();
     app.output_visible = true;
-    app.output =
+    let active = app.active_project;
+    app.projects[active].run.output =
         "> cargo check\n\n    Checking example v0.1.0\n    Finished `dev` profile in 0.42s\n"
             .into();
     app.command = "cargo check".into();
-    app.task_status = "Completed".into();
+    app.projects[active].run.status = "Completed".into();
     snapshot(&mut screen, "vedit_output");
 
     let app = screen.state_mut();

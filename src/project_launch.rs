@@ -425,17 +425,19 @@ impl VEditApp {
         let crate::cli::Request::Launch { workspace, action } = request else {
             return false;
         };
-        let index = match self.control_query_project(workspace.as_deref()) {
-            Ok(project) => self
-                .projects
-                .iter()
-                .position(|p| p.root == project.root)
-                .unwrap(),
+        let (index, source) = match self.control_project_index(workspace.as_deref()) {
+            Ok(found) => found,
             Err(response) => {
                 let _ = reply.send(response);
                 return true;
             }
         };
+        let reply = control::reply_naming_workspace(
+            reply,
+            self.projects[index].root.clone(),
+            source,
+            false,
+        );
         self.begin_launch_action(index, action.clone(), Some(reply));
         true
     }

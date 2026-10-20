@@ -344,6 +344,22 @@ impl VEditApp {
                         std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
                     );
                 }
+                // A named document belongs to the project that will contain
+                // it, like `open`; a path outside every project and
+                // repository stays in the visible project.
+                if let Some(path) = &path {
+                    match super::path_owner(&self.projects, &super::canonical_target(path)) {
+                        super::PathOwner::Project(index) if index != self.active_project => {
+                            self.finish_insert_before_switch();
+                            self.switch_project(index);
+                        }
+                        super::PathOwner::Repository(root) => {
+                            self.finish_insert_before_switch();
+                            self.add_project(root);
+                        }
+                        _ => {}
+                    }
+                }
                 let title = title
                     .or_else(|| {
                         path.as_ref()
@@ -409,20 +425,28 @@ impl VEditApp {
                     json!({"applied":true,"saving":self.projects[project].tabs[index].saving,"tab":self.control_tab_value(project,index),"completion":"Inspect status until saving is false and error is null"}),
                 )
             }
-            Request::Task { action } => {
+            Request::Task { action, workspace } => {
+                let (project, source) = match self.control_project_index(workspace.as_deref()) {
+                    Ok(found) => found,
+                    Err(response) => return response,
+                };
+                let root = crate::paths::display(&self.projects[project].root);
+                let run = &self.projects[project].run;
                 if matches!(action, TaskAction::Stop) {
-                    let running = self.task.is_some();
-                    if let Some(task) = &self.task {
+                    let running = run.task.is_some();
+                    if let Some(task) = &run.task {
                         task.cancel();
                     }
                     return Response::success(
-                        json!({"applied":true,"cancellation_requested":running,"running":running,"status":self.task_status}),
+                        json!({"applied":true,"workspace":root,"workspace_source":source,"cancellation_requested":running,"running":running,"status":run.status}),
                     );
                 }
-                if self.task.is_some() {
+                if run.task.is_some() {
                     return Response::failure(
                         "task_running",
-                        "A task is already running. Inspect output or stop it explicitly before starting another",
+                        format!(
+                            "A task is already running in {root}. Inspect output or stop it explicitly before starting another"
+                        ),
                     );
                 }
                 let action = match action {
@@ -432,14 +456,15 @@ impl VEditApp {
                     TaskAction::RunFile => project_tasks::ProjectTaskAction::RunFile,
                     TaskAction::Stop => unreachable!(),
                 };
-                let task = match self.resolve_project_task(action) {
+                let task = match self.resolve_project_task_in(project, action) {
                     Ok(task) => task,
                     Err(error) => return Response::failure("task_unavailable", error),
                 };
                 let command = task.command.display();
-                self.start_resolved_task(task);
+                self.start_resolved_task(project, task);
+                let run = &self.projects[project].run;
                 Response::success(
-                    json!({"applied":true,"running":self.task.is_some(),"status":self.task_status,"command":command,"source":"Tasks read saved files on disk; unsaved buffers are not written"}),
+                    json!({"applied":true,"workspace":root,"workspace_source":source,"running":run.task.is_some(),"status":run.status,"command":command,"source":"Tasks read saved files on disk; unsaved buffers are not written"}),
                 )
             }
             Request::File { action } => self.control_file_action(action),

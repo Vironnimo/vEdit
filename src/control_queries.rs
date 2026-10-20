@@ -32,13 +32,14 @@ impl VEditApp {
             let _ = reply.send(Response::failure("invalid_request", error));
             return true;
         }
-        let project = match self.control_query_project(path) {
-            Ok(project) => project,
+        let (project, source) = match self.control_project_index(path) {
+            Ok((index, source)) => (&self.projects[index], source),
             Err(response) => {
                 let _ = reply.send(response);
                 return true;
             }
         };
+        let workspace_root = project.root.clone();
         let Some(root) = project.git_root.clone() else {
             let _ = reply.send(Response::failure("no_repository", "This workspace has no loaded repository. Inspect git-status for loading or errors."));
             return true;
@@ -95,7 +96,9 @@ impl VEditApp {
                 }
                 let more = has_more || bounded.len() < count;
                 let next = offset.saturating_add(bounded.len());
-                Ok(json!({"repository":crate::paths::display(&root),"items":bounded,"offset":offset,"total":total,"has_more":more,"next_offset":if more { Some(next) } else { None },"remote_state":"last_fetch"}))
+                let mut result = json!({"repository":crate::paths::display(&root),"items":bounded,"offset":offset,"total":total,"has_more":more,"next_offset":if more { Some(next) } else { None },"remote_state":"last_fetch"});
+                name_workspace(&mut result, &workspace_root, source);
+                Ok(result)
             })();
             let response = match result { Ok(value) => Response::success(value), Err(error) => Response::failure("git_query_failed", error.to_string()) };
             let _ = worker_reply.send(response);
@@ -130,7 +133,13 @@ impl VEditApp {
                 start_line,
                 line_count,
                 start_column,
-            } => self.control_output(*start_line, *start_column, *line_count),
+                workspace,
+            } => self.control_output(
+                workspace.as_deref(),
+                *start_line,
+                *start_column,
+                *line_count,
+            ),
             Request::GitStatus {
                 workspace,
                 limit,
@@ -157,8 +166,8 @@ impl VEditApp {
             let _ = reply.send(Response::failure("invalid_request", error));
             return true;
         }
-        let project = match self.control_query_project(workspace.as_deref()) {
-            Ok(project) => project,
+        let (project, source) = match self.control_project_index(workspace.as_deref()) {
+            Ok((index, source)) => (&self.projects[index], source),
             Err(response) => {
                 let _ = reply.send(response);
                 return true;
@@ -206,13 +215,14 @@ impl VEditApp {
             .name("vedit-cli-search".into())
             .spawn(move || {
                 let _permit = permit;
-                let response =
+                let mut response =
                     match workspace::search_with_excludes(&root_path, &query, options, &excludes) {
                         Ok(results) => {
                             search_response(root, query, results, excludes, excludes_source)
                         }
                         Err(error) => Response::failure("search_failed", error),
                     };
+                name_workspace(&mut response.result, &root_path, source);
                 let _ = worker_reply.send(response);
             });
         if let Err(error) = spawn {
@@ -221,15 +231,20 @@ impl VEditApp {
         true
     }
 
-    pub(in crate::app) fn control_query_project(
+    /// The project a project command acts on: the named workspace, else the
+    /// open project containing the CLI caller's directory (the deepest one, so
+    /// a nested worktree wins over its parent), else the visible project.
+    /// The second value names the rule that chose it.
+    pub(in crate::app) fn control_project_index(
         &self,
         path: Option<&Path>,
-    ) -> Result<&Project, Response> {
+    ) -> Result<(usize, &'static str), Response> {
         if let Some(path) = path {
             return self
                 .projects
                 .iter()
-                .find(|project| same_workspace(&project.root, path))
+                .position(|project| same_workspace(&project.root, path))
+                .map(|index| (index, "request"))
                 .ok_or_else(|| {
                     Response::failure(
                         "unknown_workspace",
@@ -237,12 +252,20 @@ impl VEditApp {
                     )
                 });
         }
-        self.project().ok_or_else(|| {
-            Response::failure(
-                "no_workspace",
-                "Open a workspace before querying project state.",
-            )
-        })
+        if let Some(index) = self
+            .control_caller
+            .as_deref()
+            .and_then(|caller| containing_project(&self.projects, caller))
+        {
+            return Ok((index, "caller_directory"));
+        }
+        if self.project().is_some() {
+            return Ok((self.active_project, "active_project"));
+        }
+        Err(Response::failure(
+            "no_workspace",
+            "Open a workspace before querying project state.",
+        ))
     }
 
     fn control_buffer_diff(&self, id: u64, max_lines: usize) -> Response {
@@ -352,12 +375,18 @@ impl VEditApp {
 
     fn control_output(
         &self,
+        workspace: Option<&Path>,
         start_line: usize,
         start_column: usize,
         line_count: usize,
     ) -> Response {
+        let (index, source) = match self.control_project_index(workspace) {
+            Ok(found) => found,
+            Err(response) => return response,
+        };
+        let run = &self.projects[index].run;
         let mut result = match text_page(
-            &self.output,
+            &run.output,
             start_line,
             start_column,
             line_count,
@@ -367,11 +396,13 @@ impl VEditApp {
             Ok(value) => value,
             Err(error) => return Response::failure("invalid_location", error),
         };
-        let mut command = self.command.clone();
+        let mut command = run.command.clone();
         truncate_utf8(&mut command, 4096);
-        let mut status = self.task_status.clone();
+        let mut status = run.status.clone();
         truncate_utf8(&mut status, 1024);
-        result["running"] = json!(self.task.is_some());
+        result["workspace"] = json!(crate::paths::display(&self.projects[index].root));
+        result["workspace_source"] = json!(source);
+        result["running"] = json!(run.task.is_some());
         result["status"] = json!(status);
         result["command"] = json!(command);
         result["snapshot"] = json!(true);
@@ -379,8 +410,8 @@ impl VEditApp {
     }
 
     fn control_git_status(&self, path: Option<&Path>, limit: usize, offset: usize) -> Response {
-        let project = match self.control_query_project(path) {
-            Ok(project) => project,
+        let (project, source) = match self.control_project_index(path) {
+            Ok((index, source)) => (&self.projects[index], source),
             Err(response) => return response,
         };
         let total = project.git_changes.len();
@@ -424,7 +455,7 @@ impl VEditApp {
             truncate_utf8(error, 4096);
         }
         Response::success(json!({
-            "workspace":crate::paths::display(&project.root),
+            "workspace":crate::paths::display(&project.root),"workspace_source":source,
             "repository":project.git_root.as_deref().map(crate::paths::display),
             "branch":branch,"tracking":tracking,"items":items,
             "total":total,"offset":offset,"has_more":next<total,"next_offset":if next<total{Some(next)}else{None},
@@ -542,6 +573,71 @@ fn bounded_lines(lines: &[&str], max_lines: usize) -> (String, usize, bool, bool
         partial_line || returned < lines.len(),
         partial_line,
     )
+}
+
+/// Name the project a successful result is about and the rule that chose it.
+pub(in crate::app) fn name_workspace(result: &mut Value, root: &Path, source: &str) {
+    if result.is_object() {
+        result["workspace"] = json!(crate::paths::display(root));
+        result["workspace_source"] = json!(source);
+    }
+}
+
+/// A reply channel that names the project in a deferred success before it
+/// reaches the CLI, for answers produced by code that does not know how the
+/// project was chosen.
+pub(in crate::app) fn reply_naming_workspace(
+    reply: Sender<Response>,
+    root: PathBuf,
+    source: &'static str,
+    background: bool,
+) -> Sender<Response> {
+    let (sender, receiver) = mpsc::channel::<Response>();
+    let forward = reply.clone();
+    let spawned = std::thread::Builder::new()
+        .name("vedit-cli-reply".into())
+        .spawn(move || {
+            if let Ok(mut response) = receiver.recv() {
+                if response.ok {
+                    name_workspace(&mut response.result, &root, source);
+                    if background && response.result.is_object() {
+                        response.result["background"] = json!(true);
+                    }
+                }
+                let _ = forward.send(response);
+            }
+        });
+    if spawned.is_ok() { sender } else { reply }
+}
+
+/// The deepest open project whose root contains `path`. Compares text only.
+pub(in crate::app) fn containing_project(projects: &[Project], path: &Path) -> Option<usize> {
+    projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| workspace_contains(&project.root, path))
+        .max_by_key(|(_, project)| project.root.components().count())
+        .map(|(index, _)| index)
+}
+
+fn workspace_contains(root: &Path, path: &Path) -> bool {
+    let normalize = |path: &Path| -> String {
+        let path: PathBuf = Path::new(&crate::paths::display(path))
+            .components()
+            .collect();
+        let text = path.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let text = text.replace('/', "\\").to_lowercase();
+        text
+    };
+    let separator = std::path::MAIN_SEPARATOR;
+    let root = normalize(root);
+    let root = root.trim_end_matches(separator);
+    let path = normalize(path);
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with(separator))
 }
 
 pub(in crate::app) fn same_workspace(left: &Path, right: &Path) -> bool {
@@ -671,7 +767,7 @@ mod tests {
         let original = format!("{}\r\nlast\n", "😀東京".repeat(40_000));
         for operation in ["read", "output"] {
             let (mut app, id) = app_with_tab(&original, "");
-            app.output = original.clone();
+            app.projects[0].run.output = original.clone();
             let mut reconstructed = String::new();
             let (mut line, mut column) = (1, 1);
             for _ in 0..100 {
@@ -921,7 +1017,7 @@ mod tests {
     fn production_dispatch_allows_read_only_observations_during_a_user_dialog() {
         let (mut app, id) = app_with_tab("valuable edits", "saved");
         app.settings_open = true;
-        app.output = "completed output\n".into();
+        app.projects[0].run.output = "completed output\n".into();
         let requests = [
             Request::Diff {
                 tab_id: id,
@@ -936,6 +1032,7 @@ mod tests {
                 start_line: 1,
                 start_column: 1,
                 line_count: 100,
+                workspace: None,
             },
             Request::GitStatus {
                 workspace: None,
@@ -956,13 +1053,14 @@ mod tests {
     #[test]
     fn output_pages_current_snapshot_and_git_observation_does_not_refresh() {
         let (mut app, _) = app_with_tab("", "");
-        app.output = "first\nsecond\nthird\n".into();
-        app.task_status = "Exited with code 0".into();
+        app.projects[0].run.output = "first\nsecond\nthird\n".into();
+        app.projects[0].run.status = "Exited with code 0".into();
         let response = app
             .control_query(&Request::Output {
                 start_line: 2,
                 start_column: 1,
                 line_count: 1,
+                workspace: None,
             })
             .unwrap();
         assert_eq!(response.result["text"], "second\n");
@@ -1023,12 +1121,13 @@ mod tests {
     #[test]
     fn a_large_unicode_output_line_has_no_false_line_continuation() {
         let (mut app, _) = app_with_tab("", "");
-        app.output = "😀".repeat(TEXT_BYTES);
+        app.projects[0].run.output = "😀".repeat(TEXT_BYTES);
         let response = app
             .control_query(&Request::Output {
                 start_line: 1,
                 start_column: 1,
                 line_count: 100,
+                workspace: None,
             })
             .unwrap();
         let text = response.result["text"].as_str().unwrap();

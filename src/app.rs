@@ -61,6 +61,8 @@ mod language_settings;
 mod language_support;
 #[path = "navigation.rs"]
 mod navigation;
+#[path = "notifications.rs"]
+mod notifications;
 #[path = "project_launch.rs"]
 mod project_launch;
 #[path = "project_status.rs"]
@@ -198,6 +200,7 @@ struct SessionTab {
 
 struct Project {
     launch: project_launch::LaunchState,
+    run: project_tasks::ProjectRun,
     root: PathBuf,
     tasks: project_tasks::TaskConfiguration,
     tabs: Vec<EditorTab>,
@@ -251,6 +254,7 @@ impl Project {
     fn new(root: PathBuf) -> Self {
         Self {
             launch: project_launch::LaunchState::default(),
+            run: project_tasks::ProjectRun::default(),
             root,
             tasks: project_tasks::TaskConfiguration::default(),
             tabs: Vec::new(),
@@ -805,10 +809,7 @@ pub struct VEditApp {
     diff_error: Option<String>,
     output_visible: bool,
     command: String,
-    task: Option<tasks::RunningTask>,
-    output: String,
     task_output_cache: task_output_ui::TaskOutputCache,
-    task_status: String,
     register: Option<Yank>,
     yank_register: Option<Yank>,
     editor_focused: bool,
@@ -831,6 +832,9 @@ pub struct VEditApp {
     text_statistics: crate::text_statistics::Statistics,
     markdown: crate::markdown::MarkdownCache,
     control: Option<crate::cli::Server>,
+    /// The working directory of the CLI request being applied, if it sent one.
+    control_caller: Option<PathBuf>,
+    notifications: notifications::Inbox,
     review: Option<crate::cli::ReviewSummary>,
     tab_strip_active: Option<u64>,
     editor_layout: split::EditorLayout,
@@ -1064,10 +1068,7 @@ impl VEditApp {
             diff_error: None,
             output_visible: false,
             command: String::new(),
-            task: None,
-            output: String::new(),
             task_output_cache: task_output_ui::TaskOutputCache::default(),
-            task_status: "Ready".into(),
             register: None,
             yank_register: None,
             editor_focused: false,
@@ -1090,6 +1091,8 @@ impl VEditApp {
             text_statistics: crate::text_statistics::Statistics::default(),
             markdown: crate::markdown::MarkdownCache::default(),
             control: None,
+            control_caller: None,
+            notifications: notifications::Inbox::default(),
             review: None,
             tab_strip_active: None,
             editor_layout: split::EditorLayout::default(),
@@ -2269,53 +2272,16 @@ impl VEditApp {
         {
             self.perform_close(action);
         }
-        let mut finished = false;
-        if let Some(task) = &self.task {
-            loop {
-                let event = match task.receiver.try_recv() {
-                    Ok(event) => event,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        if !finished {
-                            self.task_status = "Task stopped unexpectedly".into();
-                        }
-                        finished = true;
-                        break;
-                    }
-                };
-                match event {
-                    tasks::TaskEvent::Started => {}
-                    tasks::TaskEvent::Output(text) => {
-                        if self.output.len() < 1024 * 1024 {
-                            self.output.push_str(&text);
-                        }
-                    }
-                    tasks::TaskEvent::Finished { code, cancelled } => {
-                        self.task_status = if cancelled {
-                            "Cancelled".into()
-                        } else if code == Some(0) {
-                            "Completed".into()
-                        } else {
-                            format!(
-                                "Exited with code {}",
-                                code.map(|c| c.to_string())
-                                    .unwrap_or_else(|| "unknown".into())
-                            )
-                        };
-                        finished = true;
-                    }
-                    tasks::TaskEvent::Error(e) => {
-                        self.output.push_str(&format!("\n{e}\n"));
-                        self.task_status = "Failed".into();
-                    }
-                }
+        for index in 0..self.projects.len() {
+            if self.projects[index].run.poll() {
+                self.refresh_git(index, true);
             }
         }
-        if finished {
-            self.task = None;
-            self.refresh_git(self.active_project, true);
-        }
-        if self.task.is_some() {
+        if self
+            .projects
+            .iter()
+            .any(|project| project.run.task.is_some())
+        {
             self.ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
@@ -3383,7 +3349,7 @@ impl VEditApp {
         if let Some(project) = self.projects.get_mut(self.active_project) {
             project.launch.show_output = false;
         }
-        if self.task.is_some() {
+        if self.project().is_some_and(|p| p.run.task.is_some()) {
             self.status("Stop the current task first", true);
             return;
         }
@@ -3398,14 +3364,16 @@ impl VEditApp {
         }
         self.output_visible = true;
         self.problems_visible = false;
-        self.output = format!("> {command}\n{}\n\n", crate::paths::display(&root));
-        self.task_status = "Running".into();
         self.command = command.clone();
         let environment = self
             .project_task_configuration()
             .unwrap()
             .environment(&root, self.tab().and_then(|tab| tab.path.as_deref()));
-        self.task = Some(tasks::spawn_configured(
+        let run = &mut self.projects[self.active_project].run;
+        run.output = format!("> {command}\n{}\n\n", crate::paths::display(&root));
+        run.status = "Running".into();
+        run.command = command.clone();
+        run.task = Some(tasks::spawn_configured(
             root,
             tasks::CommandSpec::Shell(command),
             environment,
@@ -4638,8 +4606,10 @@ impl VEditApp {
                     }
                     ui.add_space(14.0);
                     let application_visible = self.project().is_some_and(|p| p.launch.show_output) && !self.problems_visible;
-                    if !application_visible { ui.label(RichText::new(&self.task_status).size(11.0).color(MUTED)); }
-                    if self.task.is_some() && !application_visible {
+                    let run_status = self.project().map_or("Ready", |p| p.run.status.as_str()).to_owned();
+                    let running = self.project().is_some_and(|p| p.run.task.is_some());
+                    if !application_visible { ui.label(RichText::new(run_status).size(11.0).color(MUTED)); }
+                    if running && !application_visible {
                         ui.spinner();
                     }
                     // The rail's Output icon and its shortcut hide the panel.
@@ -4663,7 +4633,8 @@ impl VEditApp {
                             self.open_terminal();
                         }
                         if application_visible { return; }
-                        if let Some(task) = &self.task {
+                        let Some(run) = self.projects.get_mut(self.active_project).map(|p| &mut p.run) else { return; };
+                        if let Some(task) = &run.task {
                             if design::ghost_button(ui, "Stop", "Stop the running command")
                                 .clicked()
                             {
@@ -4672,10 +4643,10 @@ impl VEditApp {
                         } else if design::ghost_button(ui, "Clear", "Clear command output")
                             .clicked()
                         {
-                            self.output.clear();
+                            run.output.clear();
                         }
                         if design::ghost_button(ui, "Copy", "Copy all command output").clicked() {
-                            ui.ctx().copy_text(self.output.clone());
+                            ui.ctx().copy_text(run.output.clone());
                         }
                     });
                 });
@@ -4707,7 +4678,7 @@ impl VEditApp {
                     self.register_region_focus_widget(response.id);
                     if ui
                         .add_enabled(
-                            self.task.is_none() && !self.command.trim().is_empty(),
+                            !self.project().is_some_and(|p| p.run.task.is_some()) && !self.command.trim().is_empty(),
                             egui::Button::new("Run").frame_when_inactive(false),
                         )
                         .on_hover_text("Commands run without input and stop after 10 minutes. Use Terminal for prompts and long-running commands.")
@@ -4723,7 +4694,8 @@ impl VEditApp {
                     .id_salt("task_output")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.task_output_cache.show(ui, &self.output, TEXT);
+                        let output = self.projects.get(self.active_project).map_or("", |p| p.run.output.as_str());
+                        self.task_output_cache.show(ui, output, TEXT);
                     });
             });
         self.finish_output_region(ui, panel.response.rect);
@@ -4933,6 +4905,7 @@ impl VEditApp {
                     for tab in self.projects.iter_mut().flat_map(|p| &mut p.tabs) {
                         tab.annotations.clear();
                         tab.annotations_revision = None;
+                        tab.agent_location_error = None;
                     }
                     self.review = None;
                     self.clear_review_sidebar();
@@ -5113,7 +5086,13 @@ impl VEditApp {
         let view = self.tab().map(|tab| tab.agent_view).unwrap_or_default();
         ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let controls_width = 44.0 + if markdown { 38.0 } else { 0.0 };
+        let controls_width = 44.0
+            + if markdown { 38.0 } else { 0.0 }
+            + match (self.notifications.items_empty(), self.notifications.unread()) {
+                (true, _) => 0.0,
+                (false, 0) => 28.0,
+                _ => 40.0,
+            };
         let tab_width = (ui.available_width() - controls_width).max(20.0);
         ui.allocate_ui_with_layout(Vec2::new(tab_width, 28.0), Layout::left_to_right(Align::Min), |ui| {
         let tab_scroll = egui::ScrollArea::horizontal()
@@ -5282,6 +5261,7 @@ impl VEditApp {
         ui.allocate_ui_with_layout(Vec2::new(controls_width, 28.0), Layout::right_to_left(Align::Center), |ui| {
             if self.tab_pointer_interaction_active() { ui.disable(); }
             self.agent_marks_toolbar(ui);
+            self.notifications_toolbar(ui);
             if markdown {
                 ui.add_space(5.0);
                 self.markdown_preview_toggle(ui, view == crate::cli::DocumentView::Preview);
@@ -6591,6 +6571,7 @@ impl VEditApp {
                 self.capture_agent_mark();
             }
             "Agent marks" => self.open_agent_marks(),
+            "Agent notifications" => self.open_notifications(),
             "Jump to visible text" => self.start_screen_jump(),
             "Go to definition" => self.request_definition(),
             "Show completions" => self.request_completion(),
@@ -7318,6 +7299,7 @@ impl VEditApp {
         self.finish_region_focus();
         self.overlays();
         self.agent_marks_dialog();
+        self.notifications_dialog();
         self.sync_agent_marks();
         self.navigation_ui();
         self.completion_ui();

@@ -558,6 +558,7 @@ fn cli_requests_answer_once_the_comparison_loaded() {
         rev: rev.map(str::to_owned),
         base: None,
         workspace,
+        background: false,
     };
     let (reply, answers) = mpsc::channel();
     let commit = request(
@@ -569,7 +570,7 @@ fn cli_requests_answer_once_the_comparison_loaded() {
     assert!(screen.state().change_review_visible());
     assert!(answers.try_recv().is_err(), "the answer waits for the load");
     settle(&mut screen);
-    let response = answers.try_recv().unwrap();
+    let response = answers.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(response.ok, "{:?}", response.error);
     let head = repository.git(&["rev-parse", "HEAD"]);
     assert_eq!(response.result["source"], "commit");
@@ -582,12 +583,13 @@ fn cli_requests_answer_once_the_comparison_loaded() {
     assert_eq!(response.result["removed"], 2);
     assert_eq!(response.result["seen"], 0);
     assert_eq!(response.result["visible"], true);
+    assert_eq!(response.result["workspace_source"], "request");
 
     let failure = |screen: &mut Harness<'_, VEditApp>, request: &Request| {
         let (reply, answers) = mpsc::channel();
         assert!(screen.state_mut().control_change_review(request, reply));
         settle(screen);
-        let response = answers.try_recv().unwrap();
+        let response = answers.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(!response.ok);
         response.error.unwrap().code
     };
@@ -617,7 +619,7 @@ fn cli_requests_answer_once_the_comparison_loaded() {
     let branch = request(ChangeReviewSource::Branch, None, None);
     assert!(screen.state_mut().control_change_review(&branch, reply));
     screen.state_mut().close_change_review(0);
-    let response = answers.try_recv().unwrap();
+    let response = answers.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(response.error.unwrap().code, "review_closed");
     settle(&mut screen);
     assert!(!screen.state().change_review_visible());
@@ -684,6 +686,68 @@ fn results_for_replaced_or_other_reviews_are_ignored() {
 }
 
 #[test]
+fn a_reopened_project_ignores_results_requested_before_it_closed() {
+    let repository = ReviewRepository::new();
+    let mut app = repository.app();
+    app.open_change_review(0, ReviewSource::WorkingTree)
+        .unwrap();
+    let before = view(&app).generation;
+    // Closing and reopening the project at the same root starts a fresh state.
+    app.projects[0].change_review = ChangeReviewState::default();
+    app.open_change_review(0, ReviewSource::WorkingTree)
+        .unwrap();
+    assert_ne!(view(&app).generation, before);
+    app.sender
+        .send(WorkerResult::ChangeReview {
+            root: repository.root.clone(),
+            generation: before,
+            result: Err("stale result".into()),
+        })
+        .unwrap();
+    app.poll();
+    assert_ne!(view(&app).error.as_deref(), Some("stale result"));
+}
+
+#[test]
+fn a_background_review_of_the_visible_project_waits_out_of_sight() {
+    let repository = ReviewRepository::new();
+    let mut app = repository.app();
+    // A user dialog does not block preparing a review in the background.
+    app.settings_open = true;
+    let (reply, answers) = mpsc::channel();
+    let request = Request::ChangeReview {
+        source: ChangeReviewSource::Working,
+        rev: None,
+        base: None,
+        workspace: None,
+        background: true,
+    };
+    assert!(app.control_change_review(&request, reply));
+    assert!(!app.change_review_visible());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let response = loop {
+        app.poll();
+        if let Ok(response) = answers.try_recv() {
+            break response;
+        }
+        assert!(Instant::now() < deadline, "the review did not load");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(response.result["visible"], false);
+    assert_eq!(response.result["background"], true);
+    assert_eq!(response.result["workspace_source"], "active_project");
+    assert_eq!(response.result["files"], 3);
+    assert!(!app.change_review_visible());
+    app.settings_open = false;
+    // The user's next review command shows the prepared comparison.
+    app.open_change_review(0, ReviewSource::WorkingTree)
+        .unwrap();
+    assert!(app.change_review_visible());
+    assert_eq!(view(&app).files.len(), 3);
+}
+
+#[test]
 fn review_flags_parse_to_validated_change_review_requests() {
     let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
     let Ok(Parsed::Command {
@@ -693,6 +757,7 @@ fn review_flags_parse_to_validated_change_review_requests() {
                 rev,
                 base,
                 workspace,
+                ..
             },
         start,
     }) = parse(&["review", "--commit", "HEAD~1", "C:/project"])
