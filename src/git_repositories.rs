@@ -1,27 +1,21 @@
-//! Repositories overview at the top of Source control.
+//! Cached worktree discovery and details for the project picker.
 //!
 //! Shows the active project's repository and its worktrees, including ones
 //! that are not open as projects. Listings stay cached across project switches.
-//! Open projects reuse their own status refreshes. The
-//! overview itself starts one `worktree list` per repository and one status
-//! read per worktree that is not open, only while Source control is visible.
+//! Open projects reuse their own status refreshes. Discovery starts one
+//! `worktree list` per repository and one status
+//! read per worktree that is not open, only while the project picker is open.
 //! Request IDs keep a late worker from replacing a newer result.
 
 use super::*;
-use crate::palette::BORDER_STRONG;
 use std::collections::HashSet;
 
 /// Worktrees added or removed outside vEdit appear within this interval.
 const LISTING_INTERVAL: Duration = Duration::from_secs(15);
-/// A folded overview shows only its header, so membership can wait longer.
-const COLLAPSED_LISTING_INTERVAL: Duration = Duration::from_secs(60);
 /// Worktrees that are not open refresh at half the inactive project cadence.
 const STATUS_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_JOBS: usize = 2;
 const MAX_HEADLINES: usize = 512;
-const VISIBLE_ROWS: usize = 6;
-pub(in crate::app) const HEADER_HEIGHT: f32 = 22.0;
-const HEADER_ID: &str = "git-repositories-header";
 
 /// Compare worktree paths the way Windows and Git for Windows do: without the
 /// verbatim prefix, with either separator and without case.
@@ -35,10 +29,6 @@ pub(in crate::app) fn path_key(path: &Path) -> String {
         text.pop();
     }
     text
-}
-
-fn row_id(key: &str) -> egui::Id {
-    egui::Id::new(("git-repositories-row", key))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -129,16 +119,8 @@ fn change_details(files: &[git::FileStatus], stats: &git::WorkingTreeStats) -> C
     details
 }
 
-/// A deferred click, applied after the editor pass like project tab switches.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::app) enum RepositoryAction {
-    Switch(PathBuf),
-    Open(PathBuf),
-}
-
 #[derive(Default)]
 pub(in crate::app) struct RepositoryOverview {
-    pub(in crate::app) collapsed: bool,
     repositories: Vec<Repository>,
     /// Worktrees that are not open as projects, by path key.
     statuses: HashMap<String, StatusEntry>,
@@ -152,9 +134,6 @@ pub(in crate::app) struct RepositoryOverview {
     jobs: HashMap<u64, Job>,
     next_request: u64,
     refresh_requested: Option<Instant>,
-    pending: Option<RepositoryAction>,
-    /// Keyboard rows of the last rendered frame.
-    rows: Vec<egui::Id>,
 }
 
 /// One unit of background work. It owns everything it needs, so the UI
@@ -306,12 +285,12 @@ enum RowKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Row {
+pub(in crate::app) struct Row {
     key: String,
-    path: PathBuf,
-    name: String,
+    pub(in crate::app) path: PathBuf,
+    pub(in crate::app) name: String,
     linked: bool,
-    project: Option<usize>,
+    pub(in crate::app) project: Option<usize>,
     current: bool,
     kind: RowKind,
     branch: Option<String>,
@@ -324,20 +303,41 @@ struct Row {
 }
 
 impl Row {
-    fn openable(&self) -> bool {
+    pub(in crate::app) fn openable(&self) -> bool {
         self.kind == RowKind::Worktree
     }
 
-    fn label(&self) -> String {
-        format!(
-            "{} {}",
-            if self.linked {
-                "Worktree"
-            } else {
-                "Repository"
-            },
-            self.name
-        )
+    pub(in crate::app) fn label(&self) -> String {
+        format!("Worktree {}", self.name)
+    }
+
+    pub(in crate::app) fn badge(&self) -> &str {
+        match self.kind {
+            RowKind::Worktree => "worktree",
+            RowKind::Bare => "bare",
+            RowKind::Missing(_) => "missing",
+        }
+    }
+
+    pub(in crate::app) fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(branch) = &self.branch {
+            parts.push(branch.clone());
+        } else if let Some(head) = &self.head {
+            parts.push(short_hash(head).into());
+        }
+        if let Some(Ok(status)) = &self.status {
+            if status.changes > 0 {
+                parts.push(format!("{} changed", status.changes));
+            }
+            if status.conflicts > 0 {
+                parts.push(format!("{} conflicts", status.conflicts));
+            }
+            if let Some((sync, _)) = sync_marker(status) {
+                parts.push(sync);
+            }
+        }
+        parts.join(" · ")
     }
 }
 
@@ -446,18 +446,13 @@ impl RepositoryOverview {
             });
             budget -= 1;
         }
-        let interval = if self.collapsed {
-            COLLAPSED_LISTING_INTERVAL
-        } else {
-            LISTING_INTERVAL
-        };
         let mut due: Vec<(Instant, usize)> = self
             .repositories
             .iter()
             .enumerate()
             .filter(|(_, repository)| {
                 !in_flight.contains(&Target::Listing(repository.seed_key.clone()))
-                    && (now.saturating_duration_since(repository.refreshed) >= interval
+                    && (now.saturating_duration_since(repository.refreshed) >= LISTING_INTERVAL
                         || self.requested_after(repository.refreshed)
                         || !self
                             .missing_heads(open, |key| repository.covers(key))
@@ -513,7 +508,7 @@ impl RepositoryOverview {
             });
             budget -= 1;
         }
-        if self.collapsed || budget == 0 {
+        if budget == 0 {
             return work;
         }
         let mut statuses: Vec<(Option<Instant>, String, PathBuf, Option<String>)> = Vec::new();
@@ -572,8 +567,7 @@ impl RepositoryOverview {
     fn details_work(&mut self, path: &Path, now: Instant) -> Option<Work> {
         let key = path_key(path);
         let target = Target::Details(key.clone());
-        if self.collapsed
-            || self.jobs.len() >= MAX_JOBS
+        if self.jobs.len() >= MAX_JOBS
             || self.jobs.values().any(|job| job.target == target)
             || self.details.get(&key).is_some_and(|entry| {
                 now.saturating_duration_since(entry.refreshed) < STATUS_INTERVAL
@@ -889,22 +883,6 @@ impl RepositoryOverview {
     }
 }
 
-/// Compact age beside a subject: "now", "5m", "3h", "2d", "4mo", "1y".
-fn compact_age(timestamp: i64, now: i64) -> String {
-    if timestamp <= 0 {
-        return String::new();
-    }
-    let seconds = now.saturating_sub(timestamp).max(0);
-    match seconds {
-        0..60 => "now".into(),
-        60..3_600 => format!("{}m", seconds / 60),
-        3_600..86_400 => format!("{}h", seconds / 3_600),
-        86_400..2_592_000 => format!("{}d", seconds / 86_400),
-        2_592_000..31_536_000 => format!("{}mo", seconds / 2_592_000),
-        _ => format!("{}y", seconds / 31_536_000),
-    }
-}
-
 fn overview_now(ui: &egui::Ui) -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1166,306 +1144,30 @@ fn repository_tooltip(ui: &mut egui::Ui, row: &Row, now: i64) {
     tooltip_note(ui, action, color);
 }
 
-fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {
-    let points = if open {
-        vec![
-            center + Vec2::new(-3.0, -1.5),
-            center + Vec2::new(0.0, 1.5),
-            center + Vec2::new(3.0, -1.5),
-        ]
-    } else {
-        vec![
-            center + Vec2::new(-1.5, -3.0),
-            center + Vec2::new(1.5, 0.0),
-            center + Vec2::new(-1.5, 3.0),
-        ]
-    };
-    painter.add(egui::Shape::line(points, Stroke::new(1.3, MUTED)));
-}
-
-fn header_row(ui: &mut egui::Ui, rows: &[Row], collapsed: bool) -> egui::Response {
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(1.0), HEADER_HEIGHT),
-        egui::Sense::hover(),
-    );
-    let response = ui.interact(rect, egui::Id::new(HEADER_ID), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::CollapsingHeader,
-            ui.is_enabled(),
-            !collapsed,
-            "Repositories",
-        )
-    });
-    if ui.is_rect_visible(rect) {
-        if response.hovered() || crate::design::keyboard_focus(&response) {
-            ui.painter().rect_filled(rect, 4.0, HOVER);
-        }
-        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        let repositories = rows.iter().filter(|row| !row.linked).count();
-        let worktrees = rows.iter().filter(|row| row.kind != RowKind::Bare).count();
-        let conflicts: usize = rows
-            .iter()
-            .filter_map(|row| row.status.as_ref()?.as_ref().ok())
-            .map(|status| status.conflicts)
-            .sum();
-        let plural = |count: usize, one: &str, many: &str| {
-            format!("{count} {}", if count == 1 { one } else { many })
-        };
-        let mut summary = plural(worktrees, "worktree", "worktrees");
-        if repositories > 1 {
-            summary = format!(
-                "{} · {summary}",
-                plural(repositories, "repository", "repositories")
-            );
-        }
-        let (summary, color) = if conflicts > 0 && collapsed {
-            (format!("Conflicts · {summary}"), RED)
-        } else {
-            (summary, MUTED)
-        };
-        let chevron = egui::pos2(rect.right() - 10.0, rect.center().y);
-        paint_chevron(&painter, chevron, !collapsed);
-        let summary = painter.layout_no_wrap(summary, FontId::proportional(11.0), color);
-        let summary_left = chevron.x - 10.0 - summary.size().x;
-        painter.galley(
-            egui::pos2(summary_left, rect.center().y - summary.size().y * 0.5),
-            summary,
-            color,
-        );
-        let title = truncated_text(
-            ui,
-            "Repositories",
-            FontId::proportional(11.5),
-            MUTED,
-            (summary_left - rect.left() - SECTION_TEXT_INSET - 8.0).max(1.0),
-        );
-        painter.galley(
-            egui::pos2(
-                rect.left() + SECTION_TEXT_INSET,
-                rect.center().y - title.size().y * 0.5,
-            ),
-            title,
-            MUTED,
-        );
-    }
-    git_row_keyboard(ui, &response);
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if collapsed {
-            "Show repositories and worktrees"
-        } else {
-            "Hide repositories and worktrees"
-        })
-}
-
-fn repository_row(ui: &mut egui::Ui, row: &Row, now: i64) -> (egui::Response, bool) {
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(1.0), TREE_ROW_HEIGHT),
-        egui::Sense::hover(),
-    );
-    let response = ui.interact(rect, row_id(&row.key), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            row.current,
-            row.label(),
-        )
-    });
-    if ui.is_rect_visible(rect) {
-        let focused = crate::design::keyboard_focus(&response);
-        if response.hovered() || focused {
-            ui.painter().rect_filled(rect, 4.0, HOVER);
-        } else if row.current {
-            ui.painter().rect_filled(rect, 4.0, SURFACE);
-        }
-        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        let center_y = rect.center().y;
-        let mut left = rect.left() + SECTION_TEXT_INSET + 4.0;
-        if row.linked {
-            // A quiet branch guide instead of a folder icon.
-            let guide = left + 4.0;
-            painter.line_segment(
-                [
-                    egui::pos2(guide, rect.top() + 2.0),
-                    egui::pos2(guide, center_y),
-                ],
-                Stroke::new(1.0, BORDER_STRONG),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(guide, center_y),
-                    egui::pos2(guide + 6.0, center_y),
-                ],
-                Stroke::new(1.0, BORDER_STRONG),
-            );
-            left += 14.0;
-        }
-        if row.current {
-            painter.rect_filled(
-                egui::Rect::from_center_size(
-                    egui::pos2(rect.left() + 2.0, center_y),
-                    Vec2::new(2.0, 12.0),
-                ),
-                1.0,
-                MUTED,
-            );
-        }
-        // Right side, from the edge inward: attention badge, divergence, age.
-        let mut right = rect.right() - 6.0;
-        let known = row.status.as_ref().and_then(|status| status.as_ref().ok());
-        let badge = match (&row.kind, &row.status) {
-            (RowKind::Missing(_), _) => Some(("missing".to_owned(), ORANGE, false)),
-            (RowKind::Bare, _) => Some(("bare".to_owned(), MUTED, false)),
-            (_, Some(Err(_))) => Some(("?".to_owned(), ORANGE, true)),
-            (_, Some(Ok(status))) if status.conflicts > 0 => Some((
-                format!("!{}", compact_number(status.conflicts as u64)),
-                RED,
-                true,
-            )),
-            (_, Some(Ok(status))) if status.changes > 0 => {
-                Some((compact_number(status.changes as u64), MUTED, true))
-            }
-            _ => None,
-        };
-        if let Some((text, color, pill)) = badge {
-            let galley = painter.layout_no_wrap(text, FontId::proportional(10.5), color);
-            let size = galley.size();
-            let width = if pill { size.x + 10.0 } else { size.x };
-            let pill_rect = egui::Rect::from_min_size(
-                egui::pos2(right - width, center_y - 8.0),
-                Vec2::new(width, 16.0),
-            );
-            if pill {
-                painter.rect_filled(
-                    pill_rect,
-                    8.0,
-                    if row.current || response.hovered() || focused {
-                        BORDER_STRONG
-                    } else {
-                        SURFACE
-                    },
-                );
-            }
-            painter.galley(
-                egui::pos2(pill_rect.center().x - size.x * 0.5, center_y - size.y * 0.5),
-                galley,
-                color,
-            );
-            right -= width + 6.0;
-        }
-        if let Some((text, color)) = known.and_then(sync_marker) {
-            let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), color);
-            right -= galley.size().x;
-            painter.galley(
-                egui::pos2(right, center_y - galley.size().y * 0.5),
-                galley,
-                color,
-            );
-            right -= 6.0;
-        }
-        let age = row
-            .headline
-            .as_ref()
-            .map(|headline| compact_age(headline.timestamp, now))
-            .unwrap_or_default();
-        let age_galley = (!age.is_empty())
-            .then(|| painter.layout_no_wrap(age, FontId::proportional(11.0), MUTED));
-        let age_width = age_galley
-            .as_ref()
-            .map_or(0.0, |galley| galley.size().x + 6.0);
-        // Left side: name, branch or short hash, then the latest subject.
-        let available = (right - left - age_width).max(1.0);
-        // Brightness, not hue: current, then open projects, then the rest.
-        let name_color = if row.current || response.hovered() || focused {
-            TEXT
-        } else if row.project.is_some() {
-            TEXT.lerp_to_gamma(MUTED, 0.3)
-        } else {
-            MUTED
-        };
-        let name = truncated_text(
-            ui,
-            &row.name,
-            FontId::proportional(12.0),
-            name_color,
-            available * 0.5,
-        );
-        let mut x = left;
-        x += name.size().x;
-        painter.galley(
-            egui::pos2(left, center_y - name.size().y * 0.5),
-            name,
-            name_color,
-        );
-        let reference = match (&row.kind, &row.branch, &row.head) {
-            (RowKind::Bare, _, _) => None,
-            (_, Some(branch), _) => Some((branch.clone(), FontId::proportional(11.5))),
-            (_, None, Some(head)) => Some((short_hash(head).to_owned(), FontId::monospace(11.0))),
-            _ => None,
-        };
-        if let Some((text, font)) = reference {
-            let width = (right - age_width - x - 6.0) * 0.6;
-            if width > 16.0 {
-                let galley = truncated_text(ui, &text, font, MUTED, width);
-                painter.galley(
-                    egui::pos2(x + 6.0, center_y - galley.size().y * 0.5),
-                    galley.clone(),
-                    MUTED,
-                );
-                x += 6.0 + galley.size().x;
-            }
-        }
-        let subject_width = right - age_width - x - 10.0;
-        // A few letters of a subject are noise; narrow panels drop it.
-        if let Some(headline) = &row.headline
-            && subject_width > 56.0
-        {
-            let color = MUTED.gamma_multiply(0.75);
-            let galley = truncated_text(
-                ui,
-                &headline.subject,
-                FontId::proportional(11.5),
-                color,
-                subject_width,
-            );
-            painter.galley(
-                egui::pos2(x + 10.0, center_y - galley.size().y * 0.5),
-                galley,
-                color,
-            );
-        }
-        if let Some(galley) = age_galley {
-            painter.galley(
-                egui::pos2(right - galley.size().x, center_y - galley.size().y * 0.5),
-                galley,
-                MUTED,
-            );
-        }
-    }
-    git_row_keyboard(ui, &response);
-    let response = if row.openable() || row.project.is_some() {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        response
-    };
-    // Built only while hovered.
-    let mut tooltip_visible = false;
-    let response = response.on_hover_ui(|ui| {
-        tooltip_visible = true;
-        repository_tooltip(ui, row, now);
-    });
-    (response, tooltip_visible)
-}
-
-enum RowAction {
-    Activate,
-    Reveal,
-    Copy,
-}
-
 impl VEditApp {
+    pub(in crate::app) fn worktree_picker_hover(
+        &mut self,
+        ui: &egui::Ui,
+        response: egui::Response,
+        row: &Row,
+    ) -> egui::Response {
+        let mut visible = false;
+        let response = response.on_hover_ui(|ui| {
+            visible = true;
+            repository_tooltip(ui, row, overview_now(ui));
+        });
+        if visible
+            && self.git_polling_active()
+            && row.openable()
+            && self.git_busy.is_none()
+            && let Some(work) = self.repositories.details_work(&row.path, Instant::now())
+        {
+            self.worker(move || WorkerResult::RepositoryOverview(work.run()));
+            ui.ctx().request_repaint();
+        }
+        response
+    }
+
     fn open_projects_for_overview(&self) -> Vec<OpenProject<'_>> {
         self.projects
             .iter()
@@ -1485,7 +1187,7 @@ impl VEditApp {
             .collect()
     }
 
-    fn repository_rows(&self) -> Vec<Row> {
+    pub(in crate::app) fn repository_rows(&self) -> Vec<Row> {
         let projects = self.open_projects_for_overview();
         let Some(current) = projects.iter().find(|project| project.current) else {
             return Vec::new();
@@ -1538,10 +1240,9 @@ impl VEditApp {
         }
     }
 
-    /// Start due overview reads. Runs every frame but only plans while Source
-    /// control is visible and no Git action holds the repository.
+    /// Discovery and unopened-worktree reads run only while the picker is open.
     pub(in crate::app) fn refresh_repository_overview(&mut self) {
-        if !self.sidebar_view_visible(SidebarView::SourceControl) || self.git_busy.is_some() {
+        if !self.workspace_picker_open() || !self.git_polling_active() || self.git_busy.is_some() {
             return;
         }
         self.fill_project_headlines();
@@ -1563,176 +1264,6 @@ impl VEditApp {
         }
         for work in self.repositories.plan(&seeds, &open, Instant::now()) {
             self.worker(move || WorkerResult::RepositoryOverview(work.run()));
-        }
-    }
-
-    pub(in crate::app) fn finish_repository_action(&mut self) {
-        match self.repositories.pending.take() {
-            Some(RepositoryAction::Switch(root)) => {
-                if let Some(index) = self
-                    .projects
-                    .iter()
-                    .position(|project| project.root == root)
-                {
-                    self.switch_project(index);
-                    // The source was rendered before this deferred switch.
-                    self.ctx.request_repaint();
-                }
-            }
-            Some(RepositoryAction::Open(path)) => {
-                self.add_project(path);
-                self.ctx.request_repaint();
-            }
-            None => {}
-        }
-    }
-
-    pub(in crate::app) fn repository_overview_has_focus(&self) -> bool {
-        self.ctx
-            .memory(|memory| memory.focused())
-            .is_some_and(|focused| self.repositories.rows.contains(&focused))
-    }
-
-    /// The overview only appears once there is something to choose between.
-    /// `list_budget` caps the rows' height when History is pulled up.
-    pub(in crate::app) fn repository_overview_ui(&mut self, ui: &mut egui::Ui, list_budget: f32) {
-        let rows = self.repository_rows();
-        if rows.len() < 2 {
-            self.repositories.rows.clear();
-            return;
-        }
-        let now = overview_now(ui);
-        let mut keyboard_rows = vec![egui::Id::new(HEADER_ID)];
-        if !self.repositories.collapsed {
-            keyboard_rows.extend(rows.iter().map(|row| row_id(&row.key)));
-        }
-        if let Some(focused) = ui.memory(|memory| memory.focused())
-            && ui.is_enabled()
-            && !egui::Popup::is_any_open(ui.ctx())
-            && let Some(target) = take_git_navigation(
-                ui.ctx(),
-                &keyboard_rows,
-                focused,
-                VISIBLE_ROWS,
-                self.settings.swap_jk,
-            )
-        {
-            request_git_row_focus(ui.ctx(), target);
-        }
-        self.repositories.rows = keyboard_rows;
-        let mut actions: Vec<(usize, RowAction)> = Vec::new();
-        let mut collapsed = self.repositories.collapsed;
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let header = header_row(ui, &rows, collapsed);
-            let mut open = !collapsed;
-            git_folder_key(ui, &header, &mut open);
-            if header.clicked() {
-                open = !open;
-            }
-            collapsed = !open;
-            if !collapsed {
-                egui::ScrollArea::vertical()
-                    .id_salt("git-repositories")
-                    .max_height((VISIBLE_ROWS as f32 * TREE_ROW_HEIGHT).min(list_budget.max(0.0)))
-                    .min_scrolled_height(0.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for (index, row) in rows.iter().enumerate() {
-                            let (response, tooltip_visible) = repository_row(ui, row, now);
-                            if tooltip_visible
-                                && row.openable()
-                                && self.git_busy.is_none()
-                                && let Some(work) =
-                                    self.repositories.details_work(&row.path, Instant::now())
-                            {
-                                self.worker(move || WorkerResult::RepositoryOverview(work.run()));
-                            }
-                            if response.clicked() {
-                                actions.push((index, RowAction::Activate));
-                            }
-                            git_context_menu(&response, |ui, focus| {
-                                let openable = row.openable();
-                                let open = ui
-                                    .add_enabled_ui(openable, |ui| {
-                                        git_menu_item(
-                                            ui,
-                                            "Open as project",
-                                            "",
-                                            if row.project.is_some() {
-                                                "Switch to this open project"
-                                            } else {
-                                                "Add this worktree as a project"
-                                            },
-                                            focus && openable,
-                                        )
-                                    })
-                                    .inner;
-                                if open.clicked() {
-                                    actions.push((index, RowAction::Activate));
-                                    ui.close();
-                                }
-                                let exists = !matches!(row.kind, RowKind::Missing(_));
-                                let reveal = ui
-                                    .add_enabled_ui(exists, |ui| {
-                                        git_menu_item(
-                                            ui,
-                                            "Reveal in Explorer",
-                                            "",
-                                            "Show this folder in Windows Explorer",
-                                            focus && !openable && exists,
-                                        )
-                                    })
-                                    .inner;
-                                if reveal.clicked() {
-                                    actions.push((index, RowAction::Reveal));
-                                    ui.close();
-                                }
-                                if git_menu_item(
-                                    ui,
-                                    "Copy path",
-                                    "",
-                                    "Copy the full folder path",
-                                    focus && !openable && !exists,
-                                )
-                                .clicked()
-                                {
-                                    actions.push((index, RowAction::Copy));
-                                    ui.close();
-                                }
-                            });
-                        }
-                    });
-            }
-            ui.add_space(6.0);
-            let (rule, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
-            ui.painter().line_segment(
-                [rule.left_center(), rule.right_center()],
-                Stroke::new(1.0, BORDER),
-            );
-            ui.add_space(6.0);
-        });
-        if collapsed != self.repositories.collapsed {
-            self.repositories.collapsed = collapsed;
-            self.session_dirty = true;
-        }
-        for (index, action) in actions {
-            let row = &rows[index];
-            match action {
-                RowAction::Activate if row.current => {}
-                RowAction::Activate => {
-                    if let Some(project) = row.project.and_then(|index| self.projects.get(index)) {
-                        self.repositories.pending =
-                            Some(RepositoryAction::Switch(project.root.clone()));
-                    } else if row.openable() {
-                        self.repositories.pending = Some(RepositoryAction::Open(row.path.clone()));
-                    }
-                }
-                RowAction::Reveal => self.context_reveal(row.path.clone()),
-                RowAction::Copy => self.ctx.copy_text(crate::paths::display(&row.path)),
-            }
         }
     }
 }

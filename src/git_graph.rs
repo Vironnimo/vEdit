@@ -1,15 +1,14 @@
 //! Incremental layout for a newest-first, topologically ordered commit history.
 //!
-//! The frontier contains the distinct commits that visible children still need
-//! to reach. Rows retain their layout when another page is appended; only the
-//! frontier continues into that page.
+//! Each frontier track follows a parent until that commit's own row. Tracks
+//! meeting the same ancestor stay separate until then, retaining their colors.
+//! Rows retain their layout when another page is appended.
 //!
 //! The checked-out commit and its first-parent ancestry form the HEAD line.
 //! The UI paints it in local and remote colors, like other editors' graphs,
 //! while merged side branches keep their own track colors.
 
 use crate::git::CommitSummary;
-use std::collections::HashMap;
 
 /// One segment between two lane positions in a half of a history row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,16 +61,28 @@ impl Track {
 pub(crate) struct Graph {
     pub rows: Vec<GraphRow>,
     pub lane_count: usize,
-    frontier: Vec<Track>,
+    frontier: Vec<Option<Track>>,
     next_color: usize,
+    head: Option<String>,
 }
 
 impl Graph {
-    pub fn clear(&mut self) {
-        *self = Self::default();
+    pub fn reset(&mut self, head: Option<&str>) {
+        *self = Self {
+            head: head.map(str::to_owned),
+            ..Self::default()
+        };
     }
 
     pub fn append(&mut self, commits: &[CommitSummary]) {
+        // Production supplies HEAD from the frozen refs, including when it is
+        // on a later page. Also support complete histories supplied by callers.
+        if self.rows.is_empty() && self.head.is_none() {
+            self.head = commits
+                .iter()
+                .find(|commit| commit.refs.iter().any(|reference| reference.current))
+                .map(|commit| commit.hash.clone());
+        }
         self.rows.reserve(commits.len());
         for commit in commits {
             self.append_commit(commit);
@@ -87,12 +98,14 @@ impl Graph {
     fn append_commit(&mut self, commit: &CommitSummary) {
         // Most histories spend long stretches on one lane. Keep that common
         // case free of frontier copies and lane lookups altogether.
-        let current = commit.refs.iter().any(|reference| reference.current);
+        let current = self.head.as_ref() == Some(&commit.hash);
         if self.frontier.len() == 1
-            && self.frontier[0].hash == commit.hash
+            && self.frontier[0]
+                .as_ref()
+                .is_some_and(|track| track.hash == commit.hash)
             && commit.parents.len() <= 1
         {
-            let track = &mut self.frontier[0];
+            let track = self.frontier[0].as_mut().unwrap();
             let incoming = track.edge(0, 0);
             let node_head = track.head || current;
             track.head = node_head;
@@ -116,95 +129,87 @@ impl Graph {
             });
             return;
         }
-        let tracked_lane = self
-            .frontier
-            .iter()
-            .position(|track| track.hash == commit.hash);
-        let node_lane = tracked_lane.unwrap_or(self.frontier.len());
+        let tracked_lane = self.frontier.iter().position(|track| {
+            track
+                .as_ref()
+                .is_some_and(|track| track.hash == commit.hash)
+        });
+        let node_head = current
+            || self
+                .frontier
+                .iter()
+                .flatten()
+                .any(|track| track.hash == commit.hash && track.head);
+        let node_lane = if node_head {
+            0
+        } else {
+            tracked_lane.unwrap_or_else(|| self.free_lane(usize::from(self.head.is_some())))
+        };
         let node_color = tracked_lane
-            .map(|lane| self.frontier[lane].color)
+            .map(|lane| self.frontier[lane].as_ref().unwrap().color)
             .unwrap_or_else(|| self.new_color());
-        let node_head = current || tracked_lane.is_some_and(|lane| self.frontier[lane].head);
         let incoming = self
             .frontier
             .iter()
             .enumerate()
-            .map(|(lane, track)| track.edge(lane, lane))
+            .filter_map(|(lane, track)| {
+                track.as_ref().map(|track| {
+                    track.edge(
+                        lane,
+                        if track.hash == commit.hash {
+                            node_lane
+                        } else {
+                            lane
+                        },
+                    )
+                })
+            })
             .collect();
-
-        let before = std::mem::take(&mut self.frontier);
-        let mut after = before.clone();
-        if let Some(lane) = tracked_lane {
-            after.remove(lane);
+        let before_len = self.frontier.len();
+        for track in &mut self.frontier {
+            if track
+                .as_ref()
+                .is_some_and(|track| track.hash == commit.hash)
+            {
+                *track = None;
+            }
         }
-
-        // A new first parent carries the node's track forward. Additional
-        // parents branch beside it. An already pending parent reuses its lane:
-        // this joins only edges that really lead to the same commit.
-        let mut insertion_lane = node_lane.min(after.len());
+        let mut outgoing: Vec<_> = self
+            .frontier
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, track)| track.as_ref().map(|track| track.edge(lane, lane)))
+            .collect();
+        // Keep first parents on their existing lane. Additional parents use a
+        // free lane on the right. Never merge pending edges early: even edges
+        // to the same parent keep their identity until the parent's node.
         let mut parents = Vec::with_capacity(commit.parents.len());
         for (parent_index, hash) in commit.parents.iter().enumerate() {
             if parents.contains(hash) {
                 continue;
             }
             parents.push(hash.clone());
-            if let Some(track) = after.iter_mut().find(|track| track.hash == *hash) {
-                // The HEAD line continues through a parent that a side branch
-                // reached first, so the shared lane below takes its colors.
-                if parent_index == 0 && node_head {
-                    track.head = true;
-                    track.remote = commit.on_remote;
-                }
-                continue;
-            }
-            let color = if parent_index == 0 {
-                node_color
+            let (lane, color) = if parent_index == 0 {
+                (node_lane, node_color)
             } else {
-                self.new_color()
+                (self.free_lane(node_lane + 1), self.new_color())
             };
-            after.insert(
-                insertion_lane,
-                Track {
-                    hash: hash.clone(),
-                    color,
-                    head: parent_index == 0 && node_head,
-                    remote: commit.on_remote,
-                },
-            );
-            insertion_lane += 1;
-        }
-
-        // Wide histories otherwise scan the whole frontier once for every
-        // outgoing edge. Tiny frontiers stay on the allocation-free fast path.
-        let lanes: Option<HashMap<_, _>> = (after.len() > 16).then(|| {
-            after
-                .iter()
-                .enumerate()
-                .map(|(lane, track)| (track.hash.as_str(), lane))
-                .collect()
-        });
-        let find_lane = |hash: &str| match &lanes {
-            Some(lanes) => lanes.get(hash).copied(),
-            None => after.iter().position(|track| track.hash == hash),
-        };
-        let mut outgoing = Vec::with_capacity(before.len() + parents.len());
-        for (lane, track) in before.iter().enumerate() {
-            if Some(lane) == tracked_lane {
-                continue;
-            }
-            let to_lane =
-                find_lane(&track.hash).expect("an unrelated frontier track survives the row");
-            outgoing.push(after[to_lane].edge(lane, to_lane));
-        }
-        for parent in parents {
-            let to_lane = find_lane(&parent).expect("every parent has a frontier track");
-            outgoing.push(GraphEdge {
+            let track = Track {
+                hash: hash.clone(),
+                color,
+                head: parent_index == 0 && node_head,
                 remote: commit.on_remote,
-                ..after[to_lane].edge(node_lane, to_lane)
-            });
+            };
+            outgoing.push(track.edge(node_lane, lane));
+            if lane >= self.frontier.len() {
+                self.frontier.resize(lane + 1, None);
+            }
+            self.frontier[lane] = Some(track);
         }
-
-        let lane_count = before.len().max(after.len()).max(node_lane + 1);
+        while self.frontier.last().is_some_and(Option::is_none) {
+            self.frontier.pop();
+        }
+        let lane_count = before_len.max(self.frontier.len()).max(node_lane + 1);
         self.lane_count = self.lane_count.max(lane_count);
         self.rows.push(GraphRow {
             node_lane,
@@ -214,7 +219,12 @@ impl Graph {
             incoming,
             outgoing,
         });
-        self.frontier = after;
+    }
+
+    fn free_lane(&self, start: usize) -> usize {
+        (start..self.frontier.len())
+            .find(|&lane| self.frontier[lane].is_none())
+            .unwrap_or(self.frontier.len().max(start))
     }
 }
 
@@ -243,6 +253,57 @@ mod tests {
             head: false,
             remote: false,
         }
+    }
+
+    fn head(hash: &str, parents: &[&str]) -> CommitSummary {
+        let mut commit = commit(hash, parents);
+        commit.refs.push(crate::git::CommitRef {
+            hash: hash.into(),
+            name: "main".into(),
+            kind: crate::git::RefKind::Local,
+            current: true,
+        });
+        commit
+    }
+
+    #[test]
+    fn current_branch_stays_left_when_another_tip_is_newer() {
+        let mut graph = Graph::default();
+        graph.append(&[
+            commit("other", &["base"]),
+            head("head", &["main"]),
+            commit("main", &["base"]),
+            commit("base", &[]),
+        ]);
+        for row in graph.rows.iter().filter(|row| row.node_head) {
+            assert_eq!(row.node_lane, 0, "the current branch owns the left lane");
+        }
+        assert_continuous(&graph.rows);
+    }
+
+    #[test]
+    fn side_branch_keeps_its_color_and_joins_only_at_the_common_commit() {
+        let mut graph = Graph::default();
+        graph.append(&[
+            head("merge", &["main", "feature"]),
+            commit("feature", &["base"]),
+            commit("main", &["base"]),
+            commit("base", &[]),
+        ]);
+        let side_color = graph.rows[1].node_color;
+        assert!(
+            graph.rows[2].outgoing.iter().any(|edge| {
+                edge.from_lane == 1 && edge.to_lane == 1 && !edge.head && edge.color == side_color
+            }),
+            "the side branch must pass the main commit without joining it"
+        );
+        assert!(
+            graph.rows[3].incoming.iter().any(|edge| {
+                edge.from_lane == 1 && edge.to_lane == 0 && !edge.head && edge.color == side_color
+            }),
+            "the side branch joins at the common commit in its own color"
+        );
+        assert_continuous(&graph.rows);
     }
 
     fn assert_continuous(rows: &[GraphRow]) {
@@ -296,8 +357,8 @@ mod tests {
         assert_eq!(graph.rows[0].outgoing, vec![edge(0, 0, 0), edge(0, 1, 1)]);
         assert_eq!(graph.rows[1].node_lane, 0);
         assert_eq!(graph.rows[2].node_lane, 1);
-        assert_eq!(graph.rows[2].outgoing, vec![edge(0, 0, 0), edge(1, 0, 0)]);
-        assert_eq!(graph.rows[3].incoming, vec![edge(0, 0, 0)]);
+        assert_eq!(graph.rows[2].outgoing, vec![edge(0, 0, 0), edge(1, 1, 1)]);
+        assert_eq!(graph.rows[3].incoming, vec![edge(0, 0, 0), edge(1, 0, 1)]);
         assert!(graph.frontier.is_empty());
         assert_continuous(&graph.rows);
     }
@@ -321,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_a_finished_lane_routes_other_pending_commits() {
+    fn finishing_a_lane_does_not_move_other_pending_commits() {
         let mut graph = Graph::default();
         graph.append(&[
             commit("merge", &["root", "branch"]),
@@ -331,14 +392,14 @@ mod tests {
         ]);
 
         assert_eq!(graph.rows[1].node_lane, 0);
-        assert_eq!(graph.rows[1].outgoing, vec![edge(1, 0, 1)]);
-        assert_eq!(graph.rows[2].node_lane, 0);
+        assert_eq!(graph.rows[1].outgoing, vec![edge(1, 1, 1)]);
+        assert_eq!(graph.rows[2].node_lane, 1);
         assert_eq!(graph.rows[2].node_color, 1);
         assert_continuous(&graph.rows);
     }
 
     #[test]
-    fn several_merge_parents_reuse_existing_frontier_lanes() {
+    fn several_merge_parents_keep_separate_tracks_until_their_nodes() {
         let mut graph = Graph::default();
         graph.append(&[
             commit("tip", &["shared", "merge"]),
@@ -347,14 +408,15 @@ mod tests {
 
         assert_eq!(graph.rows[1].node_lane, 1);
         assert_eq!(graph.rows[1].outgoing.len(), 4);
-        assert_eq!(graph.rows[1].outgoing[1], edge(1, 0, 0));
+        assert_eq!(graph.rows[1].outgoing[1], edge(1, 1, 1));
         assert_eq!(
             graph
                 .frontier
                 .iter()
+                .flatten()
                 .map(|track| track.hash.as_str())
                 .collect::<Vec<_>>(),
-            ["shared", "side-a", "side-b"]
+            ["shared", "shared", "side-a", "side-b"]
         );
         assert_continuous(&graph.rows);
     }
@@ -412,6 +474,39 @@ mod tests {
     }
 
     #[test]
+    fn head_on_a_later_page_has_a_reserved_lane_without_moving_earlier_rows() {
+        let commits = [
+            commit("other", &["base"]),
+            head("head", &["merge"]),
+            commit("merge", &["main", "side"]),
+            commit("side", &["base"]),
+            commit("main", &["base"]),
+            commit("base", &[]),
+        ];
+        let mut entire = Graph::default();
+        entire.reset(Some("head"));
+        entire.append(&commits);
+        for split in 0..=commits.len() {
+            let mut paged = Graph::default();
+            paged.reset(Some("head"));
+            paged.append(&commits[..split]);
+            let previous = paged.rows.clone();
+            paged.append(&commits[split..]);
+            assert_eq!(&paged.rows[..split], previous);
+            assert_eq!(paged, entire);
+        }
+        assert_eq!(entire.rows[0].node_lane, 1);
+        assert!(
+            entire
+                .rows
+                .iter()
+                .filter(|row| row.node_head)
+                .all(|row| row.node_lane == 0)
+        );
+        assert_continuous(&entire.rows);
+    }
+
+    #[test]
     fn head_line_follows_first_parents_and_turns_remote_where_the_remote_starts() {
         let mut head = commit("head", &["merge"]);
         head.refs.push(crate::git::CommitRef {
@@ -462,7 +557,7 @@ mod tests {
     fn clear_starts_a_new_snapshot_with_fresh_tracks() {
         let mut graph = Graph::default();
         graph.append(&[commit("old-tip", &["unseen-parent"])]);
-        graph.clear();
+        graph.reset(None);
         graph.append(&[commit("new-root", &[])]);
 
         assert_eq!(graph.rows.len(), 1);

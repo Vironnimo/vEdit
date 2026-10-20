@@ -497,6 +497,97 @@ fn clean_repository_push_screenshot() {
 }
 
 #[test]
+fn commit_and_push_button_text_is_centered_in_every_state() {
+    for (state, label) in [
+        (0, "Commit 2 staged files"),
+        (1, "Commit staged changes"),
+        (2, "Push 3 commits"),
+    ] {
+        let mut app = git_workspace();
+        if state > 0 {
+            app.projects[0].git_changes.clear();
+        }
+        if state == 2 {
+            app.projects[0].git_tracking = Some(git::BranchInfo {
+                name: Some("main".into()),
+                upstream: Some("origin/main".into()),
+                ahead: 3,
+                behind: 0,
+                divergence_known: true,
+            });
+        }
+        let mut screen = visual_tests::harness(app);
+        screen.run_steps(3);
+        let button = screen.get_by_label(label).rect();
+        let text = screen
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .expect("button text was painted");
+        assert!(
+            (button.center().x - text.center().x).abs() < 1.0,
+            "{label}: {button:?}, {text:?}"
+        );
+    }
+}
+
+#[test]
+fn repeated_merges_keep_a_clear_mainline_screenshot() {
+    let mut app = git_workspace();
+    let project = &mut app.projects[0];
+    project.git_changes.clear();
+    project.git_stats = git::WorkingTreeStats::default();
+    project.recent_commits = [
+        (0, vec![1, 2], "Merge: search improvements"),
+        (2, vec![3], "Keep search results stable while typing"),
+        (1, vec![3], "Update documentation"),
+        (3, vec![4, 5], "Merge: workspace navigation"),
+        (5, vec![6], "Open worktrees from the project picker"),
+        (6, vec![7], "Preserve open documents on project switch"),
+        (4, vec![7], "Improve keyboard focus"),
+        (7, vec![8, 9], "Merge: editor polish"),
+        (9, vec![10], "Use quieter scrollbar colors"),
+        (8, vec![10], "Update release notes"),
+        (10, vec![], "Create the editor workspace"),
+    ]
+    .into_iter()
+    .map(|(index, parents, subject)| git::CommitSummary {
+        hash: format!("{index:040x}"),
+        parents: parents
+            .into_iter()
+            .map(|parent| format!("{parent:040x}"))
+            .collect(),
+        refs: if index == 0 {
+            vec![git::CommitRef {
+                hash: format!("{index:040x}"),
+                name: "main".into(),
+                kind: git::RefKind::Local,
+                current: true,
+            }]
+        } else {
+            Vec::new()
+        },
+        author: "Alex Taylor".into(),
+        date: "2026-10-20T12:00:00+02:00".into(),
+        timestamp: 1792490400,
+        on_remote: false,
+        subject: subject.into(),
+    })
+    .collect();
+    project.git_branches = project.recent_commits[0].refs.clone();
+    project.git_history_has_more = false;
+    project.git_view.graph.reset(Some(&format!("{:040x}", 0)));
+    let mut screen = visual_tests::harness(app);
+    visual_tests::snapshot(&mut screen, "vedit_git_mainline");
+}
+
+#[test]
 fn history_bottom_uses_the_full_sidebar_height_screenshot() {
     let mut app = git_workspace();
     let project = &mut app.projects[0];
@@ -513,7 +604,7 @@ fn history_bottom_uses_the_full_sidebar_height_screenshot() {
             ..template.clone()
         })
         .collect();
-    project.git_view.graph.clear();
+    project.git_view.graph.reset(None);
     let mut screen = visual_tests::harness(app);
     visual_tests::settle_render(&mut screen);
     let first = screen
@@ -530,4 +621,17 @@ fn history_bottom_uses_the_full_sidebar_height_screenshot() {
     screen.run_steps(20);
     screen.input_mut().events.push(egui::Event::PointerGone);
     visual_tests::snapshot(&mut screen, "vedit_git_history_bottom");
+    let last = screen
+        .get_by_label("Improve repository navigation (119)")
+        .rect();
+    screen.hover_at(egui::pos2(last.right() - 2.0, last.center().y));
+    screen.run_steps(5);
+    if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+        screen.snapshot_options(
+            "vedit_git_history_scrollbar_hover",
+            &egui_kittest::SnapshotOptions::new().output_path(std::path::PathBuf::from(directory)),
+        );
+    } else {
+        screen.snapshot("vedit_git_history_scrollbar_hover");
+    }
 }

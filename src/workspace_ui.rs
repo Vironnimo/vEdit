@@ -27,6 +27,7 @@ enum WorkspaceAction {
     Select {
         index: usize,
     },
+    OpenWorktree(PathBuf),
     Project {
         root: PathBuf,
         action: ProjectAction,
@@ -48,6 +49,14 @@ struct ProjectRow {
     open: usize,
     dirty: usize,
     current: bool,
+    git: Option<String>,
+    worktree: Option<git_panel::repositories::Row>,
+}
+
+impl ProjectRow {
+    fn openable(&self) -> bool {
+        self.worktree.as_ref().is_none_or(|row| row.openable())
+    }
 }
 
 struct ProjectHeaderTab {
@@ -227,6 +236,10 @@ impl VEditApp {
             WorkspaceAction::Select { index } => {
                 self.switch_project(index);
                 // The source was rendered before this deferred switch.
+                self.ctx.request_repaint();
+            }
+            WorkspaceAction::OpenWorktree(path) => {
+                self.add_project(path);
                 self.ctx.request_repaint();
             }
             WorkspaceAction::Project { root, action } => {
@@ -467,7 +480,8 @@ impl VEditApp {
         if !self.workspace_picker_open() {
             return;
         }
-        let rows: Vec<_> = self
+        self.refresh_repository_overview();
+        let mut rows: Vec<_> = self
             .projects
             .iter()
             .enumerate()
@@ -481,9 +495,30 @@ impl VEditApp {
                     open: project.tabs.len(),
                     dirty: project.tabs.iter().filter(|tab| tab.dirty).count(),
                     current: index == self.active_project,
+                    git: project.git_tab_summary(),
+                    worktree: None,
                 }
             })
             .collect();
+        rows.extend(
+            self.repository_rows()
+                .into_iter()
+                .filter(|row| row.project.is_none())
+                .map(|row| {
+                    let path = crate::paths::display(&row.path);
+                    ProjectRow {
+                        root: row.path.clone(),
+                        name: row.name.clone(),
+                        short_path: shortened_project_path(&path),
+                        path,
+                        open: 0,
+                        dirty: 0,
+                        current: false,
+                        git: Some(row.summary()),
+                        worktree: Some(row),
+                    }
+                }),
+        );
         let ctx = self.ctx.clone();
         let mut state = std::mem::take(&mut self.workspace_ui);
         let mut chosen = None;
@@ -548,7 +583,7 @@ impl VEditApp {
             let query = ui.add(
                 egui::TextEdit::singleline(&mut state.query)
                     .id(query_id())
-                    .hint_text("Find an open project…")
+                    .hint_text("Find a project or worktree…")
                     .desired_width(f32::INFINITY),
             );
             query.widget_info(|| {
@@ -566,19 +601,29 @@ impl VEditApp {
             let mut matching: Vec<_> = rows
                 .iter()
                 .filter_map(|row| {
-                    project_match_score(&state.query, &row.name, &row.path)
-                        .map(|score| (row, score))
+                    project_match_score(
+                        &state.query,
+                        &row.name,
+                        &format!("{} {}", row.path, row.git.as_deref().unwrap_or_default()),
+                    )
+                    .map(|score| (row, score))
                 })
                 .collect();
             if !state.query.trim().is_empty() {
                 matching.sort_by_key(|(_, score)| *score);
             }
             let visible: Vec<_> = matching.iter().map(|(row, _)| *row).collect();
-            let mut selected = state
-                .selected_root
-                .as_ref()
-                .and_then(|root| visible.iter().position(|row| &row.root == root))
-                .unwrap_or(0);
+            let mut selected = if query.changed() {
+                // A precise branch match must win over a previously selected
+                // project that still happens to match the query as a subsequence.
+                0
+            } else {
+                state
+                    .selected_root
+                    .as_ref()
+                    .and_then(|root| visible.iter().position(|row| &row.root == root))
+                    .unwrap_or(0)
+            };
             let mut moved = false;
             for (pressed, destination) in [
                 (down, selected.saturating_add(1)),
@@ -593,7 +638,10 @@ impl VEditApp {
             }
             state.selected_root = visible.get(selected).map(|row| row.root.clone());
             if enter {
-                chosen = state.selected_root.clone();
+                chosen = visible
+                    .get(selected)
+                    .filter(|row| row.openable())
+                    .map(|row| row.root.clone());
                 keyboard_close = chosen.is_some();
             }
             if escape {
@@ -610,7 +658,7 @@ impl VEditApp {
             };
             if visible.is_empty() {
                 ui.add_space(14.0);
-                ui.label(RichText::new("No matching open project.").color(MUTED));
+                ui.label(RichText::new("No matching project or worktree.").color(MUTED));
                 ui.add_space(14.0);
             } else {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -637,7 +685,13 @@ impl VEditApp {
                     for index in range {
                         let row = visible[index];
                         ui.push_id(&row.root, |ui| {
-                            if project_row(ui, row, index == selected).clicked() {
+                            let response = project_row(ui, row, index == selected);
+                            let response = if let Some(worktree) = &row.worktree {
+                                self.worktree_picker_hover(ui, response, worktree)
+                            } else {
+                                response
+                            };
+                            if response.clicked() && row.openable() {
                                 chosen = Some(row.root.clone());
                             }
                         });
@@ -659,11 +713,20 @@ impl VEditApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_enabled_ui(state.selected_root.is_some(), |ui| {
                         let tooltip = "Close the selected project; unsaved changes are confirmed";
-                        let close = if compact {
-                            compact_project_action(ui, "×", "Close project", tooltip)
-                        } else {
-                            design::ghost_button(ui, "Close project", tooltip)
-                        };
+                        let close = ui
+                            .add_enabled_ui(
+                                visible
+                                    .get(selected)
+                                    .is_some_and(|row| row.worktree.is_none()),
+                                |ui| {
+                                    if compact {
+                                        compact_project_action(ui, "×", "Close project", tooltip)
+                                    } else {
+                                        design::ghost_button(ui, "Close project", tooltip)
+                                    }
+                                },
+                            )
+                            .inner;
                         if close.clicked() {
                             close_project = state.selected_root.clone();
                         }
@@ -682,7 +745,7 @@ impl VEditApp {
             });
             if !short {
                 ui.label(
-                    RichText::new("↑ ↓ select · Enter switch · Esc close")
+                    RichText::new("↑ ↓ select · Enter open · Esc close")
                         .size(10.5)
                         .color(MUTED),
                 );
@@ -699,6 +762,8 @@ impl VEditApp {
                 .position(|project| project.root == root)
             {
                 self.switch_project(index);
+            } else if rows.iter().any(|row| row.root == root && row.openable()) {
+                self.workspace_ui.pending = Some(WorkspaceAction::OpenWorktree(root));
             }
             self.close_workspace_picker();
         } else if let Some(root) = close_project {
@@ -1041,10 +1106,15 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            format!(
-                "{} · {} open · {} unsaved · {}",
-                row.name, row.open, row.dirty, row.short_path
-            ),
+            row.worktree
+                .as_ref()
+                .map(|worktree| worktree.label())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} · {} open · {} unsaved · {}",
+                        row.name, row.open, row.dirty, row.short_path
+                    )
+                }),
         )
     });
     if ui.is_rect_visible(rect) {
@@ -1058,14 +1128,20 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
                 .rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 5.0, color);
         }
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-        let badge = if row.dirty > 0 {
+        let badge = if let Some(worktree) = &row.worktree {
+            worktree.badge().into()
+        } else if row.dirty > 0 {
             format!("{} unsaved", row.dirty)
         } else if row.current {
             "current".into()
         } else {
             String::new()
         };
-        let badge_color = if row.dirty > 0 { ORANGE } else { ACCENT };
+        let badge_color = if row.dirty > 0 || !row.openable() {
+            ORANGE
+        } else {
+            MUTED
+        };
         let badge = project_text(ui, &badge, FontId::proportional(10.5), badge_color, 105.0);
         let title_width = rect.width() - 30.0 - badge.size().x;
         let title = project_text(ui, &row.name, FontId::proportional(13.0), TEXT, title_width);
@@ -1075,7 +1151,11 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
             badge,
             badge_color,
         );
-        let detail = format!("{} · {} open", row.short_path, row.open);
+        let detail = if let Some(git) = &row.git {
+            format!("{git} · {}", row.short_path)
+        } else {
+            format!("{} · {} open", row.short_path, row.open)
+        };
         let detail = project_text(
             ui,
             &detail,
@@ -1085,15 +1165,21 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
         );
         painter.galley(rect.left_top() + Vec2::new(12.0, 29.0), detail, MUTED);
     }
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!(
-            "{}\n{} open files · {} unsaved{}",
-            row.path,
-            row.open,
-            row.dirty,
-            if row.current { "\nCurrent project" } else { "" }
-        ))
+    let response = if row.openable() {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    if row.worktree.is_some() {
+        return response;
+    }
+    response.on_hover_text(format!(
+        "{}\n{} open files · {} unsaved{}",
+        row.path,
+        row.open,
+        row.dirty,
+        if row.current { "\nCurrent project" } else { "" }
+    ))
 }
 
 #[cfg(test)]

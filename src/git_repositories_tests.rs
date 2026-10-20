@@ -1,5 +1,8 @@
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 
 fn hash(character: char) -> String {
     character.to_string().repeat(40)
@@ -207,25 +210,6 @@ fn path_keys_match_verbatim_mixed_separator_and_case_variants() {
 }
 
 #[test]
-fn compact_ages_stay_short_and_tolerate_clock_skew() {
-    let now = 1_800_000_000;
-    for (age, expected) in [
-        (0, "now"),
-        (59, "now"),
-        (60, "1m"),
-        (3_599, "59m"),
-        (3_600, "1h"),
-        (86_400 * 2, "2d"),
-        (2_592_000 * 4, "4mo"),
-        (31_536_000, "1y"),
-        (-500, "now"),
-    ] {
-        assert_eq!(compact_age(now - age, now), expected, "{age}");
-    }
-    assert_eq!(compact_age(0, now), "");
-}
-
-#[test]
 fn rows_group_worktrees_under_their_repository_in_project_order() {
     let base = Path::new("C:/Code");
     let main = base.join("vEdit");
@@ -428,17 +412,6 @@ fn planning_reads_only_due_worktrees_that_are_not_open_within_the_budget() {
     reads.sort();
     assert_eq!(reads, linked, "each worktree that is not open is read once");
     assert!(overview.plan(&seeds, &open_keys, now).is_empty(), "idle");
-    // Folding pauses status reads; listings slow down.
-    overview.collapsed = true;
-    assert!(
-        overview
-            .plan(&seeds, &open_keys, now + STATUS_INTERVAL + LISTING_INTERVAL)
-            .is_empty()
-    );
-    let work = overview.plan(&seeds, &open_keys, now + COLLAPSED_LISTING_INTERVAL);
-    assert!(matches!(work.as_slice(), [Work::Listing { .. }]));
-    overview.jobs.clear();
-    overview.collapsed = false;
     // An action such as a commit or fetch makes everything due once.
     let later = Instant::now();
     overview.request_refresh();
@@ -656,13 +629,15 @@ impl Folders {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         for name in names {
-            fs::create_dir_all(base.join(name)).unwrap();
+            // Keep the displayed three-component suffix deterministic while
+            // each test still owns a unique temporary directory.
+            fs::create_dir_all(base.join("Code/worktrees").join(name)).unwrap();
         }
         Self(fs::canonicalize(base).unwrap())
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
+        self.0.join("Code/worktrees").join(name)
     }
 }
 
@@ -767,7 +742,18 @@ fn screen(app: VEditApp) -> Harness<'static, VEditApp> {
 }
 
 #[test]
-fn switching_projects_scopes_worktrees_even_before_the_next_refresh() {
+fn project_picker_lists_unopened_worktrees_without_sidebar_overview() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut screen = screen(overview_app(&folders, true));
+    assert!(screen.query_by_label("Repositories").is_none());
+    assert!(screen.query_by_label("Worktree agent wt").is_none());
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
+}
+
+#[test]
+fn picker_worktrees_follow_the_active_repository_and_do_not_duplicate_open_projects() {
     let folders = Folders::new(&[
         "vEdit",
         "vEdit-feature",
@@ -793,17 +779,36 @@ fn switching_projects_scopes_worktrees_even_before_the_next_refresh() {
         ],
         Vec::new(),
     );
+    read(
+        &mut app.repositories,
+        &other_wt,
+        Ok(status(Some("feature"), '4', 0, 0, None)),
+    );
     let mut screen = screen(app);
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
     assert!(screen.query_by_label("Worktree agent wt").is_some());
+    assert!(
+        screen.query_by_label("Worktree vEdit-feature").is_none(),
+        "open projects appear only once"
+    );
     assert!(screen.query_by_label("Worktree other-wt").is_none());
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
     screen.get_by_label("Project: other").click();
     screen.run_steps(2);
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
     assert!(screen.query_by_label("Worktree other-wt").is_some());
     assert!(screen.query_by_label("Worktree agent wt").is_none());
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
     screen.get_by_label("Project: plain").click();
     screen.run_steps(2);
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
     assert!(screen.state().repository_rows().is_empty());
-    // A late result from the previous project cannot bring its rows back.
+    // A late listing from the previous project cannot reintroduce its choices.
     list(
         &mut screen.state_mut().repositories,
         &other,
@@ -814,122 +819,97 @@ fn switching_projects_scopes_worktrees_even_before_the_next_refresh() {
         Vec::new(),
     );
     screen.run_steps(2);
-    assert!(screen.state().repository_rows().is_empty());
-    screen.get_by_label("Project: vEdit-feature").click();
-    screen.run_steps(2);
-    assert!(screen.query_by_label("Repository vEdit").is_some());
-    assert!(screen.query_by_label("Worktree agent wt").is_some());
     assert!(screen.query_by_label("Worktree other-wt").is_none());
 }
 
 #[test]
-fn overview_appears_only_with_more_than_one_worktree() {
+fn clicking_a_picker_worktree_opens_it_once_and_preserves_existing_projects() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut screen = screen(overview_app(&folders, true));
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    screen.get_by_label("Worktree agent wt").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().projects.len(), 3);
+    assert_eq!(screen.state().active_project, 2);
+    assert_eq!(screen.state().projects[2].root, folders.path("agent wt"));
+    assert!(!screen.state().workspace_picker_open());
+    screen.get_by_label("Project: vEdit").click();
+    screen.run_steps(2);
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Worktree agent wt").is_none());
+    screen.key_press(Key::End);
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 2);
+    assert_eq!(screen.state().projects.len(), 3);
+}
+
+#[test]
+fn picker_search_finds_worktrees_by_branch_and_enter_opens_them() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut screen = screen(overview_app(&folders, true));
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    screen.get_by_label("Find project").type_text("agent/run");
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
+    assert!(
+        screen
+            .get_by_label("Close project")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().projects.len(), 3);
+    assert_eq!(screen.state().projects[2].root, folders.path("agent wt"));
+}
+
+#[test]
+fn missing_worktrees_can_be_inspected_but_not_opened_from_the_picker() {
     let folders = Folders::new(&["vEdit", "vEdit-feature"]);
     let mut app = overview_app(&folders, false);
-    app.projects.truncate(1);
-    // The only listed worktree besides the open one is gone from the listing.
     let main = folders.path("vEdit");
+    let missing = folders.path("missing-worktree");
+    let mut gone = entry(&missing, Some("old-branch"), Some('3'));
+    gone.prunable = Some("directory no longer exists".into());
     list(
         &mut app.repositories,
         &main,
-        vec![entry(&main, Some("main"), Some('1'))],
-        Vec::new(),
-    );
-    let mut screen = screen(app);
-    assert!(screen.query_by_label("Repositories").is_none());
-    let feature = folders.path("vEdit-feature");
-    list(
-        &mut screen.state_mut().repositories,
-        &main,
         vec![
             entry(&main, Some("main"), Some('1')),
-            entry(&feature, Some("feature"), Some('2')),
+            entry(&folders.path("vEdit-feature"), Some("feature"), Some('2')),
+            gone,
         ],
         Vec::new(),
     );
-    // Its status is fresh, so the closed worktree needs no read either.
-    read(
-        &mut screen.state_mut().repositories,
-        &feature,
-        Ok(status(Some("feature"), '2', 0, 0, None)),
-    );
+    let mut screen = screen(app);
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    screen.get_by_label("Find project").type_text("old-branch");
     screen.run_steps(2);
-    assert!(screen.query_by_label("Repositories").is_some());
-    assert!(screen.query_by_label("Repository vEdit").is_some());
-    assert!(screen.query_by_label("Worktree vEdit-feature").is_some());
-    assert!(
-        screen.state().repositories.jobs.is_empty(),
-        "fresh results start no Git process"
-    );
-}
-
-#[test]
-fn clicking_rows_switches_projects_and_opens_worktrees_as_projects() {
-    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
-    let mut screen = screen(overview_app(&folders, true));
-    assert_eq!(screen.state().active_project, 0);
-    screen.get_by_label("Worktree vEdit-feature").click();
-    screen.run_steps(2);
-    assert_eq!(screen.state().active_project, 1);
-    assert_eq!(screen.state().projects.len(), 2);
-    screen.get_by_label("Worktree agent wt").click();
-    screen.run_steps(2);
-    let app = screen.state();
-    assert_eq!(app.projects.len(), 3, "the existing add-project path ran");
-    assert_eq!(app.active_project, 2);
-    assert_eq!(app.projects[2].root, folders.path("agent wt"));
-    // Clicking it again switches to the new project instead of adding twice.
-    screen.get_by_label("Repository vEdit").click();
-    screen.run_steps(2);
-    screen.get_by_label("Worktree agent wt").click();
-    screen.run_steps(2);
-    assert_eq!(screen.state().projects.len(), 3);
-    assert_eq!(screen.state().active_project, 2);
-}
-
-#[test]
-fn keyboard_moves_through_rows_and_enter_activates_one() {
-    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
-    let mut screen = screen(overview_app(&folders, true));
-    let header = egui::Id::new(HEADER_ID);
-    screen.ctx.memory_mut(|memory| memory.request_focus(header));
-    screen.run_steps(1);
-    assert!(screen.state().git_content_has_focus());
-    // Header, vEdit, agent wt, vEdit-feature: linked worktrees sort by name.
-    for _ in 0..3 {
-        screen.key_press(Key::ArrowDown);
-        screen.run_steps(1);
-    }
-    let focused = screen.ctx.memory(|memory| memory.focused());
-    assert_eq!(
-        focused,
-        Some(row_id(&path_key(&folders.path("vEdit-feature"))))
-    );
+    assert!(screen.query_by_label("Worktree missing-worktree").is_some());
     screen.key_press(Key::Enter);
     screen.run_steps(2);
-    assert_eq!(screen.state().active_project, 1);
+    assert_eq!(screen.state().projects.len(), 2);
+    assert!(screen.state().workspace_picker_open());
 }
 
 #[test]
-fn collapsing_hides_rows_pauses_reads_and_persists_in_the_session() {
+fn worktree_reads_pause_when_the_project_picker_is_closed() {
     let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
-    let mut screen = screen(overview_app(&folders, true));
-    assert!(screen.query_by_label("Worktree agent wt").is_some());
-    screen.get_by_label("Repositories").click();
-    screen.run_steps(2);
-    assert!(screen.state().repositories.collapsed);
-    assert!(screen.query_by_label("Worktree agent wt").is_none());
-    assert!(screen.query_by_label("Repositories").is_some());
-    let session = screen.state().session();
-    assert!(session.repositories_collapsed);
-    let restored: Session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-    assert!(restored.repositories_collapsed);
-    let legacy: Session = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
-    assert!(!legacy.repositories_collapsed, "expanded by default");
-    screen.get_by_label("Repositories").click();
-    screen.run_steps(2);
-    assert!(!screen.state().repositories.collapsed);
-    assert!(screen.query_by_label("Worktree agent wt").is_some());
+    let mut app = overview_app(&folders, true);
+    app.repositories.request_refresh();
+    app.refresh_repository_overview();
+    assert!(app.repositories.jobs.is_empty());
+    let legacy: Session =
+        serde_json::from_str(r#"{"projects":[],"repositories_collapsed":true}"#).unwrap();
+    assert!(
+        legacy.projects.is_empty(),
+        "old session settings remain readable"
+    );
 }
 
 #[test]
@@ -961,6 +941,8 @@ fn hovering_a_worktree_shows_cached_file_and_line_counts() {
         style.interaction.tooltip_grace_time = 0.0;
         style.interaction.show_tooltips_only_when_still = false;
     });
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
     screen.hover_at(screen.get_by_label("Worktree agent wt").rect().center());
     screen.run_steps(4);
     for label in [
@@ -978,10 +960,12 @@ fn hovering_a_worktree_shows_cached_file_and_line_counts() {
 }
 
 #[test]
-fn visible_overview_settles_without_repainting_continuously() {
+fn project_picker_settles_without_repainting_continuously() {
     let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
     let mut screen = screen(overview_app(&folders, true));
-    assert!(screen.query_by_label("Repositories").is_some());
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
     let steps = screen
         .try_run()
         .expect("an idle repository overview must not request continuous repaints");
@@ -1034,8 +1018,14 @@ fn overview_screenshot() {
     });
     visual_tests::snapshot(&mut screen, "vedit_git_repositories");
 
-    // Pulling History up shrinks the change controls, then the repository
-    // list, until History fills nearly the whole panel.
+    // Worktrees live in the project picker, leaving the sidebar to History.
+    screen.state_mut().open_workspace_picker();
+    screen.run_steps(3);
+    visual_tests::snapshot(&mut screen, "vedit_project_worktrees");
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
+
+    // Pulling History up shrinks only the change controls.
     let start = screen
         .get_by_label("Resize Changes and History")
         .rect()
@@ -1323,17 +1313,6 @@ fn real_worktrees_group_under_one_repository_at_a_bounded_idle_cost() {
             .iter()
             .all(|row| row.linked && row.project.is_none())
     );
-
-    // Folded, only a slower listing remains; status reads pause.
-    overview.collapsed = true;
-    let folded = simulate(
-        &mut overview,
-        &seeds,
-        &open,
-        Instant::now() + Duration::from_secs(600),
-        120,
-    );
-    assert_eq!(folded[60..120].iter().sum::<usize>(), 1, "{folded:?}");
 }
 
 /// Manual measurement of one overview refresh cycle's wall time.

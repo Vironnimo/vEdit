@@ -4,8 +4,8 @@
 //! consistent across the explorer, palettes, and toolbars.
 
 use eframe::egui::{
-    self, Color32, CursorIcon, FontId, Response, RichText, Sense, Stroke, Ui, Vec2, WidgetInfo,
-    WidgetType,
+    self, AtomExt, Color32, CursorIcon, FontId, Response, RichText, Sense, Stroke, Ui, Vec2,
+    WidgetInfo, WidgetType,
 };
 
 /// Whether focus came from the keyboard, like CSS `:focus-visible`: a key
@@ -181,9 +181,15 @@ pub(crate) fn primary_button(ui: &mut Ui, label: &str, min_size: Vec2) -> Respon
             visual.corner_radius = 6.into();
         }
         ui.add(
-            egui::Button::new(RichText::new(label).size(12.5).strong().color(text))
-                .frame(true)
-                .min_size(min_size),
+            egui::Button::new(
+                RichText::new(label)
+                    .size(12.5)
+                    .strong()
+                    .color(text)
+                    .atom_grow(min_size.x > 0.0),
+            )
+            .frame(true)
+            .min_size(min_size),
         )
     })
     .inner

@@ -170,8 +170,6 @@ struct Session {
     layout: Option<split::SessionLayout>,
     bookmarks: Vec<crate::bookmarks::Bookmark>,
     agent_marks: crate::agent_marks::AgentMarks,
-    /// The Source control repository overview stays folded across restarts.
-    repositories_collapsed: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -587,7 +585,7 @@ enum WorkerResult {
         request_id: u64,
         result: Result<Option<project_status::GitSummary>, String>,
     },
-    /// Worktree listing or status for the Source control repository overview.
+    /// Worktree listing or status for the project picker.
     RepositoryOverview(git_panel::repositories::OverviewResult),
     GitCommit {
         root: PathBuf,
@@ -865,7 +863,6 @@ impl VEditApp {
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
-        app.repositories.collapsed = session.repositories_collapsed;
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -1988,7 +1985,14 @@ impl VEditApp {
                                                 &page.commits,
                                             );
                                             p.recent_commits = page.commits;
-                                            p.git_view.graph.clear();
+                                            p.git_view.graph.reset(
+                                                history
+                                                    .snapshot
+                                                    .refs
+                                                    .iter()
+                                                    .find(|reference| reference.current)
+                                                    .map(|reference| reference.hash.as_str()),
+                                            );
                                             p.git_view.graph.append(&p.recent_commits);
                                             p.git_history_error = None;
                                             p.git_history_snapshot = Some(history.snapshot);
@@ -3118,7 +3122,6 @@ impl VEditApp {
             layout: None,
             bookmarks: self.bookmarks.items.clone(),
             agent_marks: self.agent_marks.clone(),
-            repositories_collapsed: self.repositories.collapsed,
         }
     }
     fn persist_session(&self) {
@@ -7305,7 +7308,6 @@ impl VEditApp {
         }
         self.editor_ui(ui);
         self.finish_workspace_action();
-        self.finish_repository_action();
         self.finish_region_render_owner();
         self.finish_region_focus();
         self.overlays();
@@ -7477,6 +7479,8 @@ fn set_style(ctx: &egui::Context) {
     style.spacing.item_spacing = Vec2::new(7.0, 5.0);
     style.spacing.button_padding = Vec2::new(9.0, 5.0);
     style.spacing.interact_size.y = 28.0;
+    // Floating scrollbars expand on hover without flashing bright white.
+    style.spacing.scroll.interact_handle_opacity = 0.45;
     style
         .text_styles
         .insert(egui::TextStyle::Body, FontId::proportional(12.5));

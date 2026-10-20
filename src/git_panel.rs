@@ -5,6 +5,7 @@
 //! file contents. Tree state stays local to the project and survives refreshes.
 
 use super::*;
+use egui::AtomExt;
 use std::collections::{BTreeMap, VecDeque};
 
 #[path = "git_repositories.rs"]
@@ -25,9 +26,6 @@ pub(super) struct GitViewState {
     /// Divider position as a share of the whole panel below its title.
     /// `None` sizes Changes to its content, up to half of the space.
     pub(super) split_ratio: Option<f32>,
-    /// Height of the branch summary between the repositories and Changes,
-    /// measured in the previous frame.
-    summary_height: f32,
     /// Height Changes needs to show all of its content, from the previous frame.
     changes_needed: f32,
     changes_rect: Option<egui::Rect>,
@@ -735,9 +733,6 @@ impl VEditApp {
         let Some(focused) = self.ctx.memory(|memory| memory.focused()) else {
             return false;
         };
-        if self.repository_overview_has_focus() {
-            return true;
-        }
         self.project().is_some_and(|project| {
             let state = &project.git_view;
             state
@@ -839,22 +834,6 @@ impl VEditApp {
     fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
         let panel_top = ui.cursor().top();
         let panel_height = ui.available_height().max(1.0);
-        // A divider pulled up first shrinks the repository list, so History
-        // can take nearly the whole panel.
-        let list_budget = self
-            .project()
-            .and_then(|project| {
-                let state = &project.git_view;
-                state.split_ratio.map(|ratio| {
-                    ratio * panel_height
-                        - state.summary_height
-                        - CHANGES_MIN_HEIGHT
-                        - crate::app::git_panel::repositories::HEADER_HEIGHT
-                })
-            })
-            .unwrap_or(f32::INFINITY);
-        self.repository_overview_ui(ui, list_budget);
-        let summary_top = ui.cursor().top();
         let project_index = self.active_project;
         let unsaved_count = self.git_unsaved_document_count();
         let busy = self.git_busy.is_some();
@@ -1145,7 +1124,6 @@ impl VEditApp {
         } else {
             ui.add_space(7.0);
             let split_top = ui.cursor().top();
-            state.summary_height = split_top - summary_top;
             let remaining = panel_top + panel_height - split_top;
             let max_changes =
                 (remaining - DIVIDER_HEIGHT - HISTORY_MIN_HEIGHT).max(CHANGES_MIN_HEIGHT);
@@ -1297,7 +1275,7 @@ impl VEditApp {
                     } else {
                         ui.add_enabled(
                             false,
-                            egui::Button::new(RichText::new(&label).size(12.5)).min_size(size),
+                            egui::Button::new(RichText::new(&label).size(12.5).atom_grow(true)).min_size(size),
                         )
                     }
                     .on_hover_text("Create a local commit from the staged files")
@@ -1384,7 +1362,11 @@ impl VEditApp {
                 // The graph grows once per received page, never per painted
                 // row. This also initializes synthetic screenshot fixtures.
                 if state.graph.rows.len() > project.recent_commits.len() {
-                    state.graph.clear();
+                    state.graph.reset(
+                        project.git_branches.iter()
+                            .find(|reference| reference.current)
+                            .map(|reference| reference.hash.as_str()),
+                    );
                 }
                 state
                     .graph
@@ -1420,7 +1402,6 @@ impl VEditApp {
                     .and_then(|tracking| tracking.upstream.as_deref());
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.spacing_mut().scroll.floating = false;
                     let mut scroll = egui::ScrollArea::vertical()
                         .id_salt(("git-history", &project.root))
                         .auto_shrink([false, false]);
