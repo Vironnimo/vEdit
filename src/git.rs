@@ -1862,7 +1862,6 @@ pub fn status_fingerprint(root: &Path, head: Option<&StatusHead>, files: &[FileS
 }
 
 /// HEAD and [`status_fingerprint`] read now, with one status process.
-#[cfg(test)]
 pub fn working_tree_fingerprint(root: &Path) -> GitResult<(Option<StatusHead>, u64)> {
     let (status, _, head) = status_with_head(root)?;
     let key = status_fingerprint(root, head.as_ref(), &status.files);

@@ -70,3 +70,5 @@ To hand finished work to the user, show every change as one continuous, read-onl
 ```
 
 Choose exactly one source. The optional workspace must be an open project with a repository; without it the active project is used. A change review never starts vEdit, does not open tabs, and does not edit, stage or save anything. The response arrives after the comparison loaded and reports `title`, `files`, `added`, `removed` and `seen`; large and binary files appear with a note instead of a patch. `review_closed` or `review_replaced` means the user closed it or another review replaced it before it loaded. Seen marks belong to the user; the CLI only reports their count. `schema change-review` gives the JSON request.
+
+While reading, the user can select diff rows and write a **Comment for agent**. It arrives as an agent mark with a `review` field and the diff excerpt as its text; collect it with `agent-marks take` as described in `agent-marks.md`. A working-tree review does not include unsaved buffers; the user sees how many are left out. When the repository changes after loading, the review only offers **Refresh**; it never reloads by itself.

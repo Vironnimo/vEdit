@@ -254,12 +254,17 @@ impl VEditApp {
         let text: String = mark.snippet.chars().take(PREVIEW_CHARS).collect();
         let total_chars = mark.range.end.saturating_sub(mark.range.start);
         let shown_chars = text.chars().count();
-        json!({"id":mark.id,"workspace":crate::paths::display(&mark.target.workspace),
+        let mut value = json!({"id":mark.id,"workspace":crate::paths::display(&mark.target.workspace),
             "path":mark.target.path.as_deref().map(crate::paths::display),"title":mark.target.title,
             "range":{"start":mark.start,"end":mark.end},"text":text,"text_chars":total_chars,
             "text_next_offset":(shown_chars<total_chars).then_some(shown_chars),"note":mark.note,
             "stale":mark.stale,"source_open":live.is_some(),"range_current":current_collection && mark.is_attached() && live.is_some(),
-            "tab_id":live.map(|tab|tab.id),"revision":live.map(|tab|tab.revision),"dirty":live.map(|tab|tab.dirty)})
+            "tab_id":live.map(|tab|tab.id),"revision":live.map(|tab|tab.revision),"dirty":live.map(|tab|tab.dirty)});
+        if let Some(review) = &mark.review {
+            // `text` is then a diff excerpt and `range` names new-side lines.
+            value["review"] = json!({"comparison":review.comparison,"source":review.source});
+        }
+        value
     }
 
     fn agent_marks_page(

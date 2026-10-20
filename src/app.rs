@@ -835,6 +835,8 @@ pub struct VEditApp {
     repositories: git_panel::repositories::RepositoryOverview,
     diff: Option<(String, String)>,
     diff_view: crate::git_diff_view::DiffView,
+    /// The repository whose paths the diff dialog shows.
+    diff_repository: Option<PathBuf>,
     /// Committed versions, gutter markers and the open change peek.
     git_gutter: git_gutter::GitGutterState,
     diff_generation: u64,
@@ -1096,6 +1098,7 @@ impl VEditApp {
             repositories: git_panel::repositories::RepositoryOverview::default(),
             diff: None,
             diff_view: crate::git_diff_view::DiffView::default(),
+            diff_repository: None,
             git_gutter: git_gutter::GitGutterState::default(),
             diff_generation: 0,
             diff_loading: false,
@@ -2412,8 +2415,10 @@ impl VEditApp {
         if !force && !window_active {
             return;
         }
-        let history_visible =
-            index == self.active_project && self.sidebar_view_visible(SidebarView::SourceControl);
+        // A visible change review notices new changes as quickly as Source control.
+        let history_visible = index == self.active_project
+            && (self.sidebar_view_visible(SidebarView::SourceControl)
+                || self.change_review_visible());
         let interval = if history_visible {
             Duration::from_secs(3)
         } else {
@@ -2639,6 +2644,7 @@ impl VEditApp {
             .find(|file| Path::new(&file.path) == path)
             .cloned();
         self.begin_git_diff(title.clone());
+        self.diff_repository = Some(root.clone());
         let generation = self.diff_generation;
         self.worker(move || WorkerResult::Diff {
             generation,
@@ -2666,6 +2672,7 @@ impl VEditApp {
                     .map(|file| (detail.clone(), file.clone()))
             });
         self.begin_git_diff(title.clone());
+        self.diff_repository = Some(root.clone());
         let generation = self.diff_generation;
         self.worker(move || WorkerResult::Diff {
             generation,
@@ -7213,6 +7220,7 @@ impl VEditApp {
         }
         self.git_detail_ui();
         if let Some((title, text)) = &self.diff {
+            let mut open = None;
             let modal = crate::git_diff_view::dialog(
                 &ctx,
                 egui::Id::new("git_patch_window"),
@@ -7229,17 +7237,53 @@ impl VEditApp {
                     } else if let Some(error) = &self.diff_error {
                         ui.colored_label(RED, error);
                     } else {
-                        self.diff_view.show(ui, title, text);
+                        open = self.diff_view.show(ui, title, text);
                     }
                 },
             );
-            if modal.inner || modal.should_close() {
+            if let Some(open) = open {
+                self.open_diff_location(open);
+            } else if modal.inner || modal.should_close() {
                 self.close_diff();
             }
         }
     }
+    /// Open the file of the diff dialog at the chosen line, as the change
+    /// review's o and Enter do.
+    fn open_diff_location(&mut self, open: crate::git_diff_view::DiffOpen) {
+        let Some(repository) = self.diff_repository.clone() else {
+            return;
+        };
+        if open.deleted {
+            self.status(
+                format!(
+                    "{} is deleted in this diff; there is no file to open",
+                    open.path
+                ),
+                true,
+            );
+            return;
+        }
+        self.close_diff();
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.git_view.detail_open = false;
+        }
+        let path = open
+            .path
+            .split('/')
+            .fold(repository, |path, part| path.join(part));
+        self.open_file(path);
+        if let Some(line) = open.line
+            && let Some(tab) = self.tab_mut()
+        {
+            tab.pending_agent_location = Some(crate::cli::Location { line, column: 1 });
+            tab.agent_location_error = None;
+            self.apply_pending_agent_locations();
+        }
+    }
     fn close_diff(&mut self) {
         self.diff = None;
+        self.diff_repository = None;
         self.diff_loading = false;
         self.diff_error = None;
         self.diff_view.reset_focus();

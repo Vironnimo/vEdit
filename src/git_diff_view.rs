@@ -77,15 +77,29 @@ pub(crate) struct DiffView {
     wrapped: WrappedRows,
     details_open: bool,
     last_frame: Option<u64>,
+    /// The clicked row, which Enter or o opens.
+    selected: Option<usize>,
+}
+
+/// Where the reader asked to open the file of a diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffOpen {
+    /// Repository-relative path.
+    pub(crate) path: String,
+    pub(crate) line: Option<usize>,
+    pub(crate) deleted: bool,
 }
 
 impl DiffView {
+    /// Forget the focus and clicked row of the closed diff.
     pub(crate) fn reset_focus(&mut self) {
         self.last_frame = None;
+        self.selected = None;
     }
 
-    /// Show a read-only patch. The raw patch is also what the copy action returns.
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, title: &str, text: &str) {
+    /// Show a read-only patch. The raw patch is also what the copy action
+    /// returns. Double-click, Enter or o asks to open the file at a line.
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, title: &str, text: &str) -> Option<DiffOpen> {
         let frame = ui.ctx().cumulative_frame_nr();
         let focus_contents = self
             .last_frame
@@ -178,7 +192,7 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                         .color(palette.muted),
                 );
             });
-            return;
+            return None;
         }
 
         // Reserve the vertical bar before measuring so its appearance cannot
@@ -213,6 +227,11 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                 if focus_contents || body.clicked() {
                     body.request_focus();
                 }
+                let pointer = (body.clicked() || body.double_clicked())
+                    .then(|| body.interact_pointer_pos())
+                    .flatten();
+                let double_clicked = body.double_clicked();
+                let open_key = take_open_key(ui, body_id);
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt(salt)
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -252,9 +271,29 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                         (self.wrapped.height() - ui.available_height()).max(0.0),
                     ),
                 ));
-                scroll.show_viewport(ui, |ui, viewport| {
+                let output = scroll.show_viewport(ui, |ui, viewport| {
                     ui.set_min_size(Vec2::new(content_width, self.wrapped.height()));
                     let origin = ui.max_rect().min;
+                    let mut open = None;
+                    if let Some(pointer) = pointer {
+                        let y = pointer.y - origin.y;
+                        if (0.0..self.wrapped.height()).contains(&y) {
+                            let row = self.wrapped.visible(y..y + 0.01).start;
+                            self.selected = Some(row);
+                            if double_clicked {
+                                open = Some(row);
+                            }
+                        }
+                    }
+                    if open_key {
+                        open = self.selected.or_else(|| {
+                            Some(
+                                self.wrapped
+                                    .visible(viewport.top()..viewport.top() + 1.0)
+                                    .start,
+                            )
+                        });
+                    }
                     for index in self.wrapped.visible(viewport.top()..viewport.bottom()) {
                         let rect = egui::Rect::from_min_max(
                             origin + Vec2::new(0.0, self.wrapped.offsets[index]),
@@ -272,15 +311,28 @@ Long lines wrap to fit the dialog. Scroll: j / k · Page Up / Down · Ctrl+F / B
                             &metrics,
                             body_id.with(index),
                         );
+                        if self.selected == Some(index) {
+                            paint_selected_row(ui, rect);
+                        }
                     }
-                })
+                    open
+                });
+                render::remember_scroll_limits(ui.ctx(), &output);
+                output.inner
             })
             .inner;
-        render::remember_scroll_limits(ui.ctx(), &output);
+        let row = output?;
+        let file = self.patch.file_at(row)?;
+        Some(DiffOpen {
+            path: file.path.to_owned(),
+            line: self.patch.new_line_at(row),
+            deleted: file.deleted,
+        })
     }
 
     fn update(&mut self, title: &str, text: &str) {
         if self.title != title || self.patch.source != text {
+            self.selected = None;
             self.patch = ParsedPatch::parse(text);
             self.title = title.to_owned();
             self.generation = self.generation.wrapping_add(1);
@@ -424,6 +476,52 @@ impl WrappedRows {
             .max(first);
         first..last
     }
+}
+
+/// Enter or o on the focused diff opens the file.
+fn take_open_key(ui: &egui::Ui, body_id: egui::Id) -> bool {
+    let ctx = ui.ctx();
+    if !ui.is_enabled()
+        || egui::Popup::is_any_open(ctx)
+        || !ctx.memory(|memory| memory.has_focus(body_id))
+    {
+        return false;
+    }
+    ctx.input_mut(|input| {
+        let mut open = false;
+        input.events.retain(|event| match event {
+            egui::Event::Text(text) if text == "o" => {
+                open = true;
+                false
+            }
+            egui::Event::Key {
+                key: egui::Key::Enter | egui::Key::O,
+                pressed,
+                modifiers,
+                ..
+            } if modifiers.is_none() => {
+                open |= *pressed;
+                false
+            }
+            _ => true,
+        });
+        open
+    })
+}
+
+/// A quiet outline on the clicked row.
+fn paint_selected_row(ui: &egui::Ui, rect: egui::Rect) {
+    let accent = ui.visuals().selection.stroke.color;
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        ui.visuals().selection.bg_fill.gamma_multiply(0.35),
+    );
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
+        0.0,
+        accent,
+    );
 }
 
 fn keyboard_scroll_offset(
@@ -776,11 +874,61 @@ pub(crate) struct ParsedPatch {
     number_digits: usize,
     presentation: Vec<PresentationRow>,
     file_details: Vec<FileDetail>,
+    /// First presentation row of each entry of `file_details`.
+    file_starts: Vec<usize>,
     details: Vec<String>,
     detail_columns: usize,
 }
 
+/// One changed or context line of a patch, without its +/−/space marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiffLine<'a> {
+    /// `'+'`, `'-'` or `' '`.
+    pub(crate) marker: char,
+    pub(crate) old_line: Option<usize>,
+    pub(crate) new_line: Option<usize>,
+    pub(crate) text: &'a str,
+}
+
+/// A file of a patch, as a presentation row belongs to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PatchFile<'a> {
+    /// Repository-relative path; the previous path of a deleted file.
+    pub(crate) path: &'a str,
+    pub(crate) deleted: bool,
+}
+
 impl ParsedPatch {
+    /// The source line shown at presentation row `index`, when it is one.
+    pub(crate) fn diff_line(&self, index: usize) -> Option<DiffLine<'_>> {
+        let row = &self.rows[self.presentation.get(index)?.raw_row?];
+        let marker = match row.kind {
+            RowKind::Added => '+',
+            RowKind::Removed => '-',
+            RowKind::Context => ' ',
+            _ => return None,
+        };
+        Some(DiffLine {
+            marker,
+            old_line: row.old_line,
+            new_line: row.new_line,
+            text: &self.source[row.source.start + 1..row.source.end],
+        })
+    }
+
+    /// The file presentation row `index` belongs to.
+    pub(crate) fn file_at(&self, index: usize) -> Option<PatchFile<'_>> {
+        let file = self
+            .file_starts
+            .partition_point(|start| *start <= index)
+            .checked_sub(1)?;
+        let detail = self.file_details.get(file)?;
+        Some(PatchFile {
+            path: detail.path.as_deref().or(detail.previous.as_deref())?,
+            deleted: detail.status == "Deleted",
+        })
+    }
+
     pub(crate) fn rows(&self) -> usize {
         self.presentation.len()
     }
@@ -1018,6 +1166,7 @@ impl ParsedPatch {
                 self.details
                     .push("Binary contents; no text line statistics.".into());
             }
+            self.file_starts.push(self.presentation.len());
             if multiple {
                 self.presentation.push(PresentationRow::text(
                     format!("{description}    +{}  −{}", file.additions, file.deletions),

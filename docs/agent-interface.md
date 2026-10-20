@@ -4,6 +4,12 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
+## Change-review comments
+
+Users answer an agent's work directly from the change review: selected diff rows plus a note become an ordinary agent mark, so `agent-marks list|take|batch|ack|restore` deliver them without a new command. Such items add `review: {comparison, source}` (`working`, `commit` or `branch`) and are anchored to the file path and the new-side lines, not to an open buffer: `source_open` is false and the range never follows later edits. `text` is the diff excerpt in unified form, each line prefixed by `+`, `-` or a space, without hunk headers. The range starts at column 1 of the first new-side line and ends exclusively after the last; a removal-only excerpt anchors at the nearest new-side line. Agents should read the current file before editing, because the comparison can be older than the buffer. Older receivers simply omit the field.
+
+The review shows when the repository changed after loading (working tree: status fingerprint; branch: HEAD; commits never) and leaves refreshing to the user. Working-tree reviews compare saved files only; a banner names unsaved documents in the repository. The editor gutter separately marks lines that differ from HEAD; its `git_gutter` preference is part of `settings --patch`.
+
 ## Project application launches (0.4.32)
 
 `launch list|configure|select|start|stop|output` configures and operates named application variants for an explicit `--workspace` or the active project. The GUI uses the same project state for Play, the variant dropdown and Application output. Each project owns one run, separate from the existing short-lived task runner; no active source file is required.

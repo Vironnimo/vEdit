@@ -647,6 +647,7 @@ fn results_for_replaced_or_other_reviews_are_ignored() {
         comparison: comparison.clone(),
         files: Vec::new(),
         omitted_untracked: 0,
+        basis: None,
     };
     let root = repository.root.clone();
     for (root, generation) in [(root.clone(), replaced), (repository.base.clone(), current)] {
@@ -827,3 +828,7 @@ fn change_review_screenshots() {
         EntryPatch::Parsed(_)
     ));
 }
+
+/// Comments for the agent, freshness, unsaved drafts and the diff dialog.
+#[path = "change_review_feedback_tests.rs"]
+mod feedback_tests;
