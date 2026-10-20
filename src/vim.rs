@@ -3810,8 +3810,17 @@ fn normal_cursor(text: &str, cursor: usize) -> usize {
 fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
     let rows = lines(chars);
     let line = rows[row_for_cursor(&rows, cursor)];
-    let at = (cursor..line.end)
-        .find(|index| matches!(chars[*index], '(' | ')' | '[' | ']' | '{' | '}'))?;
+    let at = (cursor..line.end).find(|index| is_bracket(chars[*index]))?;
+    bracket_partner(chars, at, chars.len())
+}
+
+fn is_bracket(ch: char) -> bool {
+    matches!(ch, '(' | ')' | '[' | ']' | '{' | '}')
+}
+
+/// The bracket that pairs with the one at `at`, looking at most `limit`
+/// characters away.
+fn bracket_partner(chars: &[char], at: usize, limit: usize) -> Option<usize> {
     let (open, close, forward) = match chars[at] {
         '(' => ('(', ')', true),
         ')' => ('(', ')', false),
@@ -3823,7 +3832,7 @@ fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
     };
     let mut depth: usize = 1;
     if forward {
-        for (index, ch) in chars.iter().enumerate().skip(at + 1) {
+        for (index, ch) in chars.iter().enumerate().skip(at + 1).take(limit) {
             if *ch == open {
                 depth += 1;
             } else if *ch == close {
@@ -3834,7 +3843,7 @@ fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
             }
         }
     } else {
-        for index in (0..at).rev() {
+        for index in (at.saturating_sub(limit)..at).rev() {
             if chars[index] == close {
                 depth += 1;
             } else if chars[index] == open {
@@ -3846,6 +3855,25 @@ fn matching_bracket(chars: &[char], cursor: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// The bracket at the caret and its partner, for highlighting: the bracket
+/// under the cursor, else, for a caret between characters as in Insert mode,
+/// the one directly before it. `text` is a window of the document starting
+/// at character `offset`; the search stays inside it.
+pub fn bracket_pair(
+    text: &[char],
+    offset: usize,
+    cursor: usize,
+    between: bool,
+) -> Option<(usize, usize)> {
+    let local = cursor.checked_sub(offset)?;
+    let before = local.checked_sub(1).filter(|_| between);
+    let at = [Some(local), before]
+        .into_iter()
+        .flatten()
+        .find(|index| text.get(*index).copied().is_some_and(is_bracket))?;
+    bracket_partner(text, at, text.len()).map(|partner| (offset + at, offset + partner))
 }
 /// `{` / `}`: the next empty line after at least one nonempty line, counting
 /// the cursor's own line. Without one, the motion ends at the start or end of
@@ -6094,5 +6122,28 @@ mod tests {
         let mut state = VimState::new();
         state.handle_key(&mut "abc".to_owned(), VimKey::Char('m'));
         assert!(state.expects_literal_character());
+    }
+
+    #[test]
+    fn bracket_pairs_for_highlighting_respect_the_caret_kind_and_window() {
+        let text: Vec<char> = "f(a, [b], {c})🦀)".chars().collect();
+        assert_eq!(bracket_pair(&text, 0, 1, false), Some((1, 13)));
+        assert_eq!(bracket_pair(&text, 0, 13, false), Some((13, 1)));
+        assert_eq!(bracket_pair(&text, 0, 5, false), Some((5, 7)));
+        // A block cursor after a bracket shows nothing; a caret between
+        // characters pairs the bracket before it.
+        assert_eq!(bracket_pair(&text, 0, 2, false), None);
+        assert_eq!(bracket_pair(&text, 0, 2, true), Some((1, 13)));
+        assert_eq!(bracket_pair(&text, 0, 14, true), Some((13, 1)));
+        // An unmatched bracket and one outside the window have no partner.
+        assert_eq!(bracket_pair(&text, 0, 15, false), None);
+        assert_eq!(bracket_pair(&text[5..], 5, 5, false), Some((5, 7)));
+        assert_eq!(bracket_pair(&text[3..], 3, 13, false), None);
+        assert_eq!(bracket_pair(&text[3..], 3, 1, true), None);
+        // `%` still finds the next bracket on the line and its partner.
+        let mut state = VimState::new();
+        let mut source = "f(a, [b])".to_owned();
+        keys(&mut state, &mut source, "%");
+        assert_eq!(state.cursor, 8);
     }
 }

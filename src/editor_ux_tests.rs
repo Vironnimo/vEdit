@@ -335,6 +335,50 @@ fn native_undo_restores_the_exact_text_before_replace_and_replace_all() {
     );
 }
 
+fn bracket_outlines(screen: &Harness<'_, VEditApp>) -> Vec<egui::Rect> {
+    let stroke = crate::palette::MUTED.linear_multiply(0.45);
+    let mut rects: Vec<_> = screen
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.stroke.color == stroke => Some(rect.rect),
+            _ => None,
+        })
+        .collect();
+    rects.sort_by(|a, b| a.left().total_cmp(&b.left()));
+    rects
+}
+
+#[test]
+fn the_bracket_at_the_caret_and_its_partner_are_outlined_in_the_focused_pane() {
+    let mut screen = harness(fixture("call(a, [b])\n", false), [1200.0, 760.0]);
+    let text = |screen: &mut Harness<'_, VEditApp>, value: &str| {
+        screen.event(egui::Event::Text(value.into()));
+        screen.run_steps(2);
+    };
+    assert!(bracket_outlines(&screen).is_empty());
+    text(&mut screen, "4l");
+    let outlines = bracket_outlines(&screen);
+    assert_eq!(outlines.len(), 2, "( and ) are outlined: {outlines:?}");
+    assert!((outlines[0].center().y - outlines[1].center().y).abs() < 1.0);
+    let width = outlines[0].width();
+    assert!(width > 4.0 && (outlines[1].width() - width).abs() < 0.5);
+    let column = (outlines[1].left() - outlines[0].left()) / 7.0;
+    assert!(
+        (0.85..1.15).contains(&(column / width)),
+        "the outlines cover columns 5 and 12: {outlines:?}"
+    );
+
+    // A block cursor just after the bracket outlines nothing; the Insert
+    // caret there belongs to the bracket before it.
+    text(&mut screen, "l");
+    assert!(bracket_outlines(&screen).is_empty());
+    text(&mut screen, "i");
+    assert_eq!(bracket_outlines(&screen).len(), 2);
+    assert!(!screen.state().tab().unwrap().dirty);
+}
+
 #[test]
 fn large_find_shows_pending_progress_and_accepts_query_refinement() {
     let original = "needle here\n".repeat(25_000);

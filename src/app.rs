@@ -339,6 +339,8 @@ struct EditorTab {
     /// The revision and text that other panes' positions refer to, kept only
     /// while another pane holds one; see `shift_shared_document_positions`.
     pane_baseline: Option<(u64, String)>,
+    /// The bracket pair at the caret, computed once per (revision, cursor, caret kind).
+    bracket_match: Option<((u64, usize, bool), Option<(usize, usize)>)>,
     pending_navigation_feedback: bool,
     feedback: Option<editor_feedback::Highlight>,
     lines: crate::render::LineIndex,
@@ -386,6 +388,7 @@ impl EditorTab {
             scroll_align: None,
             vim_message: None,
             pane_baseline: None,
+            bracket_match: None,
             pending_navigation_feedback: false,
             feedback: None,
             lines: crate::render::LineIndex::default(),
@@ -412,6 +415,34 @@ impl EditorTab {
         self.pending_selection = Some(edit.selection);
         self.changed();
         self.focus = true;
+    }
+    /// The bracket at the caret and its partner. The search looks at most
+    /// `BRACKET_SCAN` characters either way and skips very large documents.
+    fn bracket_pair(&mut self, vim: bool) -> Option<(usize, usize)> {
+        const BRACKET_SCAN: usize = 20_000;
+        const BRACKET_MAX_DOCUMENT: usize = 2 * 1024 * 1024;
+        // A Vim block cursor covers a character; a text caret sits between two.
+        let between = !vim || self.vim.mode == VimMode::Insert;
+        let key = (self.revision, self.vim.cursor, between);
+        if let Some((cached, pair)) = self.bracket_match
+            && cached == key
+        {
+            return pair;
+        }
+        let pair = if self.loading || self.text.len() > BRACKET_MAX_DOCUMENT {
+            None
+        } else {
+            let offset = self.vim.cursor.saturating_sub(BRACKET_SCAN);
+            let window: Vec<char> = self
+                .text
+                .chars()
+                .skip(offset)
+                .take(2 * BRACKET_SCAN + 1)
+                .collect();
+            crate::vim::bracket_pair(&window, offset, self.vim.cursor, between)
+        };
+        self.bracket_match = Some((key, pair));
+        pair
     }
     fn set_cursor(&mut self, range: Range<usize>) {
         self.vim.set_cursor(&self.text, range.start);
@@ -5829,6 +5860,15 @@ impl VEditApp {
                     output.response.rect.x_range(), cursor_rect.y_range(),
                 ).intersect(ui.clip_rect());
                 ui.painter().rect_filled(highlight, 0.0, ACCENT.linear_multiply(0.055));
+            }
+            if pane_focused && let Some((bracket, partner)) = tab.bracket_pair(settings.vim) {
+                for index in [bracket, partner] {
+                    let start = output.galley.pos_from_cursor(egui::text::CCursor::new(index));
+                    let end = output.galley.pos_from_cursor(egui::text::CCursor::new(index + 1));
+                    let right = if (end.min.y - start.min.y).abs() < 0.5 { end.min.x } else { start.min.x + start.height() * 0.5 };
+                    let rect = egui::Rect::from_min_max(start.min, egui::pos2(right, start.max.y));
+                    design::paint_bracket_match(ui.painter(), rect.translate(output.galley_pos.to_vec2()));
+                }
             }
             // Cursor reveals keep this margin to the viewport edge, like Vim's
             // 'scrolloff'; zt / zb and H / L respect the same margin.
