@@ -331,9 +331,11 @@ pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<Explorer
 #[derive(Debug)]
 pub struct ExplorerTree {
     snapshot: Arc<WorkspaceIndex>,
-    generation: u64,
     loaded: BTreeSet<PathBuf>,
-    pending: BTreeSet<PathBuf>,
+    /// Each in-flight read carries a unique token. Refreshing a folder while
+    /// it is read orphans the old token, so a listing taken before the change
+    /// can never replace a newer one.
+    pending: BTreeMap<PathBuf, u64>,
     errors: BTreeMap<PathBuf, String>,
 }
 
@@ -343,9 +345,8 @@ impl ExplorerTree {
         snapshot.explorer_snapshot = true;
         Self {
             snapshot: Arc::new(snapshot),
-            generation: EXPLORER_GENERATION.fetch_add(1, Ordering::Relaxed),
             loaded: BTreeSet::new(),
-            pending: BTreeSet::new(),
+            pending: BTreeMap::new(),
             errors: BTreeMap::new(),
         }
     }
@@ -355,29 +356,31 @@ impl ExplorerTree {
     }
 
     /// Reserve a worker request. Duplicate, cached and failed requests wait
-    /// until refresh; return this generation with the worker completion.
+    /// until refresh; return this token with the worker completion.
     pub fn begin(&mut self, directory: &Path) -> Option<u64> {
         if !directory.starts_with(&self.snapshot.root)
             || self.loaded.contains(directory)
-            || self.pending.contains(directory)
+            || self.pending.contains_key(directory)
             || self.errors.contains_key(directory)
         {
             return None;
         }
-        self.pending.insert(directory.to_path_buf());
-        Some(self.generation)
+        let token = EXPLORER_GENERATION.fetch_add(1, Ordering::Relaxed);
+        self.pending.insert(directory.to_path_buf(), token);
+        Some(token)
     }
 
-    /// Publish only a reserved request from the current refresh generation.
+    /// Publish only the latest reserved request for this folder.
     pub fn complete(
         &mut self,
         directory: &Path,
-        generation: u64,
+        token: u64,
         result: Result<ExplorerDirectory, String>,
     ) -> bool {
-        if generation != self.generation || !self.pending.remove(directory) {
+        if self.pending.get(directory) != Some(&token) {
             return false;
         }
+        self.pending.remove(directory);
         match result {
             Ok(listing) if listing.root == self.snapshot.root && listing.path == directory => {
                 // Navigation remembers snapshot identity while awaiting a
@@ -414,10 +417,58 @@ impl ExplorerTree {
     /// Keep previous rows visible while fresh requests run. Late workers from
     /// the previous generation cannot replace the refreshed directory cache.
     pub fn invalidate(&mut self) {
-        self.generation = EXPLORER_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.loaded.clear();
         self.pending.clear();
         self.errors.clear();
+    }
+
+    /// Read these folders again when they are next shown, keeping their
+    /// current rows meanwhile. A read already in flight may predate the
+    /// change, so its result is discarded.
+    pub fn refresh(&mut self, directories: &BTreeSet<PathBuf>) {
+        for directory in directories {
+            self.loaded.remove(directory);
+            self.pending.remove(directory);
+            self.errors.remove(directory);
+        }
+    }
+
+    /// Drop listed folders that no longer exist from their parent's rows and
+    /// forget their own listings, so an expanded folder that was deleted does
+    /// not briefly report itself as unavailable. The parent is read again.
+    pub fn forget(&mut self, removed: &BTreeSet<PathBuf>) {
+        if removed.is_empty() {
+            return;
+        }
+        let mut snapshot = (*self.snapshot).clone();
+        for path in removed {
+            snapshot
+                .explorer_directories
+                .retain(|directory, _| !directory.starts_with(path));
+            self.loaded.retain(|directory| !directory.starts_with(path));
+            self.pending
+                .retain(|directory, _| !directory.starts_with(path));
+            self.errors
+                .retain(|directory, _| !directory.starts_with(path));
+            if let Some(parent) = path.parent()
+                && let Some(listing) = snapshot.explorer_directories.get_mut(parent)
+                && listing.entries.iter().any(|entry| entry.path == *path)
+            {
+                let listing = Arc::make_mut(listing);
+                listing.entries.retain(|entry| entry.path != *path);
+                self.loaded.remove(parent);
+                self.pending.remove(parent);
+            }
+        }
+        self.snapshot = Arc::new(snapshot);
+    }
+
+    /// Folders that currently have a listing, loaded or awaiting a refresh.
+    pub fn listed(&self) -> impl Iterator<Item = &Path> {
+        self.snapshot
+            .explorer_directories
+            .keys()
+            .map(PathBuf::as_path)
     }
 
     pub fn has_listing(&self, directory: &Path) -> bool {
@@ -430,7 +481,7 @@ impl ExplorerTree {
     }
 
     pub fn is_loading(&self, directory: &Path) -> bool {
-        self.pending.contains(directory)
+        self.pending.contains_key(directory)
     }
 
     pub fn pending_count(&self) -> usize {
@@ -490,7 +541,7 @@ fn path_score(path: &str, query: &str) -> Option<i64> {
     None
 }
 
-fn generated_index_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn generated_index_name(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
         Some(
@@ -1789,6 +1840,65 @@ mod tests {
         ));
         assert!(!tree.snapshot().has_entry(&old));
         assert!(tree.snapshot().has_entry(&new));
+    }
+
+    #[test]
+    fn explorer_folder_refresh_discards_a_read_that_predates_the_change() {
+        let fixture = Fixture::new("explorer-targeted-refresh");
+        fixture.write("src/old.txt", "old");
+        let src = fixture.0.join("src");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        for directory in [&fixture.0, &src] {
+            let token = tree.begin(directory).unwrap();
+            tree.complete(
+                directory,
+                token,
+                read_explorer_directory(&fixture.0, directory),
+            );
+        }
+        let root_identity = Arc::as_ptr(&tree.snapshot()) as usize;
+        // Only the changed folder is read again; its rows stay meanwhile.
+        tree.refresh(&BTreeSet::from([src.clone()]));
+        assert!(tree.is_loaded(&fixture.0));
+        assert!(!tree.is_loaded(&src));
+        assert!(tree.snapshot().has_entry(&src.join("old.txt")));
+        assert_eq!(Arc::as_ptr(&tree.snapshot()) as usize, root_identity);
+        let early = tree.begin(&src).unwrap();
+        let stale = read_explorer_directory(&fixture.0, &src);
+        let new = fixture.write("src/new.txt", "new");
+        // Another change arrives while the first read is in flight.
+        tree.refresh(&BTreeSet::from([src.clone()]));
+        let fresh = tree.begin(&src).unwrap();
+        assert!(tree.complete(&src, fresh, read_explorer_directory(&fixture.0, &src)));
+        assert!(!tree.complete(&src, early, stale));
+        assert!(tree.snapshot().has_entry(&new));
+        assert!(tree.is_loaded(&src));
+        assert!(tree.listed().any(|path| path == src));
+    }
+
+    #[test]
+    fn explorer_forgets_a_removed_listed_folder_and_rereads_its_parent() {
+        let fixture = Fixture::new("explorer-forget-folder");
+        fixture.write("gone/inner/file.txt", "x");
+        fixture.write("kept.txt", "x");
+        let gone = fixture.0.join("gone");
+        let inner = gone.join("inner");
+        let mut tree = ExplorerTree::new(fixture.0.clone());
+        for directory in [&fixture.0, &gone, &inner] {
+            let token = tree.begin(directory).unwrap();
+            tree.complete(
+                directory,
+                token,
+                read_explorer_directory(&fixture.0, directory),
+            );
+        }
+        tree.forget(&BTreeSet::from([gone.clone()]));
+        let snapshot = tree.snapshot();
+        assert!(!snapshot.has_entry(&gone));
+        assert!(snapshot.has_entry(&fixture.0.join("kept.txt")));
+        assert!(!tree.has_listing(&gone) && !tree.has_listing(&inner));
+        assert!(!tree.is_loaded(&fixture.0), "the parent is read again");
+        assert!(tree.begin(&fixture.0).is_some());
     }
 
     #[test]

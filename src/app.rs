@@ -222,7 +222,16 @@ struct Project {
     indexing: bool,
     index_cancel: Arc<AtomicBool>,
     index_generation: u64,
+    /// The latest index build, manual or file-watch driven; older results are dropped.
+    index_request: u64,
+    index_in_flight: bool,
+    /// Files changed while a build ran; build once more when it finishes.
+    index_again: bool,
     index_error: Option<String>,
+    /// Follows external file creation, deletion and renames below `root`.
+    watcher: Option<crate::fs_watch::ProjectWatcher>,
+    watcher_starting: bool,
+    watcher_error: Option<String>,
     rust_project: bool,
     git_root: Option<PathBuf>,
     git_parent_root: Option<PathBuf>,
@@ -279,7 +288,13 @@ impl Project {
             indexing: false,
             index_cancel: Arc::new(AtomicBool::new(false)),
             index_generation: 0,
+            index_request: 0,
+            index_in_flight: false,
+            index_again: false,
             index_error: None,
+            watcher: None,
+            watcher_starting: false,
+            watcher_error: None,
             rust_project: false,
             git_root: None,
             git_parent_root: None,
@@ -637,7 +652,12 @@ enum WorkerResult {
     Index {
         root: PathBuf,
         generation: u64,
+        request: u64,
         result: Result<workspace::WorkspaceIndex, String>,
+    },
+    FileWatcher {
+        root: PathBuf,
+        result: Result<crate::fs_watch::ProjectWatcher, String>,
     },
     Loaded {
         id: u64,
@@ -929,6 +949,8 @@ pub struct VEditApp {
     definition_request: Option<(u64, u64)>,
     definition_origin: Option<(u64, u64, usize, egui::Id)>,
     pending_location: Option<(u64, crate::lsp::Position)>,
+    /// Projects follow external file changes; tests opt in explicitly.
+    file_watching: bool,
     problems_visible: bool,
     last_disk_check: Instant,
     disk_check_running: bool,
@@ -1194,6 +1216,7 @@ impl VEditApp {
             definition_request: None,
             definition_origin: None,
             pending_location: None,
+            file_watching: !cfg!(test),
             problems_visible: false,
             last_disk_check: Instant::now(),
             disk_check_running: false,
@@ -1270,6 +1293,9 @@ impl VEditApp {
         p.index_cancel.store(true, Ordering::Relaxed);
         p.index_cancel = Arc::new(AtomicBool::new(false));
         p.index_generation += 1;
+        p.index_request += 1;
+        p.index_in_flight = true;
+        p.index_again = false;
         p.indexing = true;
         p.index_error = None;
         if let Some(explorer) = &mut p.explorer {
@@ -1280,6 +1306,7 @@ impl VEditApp {
         let root = p.root.clone();
         let explorer_root = root.clone();
         let generation = p.index_generation;
+        let request = p.index_request;
         let cancel = p.index_cancel.clone();
         self.worker(move || WorkerResult::Index {
             result: workspace::build_index(
@@ -1291,8 +1318,10 @@ impl VEditApp {
             ),
             root,
             generation,
+            request,
         });
         self.request_explorer_directory(index, explorer_root);
+        self.ensure_file_watcher(index);
     }
     fn load_tab(&self, id: u64, path: Option<PathBuf>, recovery: Option<PathBuf>) {
         self.worker(move || {
@@ -1778,26 +1807,30 @@ impl VEditApp {
                     generation,
                     result,
                 } => {
-                    if let Some(explorer) = self
+                    if let Some(index) = self
                         .projects
-                        .iter_mut()
-                        .find(|project| project.root == root)
-                        .and_then(|project| project.explorer.as_mut())
+                        .iter()
+                        .position(|project| project.root == root)
+                        && let Some(explorer) = self.projects[index].explorer.as_mut()
+                        && explorer.complete(&path, generation, result)
                     {
-                        explorer.complete(&path, generation, result);
+                        self.sync_watched_listing(index);
                     }
                 }
                 WorkerResult::Index {
                     root,
                     generation,
+                    request,
                     result,
                 } => {
-                    if let Some(p) = self
-                        .projects
-                        .iter_mut()
-                        .find(|p| p.root == root && p.index_generation == generation)
-                    {
+                    if let Some(index) = self.projects.iter().position(|p| {
+                        p.root == root
+                            && p.index_generation == generation
+                            && p.index_request == request
+                    }) {
+                        let p = &mut self.projects[index];
                         p.indexing = false;
+                        p.index_in_flight = false;
                         match result {
                             Ok(index) => {
                                 p.index_error = None;
@@ -1806,7 +1839,13 @@ impl VEditApp {
                             }
                             Err(e) => p.index_error = Some(e),
                         }
+                        if std::mem::take(&mut p.index_again) {
+                            self.refresh_index_quietly(index);
+                        }
                     }
+                }
+                WorkerResult::FileWatcher { root, result } => {
+                    self.file_watcher_started(root, result)
                 }
                 WorkerResult::Loaded {
                     id,
@@ -2483,6 +2522,7 @@ impl VEditApp {
                 project.last_git_refresh = Instant::now() - Duration::from_secs(30);
             }
             self.repositories.request_refresh();
+            self.refresh_unwatched_project(self.active_project);
         }
         self.refresh_git(self.active_project, resumed);
         self.refresh_inactive_git_indicators();
@@ -7607,6 +7647,7 @@ impl VEditApp {
         let restore_after_menu = egui::Popup::is_any_open(&self.ctx)
             && self.ctx.input(|input| input.key_pressed(Key::Escape));
         self.poll();
+        self.poll_file_watchers();
         self.sync_agent_marks();
         self.poll_control();
         if !self.settings_open {
@@ -8065,6 +8106,9 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, hint: &str) -> egu
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+#[cfg(test)]
+#[path = "explorer_watch_tests.rs"]
+mod explorer_watch_tests;
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
