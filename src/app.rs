@@ -336,6 +336,9 @@ struct EditorTab {
     scroll_align: Option<crate::vim::ScrollAlign>,
     /// A Vim status message waiting for the status bar, such as an unsupported command.
     vim_message: Option<String>,
+    /// The revision and text that other panes' positions refer to, kept only
+    /// while another pane holds one; see `shift_shared_document_positions`.
+    pane_baseline: Option<(u64, String)>,
     pending_navigation_feedback: bool,
     feedback: Option<editor_feedback::Highlight>,
     lines: crate::render::LineIndex,
@@ -382,6 +385,7 @@ impl EditorTab {
             center_on_reveal: false,
             scroll_align: None,
             vim_message: None,
+            pane_baseline: None,
             pending_navigation_feedback: false,
             feedback: None,
             lines: crate::render::LineIndex::default(),
