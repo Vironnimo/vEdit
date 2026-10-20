@@ -825,6 +825,9 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.highlight_current_line {
         settings.highlight_current_line = value;
     }
+    if let Some(value) = patch.git_gutter {
+        settings.git_gutter = value;
+    }
     // Retained for older CLI clients; Explorer now always lists ignored files.
     settings.show_ignored_files = true;
     if let Some(value) = patch.font_size {
@@ -1510,6 +1513,7 @@ mod tests {
                 line_height: Some(1.7),
                 line_numbers: Some(cli::LineNumbers::Relative),
                 highlight_current_line: Some(false),
+                git_gutter: Some(false),
                 autosave_delay_ms: Some(1500),
                 show_ignored_files: Some(true),
                 search_excludes: Some(vec![" generated ".into(), "src\\cache".into()]),
@@ -1535,6 +1539,7 @@ mod tests {
         assert_eq!(saved.line_height, 1.7);
         assert_eq!(saved.line_numbers, cli::LineNumbers::Relative);
         assert!(!saved.highlight_current_line);
+        assert!(!saved.git_gutter);
         assert_eq!(saved.autosave_delay_ms, 1500);
         assert!(saved.show_ignored_files);
         assert!(saved.word_wrap && saved.swap_jk);

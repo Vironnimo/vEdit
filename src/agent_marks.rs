@@ -66,6 +66,11 @@ pub struct UserMark {
     pub note: String,
     pub stale: bool,
     pub source_fingerprint: DocumentFingerprint,
+    /// Set for a comment on a change review: `snippet` is then an excerpt of
+    /// the diff, `start`/`end` are new-side lines, and the mark never attaches
+    /// to a buffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewOrigin>,
     #[serde(skip)]
     attached: bool,
     #[serde(skip)]
@@ -112,6 +117,15 @@ impl UserMark {
             .take(end - start)
             .collect()
     }
+}
+
+/// The change review a comment was written in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewOrigin {
+    /// The review's title, such as "Working tree" or a commit subject.
+    pub comparison: String,
+    /// `working_tree`, `commit` or `branch`.
+    pub source: String,
 }
 
 /// Borrowed buffer identity; obtaining a mark never changes editor selection.
@@ -322,8 +336,47 @@ impl AgentMarks {
             note: note.to_owned(),
             stale: false,
             source_fingerprint: fingerprint,
+            review: None,
             attached: true,
             runtime_identity: true,
+            snippet_offsets: OnceLock::new(),
+        });
+        self.touch_collection();
+        Ok(id)
+    }
+
+    /// A comment on lines of a change review. `excerpt` is the commented
+    /// part of the diff; `start` and `end` are one-based new-side positions
+    /// with an exclusive end. The file need not be open.
+    pub fn add_review(
+        &mut self,
+        target: MarkTarget,
+        start: MarkPosition,
+        end: MarkPosition,
+        excerpt: &str,
+        note: &str,
+        origin: ReviewOrigin,
+    ) -> Result<u64, MarkError> {
+        validate_note(note)?;
+        let (fingerprint, _) = inspect_document(excerpt);
+        if fingerprint.chars == 0 || target.path.is_none() {
+            return Err(MarkError::InvalidRange);
+        }
+        let id = self.allocate_id();
+        self.items.push(UserMark {
+            id,
+            document_id: 0,
+            target,
+            range: (0..fingerprint.chars).into(),
+            start,
+            end,
+            snippet: excerpt.to_owned(),
+            note: note.to_owned(),
+            stale: false,
+            source_fingerprint: fingerprint,
+            review: Some(origin),
+            attached: false,
+            runtime_identity: false,
             snippet_offsets: OnceLock::new(),
         });
         self.touch_collection();
@@ -775,6 +828,10 @@ fn validate_note(note: &str) -> Result<(), MarkError> {
 }
 
 fn document_matches(mark: &UserMark, document: MarkDocument<'_>, known_document: bool) -> bool {
+    if mark.review.is_some() {
+        // A diff excerpt is no range of the buffer; it never highlights or goes stale.
+        return false;
+    }
     if known_document && mark.runtime_identity && mark.document_id == document.id {
         return true;
     }

@@ -185,6 +185,8 @@ fn full_snapshot_updates_count_and_invalidates_an_older_indicator() {
                 ],
                 stats: git::WorkingTreeStats::default(),
                 stats_error: None,
+                head: None,
+                fingerprint: 0,
                 history: Ok(GitHistoryRefresh {
                     snapshot: git::HistorySnapshot {
                         refs: vec![git::CommitRef {

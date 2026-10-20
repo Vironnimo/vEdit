@@ -172,8 +172,9 @@ struct OverlayPointer {
 }
 
 impl VEditApp {
+    /// The For-agent overview or a review comment is open.
     pub(super) fn agent_marks_modal_open(&self) -> bool {
-        self.agent_marks_ui.open
+        self.agent_marks_ui.open || self.review_comment_open()
     }
 
     pub(super) fn open_agent_marks(&mut self) {
@@ -827,6 +828,9 @@ fn mark_location(mark: &crate::agent_marks::UserMark) -> String {
     } else {
         format!("Lines {}–{last_line}", mark.start.line)
     };
+    if mark.review.is_some() {
+        return format!("Review comment · {lines}");
+    }
     let count = mark.snippet_chars();
     format!(
         "{lines} · {count} character{}",
@@ -835,6 +839,9 @@ fn mark_location(mark: &crate::agent_marks::UserMark) -> String {
 }
 
 fn mark_exact_range(mark: &crate::agent_marks::UserMark) -> String {
+    if let Some(review) = &mark.review {
+        return format!("Diff excerpt from {}", review.comparison);
+    }
     format!(
         "Exact range: {}:{} → {}:{} (end excluded)",
         mark.start.line, mark.start.column, mark.end.line, mark.end.column,

@@ -85,6 +85,7 @@ fn hunks_between(old: &[&str], new: &[&str]) -> Vec<Hunk> {
 
 /// A Git-style unified patch from `old` to `new`, or an empty string when the
 /// texts have the same lines. `label` names the file in the header.
+// Only tests call the unified patch so far; the draft comparison builds on it.
 pub(crate) fn unified_patch(old: &str, new: &str, label: &str, context: usize) -> String {
     let old_lines = lines(old);
     let new_lines = lines(new);

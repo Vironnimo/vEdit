@@ -76,11 +76,21 @@ struct ChangeReview {
     list_height: f32,
     /// CLI requests answered once the comparison has loaded.
     replies: Vec<Sender<Response>>,
+    /// Diff rows chosen for a comment to the agent.
+    selection: Option<feedback::RowSelection>,
+    /// The open "Comment for agent" dialog.
+    comment: Option<feedback::CommentDraft>,
+    /// Repository state this comparison was read from, and the project's
+    /// state when it arrived; together they tell whether it is still fresh.
+    freshness: Option<feedback::Freshness>,
 }
 
 impl ChangeReview {
     fn new(source: ReviewSource, repository: PathBuf) -> Self {
         Self {
+            selection: None,
+            comment: None,
+            freshness: None,
             source,
             repository,
             generation: 0,
@@ -247,6 +257,8 @@ pub(super) struct LoadedReview {
     comparison: ReviewComparison,
     files: Vec<(ReviewFile, EntryPatch)>,
     omitted_untracked: usize,
+    /// HEAD and status fingerprint read just before the comparison.
+    basis: Option<(Option<git::StatusHead>, u64)>,
 }
 
 pub(super) struct LoadedPatch {
@@ -256,8 +268,15 @@ pub(super) struct LoadedPatch {
 }
 
 fn load_review(repository: &Path, source: &ReviewSource) -> Result<LoadedReview, String> {
+    // Read before the comparison: a change in between shows the review as
+    // possibly outdated rather than hiding a change from it.
+    let basis = match source {
+        ReviewSource::Commit(_) => None,
+        _ => git::working_tree_fingerprint(repository).ok(),
+    };
     let set = git::change_set(repository, source).map_err(|error| error.to_string())?;
     Ok(LoadedReview {
+        basis,
         comparison: set.comparison,
         files: set
             .files
@@ -319,9 +338,19 @@ fn review_summary(root: &Path, view: &ChangeReview, seen: &SeenMarks, visible: b
 enum ReviewAction {
     Close,
     Refresh,
-    Open { file: usize, line: Option<usize> },
-    Load { files: Vec<usize>, automatic: bool },
+    Open {
+        file: usize,
+        line: Option<usize>,
+    },
+    Load {
+        files: Vec<usize>,
+        automatic: bool,
+    },
     Status(String),
+    /// Add the comment of the dialog as an agent mark.
+    Comment(feedback::CommentDraft),
+    /// Show an unsaved document the review does not include.
+    ShowDocument(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -335,6 +364,10 @@ enum ReviewKey {
     SeenNext,
     Open,
     Close,
+    /// Shift+Arrow: extend the selected diff rows by one.
+    Extend(isize),
+    /// c: comment on the selected rows, or on the line on screen.
+    Comment,
 }
 
 impl VEditApp {
@@ -538,6 +571,7 @@ impl VEditApp {
         };
         let visible_project = index == self.active_project;
         let project = &mut self.projects[index];
+        let current_status = (project.git_head.clone(), project.git_fingerprint);
         let ChangeReviewState { view, parked, seen } = &mut project.change_review;
         // A background review loads while parked; it answers as not visible.
         let (view, shown) = match view.as_mut().filter(|view| view.generation == generation) {
@@ -556,6 +590,12 @@ impl VEditApp {
                 return;
             }
         };
+        view.freshness = loaded.basis.map(|(head, fingerprint)| feedback::Freshness {
+            head,
+            fingerprint,
+            arrived_head: current_status.0,
+            arrived_fingerprint: current_status.1,
+        });
         // Unchanged files keep their parsed patch and wrapped geometry.
         let mut previous: HashMap<(String, u64), ReviewEntry> = view
             .files
@@ -710,7 +750,7 @@ impl VEditApp {
         let root = self.projects[index].root.clone();
         let body_id = review_body_id(&root);
         self.register_region_focus_widget(body_id);
-        let swap_jk = self.settings.swap_jk;
+        let context = self.review_context(index);
         let mut state = std::mem::take(&mut self.projects[index].change_review);
         let mut actions = Vec::new();
         let source = if let ChangeReviewState {
@@ -719,7 +759,7 @@ impl VEditApp {
             ..
         } = &mut state
         {
-            review_ui(ui, rect, view, seen, body_id, swap_jk, &mut actions);
+            review_ui(ui, rect, view, seen, body_id, &context, &mut actions);
             Some(view.source.clone())
         } else {
             None
@@ -741,6 +781,8 @@ impl VEditApp {
                     self.request_review_patches(index, files, automatic)
                 }
                 ReviewAction::Status(text) => self.status(text, false),
+                ReviewAction::Comment(draft) => self.add_review_comment(index, draft),
+                ReviewAction::ShowDocument(path) => self.open_file(path),
             }
         }
     }
@@ -830,13 +872,22 @@ fn review_ui(
     view: &mut ChangeReview,
     seen: &mut SeenMarks,
     body_id: egui::Id,
-    swap_jk: bool,
+    context: &feedback::ReviewContext,
     actions: &mut Vec<ReviewAction>,
 ) {
     ui.painter().rect_filled(rect, 0.0, BG);
     let header = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT));
-    review_header(ui, header, view, seen, actions);
-    let body = egui::Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max);
+    review_header(ui, header, view, seen, context.stale, actions);
+    let mut body = egui::Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max);
+    if !context.drafts.is_empty() {
+        let banner =
+            egui::Rect::from_min_size(body.min, Vec2::new(body.width(), feedback::BANNER_HEIGHT));
+        feedback::drafts_banner(ui, banner, &context.drafts, actions);
+        body.min.y = banner.bottom();
+    }
+    if view.comment.is_some() {
+        feedback::comment_dialog(ui.ctx(), body_id, view, actions);
+    }
     if view.files.is_empty() {
         empty_review(ui, body, view, actions);
         return;
@@ -859,7 +910,7 @@ fn review_ui(
     if let Some(list) = list {
         view.list_clicked = file_list(ui, list, view, seen);
     }
-    diff_body(ui, diff, view, seen, body_id, swap_jk, actions);
+    diff_body(ui, diff, view, seen, body_id, context.swap_jk, actions);
 }
 
 fn review_header(
@@ -867,6 +918,7 @@ fn review_header(
     rect: egui::Rect,
     view: &ChangeReview,
     seen: &SeenMarks,
+    stale: bool,
     actions: &mut Vec<ReviewAction>,
 ) {
     ui.painter().rect_filled(rect, 0.0, PANEL);
@@ -907,6 +959,9 @@ fn review_header(
         .inner;
     if refresh.clicked() {
         actions.push(ReviewAction::Refresh);
+    }
+    if stale && !view.loading {
+        feedback::stale_indicator(ui);
     }
     if view.comparison.is_some() {
         let count = view.files.len();
@@ -1288,6 +1343,7 @@ fn take_review_keys(ctx: &egui::Context, swap_jk: bool) -> Vec<ReviewKey> {
         'p' | '[' => Some(ReviewKey::PreviousFile),
         ' ' => Some(ReviewKey::SeenNext),
         'o' => Some(ReviewKey::Open),
+        'c' => Some(ReviewKey::Comment),
         _ => None,
     };
     let mut keys = Vec::new();
@@ -1310,6 +1366,19 @@ fn take_review_keys(ctx: &egui::Context, swap_jk: bool) -> Vec<ReviewKey> {
                 }
             }
             egui::Event::Key {
+                key: key @ (Key::ArrowDown | Key::ArrowUp),
+                pressed: true,
+                modifiers,
+                ..
+            } if *modifiers == egui::Modifiers::SHIFT => {
+                keys.push(ReviewKey::Extend(if *key == Key::ArrowDown {
+                    1
+                } else {
+                    -1
+                }));
+                false
+            }
+            egui::Event::Key {
                 key,
                 pressed: true,
                 modifiers,
@@ -1321,6 +1390,7 @@ fn take_review_keys(ctx: &egui::Context, swap_jk: bool) -> Vec<ReviewKey> {
                     Key::N => Some('n'),
                     Key::P => Some('p'),
                     Key::O => Some('o'),
+                    Key::C => Some('c'),
                     Key::Space => Some(' '),
                     Key::OpenBracket => Some('['),
                     Key::CloseBracket => Some(']'),
@@ -1421,17 +1491,27 @@ fn diff_body(
     });
     // The list is for pointing; the keys keep working on the diff. Requested
     // after the body's interaction, so the click elsewhere does not undo it.
-    if body.clicked() || std::mem::take(&mut view.list_clicked) {
+    if body.clicked() || body.secondary_clicked() || std::mem::take(&mut view.list_clicked) {
         body.request_focus();
     }
+    feedback::validate_selection(view);
+    // A click chooses a diff row, Shift+click extends the choice, and a
+    // right-click outside it chooses the row under the pointer.
+    let pointer = (body.clicked() || body.secondary_clicked())
+        .then(|| body.interact_pointer_pos())
+        .flatten()
+        .map(|position| feedback::RowClick {
+            position,
+            extend: body.clicked() && ui.input(|input| input.modifiers.shift),
+            secondary: body.secondary_clicked(),
+        });
     if view.focus_pending {
-        view.focus_pending = false;
-        if ui
-            .ctx()
-            .memory(|memory| memory.focused().is_none_or(|id| id == body_id))
-        {
+        let focused = ui.ctx().memory(|memory| memory.focused());
+        if focused.is_none_or(|id| id == body_id) {
             body.request_focus();
         }
+        // A closing dialog can still hold the frame's focus; ask again then.
+        view.focus_pending = focused.is_none();
     }
     let focused = ui.ctx().memory(|memory| memory.has_focus(body_id));
     if focused {
@@ -1506,11 +1586,37 @@ fn diff_body(
                     None => actions.push(ReviewAction::Status("Every file is marked seen".into())),
                 }
             }
-            ReviewKey::Open => actions.push(ReviewAction::Open {
-                file: current,
-                line: line_at(view, current, offset),
+            ReviewKey::Open => actions.push(match &view.selection {
+                Some(selection) => ReviewAction::Open {
+                    file: selection.file,
+                    line: feedback::selection_line(view, selection),
+                },
+                None => ReviewAction::Open {
+                    file: current,
+                    line: line_at(view, current, offset),
+                },
             }),
+            ReviewKey::Close if view.selection.is_some() => view.selection = None,
             ReviewKey::Close => actions.push(ReviewAction::Close),
+            ReviewKey::Extend(step) => {
+                if let Some(target) = feedback::extend_selection(view, current, offset, step) {
+                    // Keep the moving end below the sticky header and on screen.
+                    let top = target - FILE_HEADER_HEIGHT;
+                    let bottom = target + metrics.row_height - viewport_height;
+                    offset = offset.clamp(bottom, top.max(bottom));
+                }
+            }
+            ReviewKey::Comment => {
+                if view.selection.is_none() {
+                    view.selection = feedback::row_on_screen(view, current, offset);
+                }
+                match feedback::CommentDraft::new(view) {
+                    Some(draft) => view.comment = Some(draft),
+                    None => actions.push(ReviewAction::Status(
+                        "Select changed or unchanged diff lines to comment on".into(),
+                    )),
+                }
+            }
         }
         offset = offset.clamp(0.0, maximum);
     }
@@ -1543,6 +1649,7 @@ fn diff_body(
             .saturating_sub(1);
         let mut visible = Vec::new();
         let mut deferred = Vec::new();
+        let mut hit = None;
         for index in first..view.files.len() {
             let top = view.tops[index];
             // Request deferred patches a screen ahead of the reader.
@@ -1568,6 +1675,12 @@ fn diff_body(
             );
             match &entry.patch {
                 EntryPatch::Parsed(patch) if patch.rows() > 0 => {
+                    if let Some(click) = &pointer
+                        && body_rect.contains(click.position)
+                    {
+                        let local = click.position.y - body_rect.top();
+                        hit = Some((index, entry.wrapped.visible(local..local + 0.01).start));
+                    }
                     for row in entry
                         .wrapped
                         .visible(viewport.top() - body_top..viewport.bottom() - body_top)
@@ -1589,6 +1702,13 @@ fn diff_body(
                             &metrics,
                             body_id.with((index, row)),
                         );
+                        if view
+                            .selection
+                            .as_ref()
+                            .is_some_and(|selection| selection.contains(index, row))
+                        {
+                            feedback::paint_selected_row(ui, row_rect);
+                        }
                     }
                 }
                 patch => {
@@ -1619,6 +1739,13 @@ fn diff_body(
                 origin + Vec2::new(0.0, y),
                 Vec2::new(content_width, FILE_HEADER_HEIGHT),
             );
+            if pointer
+                .as_ref()
+                .is_some_and(|click| rect.contains(click.position))
+            {
+                // The header covers rows scrolled beneath it.
+                hit = None;
+            }
             let response = file_header(
                 ui,
                 rect,
@@ -1637,10 +1764,21 @@ fn diff_body(
                 toggles.push((index, value));
             }
         }
-        (deferred, toggles)
+        (deferred, toggles, hit)
     });
     render::remember_scroll_limits(ui.ctx(), &output);
-    let (deferred, toggles) = output.inner;
+    let (deferred, toggles, hit) = output.inner;
+    if let (Some(click), Some((file, row))) = (pointer, hit) {
+        feedback::click_row(view, file, row, click);
+    }
+    if let Some(comment) = feedback::diff_menu(&body, view) {
+        match comment {
+            Some(draft) => view.comment = Some(draft),
+            None => actions.push(ReviewAction::Status(
+                "Select changed or unchanged diff lines to comment on".into(),
+            )),
+        }
+    }
     if !toggles.is_empty() {
         ui.ctx().memory_mut(|memory| memory.request_focus(body_id));
     }
@@ -1812,6 +1950,9 @@ fn file_header(
         seen: toggle.changed().then_some(checked),
     }
 }
+
+#[path = "change_review_feedback.rs"]
+mod feedback;
 
 #[cfg(test)]
 #[path = "change_review_tests.rs"]

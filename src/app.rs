@@ -51,6 +51,8 @@ mod explorer_tree_ui;
 mod explorer_visual_tests;
 #[path = "find.rs"]
 mod find;
+#[path = "git_gutter.rs"]
+mod git_gutter;
 #[path = "git_panel.rs"]
 mod git_panel;
 #[path = "indentation.rs"]
@@ -119,6 +121,8 @@ struct Settings {
     line_height: f32,
     line_numbers: crate::cli::LineNumbers,
     highlight_current_line: bool,
+    /// Lines added, modified or removed since HEAD beside the line numbers.
+    git_gutter: bool,
     show_ignored_files: bool,
     explorer_preview_tabs: bool,
     editor_font: crate::cli::EditorFont,
@@ -146,6 +150,7 @@ impl Default for Settings {
             line_height: 1.35,
             line_numbers: crate::cli::LineNumbers::default(),
             highlight_current_line: true,
+            git_gutter: true,
             show_ignored_files: true,
             explorer_preview_tabs: true,
             editor_font: crate::cli::EditorFont::default(),
@@ -246,6 +251,10 @@ struct Project {
     git_indicator_count: Option<usize>,
     /// Branch, divergence and change totals from the latest full or status refresh.
     git_summary: Option<project_status::GitSummary>,
+    /// HEAD and the status fingerprint of the latest full refresh; `None` until
+    /// one completed. Gutter markers and change reviews compare them.
+    git_head: Option<git::StatusHead>,
+    git_fingerprint: Option<u64>,
     git_indicator_request: Option<u64>,
     last_git_indicator_refresh: Instant,
     commit_message: String,
@@ -297,6 +306,8 @@ impl Project {
             last_git_refresh: Instant::now() - Duration::from_secs(30),
             git_indicator_count: None,
             git_summary: None,
+            git_head: None,
+            git_fingerprint: None,
             git_indicator_request: None,
             last_git_indicator_refresh: Instant::now() - Duration::from_secs(30),
             commit_message: String::new(),
@@ -460,6 +471,10 @@ struct GitSnapshot {
     files: Vec<git::FileStatus>,
     stats: git::WorkingTreeStats,
     stats_error: Option<String>,
+    /// HEAD as the status read reported it; `None` when Git did not say.
+    head: Option<git::StatusHead>,
+    /// [`git::status_fingerprint`] of this read.
+    fingerprint: u64,
     history: Result<GitHistoryRefresh, String>,
 }
 struct GitHistoryRefresh {
@@ -488,6 +503,8 @@ fn read_git_snapshot(
             files: Vec::new(),
             stats: git::WorkingTreeStats::default(),
             stats_error: None,
+            head: None,
+            fingerprint: 0,
             history: Ok(GitHistoryRefresh {
                 snapshot: git::HistorySnapshot::default(),
                 page: Some(git::HistoryPage::default()),
@@ -498,6 +515,7 @@ fn read_git_snapshot(
     let previous_history = previous_history.filter(|_| same_repository);
     let previous_history_error = previous_history_error.filter(|_| same_repository);
     let (status, tracking, head) = git::status_with_head(&repo).map_err(|e| e.to_string())?;
+    let fingerprint = git::status_fingerprint(&repo, head.as_ref(), &status.files);
     let (stats, stats_error) = match git::working_tree_stats(&repo, &status.files) {
         Ok(stats) => (stats, None),
         Err(error) => (git::WorkingTreeStats::default(), Some(error.to_string())),
@@ -549,6 +567,8 @@ fn read_git_snapshot(
         files: status.files,
         stats,
         stats_error,
+        head,
+        fingerprint,
         history,
     })
 }
@@ -664,6 +684,21 @@ enum WorkerResult {
         patches: Vec<change_review::LoadedPatch>,
     },
     DiskChanges(Vec<disk_sync::DiskCheck>),
+    /// The committed version a document's gutter markers compare with.
+    GitGutterBase {
+        key: git_gutter::BaseKey,
+        request: u64,
+        result: Result<git::BaseVersion, String>,
+    },
+    /// Gutter markers of one document revision, compared off the UI thread.
+    GitGutterDiff {
+        document: u64,
+        request: u64,
+        revision: u64,
+        key: git_gutter::BaseKey,
+        base: Arc<str>,
+        hunks: Vec<crate::line_diff::Hunk>,
+    },
 }
 impl WorkerResult {
     /// A periodic disk check that found nothing waits for the next scheduled
@@ -819,6 +854,10 @@ pub struct VEditApp {
     repositories: git_panel::repositories::RepositoryOverview,
     diff: Option<(String, String)>,
     diff_view: crate::git_diff_view::DiffView,
+    /// The repository whose paths the diff dialog shows.
+    diff_repository: Option<PathBuf>,
+    /// Committed versions, gutter markers and the open change peek.
+    git_gutter: git_gutter::GitGutterState,
     diff_generation: u64,
     diff_loading: bool,
     diff_error: Option<String>,
@@ -1081,6 +1120,8 @@ impl VEditApp {
             repositories: git_panel::repositories::RepositoryOverview::default(),
             diff: None,
             diff_view: crate::git_diff_view::DiffView::default(),
+            diff_repository: None,
+            git_gutter: git_gutter::GitGutterState::default(),
             diff_generation: 0,
             diff_loading: false,
             diff_error: None,
@@ -1604,6 +1645,7 @@ impl VEditApp {
                     for t in p.tabs {
                         self.agent_marks.detach_document(t.id);
                         self.markdown.forget_document(t.id);
+                        self.git_gutter.forget(t.id);
                         let _ = self
                             .recovery_writer
                             .remove(&t.recovery_path, self.recovery_writer.stamp());
@@ -1651,6 +1693,7 @@ impl VEditApp {
                 let tab = project.tabs.remove(index);
                 self.agent_marks.detach_document(id);
                 self.markdown.forget_document(id);
+                self.git_gutter.forget(id);
                 let _ = self
                     .recovery_writer
                     .remove(&tab.recovery_path, self.recovery_writer.stamp());
@@ -2066,6 +2109,8 @@ impl VEditApp {
                                     .hover_stats_order
                                     .retain(|key| p.git_view.hover_stats.contains_key(key));
                                 p.git_root = s.root;
+                                p.git_head = s.head;
+                                p.git_fingerprint = Some(s.fingerprint);
                                 p.git_branch = s.branch;
                                 p.git_tracking = s.tracking;
                                 p.git_main_comparison = s.main_comparison;
@@ -2317,6 +2362,19 @@ impl VEditApp {
                     patches,
                 } => self.apply_change_review_patches(root, generation, request, patches),
                 WorkerResult::DiskChanges(checks) => self.apply_disk_checks(checks),
+                WorkerResult::GitGutterBase {
+                    key,
+                    request,
+                    result,
+                } => self.apply_git_gutter_base(key, request, result),
+                WorkerResult::GitGutterDiff {
+                    document,
+                    request,
+                    revision,
+                    key,
+                    base,
+                    hunks,
+                } => self.apply_git_gutter_diff(document, request, revision, key, base, hunks),
             }
         }
         self.resume_deferred_save_as();
@@ -2387,8 +2445,10 @@ impl VEditApp {
         if !force && !window_active {
             return;
         }
-        let history_visible =
-            index == self.active_project && self.sidebar_view_visible(SidebarView::SourceControl);
+        // A visible change review notices new changes as quickly as Source control.
+        let history_visible = index == self.active_project
+            && (self.sidebar_view_visible(SidebarView::SourceControl)
+                || self.change_review_visible());
         let interval = if history_visible {
             Duration::from_secs(3)
         } else {
@@ -2614,6 +2674,7 @@ impl VEditApp {
             .find(|file| Path::new(&file.path) == path)
             .cloned();
         self.begin_git_diff(title.clone());
+        self.diff_repository = Some(root.clone());
         let generation = self.diff_generation;
         self.worker(move || WorkerResult::Diff {
             generation,
@@ -2641,6 +2702,7 @@ impl VEditApp {
                     .map(|file| (detail.clone(), file.clone()))
             });
         self.begin_git_diff(title.clone());
+        self.diff_repository = Some(root.clone());
         let generation = self.diff_generation;
         self.worker(move || WorkerResult::Diff {
             generation,
@@ -5400,6 +5462,10 @@ impl VEditApp {
         let id = self.document_widget_id(document_id);
         self.register_region_focus_widget(id);
         let mark_overlays = self.agent_mark_overlay_rows(document_id);
+        let git_markers = self.git_gutter_markers(document_id);
+        let mut git_placements = Vec::new();
+        let mut git_click = None;
+        let mut git_peek_anchor = (0.0, 0.0);
         let marker_owns_pointer =
             source_interaction && agent_marks_ui::marker_pointer_owns_editor(&ctx, id);
         let source_interaction = source_interaction && !marker_owns_pointer;
@@ -5847,6 +5913,27 @@ impl VEditApp {
             if pane_focused && let Some(feedback) = &tab.feedback {
                 feedback.paint(ui, &output.galley, output.galley_pos, &visible_rows, tab.revision);
             }
+            if let Some(markers) = &git_markers {
+                let line_count = tab.lines.line_count(&tab.text, tab.revision);
+                git_placements = git_gutter::paint_markers(
+                    ui, markers, &output.galley, output.galley_pos, &visible_rows, line_count,
+                );
+                git_peek_anchor = (output.galley_pos.x, clip.width());
+                for placement in &git_placements {
+                    let hunk = &markers.hunks[placement.index];
+                    let target = placement.rect.expand2(Vec2::new(3.0, 0.0)).intersect(clip);
+                    let response = ui
+                        .interact(target, id.with(("git_change", placement.index)), egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_ui(|ui| git_gutter::tooltip_ui(ui, markers, hunk));
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Git change")
+                    });
+                    if response.clicked() {
+                        git_click = Some(hunk.clone());
+                    }
+                }
+            }
             if pane_focused && let Some(jump) = jump.as_mut()
                 && jump.tab_id == tab.id && jump.revision == tab.revision
             {
@@ -6116,6 +6203,22 @@ impl VEditApp {
         if let Some(id) = bookmark_click {
             self.jump_to_bookmark(id);
         }
+        if let (Some(hunk), Some(markers)) = (git_click, &git_markers) {
+            let peek = git_gutter::GutterPeek {
+                pane: search_pane_id,
+                document: document_id,
+                revision: markers.revision,
+                hunk,
+            };
+            self.git_gutter.peek = (self.git_gutter.peek.as_ref() != Some(&peek)).then_some(peek);
+        }
+        self.git_peek_ui(
+            document_id,
+            git_markers.as_ref(),
+            &git_placements,
+            git_peek_anchor.0,
+            git_peek_anchor.1 - 40.0,
+        );
         if let Some(action) = context_action {
             self.apply_editor_context_action(document_id, action);
         }
@@ -7179,6 +7282,7 @@ impl VEditApp {
         self.git_detail_ui();
         if let Some((title, text)) = &self.diff {
             let mut choice = None;
+            let mut open = None;
             let modal = crate::git_diff_view::dialog(
                 &ctx,
                 egui::Id::new("git_patch_window"),
@@ -7198,11 +7302,13 @@ impl VEditApp {
                     } else if let Some(error) = &self.diff_error {
                         ui.colored_label(RED, error);
                     } else {
-                        self.diff_view.show(ui, title, text);
+                        open = self.diff_view.show(ui, title, text);
                     }
                 },
             );
-            if modal.inner || modal.should_close() {
+            if let Some(open) = open {
+                self.open_diff_location(open);
+            } else if modal.inner || modal.should_close() {
                 self.close_diff();
             }
             if let Some(choice) = choice {
@@ -7211,9 +7317,43 @@ impl VEditApp {
             }
         }
     }
+    /// Open the file of the diff dialog at the chosen line, as the change
+    /// review's o and Enter do.
+    fn open_diff_location(&mut self, open: crate::git_diff_view::DiffOpen) {
+        let Some(repository) = self.diff_repository.clone() else {
+            return;
+        };
+        if open.deleted {
+            self.status(
+                format!(
+                    "{} is deleted in this diff; there is no file to open",
+                    open.path
+                ),
+                true,
+            );
+            return;
+        }
+        self.close_diff();
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            project.git_view.detail_open = false;
+        }
+        let path = open
+            .path
+            .split('/')
+            .fold(repository, |path, part| path.join(part));
+        self.open_file(path);
+        if let Some(line) = open.line
+            && let Some(tab) = self.tab_mut()
+        {
+            tab.pending_agent_location = Some(crate::cli::Location { line, column: 1 });
+            tab.agent_location_error = None;
+            self.apply_pending_agent_locations();
+        }
+    }
     fn close_diff(&mut self) {
         let comparison = self.comparison.take().is_some();
         self.diff = None;
+        self.diff_repository = None;
         self.diff_loading = false;
         self.diff_error = None;
         self.diff_view.reset_focus();
@@ -7326,6 +7466,9 @@ impl VEditApp {
         self.validate_vim_search();
         self.resume_editor_input();
         self.resume_shortcut_input();
+        if self.palette.is_none() && !self.settings_open {
+            self.git_peek_escape();
+        }
         let dragging_tab = self.tab_drag_keys() || self.sidebar_drag_keys();
         let switching_project = !dragging_tab && self.workspace_keys();
         if !dragging_tab && !switching_project {

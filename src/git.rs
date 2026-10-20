@@ -463,7 +463,7 @@ pub fn status_with_tracking(root: &Path) -> GitResult<(RepoStatus, BranchInfo)> 
 }
 
 /// The commit HEAD named when the status was read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StatusHead {
     Commit(String),
     /// The current branch has no commits yet.
@@ -1716,6 +1716,156 @@ fn working_file_identity(path: &Path) -> Option<(u64, u128)> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |time| time.as_nanos());
     Some((metadata.len(), modified))
+}
+
+/// HEAD versions above this size get no gutter change markers.
+pub const BASE_VERSION_LIMIT: u64 = 2 * 1024 * 1024;
+
+/// A file's committed version, compared with an editor buffer for gutter
+/// change markers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseVersion {
+    /// The committed UTF-8 text, without a byte order mark.
+    Text(String),
+    /// Not in the commit but staged: every line of the buffer is added.
+    Added,
+    /// Neither committed nor staged, for example untracked or ignored.
+    Untracked,
+    Binary,
+    TooLarge,
+    /// A symbolic link, submodule, Git LFS pointer or non-UTF-8 text.
+    Unsupported,
+}
+
+/// Read `path` (relative to the repository root, `/`-separated) from
+/// `commit` without running filters, text conversion or LFS. `None` means
+/// the branch has no commit yet. Two Git processes at most.
+pub fn base_version(root: &Path, commit: Option<&str>, path: &str) -> GitResult<BaseVersion> {
+    const OPERATION: &str = "read committed version";
+    validate_paths(&[PathBuf::from(path)], OPERATION)?;
+    if let Some(commit) = commit {
+        validate_commit_hash(commit)?;
+        let listing = checked_git(
+            root,
+            &[
+                OsString::from("ls-tree"),
+                OsString::from("-z"),
+                OsString::from("--long"),
+                OsString::from("--full-tree"),
+                OsString::from(commit),
+                OsString::from("--"),
+                OsString::from(path),
+            ],
+            OPERATION,
+        )?;
+        for record in nul_records(&listing.stdout, OPERATION)? {
+            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            if &record[tab + 1..] != path.as_bytes() {
+                continue;
+            }
+            let fields = String::from_utf8_lossy(&record[..tab]);
+            let fields: Vec<_> = fields.split_ascii_whitespace().collect();
+            let [mode, kind, object, size] = fields[..] else {
+                return Err(GitError::new(
+                    OPERATION,
+                    "Git returned an unexpected tree entry",
+                ));
+            };
+            if kind != "blob" || !matches!(mode, "100644" | "100755") {
+                return Ok(BaseVersion::Unsupported);
+            }
+            validate_commit_hash(object)?;
+            if size
+                .parse::<u64>()
+                .map_or(true, |size| size > BASE_VERSION_LIMIT)
+            {
+                return Ok(BaseVersion::TooLarge);
+            }
+            let blob = checked_git(root, &string_args(&["cat-file", "blob", object]), OPERATION)?;
+            return Ok(base_text(blob.stdout));
+        }
+    }
+    let staged = checked_git(
+        root,
+        &[
+            OsString::from("ls-files"),
+            OsString::from("-z"),
+            OsString::from("--cached"),
+            OsString::from("--full-name"),
+            OsString::from("--"),
+            OsString::from(path),
+        ],
+        OPERATION,
+    )?;
+    let staged = nul_records(&staged.stdout, OPERATION)?
+        .into_iter()
+        .any(|record| record == path.as_bytes());
+    Ok(if staged {
+        BaseVersion::Added
+    } else {
+        BaseVersion::Untracked
+    })
+}
+
+fn base_text(bytes: Vec<u8>) -> BaseVersion {
+    if bytes.iter().take(8000).any(|byte| *byte == 0) {
+        return BaseVersion::Binary;
+    }
+    // A pointer would compare as a whole-file change with the checked-out content.
+    if bytes.starts_with(b"version https://git-lfs.github.com/spec/") {
+        return BaseVersion::Unsupported;
+    }
+    match String::from_utf8(bytes) {
+        Ok(mut text) => {
+            if text.starts_with('\u{feff}') {
+                text.drain(..'\u{feff}'.len_utf8());
+            }
+            BaseVersion::Text(text)
+        }
+        Err(_) => BaseVersion::Unsupported,
+    }
+}
+
+/// Changed paths whose size and modification time a fingerprint includes.
+const FINGERPRINT_FILES: usize = 2_000;
+
+/// A key that changes with HEAD, the reported status and the size or
+/// modification time of every changed file. Polls compare it to notice
+/// edits of files that already were modified.
+pub fn status_fingerprint(root: &Path, head: Option<&StatusHead>, files: &[FileStatus]) -> u64 {
+    let mut entries: Vec<_> = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let identity = (index < FINGERPRINT_FILES && file.worktree != FileChange::Deleted)
+                .then(|| {
+                    working_file_identity(
+                        &file
+                            .path
+                            .split('/')
+                            .fold(root.to_path_buf(), |path, part| path.join(part)),
+                    )
+                })
+                .flatten();
+            (
+                &file.path,
+                &file.original_path,
+                format!("{:?}{:?}", file.index, file.worktree),
+                identity,
+            )
+        })
+        .collect();
+    entries.sort();
+    review_content_key(&(head, entries))
+}
+
+/// HEAD and [`status_fingerprint`] read now, with one status process.
+pub fn working_tree_fingerprint(root: &Path) -> GitResult<(Option<StatusHead>, u64)> {
+    let (status, _, head) = status_with_head(root)?;
+    let key = status_fingerprint(root, head.as_ref(), &status.files);
+    Ok((head, key))
 }
 
 fn review_content_key(value: &impl std::hash::Hash) -> u64 {
@@ -4903,5 +5053,68 @@ mod tests {
                 "diff --git a/y b/y\n"
             ]
         );
+    }
+
+    #[test]
+    fn base_versions_read_committed_staged_untracked_and_unsupported_files() {
+        let repository = TestRepository::new();
+        fs::create_dir(repository.0.join("src")).unwrap();
+        repository.write("src/lib.rs", "\u{feff}one\r\ntwo\r\n");
+        repository.write("binary.dat", "a\0b");
+        repository.write("old name.txt", "kept\n");
+        repository.commit_all("Initial");
+        let head = repository.head_hash();
+        let read = |path: &str| base_version(&repository.0, Some(&head), path).unwrap();
+        // Raw blob bytes: line endings stay as committed, only the BOM goes.
+        assert_eq!(
+            read("src/lib.rs"),
+            BaseVersion::Text("one\r\ntwo\r\n".into())
+        );
+        assert_eq!(read("binary.dat"), BaseVersion::Binary);
+        assert_eq!(read("src"), BaseVersion::Unsupported);
+        repository.write("new.txt", "staged\n");
+        repository.git(&["add", "new.txt"]);
+        repository.write("untracked.txt", "loose\n");
+        assert_eq!(read("new.txt"), BaseVersion::Added);
+        assert_eq!(read("untracked.txt"), BaseVersion::Untracked);
+        assert_eq!(read("missing.txt"), BaseVersion::Untracked);
+        // A staged rename reads its committed content under the old path.
+        repository.git(&["mv", "old name.txt", "new name.txt"]);
+        assert_eq!(read("old name.txt"), BaseVersion::Text("kept\n".into()));
+        assert_eq!(
+            base_version(&repository.0, None, "new.txt").unwrap(),
+            BaseVersion::Added
+        );
+        assert!(base_version(&repository.0, Some(&head), "../outside.txt").is_err());
+        repository.write("large.txt", &"x".repeat(BASE_VERSION_LIMIT as usize + 1));
+        repository.write(
+            "pointer.bin",
+            "version https://git-lfs.github.com/spec/v1\noid sha256:0\n",
+        );
+        repository.commit_all("Large");
+        let head = repository.head_hash();
+        let read = |path: &str| base_version(&repository.0, Some(&head), path).unwrap();
+        assert_eq!(read("large.txt"), BaseVersion::TooLarge);
+        assert_eq!(read("pointer.bin"), BaseVersion::Unsupported);
+    }
+
+    #[test]
+    fn status_fingerprint_follows_head_status_and_further_edits_of_changed_files() {
+        let repository = TestRepository::new();
+        repository.write("a.txt", "one\n");
+        repository.commit_all("Initial");
+        let (_, clean) = working_tree_fingerprint(&repository.0).unwrap();
+        assert_eq!(working_tree_fingerprint(&repository.0).unwrap().1, clean);
+        repository.write("a.txt", "two\n");
+        let (_, modified) = working_tree_fingerprint(&repository.0).unwrap();
+        assert_ne!(modified, clean);
+        // The status still reads " M"; the size tells this edit apart.
+        repository.write("a.txt", "three\n");
+        let (_, edited) = working_tree_fingerprint(&repository.0).unwrap();
+        assert_ne!(edited, modified);
+        repository.commit_all("Second");
+        let (head, committed) = working_tree_fingerprint(&repository.0).unwrap();
+        assert_ne!(committed, clean, "HEAD is part of the key");
+        assert_eq!(head, Some(StatusHead::Commit(repository.head_hash())));
     }
 }

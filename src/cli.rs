@@ -195,6 +195,7 @@ pub struct SettingsPatch {
     pub line_height: Option<f32>,
     pub line_numbers: Option<LineNumbers>,
     pub highlight_current_line: Option<bool>,
+    pub git_gutter: Option<bool>,
     pub show_ignored_files: Option<bool>,
     pub editor_font: Option<EditorFont>,
     pub tab_width: Option<usize>,
