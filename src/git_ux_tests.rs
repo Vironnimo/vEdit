@@ -793,6 +793,8 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
         files,
         stats: project.git_stats.clone(),
         stats_error: None,
+        head: None,
+        fingerprint: 0,
         history: Ok(GitHistoryRefresh {
             snapshot: project.git_history_snapshot.clone().unwrap_or_default(),
             page: None,

@@ -1226,7 +1226,7 @@ impl VEditApp {
             }
         }
     }
-    fn tab_location(&self, id: u64) -> Option<(usize, usize)> {
+    pub(super) fn tab_location(&self, id: u64) -> Option<(usize, usize)> {
         self.projects
             .iter()
             .enumerate()

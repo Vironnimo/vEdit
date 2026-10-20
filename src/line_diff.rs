@@ -85,6 +85,8 @@ fn hunks_between(old: &[&str], new: &[&str]) -> Vec<Hunk> {
 
 /// A Git-style unified patch from `old` to `new`, or an empty string when the
 /// texts have the same lines. `label` names the file in the header.
+// Only tests call the unified patch so far; the draft comparison builds on it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn unified_patch(old: &str, new: &str, label: &str, context: usize) -> String {
     let old_lines = lines(old);
     let new_lines = lines(new);
@@ -104,6 +106,7 @@ pub(crate) fn unified_patch(old: &str, new: &str, label: &str, context: usize) -
     patch
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn push_group(patch: &mut String, group: &[DiffOp], old: &[&str], new: &[&str]) {
     let (Some(first), Some(last)) = (group.first(), group.last()) else {
         return;
@@ -128,6 +131,7 @@ fn push_group(patch: &mut String, group: &[DiffOp], old: &[&str], new: &[&str]) 
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn push_lines(patch: &mut String, prefix: char, lines: &[&str]) {
     for line in lines {
         patch.push(prefix);
@@ -137,6 +141,7 @@ fn push_lines(patch: &mut String, prefix: char, lines: &[&str]) {
 }
 
 /// Unified headers are one-based; an empty range names the line before it.
+#[cfg_attr(not(test), allow(dead_code))]
 fn header_range(range: &Range<usize>) -> String {
     match range.len() {
         0 => format!("{},0", range.start),

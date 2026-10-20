@@ -74,6 +74,8 @@ impl Project {
         self.git_error = None;
         self.git_indicator_count = None;
         self.git_summary = None;
+        self.git_head = None;
+        self.git_fingerprint = None;
     }
 
     pub(super) fn uncommitted_change_count(&self) -> Option<usize> {

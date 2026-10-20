@@ -135,6 +135,12 @@ impl VEditApp {
             )
             .changed();
         changed |= ui
+            .checkbox(&mut self.settings.git_gutter, "Show Git changes in gutter")
+            .on_hover_text(
+                "Mark lines added, modified or removed since HEAD, including unsaved edits. Click a marker to review or revert the change.",
+            )
+            .changed();
+        changed |= ui
             .checkbox(&mut self.settings.word_wrap, "Wrap long lines")
             .on_hover_text(format!(
                 "Fit long source lines to the editor pane · {}",
@@ -179,6 +185,7 @@ mod tests {
         assert_eq!(settings.line_height, 1.35);
         assert_eq!(settings.line_numbers, crate::cli::LineNumbers::Absolute);
         assert!(settings.highlight_current_line);
+        assert!(settings.git_gutter);
         assert!(settings.show_ignored_files);
         assert_eq!(settings.autosave_delay_ms, 850);
         settings.ui_scale = f32::NAN;
