@@ -4873,6 +4873,13 @@ impl VEditApp {
                             }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
                             if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
+                                ui.label(RichText::new("Plain text: file too large for highlighting").size(11.0).color(MUTED)).on_hover_text(format!(
+                                    "Syntax colors are off for files larger than {} KiB so editing stays fast. This file has {} KiB. Editing, search and language analysis work as usual.",
+                                    crate::render::MAX_DOCUMENT_BYTES / 1024,
+                                    t.text.len().div_ceil(1024)
+                                ));
+                            }
                         }
                         if !compact_statistics { self.indentation_status_ui(ui); }
                         self.save_status_ui(ui, !narrow);
