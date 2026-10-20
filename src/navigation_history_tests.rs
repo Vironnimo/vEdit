@@ -1,4 +1,5 @@
-//! F8 problem navigation and the pane-local back/forward history.
+//! F8 problem navigation, the pane-local back/forward history and output
+//! locations.
 
 use super::*;
 use crate::lsp::{Diagnostic, Position, TextRange};
@@ -327,4 +328,72 @@ fn vim_bracket_d_and_ctrl_o_ctrl_i_use_problems_and_history() {
     assert_eq!(location(screen.state()), ("a.rs".into(), 12, 3));
     let disk = fs::read_to_string(root.join("a.rs")).unwrap();
     assert_eq!(screen.state().tab().unwrap().text, disk);
+}
+
+fn wait_for(app: &mut VEditApp, message: &str, done: impl Fn(&VEditApp) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done(app) {
+        assert!(Instant::now() < deadline, "{message}");
+        std::thread::sleep(Duration::from_millis(2));
+        settle(app);
+    }
+}
+
+fn output_link(path: &str, line: usize, column: Option<usize>) -> crate::output_links::Link {
+    crate::output_links::Link {
+        range: 0..path.len(),
+        path: path.into(),
+        line,
+        column,
+    }
+}
+
+#[test]
+fn output_locations_open_from_the_root_then_the_working_directory() {
+    let fixture = Fixture::new();
+    let root = fixture.0.clone();
+    fs::create_dir_all(root.join("tool/pkg")).unwrap();
+    fs::write(
+        root.join("tool/pkg/run.py"),
+        "one
+two
+three
+",
+    )
+    .unwrap();
+    let mut app = app(&root);
+    app.open_file(root.join("b.rs"));
+    settle(&mut app);
+    let cwd = Some(root.join("tool"));
+
+    app.open_output_link(output_link("a.rs", 12, Some(3)), cwd.clone());
+    wait_for(&mut app, "the root-relative location did not open", |app| {
+        location(app) == ("a.rs".into(), 12, 3)
+    });
+
+    app.open_output_link(output_link("pkg/run.py", 2, None), cwd.clone());
+    wait_for(&mut app, "the cwd-relative location did not open", |app| {
+        location(app) == ("run.py".into(), 2, 1)
+    });
+
+    // Only the latest click opens.
+    app.open_output_link(output_link("b.rs", 30, None), cwd.clone());
+    app.open_output_link(output_link("a.rs", 5, Some(2)), cwd.clone());
+    wait_for(&mut app, "the latest click did not open", |app| {
+        location(app) == ("a.rs".into(), 5, 2)
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    settle(&mut app);
+    assert_eq!(location(&app), ("a.rs".into(), 5, 2));
+
+    app.open_output_link(output_link("src/missing.rs", 1, None), cwd);
+    wait_for(&mut app, "a missing file was not reported", |app| {
+        status(app).contains("src/missing.rs was not found")
+    });
+    assert_eq!(location(&app), ("a.rs".into(), 5, 2));
+
+    // Output locations are history entries.
+    app.navigate_history(true);
+    settle(&mut app);
+    assert_eq!(location(&app), ("run.py".into(), 2, 1));
 }

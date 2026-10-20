@@ -663,6 +663,12 @@ enum WorkerResult {
         root: PathBuf,
         result: Result<crate::fs_watch::ProjectWatcher, String>,
     },
+    OutputLink {
+        root: PathBuf,
+        request: u64,
+        link: crate::output_links::Link,
+        path: Option<PathBuf>,
+    },
     Loaded {
         id: u64,
         result: Result<workspace::LoadedDocument, String>,
@@ -957,6 +963,8 @@ pub struct VEditApp {
     file_watching: bool,
     /// A back/forward destination waiting for its document to load.
     pending_jump: Option<(u64, jump_list::Jump)>,
+    /// The latest clicked output location; older resolutions are dropped.
+    output_link_request: u64,
     /// The next observed move comes from back/forward and is not recorded.
     jump_navigating: bool,
     problem_cache: problems::ProblemCache,
@@ -1227,6 +1235,7 @@ impl VEditApp {
             pending_location: None,
             file_watching: !cfg!(test),
             pending_jump: None,
+            output_link_request: 0,
             jump_navigating: false,
             problem_cache: Default::default(),
             problems_visible: false,
@@ -1859,6 +1868,12 @@ impl VEditApp {
                 WorkerResult::FileWatcher { root, result } => {
                     self.file_watcher_started(root, result)
                 }
+                WorkerResult::OutputLink {
+                    root,
+                    request,
+                    link,
+                    path,
+                } => self.output_link_resolved(root, request, link, path),
                 WorkerResult::Loaded {
                     id,
                     result,
@@ -3605,6 +3620,7 @@ impl VEditApp {
         run.output = format!("> {command}\n{}\n\n", crate::paths::display(&root));
         run.status = "Running".into();
         run.command = command.clone();
+        run.cwd = Some(root.clone());
         run.task = Some(tasks::spawn_configured(
             root,
             tasks::CommandSpec::Shell(command),
@@ -5014,14 +5030,19 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                     }
                 });
                 ui.separator();
-                egui::ScrollArea::both()
+                let clicked = egui::ScrollArea::both()
                     .stick_to_bottom(true)
                     .id_salt("task_output")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let output = self.projects.get(self.active_project).map_or("", |p| p.run.output.as_str());
-                        self.task_output_cache.show(ui, output, TEXT);
-                    });
+                        self.task_output_cache.show_with_links(ui, output, TEXT)
+                    })
+                    .inner;
+                if let Some(link) = clicked {
+                    let cwd = self.project().and_then(|p| p.run.cwd.clone());
+                    self.open_output_link(link, cwd);
+                }
             });
         self.finish_output_region(ui, panel.response.rect);
     }

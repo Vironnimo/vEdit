@@ -86,6 +86,8 @@ pub(super) struct ProjectRun {
     pub(super) status: String,
     /// What the current or last run executes, as reported to agents.
     pub(super) command: String,
+    /// Where it runs; relative output locations may start here.
+    pub(super) cwd: Option<PathBuf>,
 }
 
 impl Default for ProjectRun {
@@ -95,6 +97,7 @@ impl Default for ProjectRun {
             output: String::new(),
             status: "Ready".into(),
             command: String::new(),
+            cwd: None,
         }
     }
 }
@@ -524,6 +527,7 @@ impl VEditApp {
         );
         project.run.status = "Running".into();
         project.run.command = command;
+        project.run.cwd = Some(task.root.clone());
         project.run.task = Some(tasks::spawn_configured(
             task.root,
             task.command,

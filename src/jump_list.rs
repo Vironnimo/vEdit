@@ -109,6 +109,23 @@ impl VEditApp {
         }
     }
 
+    /// Show a one-based line and character column of `path` in the focused
+    /// pane, as a new history entry.
+    pub(super) fn reveal_line_column(&mut self, path: PathBuf, line: usize, column: usize) {
+        self.record_jump();
+        let target = Jump {
+            // No open document has this id, so the line and column decide.
+            document: u64::MAX,
+            path: Some(path),
+            offset: 0,
+            line,
+            column,
+        };
+        if !self.open_jump(&target) {
+            self.status("The file could not be opened", true);
+        }
+    }
+
     /// Runs once per frame after input and rendering.
     pub(super) fn observe_navigation(&mut self) {
         if self.change_review_visible() {

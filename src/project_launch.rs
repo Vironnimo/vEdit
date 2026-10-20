@@ -22,6 +22,8 @@ pub(super) struct LaunchState {
     pending: Option<Pending>,
     refreshed: Option<Instant>,
     cache: task_output_ui::TaskOutputCache,
+    /// The running or last application's working directory.
+    cwd: Option<PathBuf>,
 }
 
 impl Default for LaunchState {
@@ -41,6 +43,7 @@ impl Default for LaunchState {
             pending: None,
             refreshed: None,
             cache: Default::default(),
+            cwd: None,
         }
     }
 }
@@ -707,6 +710,7 @@ impl VEditApp {
             state.exit_code = None;
             state.running_id = Some(profile.id.clone());
             state.selected = Some(profile.id);
+            state.cwd = Some(cwd.clone());
             state.task = Some(tasks::spawn_application(cwd, command, environment));
             state.show_output = true;
             self.session_dirty = true;
@@ -877,13 +881,18 @@ impl VEditApp {
         if state.output.truncated() {
             ui.label("Showing the latest 1 MiB of output.");
         }
-        egui::ScrollArea::both()
+        let clicked = egui::ScrollArea::both()
             .id_salt(("application_output", &project.root))
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                state.cache.show(ui, state.output.text(), TEXT);
-            });
+                state.cache.show_with_links(ui, state.output.text(), TEXT)
+            })
+            .inner;
+        if let Some(link) = clicked {
+            let cwd = state.cwd.clone();
+            self.open_output_link(link, cwd);
+        }
         true
     }
 
