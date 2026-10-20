@@ -21,7 +21,24 @@ fn fixture(text: &str, markdown: bool) -> VEditApp {
 }
 
 fn harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
-    let mut screen = Harness::builder()
+    harness_with(app, size, Harness::<VEditApp>::builder())
+}
+
+/// Frames 1/60 s apart, so edits stay within the text widget's Undo grouping.
+fn fast_harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
+    harness_with(
+        app,
+        size,
+        Harness::<VEditApp>::builder().with_step_dt(1.0 / 60.0),
+    )
+}
+
+fn harness_with(
+    app: VEditApp,
+    size: [f32; 2],
+    builder: egui_kittest::HarnessBuilder<VEditApp>,
+) -> Harness<'static, VEditApp> {
+    let mut screen = builder
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
@@ -260,6 +277,152 @@ fn replacement_enter_does_not_skip_adjacent_matches_and_updates_count() {
     );
     key(&mut screen, Key::Escape, egui::Modifiers::NONE);
     assert!(!screen.state().find_visible);
+}
+
+#[test]
+fn native_undo_restores_the_exact_text_before_replace_and_replace_all() {
+    let mut app = fixture("alpha foo beta foo\n", false);
+    app.settings.vim = false;
+    app.find_visible = true;
+    app.replace_visible = true;
+    app.find_text = "foo".into();
+    app.replace_text = "bar".into();
+    let mut screen = fast_harness(app, [1200.0, 760.0]);
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    // Typing and replacing quickly after each other would otherwise share
+    // one native Undo step, and Undo would also remove the typing.
+    let widget = screen
+        .state()
+        .document_widget_id(screen.state().tab().unwrap().id);
+    screen.ctx.memory_mut(|memory| memory.request_focus(widget));
+    screen.run_steps(1);
+    text(&mut screen, "typed ");
+    let typed = "typed alpha foo beta foo\n";
+    assert_eq!(screen.state().tab().unwrap().text, typed);
+    screen.get_by_label("Replace all").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "typed alpha bar beta bar\n"
+    );
+    key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+    key(&mut screen, Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        typed,
+        "one Undo reverts Replace all and keeps the typing before it"
+    );
+
+    screen.state_mut().find_visible = true;
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    screen.ctx.memory_mut(|memory| memory.request_focus(widget));
+    screen.run_steps(1);
+    text(&mut screen, "more ");
+    let typed = "more typed alpha foo beta foo\n";
+    assert_eq!(screen.state().tab().unwrap().text, typed);
+    screen.get_by_label("Replace").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "more typed alpha bar beta foo\n"
+    );
+    key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+    key(&mut screen, Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        typed,
+        "one Undo reverts Replace and keeps the typing before it"
+    );
+}
+
+#[test]
+fn find_toolbar_regex_toggle_replaces_groups_reports_invalid_patterns_and_persists() {
+    let original = "user@example and admin@host\n";
+    let mut app = fixture(original, false);
+    app.settings.vim = false;
+    app.find_visible = true;
+    app.replace_visible = true;
+    app.find_text = r"(\w+)@(\w+)".into();
+    app.replace_text = "$2 at $1".into();
+    let mut screen = harness(app, [1200.0, 760.0]);
+    assert!(screen.state_mut().editor_search_matches().is_empty());
+    screen.get_by_label("Use regular expression").click();
+    screen.run_steps(2);
+    assert!(screen.state().find_regex);
+    assert_eq!(screen.state_mut().editor_search_matches().len(), 2);
+    let session: Session =
+        serde_json::from_slice(&serde_json::to_vec(&screen.state().session()).unwrap()).unwrap();
+    assert!(session.find_regex, "the toggle is kept in the session");
+
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    screen.get_by_label("Replace").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and admin@host\n"
+    );
+    screen.get_by_label("Replace all").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and host at admin\n"
+    );
+
+    screen.state_mut().find_text = "(unclosed".into();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Invalid pattern").is_some());
+    assert!(screen.state_mut().editor_search_matches().is_empty());
+    screen.get_by_label("Use regular expression").click();
+    screen.run_steps(2);
+    assert!(screen.query_by_label("Invalid pattern").is_none());
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "example at user and host at admin\n"
+    );
+}
+
+fn bracket_outlines(screen: &Harness<'_, VEditApp>) -> Vec<egui::Rect> {
+    let stroke = crate::palette::MUTED.linear_multiply(0.45);
+    let mut rects: Vec<_> = screen
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.stroke.color == stroke => Some(rect.rect),
+            _ => None,
+        })
+        .collect();
+    rects.sort_by(|a, b| a.left().total_cmp(&b.left()));
+    rects
+}
+
+#[test]
+fn the_bracket_at_the_caret_and_its_partner_are_outlined_in_the_focused_pane() {
+    let mut screen = harness(fixture("call(a, [b])\n", false), [1200.0, 760.0]);
+    let text = |screen: &mut Harness<'_, VEditApp>, value: &str| {
+        screen.event(egui::Event::Text(value.into()));
+        screen.run_steps(2);
+    };
+    assert!(bracket_outlines(&screen).is_empty());
+    text(&mut screen, "4l");
+    let outlines = bracket_outlines(&screen);
+    assert_eq!(outlines.len(), 2, "( and ) are outlined: {outlines:?}");
+    assert!((outlines[0].center().y - outlines[1].center().y).abs() < 1.0);
+    let width = outlines[0].width();
+    assert!(width > 4.0 && (outlines[1].width() - width).abs() < 0.5);
+    let column = (outlines[1].left() - outlines[0].left()) / 7.0;
+    assert!(
+        (0.85..1.15).contains(&(column / width)),
+        "the outlines cover columns 5 and 12: {outlines:?}"
+    );
+
+    // A block cursor just after the bracket outlines nothing; the Insert
+    // caret there belongs to the bracket before it.
+    text(&mut screen, "l");
+    assert!(bracket_outlines(&screen).is_empty());
+    text(&mut screen, "i");
+    assert_eq!(bracket_outlines(&screen).len(), 2);
+    assert!(!screen.state().tab().unwrap().dirty);
 }
 
 #[test]

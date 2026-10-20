@@ -338,6 +338,67 @@ fn inactive_pane_navigation_is_clamped_after_shared_document_shrinks() {
 }
 
 #[test]
+fn inactive_pane_selection_stays_on_its_text_when_another_pane_inserts_above() {
+    let mut app = fixture();
+    let right = app.split_active(SplitOrientation::Vertical).unwrap();
+    let mut screen = harness(app);
+    let selected = |screen: &Harness<'_, VEditApp>| {
+        let tab = screen.state().tab().unwrap();
+        let range = tab.selection.clone();
+        tab.text
+            .chars()
+            .skip(range.start)
+            .take(range.len())
+            .collect::<String>()
+    };
+
+    // Pane B selects "second" in Visual mode.
+    click_source(&mut screen, right);
+    type_text(&mut screen, "gg");
+    type_text(&mut screen, "jve");
+    assert_eq!(selected(&screen), "second");
+
+    // Pane A inserts two lines above it through Insert mode typing.
+    click_source(&mut screen, 1);
+    type_text(&mut screen, "gg");
+    type_text(&mut screen, "O");
+    type_text(&mut screen, "new one\nnew two");
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "new one\nnew two\nfirst document\nsecond line\nthird line\n"
+    );
+
+    screen.state_mut().focus_editor_pane(right).unwrap();
+    screen.run_steps(2);
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(tab.vim.mode, VimMode::Visual);
+    assert_eq!(selected(&screen), "second");
+
+    // A deletion above in pane A moves it back, still on the same text.
+    screen.key_press(Key::Escape);
+    screen.run_steps(1);
+    screen.state_mut().focus_editor_pane(1).unwrap();
+    screen.run_steps(2);
+    type_text(&mut screen, "gg2dd");
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "first document\nsecond line\nthird line\n"
+    );
+    screen.state_mut().focus_editor_pane(right).unwrap();
+    screen.run_steps(2);
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(
+        tab.vim.cursor, 20,
+        "pane B's cursor stays on the d of 'second'"
+    );
+    assert_eq!(tab.vim.mode, VimMode::Normal);
+    type_text(&mut screen, "gv");
+    assert_eq!(selected(&screen), "second", "gv reselects the shifted area");
+}
+
+#[test]
 fn closing_a_pane_preserves_dirty_documents_and_other_pane_views() {
     let mut app = fixture();
     let right = app.split_active(SplitOrientation::Vertical).unwrap();

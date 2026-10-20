@@ -65,18 +65,9 @@ fn search_inner(
         ));
     }
 
-    let (pattern, case_sensitive) = case_overrides(query, case_sensitive);
-    if pattern.is_empty() {
+    let Some(pattern) = build_regex(query, case_sensitive)? else {
         return Ok(Vec::new());
-    }
-    let pattern = regex::RegexBuilder::new(&pattern)
-        .case_insensitive(!case_sensitive)
-        .multi_line(true)
-        .crlf(true)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
-        .build()
-        .map_err(|error| error.to_string())?;
+    };
 
     let mut matches = Vec::new();
     let ascii = text.is_ascii();
@@ -110,6 +101,60 @@ fn search_inner(
         previous_char = end;
     }
     Ok(matches)
+}
+
+fn build_regex(query: &str, case_sensitive: bool) -> Result<Option<regex::Regex>, String> {
+    let (pattern, case_sensitive) = case_overrides(query, case_sensitive);
+    if pattern.is_empty() {
+        return Ok(None);
+    }
+    regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .multi_line(true)
+        .crlf(true)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// The regex matches of `search` with `replacement` expanded for each, in
+/// Rust regex syntax: `$1`, `${name}`, `$0` for the whole match, `$$` for a
+/// dollar sign. Ranges are character positions.
+pub fn regex_replacements(
+    text: &str,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    replacement: &str,
+) -> Result<Vec<(Range<usize>, String)>, String> {
+    let Some(pattern) = build_regex(query, case_sensitive)? else {
+        return Ok(Vec::new());
+    };
+    let mut replacements = Vec::new();
+    let mut previous_byte = 0;
+    let mut previous_char = 0;
+    for captures in pattern.captures_iter(text) {
+        let found = captures.get(0).unwrap();
+        if whole_word
+            && (text[..found.start()]
+                .chars()
+                .next_back()
+                .is_some_and(word_char)
+                || text[found.end()..].chars().next().is_some_and(word_char))
+        {
+            continue;
+        }
+        let start = previous_char + text[previous_byte..found.start()].chars().count();
+        let end = start + found.as_str().chars().count();
+        let mut expanded = String::new();
+        captures.expand(replacement, &mut expanded);
+        replacements.push((start..end, expanded));
+        previous_byte = found.end();
+        previous_char = end;
+    }
+    Ok(replacements)
 }
 
 /// Pick a counted result relative to the cursor, reporting whether a document
@@ -171,6 +216,15 @@ pub fn next_match(
     Some((matches[index].clone(), wrapped))
 }
 
+/// Lowercase one scalar for case-insensitive literal search. Query and text
+/// use this same per-character mapping: `str::to_lowercase` would turn a
+/// final `Σ` into `ς`, which a per-character `Σ` never becomes. Final and
+/// medial sigma therefore fold to the same `σ`.
+fn fold_case(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase()
+        .map(|lower| if lower == 'ς' { 'σ' } else { lower })
+}
+
 fn literal_matches(
     text: &str,
     query: &str,
@@ -186,7 +240,7 @@ fn literal_matches(
         return direct_literal_matches(
             text,
             &searchable,
-            &query.to_lowercase(),
+            &query.chars().flat_map(fold_case).collect::<String>(),
             whole_word,
             cancel,
         );
@@ -199,10 +253,11 @@ fn literal_matches(
             return Vec::new();
         }
         boundaries.push(searchable.len());
-        searchable.extend(ch.to_lowercase());
+        searchable.extend(fold_case(ch));
     }
     boundaries.push(searchable.len());
-    let query = query.to_lowercase();
+    // Fold the query exactly like the text, one scalar at a time.
+    let query: String = query.chars().flat_map(fold_case).collect();
     searchable
         .match_indices(&query)
         .enumerate()
@@ -333,6 +388,45 @@ mod tests {
         );
         assert!(search("🦀", "", false, false, false).unwrap().is_empty());
         assert_eq!(search("aaa", "aa", true, false, false).unwrap(), vec![0..2]);
+    }
+
+    #[test]
+    fn regex_replacements_expand_groups_at_character_positions() {
+        let text = "🦀 key=1, Key=22, keys=3";
+        assert_eq!(
+            regex_replacements(text, r"(?P<k>key)=(\d+)", false, true, "$2:${k}$$").unwrap(),
+            vec![(2..7, "1:key$".into()), (9..15, "22:Key$".into())]
+        );
+        assert_eq!(
+            regex_replacements(text, r"(?P<k>key)=(\d+)", false, true, "$2:${k}$$")
+                .unwrap()
+                .iter()
+                .map(|(range, _)| range.clone())
+                .collect::<Vec<_>>(),
+            search(text, r"(?P<k>key)=(\d+)", false, true, true).unwrap()
+        );
+        assert!(regex_replacements(text, "(", true, false, "x").is_err());
+        assert!(
+            regex_replacements(text, "", true, false, "x")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn case_insensitive_search_lowercases_a_final_sigma_like_the_text() {
+        // `"ΟΔΟΣ".to_lowercase()` ends in `ς`; the text is lowered per scalar.
+        for text in ["ΟΔΟΣ", "οδος", "οδοσ", "ΟΔΟΣ ΣΤΗ"] {
+            assert_eq!(
+                search(text, "ΟΔΟΣ", false, false, false).unwrap(),
+                vec![0..4],
+                "{text}"
+            );
+        }
+        assert_eq!(
+            search("a ΟΔΟΣ b", "ΟΔΟΣ", false, true, false).unwrap(),
+            vec![2..6]
+        );
     }
 
     #[test]

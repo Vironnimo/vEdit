@@ -202,6 +202,9 @@ struct PaneDocumentState {
     selection: Range<usize>,
     source_scroll: Option<[f32; 2]>,
     preview_scroll: Option<f32>,
+    /// The document revision these positions refer to; see
+    /// `shift_shared_document_positions`.
+    revision: u64,
 }
 #[derive(Clone)]
 struct Pane {
@@ -312,7 +315,156 @@ impl SessionLayout {
     }
 }
 
+/// How character positions move from one revision of a document to the next.
+/// Whatever the edit source, the change is the span between the texts'
+/// common prefix and common suffix.
+#[derive(Clone, Copy, Debug)]
+struct TextShift {
+    from: u64,
+    to: u64,
+    start: usize,
+    old_end: usize,
+    new_end: usize,
+    old_len: usize,
+}
+
+impl TextShift {
+    fn between(old: &str, new: &str, from: u64, to: u64) -> Self {
+        let mut prefix = old
+            .bytes()
+            .zip(new.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !old.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let limit = old.len().min(new.len()) - prefix;
+        let mut suffix = old
+            .bytes()
+            .rev()
+            .zip(new.bytes().rev())
+            .take(limit)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !old.is_char_boundary(old.len() - suffix) {
+            suffix -= 1;
+        }
+        let start = old[..prefix].chars().count();
+        Self {
+            from,
+            to,
+            start,
+            old_end: start + old[prefix..old.len() - suffix].chars().count(),
+            new_end: start + new[prefix..new.len() - suffix].chars().count(),
+            old_len: old.chars().count(),
+        }
+    }
+
+    /// A position keeps its character. One inside replaced text moves to
+    /// the replacement's start; `before_insert` keeps a range end in front
+    /// of text inserted exactly there.
+    fn position(self, position: usize, before_insert: bool) -> usize {
+        if position > self.old_len || position < self.start {
+            // Beyond the old text, a position was never in its coordinates.
+            position
+        } else if position > self.old_end
+            || position == self.old_end && !(before_insert && self.start == self.old_end)
+        {
+            position - self.old_end + self.new_end
+        } else {
+            self.start
+        }
+    }
+
+    fn selection(self, selection: &Range<usize>) -> Range<usize> {
+        if selection.is_empty() {
+            let position = self.position(selection.start, false);
+            position..position
+        } else {
+            let start = self.position(selection.start, false);
+            start..self.position(selection.end, true).max(start)
+        }
+    }
+}
+
 impl VEditApp {
+    /// Documents are shared, navigation is pane-local: after any edit — Vim,
+    /// native typing, Find/Replace, agents or a reload — move the cursor,
+    /// Visual anchor and selection that other panes keep for the document,
+    /// so they stay on the same text. The focused pane's live state is
+    /// captured from the document itself after each edit and needs no shift.
+    ///
+    /// Each pane state records the revision its positions refer to. A tab
+    /// keeps the text of its last synchronized revision only while another
+    /// pane holds a position in it.
+    pub(super) fn shift_shared_document_positions(&mut self) {
+        let mut shifts = HashMap::new();
+        let mut fresh = HashMap::new();
+        for tab in self.projects.iter().flat_map(|project| &project.tabs) {
+            if tab.loading {
+                continue;
+            }
+            match &tab.pane_baseline {
+                Some((revision, _)) if *revision == tab.revision => {}
+                Some((revision, text)) => {
+                    shifts.insert(
+                        tab.id,
+                        TextShift::between(text, &tab.text, *revision, tab.revision),
+                    );
+                }
+                None => {
+                    fresh.insert(tab.id, tab.revision);
+                }
+            }
+        }
+        let live = self.editor_layout.focused;
+        let mut shared = std::collections::HashSet::new();
+        let layouts = std::iter::once(&mut self.editor_layout).chain(
+            self.projects
+                .iter_mut()
+                .filter_map(|project| project.layout.as_mut()),
+        );
+        for (index, layout) in layouts.enumerate() {
+            for pane in &mut layout.panes {
+                for (id, state) in &mut pane.states {
+                    if !(index == 0 && pane.id == live && pane.document == Some(*id)) {
+                        shared.insert(*id);
+                    }
+                    if let Some(shift) = shifts.get(id) {
+                        if state.revision == shift.from {
+                            state.navigation = state
+                                .navigation
+                                .remapped(|position| shift.position(position, false));
+                            state.selection = shift.selection(&state.selection);
+                            state.revision = shift.to;
+                        }
+                    } else if let Some(revision) = fresh.get(id) {
+                        // Without a recorded text, assume the stored positions
+                        // already match the document, as when it was restored.
+                        state.revision = *revision;
+                    }
+                }
+            }
+        }
+        for tab in self
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.tabs)
+        {
+            if tab.loading {
+                continue;
+            }
+            if !shared.contains(&tab.id) {
+                tab.pane_baseline = None;
+            } else if tab
+                .pane_baseline
+                .as_ref()
+                .is_none_or(|(revision, _)| *revision != tab.revision)
+            {
+                tab.pane_baseline = Some((tab.revision, tab.text.clone()));
+            }
+        }
+    }
     /// A view drawn in place of every pane, such as the change review,
     /// occupies the whole area as the focused pane's region. The pane tree
     /// itself stays unchanged so closing the view restores the layout.
@@ -535,6 +687,7 @@ impl VEditApp {
                 selection: tab.selection.clone(),
                 source_scroll,
                 preview_scroll,
+                revision: tab.revision,
             },
         );
         if let Some(pane) = self
@@ -552,6 +705,7 @@ impl VEditApp {
         if self.layout_project.as_deref() != self.project().map(|project| project.root.as_path()) {
             self.activate_project_layout(self.active_project);
         }
+        self.shift_shared_document_positions();
         self.initialize_pane_groups();
         let pane_id = self.pane_context();
         let Some(tab) = self.tab() else {
@@ -568,11 +722,12 @@ impl VEditApp {
             }
             return;
         };
-        let (id, default_view, navigation, selection) = (
+        let (id, default_view, navigation, selection, revision) = (
             tab.id,
             tab.agent_view,
             tab.vim.navigation(),
             tab.selection.clone(),
+            tab.revision,
         );
         let Some(pane) = self
             .editor_layout
@@ -598,6 +753,7 @@ impl VEditApp {
                 selection,
                 source_scroll: None,
                 preview_scroll: None,
+                revision,
             })
             .clone();
         pane.document = Some(id);
@@ -671,6 +827,7 @@ impl VEditApp {
                         selection: tab.selection.clone(),
                         source_scroll: None,
                         preview_scroll: None,
+                        revision: tab.revision,
                     },
                 )
             })
@@ -835,10 +992,13 @@ impl VEditApp {
         let Some((pi, ti)) = self.tab_location(id) else {
             return;
         };
+        // Other panes' positions still refer to the text before this change.
+        self.shift_shared_document_positions();
         let tab = &self.projects[pi].tabs[ti];
         let navigation = tab.vim.navigation();
         let selection = tab.selection.clone();
         let view = tab.agent_view;
+        let revision = tab.revision;
         let layout = if pi == self.active_project {
             Some(&mut self.editor_layout)
         } else {
@@ -868,6 +1028,7 @@ impl VEditApp {
                 if let Some(state) = pane.states.get_mut(&id) {
                     state.navigation = navigation;
                     state.selection = selection;
+                    state.revision = revision;
                     // An explicit location/edit reveals its result on the next focus.
                     state.source_scroll = None;
                     state.preview_scroll = None;
@@ -880,6 +1041,7 @@ impl VEditApp {
                             view,
                             source_scroll: None,
                             preview_scroll: None,
+                            revision,
                         },
                     );
                 }
@@ -1018,6 +1180,7 @@ impl VEditApp {
                         selection: tab.selection.clone(),
                         source_scroll: None,
                         preview_scroll: None,
+                        revision: tab.revision,
                     }
                 })
             })
@@ -1284,6 +1447,7 @@ impl VEditApp {
             .find_map(|(pi, p)| p.tabs.iter().position(|t| t.id == id).map(|ti| (pi, ti)))
     }
     fn restore_focused_pane(&mut self, request_focus: bool) {
+        self.shift_shared_document_positions();
         let Some(pane) = self
             .editor_layout
             .panes
@@ -2276,6 +2440,7 @@ impl VEditApp {
                                 preview_scroll: state
                                     .preview_scroll
                                     .filter(|offset| offset.is_finite() && *offset >= 0.0),
+                                revision: tab.revision,
                             },
                         );
                     }
@@ -2297,6 +2462,7 @@ impl VEditApp {
                         selection: saved.cursor..saved.cursor,
                         source_scroll: None,
                         preview_scroll: None,
+                        revision: tab.revision,
                     });
                 } else {
                     pane.document = pane.documents.first().copied();
@@ -2349,6 +2515,7 @@ impl VEditApp {
                     selection: tab.selection.clone(),
                     source_scroll: None,
                     preview_scroll: None,
+                    revision: tab.revision,
                 });
             }
         }
@@ -2494,6 +2661,8 @@ impl VEditApp {
         }
     }
     fn render_editor_pane(&mut self, ui: &mut egui::Ui, pane_id: u64, rect: egui::Rect) {
+        // Native typing in a pane drawn earlier this frame may have changed the text.
+        self.shift_shared_document_positions();
         let Some(pane) = self
             .editor_layout
             .panes

@@ -9,11 +9,12 @@ fn reusing_whole_word_find_in_substitute_keeps_punctuation_boundaries() {
     for query in ["foo.", "*", "🦀", "foo"] {
         let text = format!("{query} {query}x x{query} ({query})");
         let state = FindState {
-            last: Some(Pattern::literal(
+            last: Some(Pattern::toolbar(
                 query.into(),
                 editor::SearchOptions {
                     case_sensitive: true,
                     whole_word: true,
+                    regex: false,
                 },
             )),
             ..Default::default()

@@ -34,6 +34,18 @@ pub(crate) fn keyboard_focus(response: &Response) -> bool {
     focus_visible(&response.ctx) && response.has_focus()
 }
 
+/// Mark a bracket at the caret and its partner: a quiet outline that stays
+/// below selections and search matches and keeps the glyph readable.
+pub(crate) fn paint_bracket_match(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect(
+        rect,
+        2.0,
+        crate::palette::MUTED.linear_multiply(0.08),
+        Stroke::new(1.0, crate::palette::MUTED.linear_multiply(0.45)),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// A toolbar action with a visible hover/focus treatment and no resting box.
 pub(crate) fn ghost_button(ui: &mut Ui, label: &str, tooltip: &str) -> Response {
     ui.scope(|ui| {
