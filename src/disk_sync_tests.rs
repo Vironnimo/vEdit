@@ -490,6 +490,46 @@ fn agent_drafts_end_when_the_buffer_is_clean_and_are_not_kept_on_discard() {
 }
 
 #[test]
+fn cli_reads_and_edits_during_a_conflict_but_save_is_refused() {
+    let fixture = Fixture::new("cli-conflict");
+    let (mut app, id, path) = fixture.conflict();
+    let request = |value: serde_json::Value| -> crate::cli::Request {
+        serde_json::from_value(value).expect("valid request")
+    };
+
+    let tabs = app.control_request(request(json!({"op": "tabs"})));
+    assert!(tabs.ok, "{tabs:?}");
+    assert_eq!(tabs.result["items"][0]["disk_conflict"], true);
+
+    let read = app.control_request(request(json!({"op": "read", "tab_id": id})));
+    assert!(read.ok, "{read:?}");
+    assert!(read.result["text"].as_str().unwrap().contains("mine"));
+    let find = app.control_request(request(
+        json!({"op": "find", "tab_id": id, "query": "mine"}),
+    ));
+    assert!(find.ok, "{find:?}");
+
+    let save = app.control_request(request(json!({"op": "save", "tab_ids": [id]})));
+    assert_eq!(save.result["complete"], false, "{save:?}");
+    assert_eq!(save.result["items"][0]["ok"], false);
+    assert_eq!(save.result["items"][0]["error"]["code"], "disk_conflict");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one\ndisk\n");
+
+    let revision = app.tab().unwrap().revision;
+    let copy = fixture.0.join("copy.txt");
+    let save_as = app.control_request(request(json!({
+        "op": "save_as", "tab_id": id, "expected_revision": revision, "path": copy,
+    })));
+    assert!(save_as.ok, "{save_as:?}");
+    wait_until(&mut app, |app| !app.tab().unwrap().saving);
+    assert_eq!(fs::read_to_string(&copy).unwrap(), "one\nmine\n");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one\ndisk\n");
+    let tab = app.tab().unwrap();
+    assert_eq!(tab.path.as_ref(), Some(&copy));
+    assert!(!tab.dirty && tab.disk_conflict.is_none());
+}
+
+#[test]
 fn disk_results_for_a_changed_path_are_ignored() {
     let fixture = Fixture::new("path-bound");
     let (mut app, id, path) = fixture.app("before\n");

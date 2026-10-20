@@ -357,6 +357,14 @@ impl VEditApp {
                         items.push(item_error(id, "file_error", error));
                         continue;
                     }
+                    if tab.disk_conflict.is_some() {
+                        items.push(item_error(
+                            id,
+                            "disk_conflict",
+                            "The file changed on disk after it was loaded, and this buffer has unsaved edits; nothing was saved. The buffer stays readable and editable. Use save_as to keep it in a new file, or ask the user to choose Use disk version or Keep my version in the editor banner",
+                        ));
+                        continue;
+                    }
                     self.save_tab(id, None);
                     let tab = &self.projects[project].tabs[index];
                     items
@@ -589,7 +597,7 @@ impl VEditApp {
         } else {
             self.context_native_history(tab.id)
         };
-        json!({"id":tab.id,"path":tab.path.as_ref().map(|p|crate::paths::display(p)),"title":tab.title,"workspace":crate::paths::display(&self.projects[project].root),"active":project==self.active_project && index==self.projects[project].active_tab,"view":tab.agent_view,"loading":tab.loading,"saving":tab.saving,"dirty":tab.dirty,"autosave_paused":tab.agent_unsaved,"file_operation_pending":tab.path.as_ref().is_some_and(|path|self.context_file_path_pending(path)),"mode":if self.settings.vim{format!("{:?}",tab.vim.mode).to_lowercase()}else{"native".into()},"revision":tab.revision,"error":tab.error,"location":{"line":line,"column":column},"location_pending":tab.pending_agent_location,"location_error":tab.agent_location_error,"annotation_count":tab.annotations.len(),"annotations":annotations,"annotations_truncated":tab.annotations.len()>20,"annotations_stale":tab.annotations_revision.is_some_and(|revision|revision!=tab.revision),"can_undo":can_undo,"can_redo":can_redo})
+        json!({"id":tab.id,"path":tab.path.as_ref().map(|p|crate::paths::display(p)),"title":tab.title,"workspace":crate::paths::display(&self.projects[project].root),"active":project==self.active_project && index==self.projects[project].active_tab,"view":tab.agent_view,"loading":tab.loading,"saving":tab.saving,"dirty":tab.dirty,"disk_conflict":tab.disk_conflict.is_some(),"autosave_paused":tab.agent_unsaved,"file_operation_pending":tab.path.as_ref().is_some_and(|path|self.context_file_path_pending(path)),"mode":if self.settings.vim{format!("{:?}",tab.vim.mode).to_lowercase()}else{"native".into()},"revision":tab.revision,"error":tab.error,"location":{"line":line,"column":column},"location_pending":tab.pending_agent_location,"location_error":tab.agent_location_error,"annotation_count":tab.annotations.len(),"annotations":annotations,"annotations_truncated":tab.annotations.len()>20,"annotations_stale":tab.annotations_revision.is_some_and(|revision|revision!=tab.revision),"can_undo":can_undo,"can_redo":can_redo})
     }
     fn control_find_tab(&self, id: u64) -> Option<(usize, usize)> {
         self.projects.iter().enumerate().find_map(|(project, p)| {

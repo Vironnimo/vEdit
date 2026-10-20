@@ -54,7 +54,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "tabs",
         "",
         "Read open buffers across projects, with IDs and revisions.",
-        "Returns items, workspace, dirty/loading/saving/error state and next_offset. Use actual IDs in subsequent commands.",
+        "Returns items, workspace, dirty/loading/saving/error/disk_conflict state and next_offset. Use actual IDs in subsequent commands.\ndisk_conflict:true: the file changed on disk while the buffer has unsaved edits; read/edit work, save waits for the user.",
         ["--limit", "--offset"]
     ),
     command!(
@@ -110,7 +110,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "save",
         "TAB_ID...",
         "Save named buffers with external-change protection.",
-        "Returns per-tab outcomes. saving:true is pending; require saving:false, dirty:false and error:null in tabs before claiming disk completion.\nUntitled buffers need save-as. Successful saves release agent drafts for autosave.",
+        "Returns per-tab outcomes. saving:true is pending; require saving:false, dirty:false and error:null in tabs before claiming disk completion.\nUntitled buffers need save-as. Successful saves release agent drafts for autosave.\nError disk_conflict: the file changed on disk after loading and nothing was written. Keep the buffer with save-as, or ask the user to choose a version in the editor.",
         []
     ),
     command!(
