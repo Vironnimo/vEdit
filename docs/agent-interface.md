@@ -4,7 +4,7 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
-## Disk conflicts and draft comparison
+## Disk conflicts and draft comparison (0.5.0)
 
 Agents often rewrite a file the user has open. vEdit treats the disk as the newer truth only while the buffer has nothing to lose:
 
@@ -16,7 +16,7 @@ Agents often rewrite a file the user has open. vEdit treats the disk as the newe
 
 `Compare with saved` (palette, File menu, tab context menu, or a click on `Agent draft`/`Unsaved` in the status bar) shows the buffer against its saved text in the same diff view. Line-ending differences such as raw CRLF in CLI edits are not shown as changes. Untitled buffers have no saved version and disable the command. The agent-draft flag ends whenever the buffer is no longer dirty, including Undo back to the saved text, and is not persisted when the user discards changes on exit. A buffer that loses its file through a Recycle Bin deletion keeps its draft state: user edits do not become an agent draft.
 
-## Several projects, worktrees and notifications
+## Several projects, worktrees and notifications (0.5.0)
 
 Several agents can work at once, each in its own project or Git worktree. vedit-cli sends its canonical working directory with every request (envelope field `cwd`). Project operations (`search`, `output`, `task`, `launch`, `git_*`, `change_review`, `notify`) resolve their project in this order: explicit `workspace` (an open project, else `unknown_workspace`), the deepest open project containing the caller's directory, then the visible project. The comparison is textual and case-insensitive on Windows, so the GUI thread reads no disk. Results carry `workspace` and `workspace_source` (`request`, `caller_directory`, `active_project`; notify also `open_path`, `none`). Resolution never switches the visible project. A receiver older than the CLI rejects the unknown `cwd` envelope field before dispatch; the CLI then resends the request once without it, which is safe because nothing was applied. Other unknown fields or operations get a hint to restart vEdit from the same installation.
 
@@ -30,7 +30,7 @@ Tasks are per project: each project owns its running task, output, status and co
 
 Smaller contract changes in the same release: change-review generations are unique per app (a result for a project closed and reopened at the same root is ignored); diagnostics report `fresh` and `diagnostics_revision`; launch configuration revisions stay at most 2^53-1 for JSON clients; launch output line numbers count from the run's first line and stay stable while old lines are trimmed (`first_line`, `total_lines`, `skipped_lines`).
 
-## Change-review comments
+## Change-review comments (0.5.0)
 
 Users answer an agent's work directly from the change review: selected diff rows plus a note become an ordinary agent mark, so `agent-marks list|take|batch|ack|restore` deliver them without a new command. Such items add `review: {comparison, source}` (`working`, `commit` or `branch`) and are anchored to the file path and the new-side lines, not to an open buffer: `source_open` is false and the range never follows later edits. `text` is the diff excerpt in unified form, each line prefixed by `+`, `-` or a space, without hunk headers. The range starts at column 1 of the first new-side line and ends exclusively after the last; a removal-only excerpt anchors at the nearest new-side line. Agents should read the current file before editing, because the comparison can be older than the buffer. Older receivers simply omit the field.
 

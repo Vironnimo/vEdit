@@ -1,6 +1,8 @@
-# vEdit 0.4.35
+# vEdit 0.5.0
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.5.0 ist ein größeres Paket für die Arbeit neben KI-Agenten. Ändert ein Agent eine offene Datei auf der Festplatte, lädt vEdit saubere Dateien rückgängig machbar nach und hält Cursor und Scrollposition in allen Ansichten an derselben Textstelle; bei ungespeicherten eigenen Änderungen bietet ein Banner **Compare**, **Use disk version**, **Keep my version** und **Save as** an. Der Rand zeigt Änderungen gegenüber `HEAD` mit Vorschau und **Revert change**; aus Diffs heraus lassen sich Kommentare als Agent-Markierungen anlegen. `vedit-cli` findet das passende Projekt jetzt über das Arbeitsverzeichnis des aufrufenden Agenten, und Agents können mit `notify` Hinweise in vEdit hinterlassen. Neu sind außerdem Hover-Dokumentation, Referenzsuche und Symbolsuche (**Shift+F12**, `@`, **Ctrl+T**), eine Problems-Liste mit **F8**, Vor/Zurück-Navigation mit **Alt+←/→**, automatisch aktualisierter Explorer, klickbare Fundstellen in der Ausgabe, weitere Vim-Befehle sowie robustere Git-Aufrufe, Wiederherstellung und Hintergrundarbeit.
 
 Version 0.4.35 macht den Bildschirm-Sprung mit **Space Space f** über Buchstaben bedienbar. Die Labels bevorzugen die Grundreihe und halten mögliche Suchfortsetzungen frei; nach drei Suchzeichen oder **Enter** folgt die Zielauswahl. Bei vielen Treffern erscheinen kurze Buchstabenpaare. Die Anzeige erklärt Suche, Auswahl und Korrektur, und **Enter** springt bei einem einzelnen Treffer direkt dorthin.
 
