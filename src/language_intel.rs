@@ -678,6 +678,7 @@ impl VEditApp {
     /// Opens a language-server location in the focused pane with the usual
     /// reveal feedback. Every reference and symbol jump goes through here.
     pub(super) fn open_language_location(&mut self, path: PathBuf, position: Position) {
+        self.record_jump();
         self.open_file(path.clone());
         let Some(id) = self
             .tab()
