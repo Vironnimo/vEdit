@@ -584,7 +584,7 @@ fn remapped_project_navigation_keeps_prefix_in_source_and_replaces_old_chords() 
     app.settings.vim = false;
     app.settings.keybindings.insert(
         keybindings::Action::NextProject.id().into(),
-        Some("F8".into()),
+        Some("F10".into()),
     );
     app.settings.keybindings.insert(
         keybindings::Action::SwitchProject.id().into(),
@@ -596,7 +596,7 @@ fn remapped_project_navigation_keeps_prefix_in_source_and_replaces_old_chords() 
     screen.input_mut().events.extend([
         egui::Event::Text("prefix".into()),
         egui::Event::Key {
-            key: Key::F8,
+            key: Key::F10,
             physical_key: None,
             pressed: true,
             repeat: false,

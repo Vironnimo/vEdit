@@ -110,6 +110,7 @@ impl EditorTab {
 
 impl VEditApp {
     pub(super) fn reveal_search_result(&mut self, path: PathBuf, line: usize, column: usize) {
+        self.record_jump();
         self.open_file(path);
         self.set_document_view(crate::cli::DocumentView::Source);
         if let Some(tab) = self.tab_mut() {

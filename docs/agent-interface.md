@@ -58,6 +58,16 @@ The skill contains common recipes and separates buffer, layout/settings, marks, 
 
 ## Observable contract
 
+The effective keybinding catalog adds `navigate_back` (Alt+ArrowLeft),
+`navigate_forward` (Alt+ArrowRight), `next_problem` (F8) and
+`previous_problem` (Shift+F8). When a saved custom binding already uses one
+of these keys, startup migration keeps it and stores the new action as
+disabled (`null`). Navigation history is pane-local UI state and is not exposed
+or persisted. The Problems panel uses the same severity names and the same
+Unicode-scalar columns as `diagnostics`; files that are not open show the
+server's UTF-16 column, labelled as such. CLI request schema and command help
+are unchanged.
+
 Version 0.4.16 adds `reopen_tab` to the effective keybinding catalog (default
 Ctrl+Shift+T). Existing saved custom bindings keep precedence during startup
 migration. The CLI request schema and command help are unchanged. Local transport

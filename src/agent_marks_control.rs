@@ -189,6 +189,7 @@ impl VEditApp {
 
     pub(super) fn navigate_agent_mark(&mut self, id: u64) -> Result<(), String> {
         self.sync_agent_marks();
+        self.record_jump();
         let mark = self
             .agent_marks
             .get(id, None)

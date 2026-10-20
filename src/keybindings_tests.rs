@@ -76,6 +76,42 @@ fn reopen_upgrade_leaves_explicit_choices_and_unrelated_bindings_unchanged() {
 }
 
 #[test]
+fn navigation_and_problem_defaults_yield_to_saved_custom_shortcuts() {
+    let mut bindings = Bindings::from([
+        (Action::Save.id().into(), Some("F8".into())),
+        (Action::ToggleWrap.id().into(), Some("Alt+ArrowLeft".into())),
+    ]);
+    migrate_later_defaults(&mut bindings);
+    assert_eq!(bindings.get(Action::NextProblem.id()), Some(&None));
+    assert_eq!(bindings.get(Action::NavigateBack.id()), Some(&None));
+    assert!(!bindings.contains_key(Action::PreviousProblem.id()));
+    assert!(!bindings.contains_key(Action::NavigateForward.id()));
+    assert!(validate(&bindings).is_ok());
+    assert!(matches(
+        &bindings,
+        Action::Save,
+        &event(Key::F8, egui::Modifiers::NONE)
+    ));
+    assert!(matches(
+        &bindings,
+        Action::PreviousProblem,
+        &event(Key::F8, egui::Modifiers::SHIFT)
+    ));
+    assert!(matches(
+        &bindings,
+        Action::NavigateForward,
+        &event(Key::ArrowRight, egui::Modifiers::ALT)
+    ));
+    let fresh = Bindings::new();
+    assert!(matches(
+        &fresh,
+        Action::NavigateBack,
+        &event(Key::ArrowLeft, egui::Modifiers::ALT)
+    ));
+    assert!(validate(&fresh).is_ok());
+}
+
+#[test]
 fn shortcut_parser_accepts_case_insensitive_names_and_literal_plus() {
     for (value, expected) in [
         (" ctrl + shift + f8 ", "Ctrl+Shift+F8"),
@@ -229,13 +265,13 @@ fn overrides_replace_all_aliases_disable_and_restore_defaults() {
     let alternative = event(Key::Z, egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT));
     assert!(matches(&bindings, Action::Redo, &old));
     assert!(matches(&bindings, Action::Redo, &alternative));
-    bindings.insert(Action::Redo.id().into(), Some("F8".into()));
+    bindings.insert(Action::Redo.id().into(), Some("F9".into()));
     assert!(!matches(&bindings, Action::Redo, &old));
     assert!(!matches(&bindings, Action::Redo, &alternative));
     assert!(matches(
         &bindings,
         Action::Redo,
-        &event(Key::F8, egui::Modifiers::NONE)
+        &event(Key::F9, egui::Modifiers::NONE)
     ));
     bindings.insert(Action::Redo.id().into(), None);
     assert!(label(&bindings, Action::Redo).is_empty());
@@ -324,18 +360,18 @@ fn custom_binding_executes_old_binding_stops_and_modals_own_their_input() {
     let mut app = VEditApp::empty(egui::Context::default());
     app.settings
         .keybindings
-        .insert(Action::ToggleWrap.id().into(), Some("F8".into()));
+        .insert(Action::ToggleWrap.id().into(), Some("F9".into()));
     app.ctx
         .input_mut(|input| input.events.push(event(Key::Z, egui::Modifiers::ALT)));
     app.shortcuts();
     assert!(!app.settings.word_wrap);
     app.ctx
-        .input_mut(|input| input.events = vec![event(Key::F8, egui::Modifiers::NONE)]);
+        .input_mut(|input| input.events = vec![event(Key::F9, egui::Modifiers::NONE)]);
     app.shortcuts();
     assert!(app.settings.word_wrap);
     app.settings_open = true;
     app.ctx
-        .input_mut(|input| input.events = vec![event(Key::F8, egui::Modifiers::NONE)]);
+        .input_mut(|input| input.events = vec![event(Key::F9, egui::Modifiers::NONE)]);
     app.shortcuts();
     assert!(app.settings.word_wrap);
     assert_eq!(app.ctx.input(|input| input.events.len()), 1);
@@ -358,7 +394,7 @@ fn shortcut_patch_is_atomic_and_session_round_trip_preserves_disabled_actions() 
     assert_eq!(app.settings.font_size, 14.0);
     assert!(app.settings.keybindings.is_empty());
     app.settings.keybindings = Bindings::from([
-        (Action::Save.id().into(), Some("F8".into())),
+        (Action::Save.id().into(), Some("F9".into())),
         (Action::ToggleLeftSidebar.id().into(), None),
     ]);
     let encoded = serde_json::to_string(&app.session()).unwrap();
@@ -432,9 +468,9 @@ fn settings_search_record_disable_and_reset_are_operable_through_widgets() {
     screen
         .input_mut()
         .events
-        .push(event(Key::F8, egui::Modifiers::NONE));
+        .push(event(Key::F9, egui::Modifiers::NONE));
     screen.run_steps(2);
-    assert_eq!(screen.state().shortcut_label(Action::Save), "F8");
+    assert_eq!(screen.state().shortcut_label(Action::Save), "F9");
     screen.get_by_label("Disable").click();
     screen.run_steps(2);
     assert!(screen.state().shortcut_label(Action::Save).is_empty());
@@ -451,7 +487,7 @@ fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
     app.keybinding_ui.query = "Save current file".into();
     app.settings
         .keybindings
-        .insert(Action::Save.id().into(), Some("F8".into()));
+        .insert(Action::Save.id().into(), Some("F9".into()));
     let mut screen = Harness::builder()
         .with_size([650.0, 600.0])
         .with_os(egui::os::OperatingSystem::Windows)
@@ -471,9 +507,9 @@ fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
     };
     screen.hover_at(egui::pos2(-20.0, -20.0));
     screen.run_steps(2);
-    let chip = screen.get_by_label("F8").rect();
+    let chip = screen.get_by_label("F9").rect();
     assert!(chip.height() <= 26.0, "The binding is a compact chip");
-    assert!(painted(&screen, "F8"));
+    assert!(painted(&screen, "F9"));
     assert!(!painted(&screen, "Disable") && !painted(&screen, "Reset"));
 
     // Hovering the action name reveals both row actions beside the chip.

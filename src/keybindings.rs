@@ -97,6 +97,10 @@ actions! {
     ToggleBookmark, "toggle_bookmark", "Toggle bookmark", "Navigation", [];
     Bookmarks, "bookmarks", "Bookmarks", "Navigation", [];
     ScreenJump, "screen_jump", "Jump to visible text", "Navigation", [];
+    NavigateBack, "navigate_back", "Go back", "Navigation", ["Alt+ArrowLeft"];
+    NavigateForward, "navigate_forward", "Go forward", "Navigation", ["Alt+ArrowRight"];
+    NextProblem, "next_problem", "Next problem", "Language", ["F8"];
+    PreviousProblem, "previous_problem", "Previous problem", "Language", ["Shift+F8"];
     Reload, "reload", "Reload file from disk", "Files", [];
     CompareWithSaved, "compare_with_saved", "Compare with saved", "Files", [];
     Settings, "settings", "Settings", "Preferences", ["Ctrl+Comma"];
@@ -123,6 +127,15 @@ impl Action {
             }
             Self::NewFile => {
                 "Default Ctrl+N requests completions in Vim Insert mode. A custom binding always creates a new file."
+            }
+            Self::OpenFile => {
+                "Default Ctrl+O goes back in Vim Normal mode, like Vim's jump list. A custom binding always opens a file."
+            }
+            Self::NavigateBack | Self::NavigateForward => {
+                "History of this editor pane: other documents, go to definition, search results, bookmarks, problems and jumps of more than 10 lines. The mouse's back and forward buttons and, in Vim Normal mode, Ctrl+O / Ctrl+I work too."
+            }
+            Self::NextProblem | Self::PreviousProblem => {
+                "Errors and warnings of the active file first, then the next file with problems. In Vim Normal mode also ]d / [d."
             }
             Self::ToggleLeftSidebar => {
                 "Ctrl+Alt+E works in every editor mode. The default Ctrl+B alias remains page-back in Vim Normal mode."
@@ -365,14 +378,35 @@ fn strokes(bindings: &Bindings, action: Action) -> Vec<Stroke> {
     }
 }
 
+/// Defaults added after users could assign their keys elsewhere. Saved choices
+/// keep their key; the new command starts without a shortcut instead.
+const LATER_DEFAULTS: [Action; 5] = [
+    Action::ReopenTab,
+    Action::NavigateBack,
+    Action::NavigateForward,
+    Action::NextProblem,
+    Action::PreviousProblem,
+];
+
+pub(super) fn migrate_later_defaults(bindings: &mut Bindings) {
+    for action in LATER_DEFAULTS {
+        migrate_later_default(bindings, action);
+    }
+}
+
 /// The Reopen default was added after users could assign Ctrl+Shift+T elsewhere.
 /// Preserve those saved choices when upgrading, without changing conflict rules
 /// for new assignments or an explicitly configured Reopen action.
+#[cfg(test)]
 pub(super) fn migrate_reopen_shortcut(bindings: &mut Bindings) {
-    if bindings.contains_key(Action::ReopenTab.id()) {
+    migrate_later_default(bindings, Action::ReopenTab);
+}
+
+fn migrate_later_default(bindings: &mut Bindings, added: Action) {
+    if bindings.contains_key(added.id()) {
         return;
     }
-    let defaults = strokes(bindings, Action::ReopenTab);
+    let defaults = strokes(bindings, added);
     let occupied = bindings.iter().any(|(id, value)| {
         let Some(action) = Action::from_id(id) else {
             return false;
@@ -383,7 +417,7 @@ pub(super) fn migrate_reopen_shortcut(bindings: &mut Bindings) {
             .is_some_and(|stroke| stroke.safe(action).is_ok() && defaults.contains(&stroke))
     });
     if occupied {
-        bindings.insert(Action::ReopenTab.id().into(), None);
+        bindings.insert(added.id().into(), None);
     }
 }
 
@@ -747,6 +781,13 @@ impl VEditApp {
         }
         if vim_modal && !self.settings.keybindings.contains_key(action.id()) {
             if action == Action::Find {
+                return false;
+            }
+            if action == Action::OpenFile
+                && self
+                    .tab()
+                    .is_some_and(|tab| tab.vim.mode == VimMode::Normal)
+            {
                 return false;
             }
             if action == Action::ToggleLeftSidebar

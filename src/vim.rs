@@ -181,6 +181,9 @@ enum Pending {
     /// The argument of an unsupported command such as `q` or `m`. It is
     /// swallowed so that the user's next keys do not run as commands.
     Ignore,
+    /// `[` or `]`: the editor handles `[d` / `]d` (previous / next problem);
+    /// other bracket commands are unsupported and swallow their argument.
+    Bracket(char),
 }
 
 /// The most recent Visual area, for `gv`.
@@ -559,6 +562,7 @@ impl VimState {
                     | Pending::Find { .. }
                     | Pending::TextObject { .. }
                     | Pending::Ignore
+                    | Pending::Bracket(_)
             )
         )
     }
@@ -902,6 +906,7 @@ impl VimState {
                     String::new()
                 }
             ),
+            Some(Pending::Bracket(bracket)) => bracket.to_string(),
             Some(Pending::Ignore) | None => String::new(),
         };
         if self.count > 0 {
@@ -1277,6 +1282,13 @@ impl VimState {
         }
         if let Some(Pending::Ignore) = self.pending {
             self.clear_command();
+            return (true, false, None);
+        }
+        if let Some(Pending::Bracket(bracket)) = self.pending {
+            self.clear_command();
+            if let VimKey::Char(ch) = key {
+                self.unsupported(&format!("{bracket}{ch}"));
+            }
             return (true, false, None);
         }
         if let Some(Pending::Scroll { count, explicit }) = self.pending {
@@ -1702,7 +1714,8 @@ impl VimState {
                 | Pending::Find { .. }
                 | Pending::TextObject { .. }
                 | Pending::Scroll { .. }
-                | Pending::Ignore => {
+                | Pending::Ignore
+                | Pending::Bracket(_) => {
                     unreachable!()
                 }
             }
@@ -1924,9 +1937,13 @@ impl VimState {
             }
             // Commands vEdit does not implement. Swallow their argument so
             // that it cannot run as a command of its own.
-            'q' | '@' | 'm' | '`' | '\'' | 'Z' | '[' | ']' => {
+            'q' | '@' | 'm' | '`' | '\'' | 'Z' => {
                 self.unsupported(&ch.to_string());
                 self.pending = Some(Pending::Ignore);
+                (true, false, None)
+            }
+            '[' | ']' => {
+                self.pending = Some(Pending::Bracket(ch));
                 (true, false, None)
             }
             _ => {
