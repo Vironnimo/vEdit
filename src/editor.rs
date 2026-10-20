@@ -279,7 +279,7 @@ fn comment_markers(language: &str) -> (&'static str, &'static str) {
     match language.as_str() {
         "py" | "python" | "pyi" | "pyw" | "rb" | "ruby" | "sh" | "shell" | "shellscript"
         | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "powershell" | "toml" | "yaml" | "yml"
-        | "r" | "julia" | "jl" | "conf" | "dockerfile" | "makefile" | "make" | "cmake"
+        | "r" | "julia" | "jl" | "conf" | "cfg" | "dockerfile" | "makefile" | "make" | "cmake"
         | "ignore" | "ignore patterns" => ("#", ""),
         "sql" | "lua" | "hs" | "haskell" | "elm" => ("--", ""),
         "html" | "htm" | "xml" | "svg" | "markdown" | "md" => ("<!--", "-->"),

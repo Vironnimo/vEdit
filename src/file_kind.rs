@@ -116,8 +116,10 @@ pub fn language_id(path: Option<&Path>) -> &'static str {
 }
 
 pub fn comment_language(path: Option<&Path>) -> &str {
-    if from_path(path) == FileKind::PlainText {
+    if matches!(from_path(path), FileKind::PlainText | FileKind::Ini) {
         // Less common file types still use editor.rs's existing marker table.
+        // INI-like files share highlighting, but `.conf` and `.cfg` comment
+        // with `#` while `.ini` uses `;`.
         path.and_then(Path::extension)
             .and_then(|value| value.to_str())
             .unwrap_or("plaintext")
@@ -320,5 +322,27 @@ mod tests {
             .text,
             "-- value = 1"
         );
+    }
+
+    #[test]
+    fn ini_like_files_use_their_own_comment_marker() {
+        for (name, expected) in [
+            ("server.conf", "# key = 1"),
+            ("setup.cfg", "# key = 1"),
+            ("Setup.CFG", "# key = 1"),
+            ("settings.ini", "; key = 1"),
+        ] {
+            assert_eq!(from_path(Some(Path::new(name))), FileKind::Ini, "{name}");
+            assert_eq!(
+                crate::editor::toggle_line_comment(
+                    "key = 1",
+                    0..0,
+                    comment_language(Some(Path::new(name)))
+                )
+                .text,
+                expected,
+                "{name}"
+            );
+        }
     }
 }
