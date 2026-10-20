@@ -432,6 +432,45 @@ fn bookmarks_and_visible_jump_snapshots() {
 }
 
 #[test]
+fn visible_jump_pair_selection_snapshots() {
+    let mut app = git_workspace();
+    app.sidebar_visible = false;
+    let tab = &mut app.projects[0].tabs[0];
+    tab.text = (0..16)
+        .map(|index| format!("    let value_{index:02} = value + value;\n"))
+        .collect();
+    tab.saved_text = tab.text.clone();
+    let mut screen = visual_tests::harness(app);
+    screen.run_steps(3);
+    screen.state_mut().start_screen_jump();
+    screen.run_steps(3);
+    screen
+        .state_mut()
+        .screen_jump
+        .as_mut()
+        .unwrap()
+        .state
+        .set_query("val");
+    visual_tests::snapshot(&mut screen, "vedit_screen_jump_pairs");
+    let jump = &mut screen.state_mut().screen_jump.as_mut().unwrap().state;
+    assert_eq!(jump.targets.len(), 48);
+    assert_eq!(jump.targets[0].label, "ff");
+    assert_eq!(jump.input_char('f'), crate::screen_jump::JumpAction::None);
+    visual_tests::snapshot(&mut screen, "vedit_screen_jump_prefix");
+    assert_eq!(
+        screen
+            .state()
+            .screen_jump
+            .as_ref()
+            .unwrap()
+            .state
+            .label_input,
+        "f"
+    );
+    assert!(!screen.state().tab().unwrap().dirty);
+}
+
+#[test]
 fn git_branch_picker_shows_local_and_remote_branches() {
     let mut screen = visual_tests::harness(git_workspace());
     screen.run_steps(3);

@@ -229,7 +229,20 @@ fn unknown_leader_suffix_remains_a_vim_motion_and_escape_restores_focus() {
 }
 
 #[test]
-fn visible_matches_are_numbered_and_jump_without_changing_the_buffer() {
+fn enter_jumps_to_a_single_visible_match() {
+    let document = "intro\nonly target\n";
+    let mut screen = harness(fixture(document));
+    begin_jump(&mut screen);
+    text(&mut screen, "tar");
+    screen.key_press(Key::Enter);
+    screen.run_steps(2);
+    assert!(screen.state().screen_jump.is_none());
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 11);
+    assert_unchanged(&screen, document);
+}
+
+#[test]
+fn visible_matches_have_home_row_labels_and_jump_without_changing_the_buffer() {
     let mut screen = harness(fixture(DOCUMENT));
     begin_jump(&mut screen);
     text(&mut screen, "gi");
@@ -247,19 +260,19 @@ fn visible_matches_are_numbered_and_jump_without_changing_the_buffer() {
             .iter()
             .map(|target| target.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["1", "2", "3"]
+        vec!["f", "j", "d"]
     );
-    text(&mut screen, "2");
+    character(&mut screen, Key::J, "j");
     assert!(screen.state().screen_jump.is_none());
     assert_eq!(screen.state().tab().unwrap().vim.cursor, targets[1]);
     assert_unchanged(&screen, DOCUMENT);
 }
 
 #[test]
-fn query_and_digit_in_one_input_batch_use_the_current_visible_glyph_cache() {
+fn query_and_label_in_one_input_batch_use_the_current_visible_glyph_cache() {
     let mut screen = harness(fixture(DOCUMENT));
     begin_jump(&mut screen);
-    text(&mut screen, "gi3i accidental text");
+    text(&mut screen, "gidi accidental text");
     assert!(screen.state().screen_jump.is_none());
     assert_eq!(
         screen.state().tab().unwrap().vim.cursor,
@@ -270,12 +283,161 @@ fn query_and_digit_in_one_input_batch_use_the_current_visible_glyph_cache() {
 }
 
 #[test]
+fn real_key_events_refine_the_query_and_lock_after_three_characters() {
+    let document = "intro\ngif gif\n";
+    let mut screen = harness(fixture(document));
+    begin_jump(&mut screen);
+    for (key, value) in [(Key::G, "g"), (Key::I, "i"), (Key::F, "f")] {
+        character(&mut screen, key, value);
+    }
+    let jump = &screen.state().screen_jump.as_ref().unwrap().state;
+    assert_eq!(jump.query, "gif");
+    assert_eq!(jump.phase, crate::screen_jump::JumpPhase::Select);
+    assert!(jump.hint().contains("type a label"));
+    character(&mut screen, Key::J, "j");
+    assert!(screen.state().screen_jump.is_none());
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 10);
+    assert_unchanged(&screen, document);
+}
+
+#[test]
+fn translated_punctuation_and_ime_are_search_text_not_duplicate_keys() {
+    let document = "intro\n!ö target\n";
+    let mut screen = harness(fixture(document));
+    begin_jump(&mut screen);
+    screen.input_mut().events.extend([
+        egui::Event::Key {
+            key: Key::Num1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        },
+        egui::Event::Text("!".into()),
+        egui::Event::Key {
+            key: Key::O,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "ö".into(),
+            active_range_chars: None,
+        }),
+        egui::Event::Ime(egui::ImeEvent::Commit("ö".into())),
+    ]);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().screen_jump.as_ref().unwrap().state.query,
+        "!ö"
+    );
+    screen.key_press(Key::Enter);
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 6);
+    assert!(screen.state().screen_jump.is_none());
+    assert_unchanged(&screen, document);
+}
+
+#[test]
+fn enter_unlocks_labels_when_all_letters_are_search_continuations() {
+    let document: String = ('a'..='z').map(|key| format!("a{key} ")).collect();
+    let mut screen = harness(fixture(&document));
+    begin_jump(&mut screen);
+    text(&mut screen, "a");
+    assert!(
+        screen
+            .state()
+            .screen_jump
+            .as_ref()
+            .unwrap()
+            .state
+            .hint()
+            .contains("Enter for labels")
+    );
+    screen.key_press(Key::Enter);
+    screen.run_steps(2);
+    let jump = &screen.state().screen_jump.as_ref().unwrap().state;
+    assert_eq!(jump.phase, crate::screen_jump::JumpPhase::Select);
+    let label = jump.targets[1].label.clone();
+    let position = jump.targets[1].char_index;
+    text(&mut screen, &label);
+    assert!(screen.state().screen_jump.is_none());
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, position);
+    assert_unchanged(&screen, &document);
+}
+
+#[test]
+fn backspace_corrects_pairs_and_queries_without_losing_editor_focus() {
+    let document = "gi \n".repeat(30);
+    let mut screen = harness(fixture(&document));
+    begin_jump(&mut screen);
+    text(&mut screen, "gi");
+    let label = screen.state().screen_jump.as_ref().unwrap().state.targets[27]
+        .label
+        .clone();
+    assert_eq!(label.len(), 2);
+    text(&mut screen, &label[..1]);
+    assert!(
+        screen
+            .state()
+            .screen_jump
+            .as_ref()
+            .unwrap()
+            .state
+            .hint()
+            .contains("type the next letter")
+    );
+    screen.key_press(Key::Backspace);
+    screen.run_steps(2);
+    let jump = &screen.state().screen_jump.as_ref().unwrap().state;
+    assert!(jump.label_input.is_empty());
+    assert_eq!(jump.query, "gi");
+    screen.key_press(Key::Backspace);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().screen_jump.as_ref().unwrap().state.query,
+        "g"
+    );
+    text(&mut screen, "i");
+    let jump = &screen.state().screen_jump.as_ref().unwrap().state;
+    let label = jump.targets[27].label.clone();
+    let position = jump.targets[27].char_index;
+    text(&mut screen, &label);
+    assert!(screen.state().screen_jump.is_none());
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, position);
+    text(&mut screen, "l");
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, position + 1);
+    assert_unchanged(&screen, &document);
+}
+
+#[test]
+fn pasted_query_and_label_preserve_raw_crlf_and_visual_selection() {
+    let document = "intro\r\ngi first\r\ngi second\r\n";
+    let mut screen = harness(fixture(document));
+    text(&mut screen, "v");
+    begin_jump(&mut screen);
+    screen.input_mut().events.extend([
+        egui::Event::Paste("gij".into()),
+        egui::Event::Cut,
+        egui::Event::Paste("accidental text".into()),
+    ]);
+    screen.run_steps(2);
+    assert!(screen.state().screen_jump.is_none());
+    let tab = screen.state().tab().unwrap();
+    assert_eq!(tab.vim.mode, VimMode::Visual);
+    assert_eq!(tab.vim.cursor, 17);
+    assert_eq!(tab.selection, 0..18);
+    assert_unchanged(&screen, document);
+}
+
+#[test]
 fn screen_jump_extends_visual_line_selection_from_its_original_anchor() {
     let mut screen = harness(fixture(DOCUMENT));
     text(&mut screen, "V");
     assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualLine);
     begin_jump(&mut screen);
-    text(&mut screen, "gi3");
+    text(&mut screen, "gid");
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.vim.mode, VimMode::VisualLine);
     assert_eq!(
@@ -323,7 +485,8 @@ fn wrapped_split_jump_reads_only_the_focused_panes_source() {
             .iter()
             .all(|target| pane_rect.contains(target.rect.center()))
     );
-    text(&mut screen, "3");
+    let label = jump.state.targets[2].label.clone();
+    text(&mut screen, &label);
     assert_eq!(
         screen.state().tab().unwrap().vim.cursor,
         gi_positions(&side_document)[2]
@@ -352,7 +515,8 @@ fn horizontally_and_vertically_hidden_matches_are_excluded() {
             .collect::<Vec<_>>(),
         vec![positions[1]]
     );
-    text(&mut screen, "1");
+    let label = jump.state.targets[0].label.clone();
+    text(&mut screen, &label);
     assert_eq!(screen.state().tab().unwrap().vim.cursor, positions[1]);
     assert_unchanged(&screen, &document);
 }

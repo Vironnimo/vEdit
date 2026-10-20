@@ -2827,30 +2827,39 @@ impl VEditApp {
         let events = self
             .ctx
             .input_mut(|input| std::mem::take(&mut input.events));
-        let text_characters: Vec<_> = events
-            .iter()
-            .filter_map(|event| {
-                if let egui::Event::Text(text) = event {
-                    Some(text.chars())
-                } else {
-                    None
+        // A translated Text event owns its preceding key press, including
+        // Shift punctuation and non-US layouts. Comparing character values
+        // would process those keys twice and could trigger a jump prematurely.
+        let mut keys_with_text = vec![false; events.len()];
+        let mut preceding_key = None;
+        for (index, event) in events.iter().enumerate() {
+            match event {
+                egui::Event::Key { pressed: true, .. } => preceding_key = Some(index),
+                egui::Event::Text(_)
+                | egui::Event::Ime(egui::ImeEvent::Preedit { .. } | egui::ImeEvent::Commit(_)) => {
+                    if let Some(key_index) = preceding_key.take() {
+                        keys_with_text[key_index] = true;
+                    }
                 }
-            })
-            .flatten()
-            .collect();
+                _ => {}
+            }
+        }
         let mut keep = Vec::new();
         let mut action = crate::screen_jump::JumpAction::None;
-        for event in events {
+        for (event_index, event) in events.into_iter().enumerate() {
             if !matches!(action, crate::screen_jump::JumpAction::None) {
                 // A completed jump owns the entire input batch; trailing query
                 // characters must never become an editing command.
-                if !matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)) {
+                if !editor_input::native_input(&event) && !matches!(event, egui::Event::Key { .. })
+                {
                     keep.push(event);
                 }
                 continue;
             }
             match event {
-                egui::Event::Text(text) => {
+                egui::Event::Text(text)
+                | egui::Event::Paste(text)
+                | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                     for ch in text.chars() {
                         action = jump.state.input_char(ch);
                         jump.state.recompute(&jump.glyphs);
@@ -2871,7 +2880,8 @@ impl VEditApp {
                     match key {
                         Key::Escape => action = crate::screen_jump::JumpAction::Cancel,
                         Key::Enter => {
-                            jump.state.enter();
+                            action = jump.state.enter();
+                            jump.state.recompute(&jump.glyphs);
                         }
                         Key::Backspace => {
                             jump.state.backspace();
@@ -2892,7 +2902,7 @@ impl VEditApp {
                             } else {
                                 None
                             };
-                            if let Some(ch) = ch.filter(|ch| !text_characters.contains(ch)) {
+                            if let Some(ch) = ch.filter(|_| !keys_with_text[event_index]) {
                                 action = jump.state.input_char(ch);
                                 jump.state.recompute(&jump.glyphs);
                             }
@@ -2900,6 +2910,7 @@ impl VEditApp {
                     }
                 }
                 egui::Event::Key { .. } => {}
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Ime(_) => {}
                 other => keep.push(other),
             }
         }
@@ -4532,14 +4543,9 @@ impl VEditApp {
                         if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if let Some(jump) = &self.screen_jump {
-                        let hint = if jump.state.query.is_empty() {
-                            "Type 1–3 characters · Esc cancels".to_owned()
-                        } else {
-                            let digits = jump.state.targets.first().map_or(1, |target| target.label.len());
-                            format!("{} · {} matches · type a {digits}-digit label · Esc cancels", jump.state.query, jump.state.targets.len())
-                        };
+                        let hint = jump.state.hint();
                         ui.add(egui::Label::new(RichText::new(&hint).size(11.0).color(ORANGE)).truncate())
-                            .on_hover_text("Type up to three characters to find visible matches. Digits choose a jump label. For numeric search text, press Enter before selecting a label. Backspace refines the query; Esc cancels.");
+                            .on_hover_text("Type 1–3 characters to find visible text, then type its letter label to jump. Home-row letters come first; possible search continuations stay available for typing. Enter locks a shorter query or jumps to the only match. Three characters lock automatically. Backspace corrects a label, unlocks an Enter-confirmed query, or deletes a search character. Esc cancels.");
                     } else if let Some((message, error, time)) = &self.status
                         && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);
