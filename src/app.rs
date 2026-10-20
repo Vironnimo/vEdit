@@ -304,6 +304,9 @@ impl Project {
         }
     }
 }
+/// A cached bracket pair: (revision, cursor, between-characters caret) and the
+/// pair found for it.
+type BracketMatch = ((u64, usize, bool), Option<(usize, usize)>);
 struct EditorTab {
     id: u64,
     path: Option<PathBuf>,
@@ -342,7 +345,7 @@ struct EditorTab {
     /// while another pane holds one; see `shift_shared_document_positions`.
     pane_baseline: Option<(u64, String)>,
     /// The bracket pair at the caret, computed once per (revision, cursor, caret kind).
-    bracket_match: Option<((u64, usize, bool), Option<(usize, usize)>)>,
+    bracket_match: Option<BracketMatch>,
     pending_navigation_feedback: bool,
     feedback: Option<editor_feedback::Highlight>,
     lines: crate::render::LineIndex,
