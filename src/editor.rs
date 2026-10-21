@@ -371,6 +371,56 @@ pub fn toggle_line_comment(text: &str, selection: Range<usize>, language: &str) 
     apply_edits(&chars, selection, edits)
 }
 
+/// Delete complete selected lines, preserving the caret column where possible.
+pub fn delete_lines(text: &str, selection: Range<usize>) -> EditResult {
+    let chars: Vec<char> = text.chars().collect();
+    let selection = clamp_selection(selection, chars.len());
+    let rows = lines(&chars);
+    let chosen = selected_rows(&rows, &selection);
+    let first = rows[chosen.start];
+    let last = rows[chosen.end - 1];
+    let column = selection.start.saturating_sub(first.start);
+    // Removing the final unterminated line includes its preceding separator,
+    // otherwise deleting it would leave an extra empty line behind.
+    let start = if last.end == chars.len() && chosen.start > 0 {
+        rows[chosen.start - 1].end
+    } else {
+        first.start
+    };
+    let mut result = replace_selection(text, start..last.break_end, "");
+    let remaining: Vec<char> = result.text.chars().collect();
+    let remaining_rows = lines(&remaining);
+    let target = remaining_rows[chosen.start.min(remaining_rows.len() - 1)];
+    let cursor = target.start + column.min(target.end - target.start);
+    result.selection = cursor..cursor;
+    result
+}
+
+/// Insert a complete line outside the selection, leaving its contents intact.
+/// Below uses the normal newline indentation; above copies the first row's indent.
+pub fn insert_line(text: &str, selection: Range<usize>, indent: &str, above: bool) -> EditResult {
+    let chars: Vec<char> = text.chars().collect();
+    let selection = clamp_selection(selection, chars.len());
+    let rows = lines(&chars);
+    let chosen = selected_rows(&rows, &selection);
+    if !above {
+        let end = rows[chosen.end - 1].end;
+        return smart_newline(text, end..end, indent);
+    }
+    let row = rows[chosen.start];
+    let base: String = chars[row.start..indentation_end(&chars, row)]
+        .iter()
+        .collect();
+    let cursor = row.start + base.chars().count();
+    let mut result = replace_selection(
+        text,
+        row.start..row.start,
+        &format!("{base}{}", newline(text)),
+    );
+    result.selection = cursor..cursor;
+    result
+}
+
 /// Duplicate the selected complete lines and move the selection to the copy.
 pub fn duplicate_lines(text: &str, selection: Range<usize>) -> EditResult {
     let chars: Vec<char> = text.chars().collect();
@@ -612,6 +662,59 @@ mod tests {
         );
         let empty = toggle_line_comment("", 0..0, "html");
         assert_eq!(toggle_line_comment(&empty.text, 0..0, "html").text, "");
+    }
+
+    #[test]
+    fn standard_line_deletion_handles_unicode_crlf_and_document_boundaries() {
+        for (text, selection, expected, cursor) in [
+            ("a\r\nβ🦀\r\nlast", 3..7, "a\r\nlast", 3),
+            ("a\r\nβ🦀", 4..4, "a", 1),
+            ("a\r\nβ🦀\r\n", 3..3, "a\r\n", 3),
+            ("a\r\n", 3..3, "a", 0),
+            ("β🦀", 1..usize::MAX, "", 0),
+            ("", 0..0, "", 0),
+            ("one\ntwo\nthree", 1..8, "three", 1),
+        ] {
+            let result = delete_lines(text, selection.clone());
+            assert_eq!(result.text, expected, "{text:?} {selection:?}");
+            assert_eq!(result.selection, cursor..cursor, "{text:?} {selection:?}");
+        }
+    }
+
+    #[test]
+    fn standard_line_insertion_preserves_blocks_and_raw_endings() {
+        for (text, selection, above, expected, cursor) in [
+            (
+                "  if x:\r\n  next",
+                4..4,
+                false,
+                "  if x:\r\n    \r\n  next",
+                13,
+            ),
+            (
+                "  if x:\r\n  next",
+                4..4,
+                true,
+                "  \r\n  if x:\r\n  next",
+                2,
+            ),
+            ("β🦀", 1..2, false, "β🦀\n", 3),
+            ("β🦀", 1..2, true, "\nβ🦀", 0),
+            ("  a\n  b\nc", 2..8, false, "  a\n  b\n  \nc", 10),
+            ("", 0..0, false, "\n", 1),
+            ("", 0..0, true, "\n", 0),
+        ] {
+            let result = insert_line(text, selection.clone(), "  ", above);
+            assert_eq!(
+                result.text, expected,
+                "{text:?} {selection:?} above={above}"
+            );
+            assert_eq!(
+                result.selection,
+                cursor..cursor,
+                "{text:?} {selection:?} above={above}"
+            );
+        }
     }
 
     #[test]

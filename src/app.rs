@@ -81,6 +81,8 @@ mod project_launch;
 mod project_status;
 #[path = "project_tasks.rs"]
 mod project_tasks;
+#[path = "recent.rs"]
+mod recent;
 #[path = "reopen.rs"]
 mod reopen;
 #[path = "save_state.rs"]
@@ -178,6 +180,7 @@ impl Default for Settings {
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct Session {
+    recent: Vec<recent::Entry>,
     projects: Vec<SessionProject>,
     active_project: usize,
     sidebar: Option<SidebarView>,
@@ -679,6 +682,7 @@ struct ActiveScreenJump {
 type BookmarkMarks = Vec<(usize, u64, String)>;
 type BookmarkLineCache = HashMap<u64, (u64, BookmarkMarks)>;
 enum WorkerResult {
+    RecentOpened(recent::OpenResult),
     DroppedPaths(other_files::DroppedPaths),
     ExplorerDirectory {
         root: PathBuf,
@@ -911,6 +915,7 @@ enum CloseAction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Palette {
     Files,
+    Recent,
     Commands,
     Line,
 }
@@ -937,6 +942,9 @@ struct CompletionPopup {
     selected: usize,
 }
 pub struct VEditApp {
+    recent: Vec<recent::Entry>,
+    recent_open_request: u64,
+    recent_opening: std::collections::HashSet<u64>,
     projects: Vec<Project>,
     closed_other_files: Vec<reopen::ClosedTab>,
     active_project: usize,
@@ -1103,6 +1111,7 @@ impl VEditApp {
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
         app.find_regex = session.find_regex;
+        app.restore_recent(session.recent);
         if let Some(autosave) = session.autosave {
             app.settings.autosave = autosave;
         }
@@ -1233,6 +1242,9 @@ impl VEditApp {
         Self {
             projects: Vec::new(),
             closed_other_files: Vec::new(),
+            recent: Vec::new(),
+            recent_open_request: 0,
+            recent_opening: Default::default(),
             active_project: 0,
             workspace_ui: workspace_ui::WorkspaceUiState::default(),
             explorer_navigation: explorer_navigation::ExplorerNavigationState::default(),
@@ -1429,6 +1441,7 @@ impl VEditApp {
         self.add_resolved_project(root);
     }
     fn add_resolved_project(&mut self, root: PathBuf) {
+        self.remember_recent(root.clone(), recent::Kind::Folder);
         if let Some(index) = self.projects.iter().position(|p| p.root == root) {
             self.switch_project(index);
             return;
@@ -1580,6 +1593,7 @@ impl VEditApp {
         if let Some(previous) = previous_preview {
             self.replace_pane_preview(previous, id);
         }
+        self.recent_opening.insert(id);
         self.load_tab(id, Some(path), None);
     }
     fn keep_tab_open(&mut self, id: u64) {
@@ -1653,6 +1667,9 @@ impl VEditApp {
         }
         self.session_dirty = true;
         self.bind_current_pane();
+        if let Some(id) = self.tab().map(|tab| tab.id) {
+            self.remember_recent_document(id);
+        }
     }
     fn set_active_project_context(&mut self, index: usize) {
         let previous_index = self.active_project;
@@ -2006,6 +2023,7 @@ impl VEditApp {
         self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                WorkerResult::RecentOpened(opened) => self.finish_recent_open(opened),
                 WorkerResult::DroppedPaths(batch) => self.finish_dropped_paths(batch),
                 WorkerResult::Panicked(message) => self.status(message, true),
                 WorkerResult::ContextFile(result) => self.context_file_result(result),
@@ -2067,6 +2085,7 @@ impl VEditApp {
                     result,
                     recovery,
                 } => {
+                    let remember = self.recent_opening.remove(&id);
                     self.find.invalidate(id);
                     let ctx = self.ctx.clone();
                     let preserve_scroll = self.has_saved_document_scroll(id);
@@ -2216,6 +2235,9 @@ impl VEditApp {
                             tab.scroll_to_cursor = false;
                         }
                     }
+                    if remember {
+                        self.remember_recent_document(id);
+                    }
                 }
                 WorkerResult::Saved {
                     id,
@@ -2305,6 +2327,9 @@ impl VEditApp {
                         }
                     }
                     let saved = message.as_ref().is_some_and(|(_, error)| !error);
+                    if saved && new_document {
+                        self.remember_recent_document(id);
+                    }
                     if let Some((message, error)) = message {
                         self.status(message, error);
                         if error {
@@ -3600,6 +3625,7 @@ impl VEditApp {
     }
     fn session(&self) -> Session {
         Session {
+            recent: self.recent.clone(),
             projects: self
                 .projects
                 .iter()
@@ -4021,6 +4047,9 @@ impl VEditApp {
                     | Action::AgentMarks
                     | Action::ToggleComment
                     | Action::DuplicateLine
+                    | Action::DeleteLine
+                    | Action::InsertLineAbove
+                    | Action::InsertLineBelow
                     | Action::MoveLineUp
                     | Action::MoveLineDown
                     | Action::Undo
@@ -4468,7 +4497,26 @@ impl VEditApp {
                         keybindings::Action::MoveLineDown,
                         &event,
                     );
-                    if comment || duplicate || move_up || move_down {
+                    let delete_line =
+                        keybindings::matches(&keybindings, keybindings::Action::DeleteLine, &event);
+                    let insert_above = keybindings::matches(
+                        &keybindings,
+                        keybindings::Action::InsertLineAbove,
+                        &event,
+                    );
+                    let insert_below = keybindings::matches(
+                        &keybindings,
+                        keybindings::Action::InsertLineBelow,
+                        &event,
+                    );
+                    if comment
+                        || duplicate
+                        || move_up
+                        || move_down
+                        || delete_line
+                        || insert_above
+                        || insert_below
+                    {
                         if events
                             .peek()
                             .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
@@ -4487,6 +4535,15 @@ impl VEditApp {
                             )
                         } else if duplicate {
                             editor::duplicate_lines(&tab.text, selection)
+                        } else if delete_line {
+                            editor::delete_lines(&tab.text, selection)
+                        } else if insert_above || insert_below {
+                            editor::insert_line(
+                                &tab.text,
+                                selection,
+                                &indent.map(|indent| indent.unit()).unwrap_or_default(),
+                                insert_above,
+                            )
                         } else {
                             editor::move_lines(&tab.text, selection, move_down)
                         };
@@ -4494,6 +4551,9 @@ impl VEditApp {
                             tab.apply_line_move(edit);
                         } else if edit.text != tab.text {
                             tab.apply(edit);
+                            if delete_line || insert_above || insert_below {
+                                tab.set_cursor(tab.selection.clone());
+                            }
                             tab.vim.notify_external_text_change();
                         }
                         editor_input::defer(&ctx, tab.id, events.collect());
@@ -6157,6 +6217,15 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 Some(editor_input::Command::Duplicate) => {
                     Some(editor::duplicate_lines(&tab.text, tab.selection.clone()))
                 }
+                Some(editor_input::Command::DeleteLine) => {
+                    Some(editor::delete_lines(&tab.text, tab.selection.clone()))
+                }
+                Some(editor_input::Command::InsertLine(above)) => Some(editor::insert_line(
+                    &tab.text,
+                    tab.selection.clone(),
+                    &indent,
+                    above,
+                )),
                 Some(editor_input::Command::MoveLine(down)) => {
                     Some(editor::move_lines(&tab.text, tab.selection.clone(), down))
                 }
@@ -7407,6 +7476,7 @@ impl VEditApp {
         match label {
             "Command palette" => self.open_palette(Palette::Commands),
             "Go to file" => self.open_palette(Palette::Files),
+            "Open recent" => self.open_palette(Palette::Recent),
             "Save as..."
             | "Close current tab"
             | "Reopen closed tab"
@@ -7420,6 +7490,9 @@ impl VEditApp {
             | "Reset zoom"
             | "Toggle line comment"
             | "Duplicate line / selection"
+            | "Delete line / selection"
+            | "Insert line above"
+            | "Insert line below"
             | "Undo"
             | "Redo" => {
                 if let Some(action) = keybindings::Action::from_label(label) {
@@ -7583,6 +7656,59 @@ impl VEditApp {
             _ => {}
         }
     }
+    fn quick_open_rows(&self) -> Vec<(language_intel::PaletteRow, Option<u64>)> {
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        let query = self.palette_query.trim().replace('\\', "/").to_lowercase();
+        let score = |name: &str, detail: &str| {
+            if query.is_empty() {
+                Some(0)
+            } else {
+                workspace::path_score(&detail.replace('\\', "/").to_lowercase(), &query)
+                    .or_else(|| workspace::path_score(&name.to_lowercase(), &query))
+            }
+        };
+        // Open buffers participate even when their files are ignored, the index
+        // is still loading, or this is the folderless Other files area.
+        let mut rows = Vec::new();
+        for tab in &project.tabs {
+            let detail = tab.path.as_ref().map_or_else(
+                || "Unsaved document".to_owned(),
+                |path| crate::paths::display(path.strip_prefix(&project.root).unwrap_or(path)),
+            );
+            if let Some(rank) = score(&tab.title, &detail) {
+                rows.push((
+                    rank,
+                    (
+                        (tab.title.clone(), detail, tab.path.clone(), None),
+                        Some(tab.id),
+                    ),
+                ));
+            }
+        }
+        if let Some(index) = &project.index {
+            for path in index.quick_open(&self.palette_query, 40) {
+                if project.tabs.iter().any(|tab| {
+                    tab.path
+                        .as_deref()
+                        .is_some_and(|open| control::same_workspace(open, &path))
+                }) {
+                    continue;
+                }
+                let name = file_title(&path);
+                let detail =
+                    crate::paths::display(path.strip_prefix(&project.root).unwrap_or(&path));
+                if let Some(rank) = score(&name, &detail) {
+                    rows.push((rank, ((name, detail, Some(path), None), None)));
+                }
+            }
+        }
+        // Stable ties retain open-tab order, then the index's existing order.
+        rows.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        rows.into_iter().take(40).map(|(_, row)| row).collect()
+    }
+
     fn overlays(&mut self) {
         let ctx = self.ctx.clone();
         self.context_file_dialog_ui(&ctx);
@@ -7615,6 +7741,7 @@ impl VEditApp {
                 design::overlay_title(ui, match palette {
                     Palette::Files if symbol_title.is_some() => symbol_title.unwrap(),
                     Palette::Files => "Quick open",
+                    Palette::Recent => "Open recent",
                     Palette::Commands => "Commands",
                     Palette::Line => "Go to line",
                 });
@@ -7624,8 +7751,9 @@ impl VEditApp {
                         .id(egui::Id::new("palette_input"))
                         .hint_text(match palette {
                             Palette::Files => "Search by file name or path…",
+                            Palette::Recent => "Search recent files and folders…",
                             Palette::Commands => "What would you like to do?",
-                            Palette::Line => "Line number",
+                            Palette::Line => "Line or line:column",
                         })
                         .desired_width(f32::INFINITY)
                         .font(FontId::proportional(15.0)),
@@ -7640,8 +7768,16 @@ impl VEditApp {
                 }
                 ui.add_space(6.0);
                 if palette == Palette::Line {
+                    let query = self.palette_query.trim();
+                    let (row, column) = query.split_once(':').unwrap_or((query, "1"));
+                    let location = row.trim().parse::<usize>().ok()
+                        .zip(column.trim().parse::<usize>().ok())
+                        .filter(|(row, column)| *row > 0 && *column > 0);
                     if enter {
-                        line = self.palette_query.trim().parse::<usize>().ok();
+                        line = location;
+                    }
+                    if !query.is_empty() && location.is_none() {
+                        ui.label(RichText::new("Enter a line or line:column using positive numbers.").color(ORANGE));
                     }
                 } else {
                     let query = self.palette_query.clone();
@@ -7649,8 +7785,8 @@ impl VEditApp {
                         .then(|| language_intel::symbol_scope(&query))
                         .flatten()
                         .map(|(scope, query)| self.symbol_palette(scope, query));
-                    let options: Vec<language_intel::PaletteRow> = if let Some(symbols) = &symbols {
-                        symbols.rows.clone()
+                    let options: Vec<(language_intel::PaletteRow, Option<u64>)> = if let Some(symbols) = &symbols {
+                        symbols.rows.iter().cloned().map(|row| (row, None)).collect()
                     } else if palette == Palette::Commands
                     {
                         COMMANDS
@@ -7659,29 +7795,15 @@ impl VEditApp {
                                 name.to_lowercase()
                                     .contains(&self.palette_query.to_lowercase())
                             })
-                            .map(|(name, _)| (name.to_string(), keybindings::Action::from_label(name).map(|action| self.shortcut_label(action)).unwrap_or_default(), None, None))
+                            .map(|(name, _)| ((name.to_string(), keybindings::Action::from_label(name).map(|action| self.shortcut_label(action)).unwrap_or_default(), None, None), None))
                             .collect()
+                    } else if palette == Palette::Recent {
+                        self.matching_recent(&query).into_iter().map(|entry| {
+                            let kind = if entry.kind == recent::Kind::Folder { "Folder" } else { "File" };
+                            ((format!("{kind} · {}", file_title(&entry.path)), crate::paths::display(&entry.path), Some(entry.path), None), None)
+                        }).collect()
                     } else {
-                        self.project()
-                            .and_then(|p| {
-                                p.index.as_ref().map(|index| {
-                                    index
-                                        .quick_open(&self.palette_query, 40)
-                                        .into_iter()
-                                        .map(|path| {
-                                            (
-                                                file_title(&path),
-                                                crate::paths::display(
-                                                    path.strip_prefix(&p.root).unwrap_or(&path),
-                                                ),
-                                                Some(path),
-                                                None,
-                                            )
-                                        })
-                                        .collect()
-                                })
-                            })
-                            .unwrap_or_default()
+                        self.quick_open_rows()
                     };
                     let index_truncated = palette == Palette::Files && symbols.is_none()
                         && self.project().and_then(|project| project.index.as_ref()).is_some_and(|index| index.truncated);
@@ -7725,7 +7847,7 @@ impl VEditApp {
                             (options.len() as f32 * design::DETAIL_ROW_HEIGHT).min(results_height),
                         )
                         .show(ui, |ui| {
-                            for (i, (name, detail, path, position)) in options.iter().enumerate() {
+                            for (i, ((name, detail, path, position), tab_id)) in options.iter().enumerate() {
                                 let response = ui
                                     .push_id(i, |ui| {
                                         design::detail_row(
@@ -7738,7 +7860,7 @@ impl VEditApp {
                                     })
                                     .inner;
                                 if response.clicked() || enter && i == self.palette_selected {
-                                    choose = Some((name.clone(), path.clone(), *position));
+                                    choose = Some((name.clone(), path.clone(), *position, *tab_id));
                                 }
                                 if (down || up || first || last || page_down || page_up || query_changed)
                                     && i == self.palette_selected {
@@ -7756,7 +7878,8 @@ impl VEditApp {
                                     ui.add_space(10.0);
                                     ui.label(RichText::new(message).color(MUTED));
                                 }
-                            } else if options.is_empty() {
+                            } else if options.is_empty() || palette == Palette::Files
+                                && self.project().is_some_and(|project| project.indexing || project.index_error.is_some()) {
                                 ui.add_space(10.0);
                                 if palette == Palette::Files {
                                     match self.project() {
@@ -7803,6 +7926,8 @@ impl VEditApp {
                                             );
                                         }
                                     }
+                                } else if palette == Palette::Recent && self.recent.is_empty() {
+                                    ui.label(RichText::new("No recent files or folders").color(MUTED));
                                 } else {
                                     ui.label(RichText::new("No matches").color(MUTED));
                                 }
@@ -7815,6 +7940,16 @@ impl VEditApp {
                                 .size(11.0)
                                 .color(ORANGE),
                         ).on_hover_text(format!("The index reached its file, depth, or time limit. Open a narrower project folder, or close Quick Open and use Open file ({}) to open directly.", self.shortcut_label(keybindings::Action::OpenFile)));
+                    }
+                    if palette == Palette::Recent {
+                        ui.add_space(8.0);
+                        if ui.add_enabled(!self.recent.is_empty(), egui::Button::new("Clear recent history"))
+                            .on_hover_text("Clear this list; open tabs and files on disk are kept.")
+                            .clicked() {
+                            self.clear_recent();
+                            self.palette_selected = 0;
+                            choose = None;
+                        }
                     }
                 }
             });
@@ -7831,8 +7966,19 @@ impl VEditApp {
             if close || choose.is_some() || line.is_some() {
                 self.close_palette();
             }
-            if let Some((name, path, position)) = choose {
-                if let (Some(path), Some(position)) = (path.clone(), position) {
+            if let Some((name, path, position, tab_id)) = choose {
+                if palette == Palette::Recent {
+                    if let Some(entry) = self
+                        .recent
+                        .iter()
+                        .find(|entry| Some(&entry.path) == path.as_ref())
+                        .cloned()
+                    {
+                        self.open_recent(entry);
+                    }
+                } else if let Some((project, tab)) = tab_id.and_then(|id| self.tab_location(id)) {
+                    self.activate_tab(project, tab);
+                } else if let (Some(path), Some(position)) = (path.clone(), position) {
                     self.open_language_location(path, position);
                 } else if let Some(path) = path {
                     self.open_file(path);
@@ -7840,10 +7986,18 @@ impl VEditApp {
                     self.command_action(&name);
                 }
             }
-            if let Some(line) = line
+            if let Some((line, column)) = line
                 && let Some(t) = self.tab_mut()
             {
                 let at = editor::go_to_line(&t.text, line);
+                let (length, last) = t
+                    .text
+                    .chars()
+                    .skip(at)
+                    .take_while(|ch| *ch != '\n')
+                    .fold((0, None), |(length, _), ch| (length + 1, Some(ch)));
+                let length = length - usize::from(last == Some('\r'));
+                let at = at + (column - 1).min(length);
                 t.set_cursor(at..at);
             }
         }

@@ -512,6 +512,113 @@ fn files_and_commands_keep_the_scrollbar_visible_without_hover() {
 }
 
 #[test]
+fn go_to_line_accepts_unicode_columns_and_clamps_within_the_line() {
+    let (_fixture, mut app) = Fixture::new(1);
+    app.settings.vim = false;
+    let tab = app.tab_mut().unwrap();
+    tab.text = "α\ncafé🦀\r\n尾".into();
+    tab.saved_text.clone_from(&tab.text);
+    let mut screen = harness(app);
+    for (query, expected) in [("2:4", 5), ("2:999", 7), ("3", 9)] {
+        open(&mut screen, Palette::Line);
+        text(&mut screen, query);
+        screen.key_press(Key::Enter);
+        screen.run_steps(3);
+        assert!(screen.state().palette.is_none(), "{query}");
+        assert_eq!(
+            screen.state().tab().unwrap().vim.cursor,
+            expected,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn go_to_line_keeps_invalid_locations_open_without_moving() {
+    let (_fixture, app) = Fixture::new(1);
+    let mut screen = harness(app);
+    for query in ["0", "2:0", "2:-1", "2:", "abc", "2:3:4"] {
+        open(&mut screen, Palette::Line);
+        let before = screen.state().tab().unwrap().vim.cursor;
+        text(&mut screen, query);
+        screen.key_press(Key::Enter);
+        screen.run_steps(3);
+        assert!(screen.state().palette == Some(Palette::Line), "{query}");
+        assert_eq!(screen.state().tab().unwrap().vim.cursor, before, "{query}");
+        assert!(
+            screen
+                .query_by_label("Enter a line or line:column using positive numbers.")
+                .is_some()
+        );
+        screen.key_press(Key::Escape);
+        screen.run_steps(3);
+    }
+}
+
+#[test]
+fn quick_open_finds_loose_files_and_untitled_drafts_without_an_index() {
+    let (_fixture, mut app) = Fixture::new(2);
+    app.projects[0].kind = WorkspaceKind::OtherFiles;
+    app.projects[0].index = None;
+    app.projects[0].languages.clear();
+    app.new_file();
+    let draft = app.tab_mut().unwrap();
+    draft.apply(editor::replace_selection(
+        &draft.text,
+        0..0,
+        "draft café 🦀",
+    ));
+    let draft_id = draft.id;
+    app.activate_tab(0, 0);
+    let loose_id = app.projects[0].tabs[1].id;
+    let mut screen = harness(app);
+    open(&mut screen, Palette::Files);
+    text(&mut screen, "document-01");
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert!(screen.state().palette.is_none());
+    assert_eq!(screen.state().tab().unwrap().id, loose_id);
+    open(&mut screen, Palette::Files);
+    text(&mut screen, "Untitled");
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert!(screen.state().palette.is_none());
+    assert_eq!(screen.state().tab().unwrap().id, draft_id);
+    assert_eq!(screen.state().tab().unwrap().text, "draft café 🦀");
+    assert!(screen.state().tab().unwrap().dirty);
+    assert_eq!(screen.state().projects[0].tabs.len(), 3);
+    assert_source_focus(&screen);
+}
+
+#[test]
+fn quick_open_includes_open_files_missing_from_the_index_and_deduplicates() {
+    let (fixture, mut app) = Fixture::new(2);
+    let path = fixture.root.join("ignored-notes.txt");
+    let mut tab = EditorTab::new(Some(path.clone()), file_title(&path));
+    tab.text = "unsaved notes".into();
+    tab.dirty = true;
+    let ignored_id = tab.id;
+    app.projects[0].tabs.push(tab);
+    let mut screen = harness(app);
+    open(&mut screen, Palette::Files);
+    text(&mut screen, "ignored-notes");
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().tab().unwrap().id, ignored_id);
+    assert_eq!(screen.state().tab().unwrap().text, "unsaved notes");
+    assert!(screen.state().tab().unwrap().dirty);
+    open(&mut screen, Palette::Files);
+    text(&mut screen, "document-00");
+    screen.key_press(Key::End);
+    screen.run_steps(3);
+    assert_eq!(
+        screen.state().palette_selected,
+        0,
+        "an open indexed file appears once"
+    );
+}
+
+#[test]
 fn quick_open_down_home_end_and_page_keys_reveal_the_selected_file() {
     let (_fixture, app) = Fixture::new(45);
     let mut screen = harness(app);
@@ -614,6 +721,45 @@ fn commands_navigation_keeps_query_focus_and_enter_runs_only_the_selection() {
     assert_eq!(screen.state().settings.word_wrap, !original);
     assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
     assert_source_focus(&screen);
+}
+
+#[test]
+fn recent_palette_filters_reuses_dirty_buffers_and_clears_only_history() {
+    let (fixture, mut app) = Fixture::new(2);
+    app.remember_recent(fixture.files[1].clone(), recent::Kind::File);
+    app.remember_recent(fixture.root.clone(), recent::Kind::Folder);
+    let tab = &mut app.projects[0].tabs[1];
+    tab.text = "unsaved café".into();
+    tab.dirty = true;
+    let id = tab.id;
+    let mut screen = harness(app);
+    screen
+        .state_mut()
+        .run_shortcut_action(keybindings::Action::OpenRecent);
+    screen.run_steps(3);
+    text(&mut screen, "document-01");
+    assert!(
+        screen
+            .query_by_label_contains("File · document-01.md")
+            .is_some()
+    );
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert!(screen.state().palette.is_none());
+    assert_eq!(screen.state().tab().unwrap().id, id);
+    assert_eq!(screen.state().tab().unwrap().text, "unsaved café");
+    open(&mut screen, Palette::Recent);
+    screen.get_by_label("Clear recent history").click();
+    screen.run_steps(3);
+    assert!(screen.state().recent.is_empty());
+    assert_eq!(screen.state().project().unwrap().tabs.len(), 2);
+    assert_eq!(screen.state().tab().unwrap().text, "unsaved café");
+    assert!(fixture.files.iter().all(|path| path.is_file()));
+    assert!(
+        screen
+            .query_by_label("No recent files or folders")
+            .is_some()
+    );
 }
 
 #[test]

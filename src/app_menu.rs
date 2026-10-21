@@ -46,6 +46,17 @@ impl VEditApp {
             }
             if design::menu_item(
                 ui,
+                "Open recent",
+                &self.shortcut_label(keybindings::Action::OpenRecent),
+                "Find recently used files and project folders",
+            )
+            .clicked()
+            {
+                self.open_palette(Palette::Recent);
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
                 "New file",
                 &self.shortcut_label(keybindings::Action::NewFile),
                 "Create an untitled draft",

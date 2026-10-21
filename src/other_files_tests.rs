@@ -406,6 +406,110 @@ fn delayed_drop_does_not_reopen_a_closed_workspace() {
 }
 
 #[test]
+fn other_files_list_supports_keyboard_selection_open_and_return() {
+    let f = Fixture::new();
+    let mut app = f.app();
+    app.open_argument(f.write("first.txt", "first"));
+    app.new_file();
+    let draft = app.tab_mut().unwrap();
+    draft.apply(editor::replace_selection(&draft.text, 0..0, "keep draft"));
+    let draft_id = draft.id;
+    let first_id = app.project().unwrap().tabs[0].id;
+    app.activate_tab(0, 0);
+    settle(&mut app);
+    let mut screen = screen(app);
+    screen.state_mut().focus_explorer();
+    screen.run_steps(3);
+    screen.key_press(Key::ArrowDown);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().tab().unwrap().id,
+        first_id,
+        "selection does not open a document"
+    );
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().tab().unwrap().id, draft_id);
+    assert_eq!(screen.state().tab().unwrap().text, "keep draft");
+    assert!(!screen.state().explorer_keyboard_focused());
+    screen.state_mut().focus_explorer();
+    screen.run_steps(3);
+    screen.key_press(Key::Home);
+    screen.run_steps(2);
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().tab().unwrap().id, first_id);
+}
+
+#[test]
+fn other_files_keyboard_menu_targets_the_selection_and_protects_drafts() {
+    let f = Fixture::new();
+    let path = f.write("first.txt", "first");
+    let mut app = f.app();
+    app.open_argument(path.clone());
+    app.new_file();
+    let draft = app.tab_mut().unwrap();
+    draft.apply(editor::replace_selection(&draft.text, 0..0, "keep draft"));
+    let draft_id = draft.id;
+    settle(&mut app);
+    let mut screen = screen(app);
+    let press = |screen: &mut Harness<'_, VEditApp>, key, modifiers| {
+        screen.event(egui::Event::ModifiersChanged(modifiers));
+        screen.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        screen.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        });
+        screen.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        screen.run_steps(3);
+    };
+    press(
+        &mut screen,
+        Key::E,
+        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+    );
+    assert!(screen.state().explorer_keyboard_focused());
+    screen.key_press(Key::Home);
+    screen.run_steps(2);
+    press(&mut screen, Key::F10, egui::Modifiers::SHIFT);
+    assert!(screen.query_by_label("Copy path").is_some());
+    assert!(screen.query_by_label("Reveal in Explorer").is_some());
+    screen.key_press(Key::Escape);
+    screen.run_steps(3);
+    assert!(screen.state().explorer_keyboard_focused());
+    screen.key_press(Key::ArrowDown);
+    screen.run_steps(2);
+    press(&mut screen, Key::F2, egui::Modifiers::NONE);
+    press(&mut screen, Key::Delete, egui::Modifiers::NONE);
+    assert!(screen.state().context_file_dialog.is_none());
+    assert!(path.is_file());
+    press(&mut screen, Key::F10, egui::Modifiers::SHIFT);
+    assert!(screen.query_by_label("Copy path").is_none());
+    assert!(screen.query_by_label("Reveal in Explorer").is_none());
+    screen.get_by_label("Close file").click();
+    screen.run_steps(3);
+    assert!(screen.state().close_action.is_some());
+    let draft = screen
+        .state()
+        .projects
+        .iter()
+        .flat_map(|project| &project.tabs)
+        .find(|tab| tab.id == draft_id)
+        .unwrap();
+    assert_eq!(draft.text, "keep draft");
+    assert!(draft.dirty);
+}
+
+#[test]
 fn other_files_visual_layout() {
     let mut app = VEditApp::empty(egui::Context::default());
     app.projects

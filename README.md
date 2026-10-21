@@ -1,6 +1,8 @@
-# vEdit 0.5.1
+# vEdit 0.5.2
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.5.2 ergänzt **Open recent** für zuletzt genutzte Dateien und Projektordner, eine vollständige Tastaturbedienung in **Other files** sowie **Ctrl+P** für offene Dateien und unbenannte Entwürfe. **Ctrl+Shift+K** löscht ganze Zeilen, **Ctrl+Enter** / **Ctrl+Shift+Enter** fügen darunter beziehungsweise darüber eine Zeile ein. **Ctrl+G** versteht auch `Zeile:Spalte`.
 
 Version 0.5.1 ergänzt **Other files** neben den Projekt-Tabs und Drag-and-drop aus dem Windows-Explorer. Einzelne Dateien außerhalb geöffneter Projekte bleiben dort mit eigenen Tabs und Splits erhalten, ohne ihren Ordner zum Projekt zu machen. Dateien und ungespeicherte Entwürfe werden beim nächsten Start wiederhergestellt.
 
@@ -79,6 +81,10 @@ Ein hineingezogener Ordner wird als Projekt hinzugefügt. Bei einer gemeinsamen 
 
 Nach dem Schließen der letzten Datei verschwindet **Other files**. **Reopen closed file** kann die letzte gespeicherte Datei in derselben Sitzung wieder öffnen. Das Schließen eines regulären Projekts lässt andere Arbeitsbereiche offen. Ungespeicherte Änderungen werden vor dem Schließen abgefragt.
 
+**File → Open recent** und die gleichnamige Palettenaktion zeigen bis zu 30 zuletzt genutzte Dateien und Projektordner, auch nach dem Schließen oder einem Neustart. Namen und Pfade lassen sich durchsuchen; Dateipfade bleiben zur Unterscheidung sichtbar. Bereits offene Dateien behalten ihre ungespeicherten Änderungen. Nicht verfügbare Einträge bleiben im Verlauf, etwa für vorübergehend getrennte Laufwerke; ein erfolgloses Öffnen meldet den Fehler. **Clear recent history** leert nur diese Liste.
+
+**Ctrl+P** berücksichtigt neben dem Projektindex auch bereits offene Dateien, einschließlich ignorierter Dateien und unbenannter Entwürfe. In **Other files** durchsucht es die dort geöffneten Dokumente. **Ctrl+Shift+E** fokussiert dort die Dateiliste; Pfeile, **Home/End**, **Page Up/Down** und **Enter** erlauben die Bedienung ohne Maus.
+
 ## Arbeiten im Editor
 
 Der Knopf mit drei Strichen ganz links über dem Explorer öffnet das Hauptmenü mit **File**, **View** und **Run**. Er bleibt auch ohne geöffnetes Projekt erreichbar. Windows verwendet eine einzelne vEdit-Titelleiste: freie Flächen ziehen das Fenster, ein Doppelklick maximiert beziehungsweise stellt es wieder her. Rechts liegen Minimieren, Maximieren/Wiederherstellen und Schließen; bei ungespeicherten Änderungen fragt vEdit vor dem Schließen nach. Die Fensterränder lassen sich weiterhin ziehen, **Alt+Space** öffnet das Windows-Fenstermenü, und der Maximieren-Knopf unterstützt die Windows-Snap-Auswahl.
@@ -154,7 +160,9 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 | Suchen / Ersetzen in der Datei | Ctrl+F² / Ctrl+H |
 | Nächster / vorheriger Treffer | F3 / Shift+F3 |
 | Projekt durchsuchen | Ctrl+Shift+F |
-| Zu einer Zeile springen | Ctrl+G |
+| Zu einer Zeile oder `Zeile:Spalte` springen | Ctrl+G |
+| Ganze Zeile / ausgewählte Zeilen löschen | Ctrl+Shift+K |
+| Zeile darunter / darüber einfügen | Ctrl+Enter / Ctrl+Shift+Enter |
 | Linke Seitenleiste ein-/ausblenden | Ctrl+Alt+E oder Ctrl+B² |
 | Rechte Seitenleiste ein-/ausblenden | Ctrl+Alt+B |
 | Oberfläche vergrößern / verkleinern / zurücksetzen | Ctrl++ / Ctrl+− / Ctrl+0 |

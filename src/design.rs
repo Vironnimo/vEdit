@@ -115,6 +115,17 @@ pub(crate) fn menu<R>(
     tooltip: &str,
     contents: impl FnOnce(&mut Ui) -> R,
 ) -> Response {
+    let contents = |ui: &mut Ui| {
+        // Popup placement can move a menu, but cannot make an oversized menu
+        // fit. Keep its last actions reachable in short/snapped windows.
+        let frame = egui::Frame::menu(ui.style());
+        let max_height =
+            (ui.ctx().content_rect().height() - frame.total_margin().sum().y - 8.0).max(1.0);
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .show(ui, contents)
+            .inner
+    };
     let button = egui::Button::new(RichText::new(label).size(12.0))
         .frame_when_inactive(false)
         .min_size(Vec2::new(38.0, 24.0));

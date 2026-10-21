@@ -27,6 +27,7 @@ actions! {
     NextProject, "next_project", "Next project", "Navigation", ["Ctrl+Alt+PageDown"];
     OpenProject, "open_project", "Add project folder", "Files", ["Ctrl+Shift+O"];
     OpenFile, "open_file", "Open file", "Files", ["Ctrl+O"];
+    OpenRecent, "open_recent", "Open recent", "Files", [];
     NewFile, "new_file", "New file", "Files", ["Ctrl+N"];
     Save, "save", "Save current file", "Files", ["Ctrl+S"];
     SaveAll, "save_all", "Save all files", "Files", ["Ctrl+Shift+S"];
@@ -94,6 +95,9 @@ actions! {
     ToggleVim, "toggle_vim", "Toggle Vim motions", "Editing", [];
     ToggleComment, "toggle_comment", "Toggle line comment", "Editing", ["Ctrl+Slash", "Ctrl+Shift+Slash"];
     DuplicateLine, "duplicate_line", "Duplicate line / selection", "Editing", ["Alt+Shift+ArrowDown"];
+    DeleteLine, "delete_line", "Delete line / selection", "Editing", ["Ctrl+Shift+K"];
+    InsertLineAbove, "insert_line_above", "Insert line above", "Editing", ["Ctrl+Shift+Enter"];
+    InsertLineBelow, "insert_line_below", "Insert line below", "Editing", ["Ctrl+Enter"];
     MoveLineUp, "move_line_up", "Move line / selection up", "Editing", ["Alt+ArrowUp"];
     MoveLineDown, "move_line_down", "Move line / selection down", "Editing", ["Alt+ArrowDown"];
     Undo, "undo", "Undo", "Editing", ["Ctrl+Z"];
@@ -148,6 +152,9 @@ impl Action {
             | Self::Redo
             | Self::ToggleComment
             | Self::DuplicateLine
+            | Self::DeleteLine
+            | Self::InsertLineAbove
+            | Self::InsertLineBelow
             | Self::MoveLineUp
             | Self::MoveLineDown => {
                 "Applies to the focused source editor. Plain text fields keep their native editing controls."
@@ -690,6 +697,9 @@ impl VEditApp {
             }
             Action::ToggleComment
             | Action::DuplicateLine
+            | Action::DeleteLine
+            | Action::InsertLineAbove
+            | Action::InsertLineBelow
             | Action::MoveLineUp
             | Action::MoveLineDown => {
                 let Some(id) = self.tab().map(|tab| tab.id) else {
@@ -697,6 +707,7 @@ impl VEditApp {
                 };
                 self.context_native_undo_checkpoint(id);
                 let vim = self.settings.vim;
+                let indent = self.tab().unwrap().indentation(&self.settings).unit();
                 let Some(tab) = self.tab_mut().filter(|tab| !tab.loading) else {
                     return;
                 };
@@ -716,6 +727,13 @@ impl VEditApp {
                     Action::MoveLineUp | Action::MoveLineDown => {
                         editor::move_lines(&tab.text, selection, action == Action::MoveLineDown)
                     }
+                    Action::DeleteLine => editor::delete_lines(&tab.text, selection),
+                    Action::InsertLineAbove | Action::InsertLineBelow => editor::insert_line(
+                        &tab.text,
+                        selection,
+                        &indent,
+                        action == Action::InsertLineAbove,
+                    ),
                     _ => editor::duplicate_lines(&tab.text, selection),
                 };
                 if edit.text == tab.text {
@@ -729,6 +747,12 @@ impl VEditApp {
                 } else {
                     tab.vim.begin_external_edit(&tab.text);
                     tab.apply(edit);
+                    if matches!(
+                        action,
+                        Action::DeleteLine | Action::InsertLineAbove | Action::InsertLineBelow
+                    ) {
+                        tab.set_cursor(tab.selection.clone());
+                    }
                     tab.vim.notify_external_text_change();
                 }
             }
@@ -777,6 +801,9 @@ impl VEditApp {
                 | Action::Redo
                 | Action::ToggleComment
                 | Action::DuplicateLine
+                | Action::DeleteLine
+                | Action::InsertLineAbove
+                | Action::InsertLineBelow
                 | Action::MoveLineUp
                 | Action::MoveLineDown
         ) && !source

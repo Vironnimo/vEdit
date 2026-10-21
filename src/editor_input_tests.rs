@@ -488,6 +488,141 @@ fn vim_alt_edit_does_not_execute_its_generated_character_as_a_motion_or_search()
 }
 
 #[test]
+fn standard_line_delete_preserves_clipboard_and_native_undo() {
+    let original = "one\ntwo🦀\nthree";
+    let mut screen = harness(original, false);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("X".into()),
+            key(Key::K, egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT)),
+        ],
+    );
+    assert_eq!(text(&screen), "two🦀\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+    assert!(
+        screen
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .all(|command| !matches!(command, egui::OutputCommand::CopyText(_)))
+    );
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), "Xone\ntwo🦀\nthree");
+    events(&mut screen, [key(Key::Y, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), "two🦀\nthree");
+}
+
+#[test]
+fn standard_line_delete_remapping_retires_the_native_fallback() {
+    let mut screen = harness("one\ntwo", false);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::DeleteLine.id().into(),
+        Some("F9".into()),
+    );
+    events(
+        &mut screen,
+        [key(
+            Key::K,
+            egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+        )],
+    );
+    assert_eq!(text(&screen), "one\ntwo");
+    events(&mut screen, [key(Key::F9, egui::Modifiers::NONE)]);
+    assert_eq!(text(&screen), "two");
+}
+
+#[test]
+fn standard_line_insert_preserves_selected_text_and_indentation() {
+    for above in [false, true] {
+        let original = "  one🦀\nnext";
+        let mut screen = harness(original, false);
+        screen.state_mut().tab_mut().unwrap().set_cursor(3..5);
+        screen.run_steps(2);
+        let modifiers = if above {
+            egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT)
+        } else {
+            egui::Modifiers::CTRL
+        };
+        events(&mut screen, [key(Key::Enter, modifiers)]);
+        assert_eq!(
+            text(&screen),
+            if above {
+                "  \n  one🦀\nnext"
+            } else {
+                "  one🦀\n  \nnext"
+            }
+        );
+        assert_eq!(
+            screen.state().tab().unwrap().selection,
+            if above { 2..2 } else { 9..9 }
+        );
+        events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+        assert_eq!(text(&screen), original);
+    }
+}
+
+#[test]
+fn standard_line_edits_share_undo_across_editor_panes() {
+    for vim in [false, true] {
+        let mut screen = harness("one\ntwo", vim);
+        let left = screen.state().current_pane_id();
+        let right = screen
+            .state_mut()
+            .split_active(crate::cli::SplitOrientation::Vertical)
+            .unwrap();
+        screen.run_steps(2);
+        events(
+            &mut screen,
+            [key(
+                Key::K,
+                egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+            )],
+        );
+        assert_eq!(text(&screen), "two");
+        screen.state_mut().focus_editor_pane(left).unwrap();
+        screen.run_steps(2);
+        events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+        assert_eq!(text(&screen), "one\ntwo");
+        screen.state_mut().focus_editor_pane(right).unwrap();
+        screen.run_steps(2);
+        assert_eq!(text(&screen), "one\ntwo");
+    }
+}
+
+#[test]
+fn standard_line_actions_work_in_vim_visual_and_insert_modes() {
+    let original = "one\ntwo🦀\nthree";
+    let mut screen = harness(original, true);
+    events(&mut screen, [egui::Event::Text("Vj".into())]);
+    events(
+        &mut screen,
+        [key(
+            Key::K,
+            egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+        )],
+    );
+    assert_eq!(text(&screen), "three");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), original);
+    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+    screen.run_steps(2);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("i".into()),
+            key(Key::Enter, egui::Modifiers::CTRL),
+        ],
+    );
+    assert_eq!(text(&screen), "one\n\ntwo🦀\nthree");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Insert);
+    events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
+    assert_eq!(text(&screen), original);
+}
+
+#[test]
 fn move_line_shortcuts_follow_native_prefix_and_keep_the_moved_caret_undoable() {
     let mut screen = harness("one\ntwo🦀\nthree", false);
     events(

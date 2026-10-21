@@ -11,6 +11,8 @@ pub(super) enum Command {
     Redo,
     Comment,
     Duplicate,
+    DeleteLine,
+    InsertLine(bool),
     MoveLine(bool),
     Indent(bool),
     Newline,
@@ -71,6 +73,15 @@ pub(super) fn command(
         (keybindings::Action::Redo, Command::Redo),
         (keybindings::Action::ToggleComment, Command::Comment),
         (keybindings::Action::DuplicateLine, Command::Duplicate),
+        (keybindings::Action::DeleteLine, Command::DeleteLine),
+        (
+            keybindings::Action::InsertLineAbove,
+            Command::InsertLine(true),
+        ),
+        (
+            keybindings::Action::InsertLineBelow,
+            Command::InsertLine(false),
+        ),
         (keybindings::Action::MoveLineUp, Command::MoveLine(false)),
         (keybindings::Action::MoveLineDown, Command::MoveLine(true)),
     ] {
@@ -164,12 +175,12 @@ pub(super) fn take_command(
     bindings: &std::collections::BTreeMap<String, Option<String>>,
 ) -> Option<Command> {
     let mut events = ctx.input_mut(|input| std::mem::take(&mut input.events));
-    // Native TextEdit also implements the platform history keys. Once the
-    // user changes a binding, those retired aliases must stop reaching it.
+    // Native TextEdit also handles history and Ctrl+Shift+K (as kill-to-end).
+    // Once the user changes a binding, retired aliases must stop reaching it.
     // With Vim enabled, active history commands have already been consumed by
     // the Vim handler; retired aliases must not reach native Insert mode either.
     events
-        .retain(|event| command(event, history, bindings).is_some() || !native_history_key(event));
+        .retain(|event| command(event, history, bindings).is_some() || !native_command_key(event));
     let Some((index, action)) = events.iter().enumerate().find_map(|(index, event)| {
         command(event, history, bindings).map(|command| (index, command))
     }) else {
@@ -202,13 +213,14 @@ pub(super) fn take_command(
     Some(action)
 }
 
-fn native_history_key(event: &egui::Event) -> bool {
+fn native_command_key(event: &egui::Event) -> bool {
     matches!(event, egui::Event::Key {
-        key: Key::Z | Key::Y,
+        key,
         pressed: true,
         modifiers,
         ..
-    } if (modifiers.command || modifiers.ctrl) && !modifiers.alt)
+    } if (modifiers.command || modifiers.ctrl) && !modifiers.alt
+        && (matches!(key, Key::Z | Key::Y) || *key == Key::K && modifiers.shift))
 }
 
 impl VEditApp {

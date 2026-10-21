@@ -68,6 +68,16 @@ fn rail_menu_is_the_only_menu_entry_and_panel_navigation_remains_accessible() {
 fn welcome_menu_and_file_view_run_actions_work_at_the_native_minimum_size() {
     let mut welcome = harness(VEditApp::empty(egui::Context::default()), 500.0, 360.0);
     open_menu(&mut welcome, "File");
+    welcome
+        .get_by_label_contains("Settings Ctrl")
+        .scroll_to_me();
+    welcome.run_steps(3);
+    assert!(
+        welcome
+            .ctx
+            .content_rect()
+            .contains_rect(welcome.get_by_label_contains("Settings Ctrl").rect())
+    );
     welcome.get_by_label_contains("Settings Ctrl").click();
     welcome.run_steps(3);
     assert!(welcome.state().settings_open);
@@ -93,6 +103,21 @@ fn welcome_menu_and_file_view_run_actions_work_at_the_native_minimum_size() {
             _ => unreachable!(),
         }
     }
+
+    let mut screen = harness(fixture(), 500.0, 360.0);
+    let previous_vim = screen.state().settings.vim;
+    open_menu(&mut screen, "View");
+    screen.get_by_label("Vim motions").scroll_to_me();
+    screen.run_steps(3);
+    assert!(
+        screen
+            .ctx
+            .content_rect()
+            .contains_rect(screen.get_by_label("Vim motions").rect())
+    );
+    screen.get_by_label("Vim motions").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().settings.vim, !previous_vim);
 }
 
 #[test]

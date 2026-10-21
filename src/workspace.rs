@@ -499,7 +499,8 @@ impl ExplorerTree {
     }
 }
 
-fn path_score(path: &str, query: &str) -> Option<i64> {
+/// Rank a path and query normalized to lowercase with `/` separators.
+pub(crate) fn path_score(path: &str, query: &str) -> Option<i64> {
     let basename = path.rsplit('/').next().unwrap_or(path);
     let length_penalty = (path.len() as i64).min(2_000);
     if basename == query {

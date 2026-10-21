@@ -11,6 +11,15 @@ pub(super) struct ExplorerNavigationState {
     projects: HashMap<PathBuf, ProjectNavigation>,
     keyboard_menu: Option<(PathBuf, egui::Pos2)>,
     focus_requested: Option<PathBuf>,
+    pub(super) other_files: OtherFilesNavigation,
+}
+
+#[derive(Default)]
+pub(super) struct OtherFilesNavigation {
+    pub(super) selected: Option<u64>,
+    pub(super) scroll_to_selection: bool,
+    pub(super) page_rows: usize,
+    pub(super) menu: Option<(u64, Option<egui::Pos2>)>,
 }
 
 impl ExplorerNavigationState {
@@ -407,6 +416,10 @@ impl VEditApp {
             tab.focus = false;
         }
         let active = self.tab().and_then(|tab| tab.path.clone());
+        if self.project().is_some_and(Project::is_other_files) {
+            self.explorer_navigation.other_files.selected = self.tab().map(|tab| tab.id);
+            self.explorer_navigation.other_files.scroll_to_selection = true;
+        }
         if let Some(index) = self.explorer_index() {
             let state = self
                 .explorer_navigation
@@ -493,6 +506,10 @@ impl VEditApp {
             self.ctx
                 .memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
+        if self.project().is_some_and(Project::is_other_files) {
+            self.other_files_navigation_moves(moves);
+            return true;
+        }
         let Some((root, index)) = self
             .project()
             .map(|project| project.root.clone())
@@ -546,6 +563,62 @@ impl VEditApp {
             self.ctx.request_repaint();
         }
         true
+    }
+
+    fn other_files_navigation_moves(&mut self, moves: Vec<Move>) {
+        let Some(project) = self.project() else {
+            return;
+        };
+        let ids: Vec<_> = project.tabs.iter().map(|tab| tab.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let mut selected = self
+            .explorer_navigation
+            .other_files
+            .selected
+            .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+            .unwrap_or(project.active_tab.min(ids.len() - 1));
+        let page = self.explorer_navigation.other_files.page_rows.max(1);
+        let changed = !moves.is_empty();
+        for movement in moves {
+            match movement {
+                Move::Up => selected = selected.saturating_sub(1),
+                Move::Down => selected = (selected + 1).min(ids.len() - 1),
+                Move::First => selected = 0,
+                Move::Last => selected = ids.len() - 1,
+                Move::PageUp => selected = selected.saturating_sub(page),
+                Move::PageDown => selected = selected.saturating_add(page).min(ids.len() - 1),
+                Move::Open => {
+                    self.activate_tab(self.active_project, selected);
+                    self.focus_editor();
+                    break;
+                }
+                Move::Editor => {
+                    self.focus_editor();
+                    break;
+                }
+                Move::Menu => {
+                    self.explorer_navigation.other_files.menu = Some((ids[selected], None));
+                }
+                // A flat list has no folders, and these keys never rename or
+                // delete a loose file (or an unsaved draft) on disk.
+                Move::Parent | Move::Child | Move::Rename | Move::Delete => {}
+            }
+        }
+        self.explorer_navigation.other_files.selected = Some(ids[selected]);
+        self.explorer_navigation.other_files.scroll_to_selection |= changed;
+        if changed {
+            self.ctx.request_repaint();
+        }
+    }
+
+    pub(super) fn restore_other_files_list_focus(&mut self) {
+        if let Some(root) = self.project().map(|project| project.root.clone()) {
+            self.ctx
+                .memory_mut(|memory| memory.request_focus(focus_id(&root)));
+            self.explorer_navigation.focus_requested = Some(root);
+        }
     }
 
     pub(super) fn explorer_initialize(&mut self, index: &workspace::WorkspaceIndex) {

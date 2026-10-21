@@ -251,6 +251,7 @@ impl VEditApp {
         let Some(project) = self.project() else {
             return;
         };
+        let root = project.root.clone();
         let active = project.active_tab;
         let items: Vec<_> = project
             .tabs
@@ -266,31 +267,86 @@ impl VEditApp {
                 )
             })
             .collect();
+        self.explorer_register_focus(ui, &root);
+        if !items
+            .iter()
+            .any(|(_, id, _, _, _)| self.explorer_navigation.other_files.selected == Some(*id))
+        {
+            self.explorer_navigation.other_files.selected =
+                items.get(active).map(|(_, id, _, _, _)| *id);
+        }
+        self.explorer_navigation.other_files.page_rows =
+            (ui.available_height() / 44.0).floor().max(1.0) as usize;
+        let list_focused = self.explorer_keyboard_focused();
         let mut chosen = None;
         let mut close = None;
+        let mut reveal = None;
         egui::ScrollArea::vertical()
             .id_salt("other_files_list")
             .show(ui, |ui| {
                 for (index, id, title, path, dirty) in items {
+                    let menu_id = egui::Id::new(("other_files_context_menu", id));
                     let label = format!("{title}{}", if dirty { " •" } else { "" });
-                    let response = ui.selectable_label(index == active, &label);
+                    let selected = if list_focused || egui::Popup::is_id_open(&self.ctx, menu_id) {
+                        self.explorer_navigation.other_files.selected == Some(id)
+                    } else {
+                        index == active
+                    };
+                    let response = ui
+                        .push_id(id, |ui| ui.selectable_label(selected, &label))
+                        .inner
+                        .on_hover_text(path.as_deref().unwrap_or("Unsaved document"));
                     if response.clicked() {
+                        self.explorer_navigation.other_files.selected = Some(id);
                         chosen = Some(index);
                     }
-                    response
-                        .on_hover_text(path.as_deref().unwrap_or("Unsaved document"))
-                        .context_menu(|ui| {
-                            if ui.button("Close file").clicked() {
-                                close = Some(id);
-                                ui.close();
+                    if response.secondary_clicked() {
+                        self.explorer_navigation.other_files.selected = Some(id);
+                        self.explorer_navigation.other_files.menu = None;
+                    }
+                    if self.explorer_navigation.other_files.selected == Some(id)
+                        && self.explorer_navigation.other_files.scroll_to_selection
+                    {
+                        response.scroll_to_me(None);
+                        self.explorer_navigation.other_files.scroll_to_selection = false;
+                    }
+                    let mut popup = egui::Popup::context_menu(&response).id(menu_id);
+                    if let Some((target, position)) = self.explorer_navigation.other_files.menu
+                        && target == id
+                    {
+                        let opening = position.is_none();
+                        let position = position.unwrap_or_else(|| response.rect.left_bottom());
+                        if opening {
+                            egui::Popup::open_id(&self.ctx, menu_id);
+                            self.explorer_navigation.other_files.menu = Some((id, Some(position)));
+                        }
+                        if egui::Popup::is_id_open(&self.ctx, menu_id) {
+                            popup = popup.at_position(position);
+                        } else {
+                            self.explorer_navigation.other_files.menu = None;
+                            if !self.chrome_blocked() {
+                                self.restore_other_files_list_focus();
                             }
-                            if let Some(path) = &path
-                                && ui.button("Copy path").clicked()
-                            {
-                                ui.ctx().copy_text(path.clone());
-                                ui.close();
-                            }
-                        });
+                        }
+                    }
+                    popup.show(|ui| {
+                        if ui.button("Close file").clicked() {
+                            close = Some(id);
+                            ui.close();
+                        }
+                        if let Some(path) = &path
+                            && ui.button("Copy path").clicked()
+                        {
+                            ui.ctx().copy_text(path.clone());
+                            ui.close();
+                        }
+                        if let Some(path) = &path
+                            && ui.button("Reveal in Explorer").clicked()
+                        {
+                            reveal = Some(PathBuf::from(path));
+                            ui.close();
+                        }
+                    });
                     if let Some(path) = path {
                         ui.add(
                             egui::Label::new(RichText::new(path).small().color(MUTED)).truncate(),
@@ -304,6 +360,9 @@ impl VEditApp {
         }
         if let Some(id) = close {
             self.request_close(CloseAction::Tab(id));
+        }
+        if let Some(path) = reveal {
+            self.context_reveal(path);
         }
     }
 }
