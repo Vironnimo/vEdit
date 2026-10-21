@@ -50,11 +50,19 @@ impl VEditApp {
     }
 
     pub(super) fn can_reopen_closed_tab(&self) -> bool {
-        self.project()
-            .is_some_and(|project| !project.closed_tabs.is_empty())
+        !self.closed_other_files.is_empty()
+            || self
+                .project()
+                .is_some_and(|project| !project.closed_tabs.is_empty())
     }
 
     pub(super) fn reopen_closed_tab(&mut self) {
+        if self.project().is_none_or(|p| p.closed_tabs.is_empty())
+            && !self.closed_other_files.is_empty()
+        {
+            let index = self.ensure_other_files();
+            self.switch_project(index);
+        }
         let Some(closed) = self
             .project()
             .and_then(|project| project.closed_tabs.last())

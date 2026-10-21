@@ -423,10 +423,11 @@ impl VEditApp {
         let configurations = self.settings.language_servers.clone();
         let project_root = self
             .project()
-            .map(|project| project.root.clone())
+            .and_then(|project| project.folder_root().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
         let interpreter = self
             .project()
+            .filter(|project| !project.is_other_files())
             .map(|project| project.tasks.python_program(&project.root))
             .unwrap_or_else(|| "python".into());
         let mut changed = Vec::new();

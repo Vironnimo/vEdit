@@ -3,6 +3,73 @@ use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+#[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
+fn other_files_cli_round_trip_in_isolated_editor() {
+    let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
+    let root = std::env::temp_dir().join(format!(
+        "vedit-cli-round-trip-other-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture(root);
+    let endpoint = fixture.0.join("control");
+    let a = fixture.0.join("notes café.txt");
+    let b = fixture.0.join("other.txt");
+    fs::write(&a, "café 🦀").unwrap();
+    fs::write(&b, "second").unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.recovery_session_path = fixture.0.join("session.json");
+    app.control = Some(cli::Server::start_test(app.ctx.clone(), endpoint.clone()).unwrap());
+    let mut cli = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        command.args(args);
+        let output = run(&mut app, command, &endpoint);
+        (
+            output.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        )
+    };
+    let (code, opened) = cli(&["open", a.to_str().unwrap(), b.to_str().unwrap()]);
+    assert_eq!(code, 0, "{opened}");
+    assert!(opened["result"]["active_workspace"].is_null());
+    let tab = &opened["result"]["items"][0]["tab"];
+    assert!(tab["workspace"].is_null());
+    assert_eq!(tab["workspace_kind"], "other_files");
+    let (code, page) = cli(&["tabs", "--limit", "1"]);
+    assert_eq!(code, 0);
+    assert_eq!(page["result"]["total"], 2);
+    let next = page["result"]["next_offset"].to_string();
+    let (code, page2) = cli(&["tabs", "--limit", "1", "--offset", &next]);
+    assert_eq!(code, 0);
+    assert_ne!(
+        page["result"]["items"][0]["id"],
+        page2["result"]["items"][0]["id"]
+    );
+    let (code, missing) = cli(&["open", fixture.0.join("missing.txt").to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert_eq!(missing["result"]["items"][0]["ok"], false);
+    let (code, usage) = cli(&["open"]);
+    assert_ne!(code, 0);
+    assert_eq!(usage["error"]["code"], "invalid_arguments");
+    let (code, status) = cli(&["status"]);
+    assert_eq!(code, 0);
+    assert_eq!(status["result"]["active_workspace_kind"], "other_files");
+    assert!(
+        status["result"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    println!(
+        "Opened two loose files; workspace=null, workspace_kind=other_files; pagination, usage and missing-file errors verified."
+    );
+}
+
+#[test]
 #[cfg(windows)]
 #[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
 fn launch_cli_round_trip_in_isolated_editor() {

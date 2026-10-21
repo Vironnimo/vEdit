@@ -452,8 +452,11 @@ impl VEditApp {
         match name {
             "w" | "write" if argument.is_empty() => self.save_current(),
             "w" | "write" => {
-                if let (Some(tab), Some(project)) = (self.tab(), self.project()) {
-                    self.save_tab(tab.id, Some(project.root.join(argument.trim_matches('"'))));
+                if let Some(tab) = self.tab() {
+                    self.save_tab(
+                        tab.id,
+                        Some(self.document_directory().join(argument.trim_matches('"'))),
+                    );
                 }
             }
             "wa" | "wall" if argument.is_empty() => self.save_all(),
@@ -489,9 +492,7 @@ impl VEditApp {
             }
             "e" | "edit" if argument.is_empty() => self.reload_current(),
             "e" | "edit" => {
-                if let Some(project) = self.project() {
-                    self.open_file(project.root.join(argument.trim_matches('"')));
-                }
+                self.open_routed_file(self.document_directory().join(argument.trim_matches('"')));
             }
             "bn" | "bnext" if argument.is_empty() => {
                 self.run_shortcut_action(keybindings::Action::NextTab)
@@ -508,10 +509,10 @@ impl VEditApp {
                 };
                 match self.split_active(orientation) {
                     Ok(_) => {
-                        if !argument.is_empty()
-                            && let Some(project) = self.project()
-                        {
-                            self.open_file(project.root.join(argument.trim_matches('"')));
+                        if !argument.is_empty() {
+                            self.open_routed_file(
+                                self.document_directory().join(argument.trim_matches('"')),
+                            );
                         }
                     }
                     Err(error) => self.status(error, true),

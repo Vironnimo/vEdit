@@ -44,7 +44,7 @@ impl VEditApp {
         let Some(project) = self.projects.get_mut(index) else {
             return;
         };
-        if project.watcher.is_some() || project.watcher_starting {
+        if project.is_other_files() || project.watcher.is_some() || project.watcher_starting {
             return;
         }
         project.watcher_starting = true;
@@ -210,6 +210,10 @@ impl VEditApp {
     }
 
     pub(super) fn explorer(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            self.other_files_ui(ui);
+            return;
+        }
         let Some(root) = self.project().map(|project| project.root.clone()) else {
             return;
         };

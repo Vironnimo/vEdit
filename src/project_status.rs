@@ -168,6 +168,7 @@ impl VEditApp {
             .enumerate()
             .filter(|(index, project)| {
                 *index != self.active_project
+                    && !project.is_other_files()
                     && !project.git_loading
                     && project.git_indicator_request.is_none()
                     && project.last_git_refresh.elapsed() >= REFRESH_INTERVAL

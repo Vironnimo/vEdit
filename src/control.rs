@@ -271,7 +271,7 @@ impl VEditApp {
                 }
                 self.add_project(path);
                 self.raise_control_window();
-                json!({"applied":true,"workspace":self.project().map(|p|crate::paths::display(&p.root)),"indexing":self.project().is_some_and(|p|p.indexing)})
+                json!({"applied":true,"workspace":self.active_folder().map(crate::paths::display),"indexing":self.project().is_some_and(|p|p.indexing)})
             }
             Request::Panel { panel, visible } => {
                 match panel {
@@ -598,27 +598,20 @@ impl VEditApp {
         result["applied"] = json!(first.is_some());
         result["background"] = json!(background);
         result["active_tab"] = json!(self.tab().map(|t| t.id));
-        result["active_workspace"] = json!(self.project().map(|p| crate::paths::display(&p.root)));
+        result["active_workspace"] = json!(self.active_folder().map(crate::paths::display));
         result["review"] = json!(self.review);
         result
     }
 
-    /// The project a file belongs to: the deepest open project, unless the
-    /// file lies in a deeper Git working tree (e.g. a nested worktree), which
-    /// then opens as its own project. A file outside every project and
-    /// repository opens its folder. Only `background` keeps the visible project.
+    /// Share file routing with Open File and OS drops. Opening a file never
+    /// implicitly opens its repository or parent folder as a project.
     pub(super) fn control_file_project(&mut self, path: &Path, background: bool) -> usize {
-        let root = match path_owner(&self.projects, path) {
-            PathOwner::Project(index) => return index,
-            PathOwner::Repository(root) => root,
-            PathOwner::Outside => path.parent().unwrap_or(path).to_owned(),
-        };
-        if background {
-            return self.add_background_project(root);
+        let index = self.file_workspace(path);
+        if !background || self.projects.len() == 1 {
+            self.finish_insert_before_switch();
+            self.switch_project(index);
         }
-        self.finish_insert_before_switch();
-        self.add_project(root);
-        self.active_project
+        index
     }
 
     /// Leave Insert mode in the visible document before another project's
@@ -632,9 +625,8 @@ impl VEditApp {
         }
     }
 
-    /// Register a project without switching to it or changing the visible layout.
-    pub(super) fn add_background_project(&mut self, path: PathBuf) -> usize {
-        let root = fs::canonicalize(&path).unwrap_or(path);
+    /// Register a worker-resolved project without changing the visible layout.
+    pub(super) fn add_background_project(&mut self, root: PathBuf) -> usize {
         if let Some(index) = self.projects.iter().position(|p| p.root == root) {
             return index;
         }
@@ -651,7 +643,7 @@ impl VEditApp {
 
     /// Add a loading tab to `project` without activating it. In the visible
     /// project it joins the focused pane's tabs behind the current document.
-    fn open_background_tab(
+    pub(super) fn open_background_tab(
         &mut self,
         project: usize,
         path: PathBuf,
@@ -689,7 +681,7 @@ impl VEditApp {
     }
 
     fn control_status(&self) -> Value {
-        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.project().map(|p|crate::paths::display(&p.root)),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"workspaces":self.projects.iter().map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.languages.get("rust").is_some_and(|session|session.active()),"rust_analysis_error":p.languages.get("rust").and_then(|session|session.error.as_ref()),"languages":p.language_status_json(),"task":{"status":p.run.status,"running":p.run.task.is_some()},"unread_notifications":self.notifications.unread_for(&p.root)})).take(100).collect::<Vec<_>>(),"caller_workspace":self.control_caller.as_deref().and_then(|caller| containing_project(&self.projects, caller)).map(|index| crate::paths::display(&self.projects[index].root)),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":self.project().map_or(json!({"status":"Ready","running":false}), |p| json!({"status":p.run.status,"running":p.run.task.is_some()})),"notifications":self.notifications.status_json(&self.projects),"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"sidebars":self.sidebars_status(),"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
+        json!({"protocol":1,"pid":std::process::id(),"session":std::process::id().to_string(),"version":env!("CARGO_PKG_VERSION"),"active_tab":self.tab().map(|t|t.id),"active_workspace":self.active_folder().map(crate::paths::display),"file_jobs":self.context_file_jobs_status(),"vim_default":self.settings.vim,"settings":self.settings,"layout":self.layout_status(),"active_workspace_kind":self.project().map(|p|p.kind),"workspaces":self.projects.iter().filter(|p|!p.is_other_files()).map(|p|json!({"path":crate::paths::display(&p.root),"indexing":p.indexing,"index_error":p.index_error,"rust_analysis_ready":p.languages.get("rust").is_some_and(|session|session.active()),"rust_analysis_error":p.languages.get("rust").and_then(|session|session.error.as_ref()),"languages":p.language_status_json(),"task":{"status":p.run.status,"running":p.run.task.is_some()},"unread_notifications":self.notifications.unread_for(&p.root)})).take(100).collect::<Vec<_>>(),"caller_workspace":self.control_caller.as_deref().and_then(|caller| containing_project(&self.projects, caller)).map(|index| crate::paths::display(&self.projects[index].root)),"tabs":self.control_tabs(100,0),"review":self.review,"agent_marks":{"total":self.agent_marks.items.len(),"last_batch_id":self.agent_marks.last_batch().map(|batch|batch.id),"delivery_pending":self.agent_marks.last_batch().is_some_and(|batch|!batch.acknowledged),"restore_count":self.agent_marks.restore_count()},"dialog":self.control_dialog(),"task":self.project().map_or(json!({"status":"Ready","running":false}), |p| json!({"status":p.run.status,"running":p.run.task.is_some()})),"notifications":self.notifications.status_json(&self.projects),"panels":{"sidebar":self.sidebar,"sidebar_visible":self.sidebar_visible,"sidebars":self.sidebars_status(),"output":self.output_visible,"problems":self.problems_visible,"settings":self.settings_open}})
     }
     fn control_tabs(&self, limit: usize, offset: usize) -> Value {
         let total = self.projects.iter().map(|p| p.tabs.len()).sum::<usize>();
@@ -734,7 +726,7 @@ impl VEditApp {
         } else {
             self.context_native_history(tab.id)
         };
-        json!({"id":tab.id,"path":tab.path.as_ref().map(|p|crate::paths::display(p)),"title":tab.title,"workspace":crate::paths::display(&self.projects[project].root),"active":project==self.active_project && index==self.projects[project].active_tab,"view":tab.agent_view,"loading":tab.loading,"saving":tab.saving,"dirty":tab.dirty,"disk_conflict":tab.disk_conflict.is_some(),"autosave_paused":tab.agent_unsaved,"file_operation_pending":tab.path.as_ref().is_some_and(|path|self.context_file_path_pending(path)),"mode":if self.settings.vim{format!("{:?}",tab.vim.mode).to_lowercase()}else{"native".into()},"revision":tab.revision,"error":tab.error,"location":{"line":line,"column":column},"location_pending":tab.pending_agent_location,"location_error":tab.agent_location_error,"annotation_count":tab.annotations.len(),"annotations":annotations,"annotations_truncated":tab.annotations.len()>20,"annotations_stale":tab.annotations_revision.is_some_and(|revision|revision!=tab.revision),"can_undo":can_undo,"can_redo":can_redo})
+        json!({"id":tab.id,"path":tab.path.as_ref().map(|p|crate::paths::display(p)),"title":tab.title,"workspace":self.projects[project].folder_root().map(crate::paths::display),"workspace_kind":self.projects[project].kind,"active":project==self.active_project && index==self.projects[project].active_tab,"view":tab.agent_view,"loading":tab.loading,"saving":tab.saving,"dirty":tab.dirty,"disk_conflict":tab.disk_conflict.is_some(),"autosave_paused":tab.agent_unsaved,"file_operation_pending":tab.path.as_ref().is_some_and(|path|self.context_file_path_pending(path)),"mode":if self.settings.vim{format!("{:?}",tab.vim.mode).to_lowercase()}else{"native".into()},"revision":tab.revision,"error":tab.error,"location":{"line":line,"column":column},"location_pending":tab.pending_agent_location,"location_error":tab.agent_location_error,"annotation_count":tab.annotations.len(),"annotations":annotations,"annotations_truncated":tab.annotations.len()>20,"annotations_stale":tab.annotations_revision.is_some_and(|revision|revision!=tab.revision),"can_undo":can_undo,"can_redo":can_redo})
     }
     fn control_find_tab(&self, id: u64) -> Option<(usize, usize)> {
         self.projects.iter().enumerate().find_map(|(project, p)| {
@@ -838,38 +830,6 @@ fn control_observation(request: &Request) -> bool {
         _ => false,
     }
 }
-pub(super) enum PathOwner {
-    /// The deepest open project containing the path.
-    Project(usize),
-    /// A Git working tree deeper than every open project containing the path.
-    Repository(PathBuf),
-    Outside,
-}
-
-/// Route a canonical path. Walks parent folders for `.git` (a directory, or
-/// the file a linked worktree has); no subprocess, so it is safe on the GUI thread.
-pub(super) fn path_owner(projects: &[Project], path: &Path) -> PathOwner {
-    let deepest = projects
-        .iter()
-        .enumerate()
-        .filter(|(_, project)| path.starts_with(&project.root))
-        .max_by_key(|(_, project)| project.root.components().count());
-    let repository = path
-        .ancestors()
-        .skip(1)
-        .take_while(|folder| {
-            deepest.is_none_or(|(_, project)| {
-                folder.components().count() > project.root.components().count()
-            })
-        })
-        .find(|folder| fs::symlink_metadata(folder.join(".git")).is_ok());
-    match (repository, deepest) {
-        (Some(root), _) => PathOwner::Repository(root.to_owned()),
-        (None, Some((index, _))) => PathOwner::Project(index),
-        (None, None) => PathOwner::Outside,
-    }
-}
-
 /// Canonicalize the deepest existing ancestor of a path that may not exist yet,
 /// so it compares with canonical project roots.
 pub(super) fn canonical_target(path: &Path) -> PathBuf {

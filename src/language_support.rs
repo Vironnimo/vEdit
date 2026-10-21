@@ -244,6 +244,10 @@ impl VEditApp {
         }
     }
     pub(super) fn restart_active_language(&mut self) {
+        if self.active_folder().is_none() {
+            self.status("Open a project folder to use language analysis.", false);
+            return;
+        }
         let language = self
             .tab()
             .and_then(|tab| tab.path.as_deref())
@@ -348,6 +352,9 @@ impl VEditApp {
         Some(LanguageAnalysisStatus { label:"Analysis: not configured".into(), hint:"Syntax highlighting and editing work without a server. Add this language's server in Settings → Languages for diagnostics, completion and definitions.".into(),color:MUTED })
     }
     pub(super) fn rust_analysis_status_ui(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            return;
+        }
         let Some(status) = self.rust_analysis_status() else {
             return;
         };
@@ -357,6 +364,13 @@ impl VEditApp {
         }
     }
     pub(super) fn language_request_unavailable(&mut self) {
+        if self.project().is_some_and(Project::is_other_files) {
+            self.status(
+                "Open the file's project folder to use language analysis.",
+                false,
+            );
+            return;
+        }
         if let Some(status) = self.rust_analysis_status() {
             self.status(status.hint, status.color == ORANGE);
         } else {
@@ -367,6 +381,9 @@ impl VEditApp {
         }
     }
     pub(super) fn language_controls_ui(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            return;
+        }
         let relevant: Vec<_> = self
             .settings
             .language_servers
@@ -427,6 +444,9 @@ impl VEditApp {
     }
     pub(super) fn sync_languages(&mut self, force: bool) {
         for project in &mut self.projects {
+            if project.is_other_files() {
+                continue;
+            }
             let removed: Vec<_> = project
                 .languages
                 .iter()

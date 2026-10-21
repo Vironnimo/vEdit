@@ -184,7 +184,7 @@ impl VEditApp {
             .and_then(|open| control::containing_project(&self.projects, &open.path))
         {
             (Some(index), "open_path")
-        } else if self.project().is_some() {
+        } else if self.active_folder().is_some() {
             (Some(self.active_project), "active_project")
         } else {
             (None, "none")

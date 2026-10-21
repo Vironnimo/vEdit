@@ -78,3 +78,16 @@ Primary native integration references:
 - <https://learn.microsoft.com/en-us/windows/win32/dwm/customframe>
 - <https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-nchittest>
 - <https://learn.microsoft.com/windows/apps/desktop/modernize/apply-snap-layout-menu>
+
+## File drops
+
+OLE drag callbacks publish `CursorMoved` before hover/drop events and during
+`DragOver`, converting the supplied screen point with `ScreenToClient`. OLE owns
+the pointer during a shell drag, so ordinary `WM_MOUSEMOVE` does not reliably
+update egui's pointer. vEdit uses these physical client coordinates for its drop
+overlay and split-pane targeting; egui applies the window's DPI scale.
+Preserve this forwarding until upstream supplies equivalent drop coordinates.
+Native Explorer drops and mixed-DPI targeting still need desktop verification.
+The local COM vtable signatures also pass `POINTL` by value, as specified by
+[`IDropTarget::DragOver`](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragover).
+The upstream declarations used a pointer for this previously unused argument.

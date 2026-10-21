@@ -478,6 +478,12 @@ impl VEditApp {
         action: Action,
         reply: Option<mpsc::Sender<Response>>,
     ) -> Option<Response> {
+        if self.projects.get(index).is_none_or(Project::is_other_files) {
+            return Some(Response::failure(
+                "no_workspace",
+                "Open a project folder to use application launches.",
+            ));
+        }
         if !matches!(action, Action::List | Action::Output { .. })
             && let Some(dialog) = self.control_dialog()
         {
@@ -565,6 +571,9 @@ impl VEditApp {
 
     pub(super) fn poll_launches(&mut self) {
         for index in 0..self.projects.len() {
+            if self.projects[index].is_other_files() {
+                continue;
+            }
             self.projects[index].launch.poll_task();
             let ready = self.projects[index].launch.pending.as_ref().and_then(|p| {
                 match p.receiver.try_recv() {

@@ -1,6 +1,8 @@
-# vEdit 0.5.0
+# vEdit 0.5.1
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.5.1 ergänzt **Other files** neben den Projekt-Tabs und Drag-and-drop aus dem Windows-Explorer. Einzelne Dateien außerhalb geöffneter Projekte bleiben dort mit eigenen Tabs und Splits erhalten, ohne ihren Ordner zum Projekt zu machen. Dateien und ungespeicherte Entwürfe werden beim nächsten Start wiederhergestellt.
 
 Version 0.5.0 ist ein größeres Paket für die Arbeit neben KI-Agenten. Ändert ein Agent eine offene Datei auf der Festplatte, lädt vEdit saubere Dateien rückgängig machbar nach und hält Cursor und Scrollposition in allen Ansichten an derselben Textstelle; bei ungespeicherten eigenen Änderungen bietet ein Banner **Compare**, **Use disk version**, **Keep my version** und **Save as** an. Der Rand zeigt Änderungen gegenüber `HEAD` mit Vorschau und **Revert change**; aus Diffs heraus lassen sich Kommentare als Agent-Markierungen anlegen. `vedit-cli` findet das passende Projekt jetzt über das Arbeitsverzeichnis des aufrufenden Agenten, und Agents können mit `notify` Hinweise in vEdit hinterlassen. Neu sind außerdem Hover-Dokumentation, Referenzsuche und Symbolsuche (**Shift+F12**, `@`, **Ctrl+T**), eine Problems-Liste mit **F8**, Vor/Zurück-Navigation mit **Alt+←/→**, automatisch aktualisierter Explorer, klickbare Fundstellen in der Ausgabe, weitere Vim-Befehle sowie robustere Git-Aufrufe, Wiederherstellung und Hintergrundarbeit.
 
@@ -66,6 +68,16 @@ Beim ersten Start mit **Ctrl+Shift+O** Projektordner hinzufügen. **Ctrl+O**, da
 Die Projekt-Tabs sitzen oben neben dem Namen der App und wechseln per Klick direkt zum Projekt. Ein gelber Punkt direkt hinter dem Namen zeigt uncommittete Git-Änderungen; der Tooltip nennt die Anzahl. Saubere Projekte erhalten keinen Punkt. Auch inaktive Projekte werden im Hintergrund aktualisiert. Viele Projekte lassen sich horizontal durchscrollen; Tastenkürzel machen den aktiven Tab sichtbar. Der **+**-Knopf beziehungsweise **Ctrl+Alt+P** öffnet die durchsuchbare Projektliste; Namen, Pfade sowie offene und geänderte Dateien helfen bei der Auswahl. Pfeiltasten und **Enter** wechseln direkt zum Projekt, **Esc** schließt die Liste. **Ctrl+Alt+PageDown** / **Ctrl+Alt+PageUp** wechseln zum nächsten beziehungsweise vorherigen offenen Projekt. Jedes Projekt besitzt eigene Tab-Leisten, Ansichten und Splits, die beim Wechsel zusammen mitwechseln und nach einem Neustart wiederhergestellt werden. Die Dateien bleiben geöffnet und ungespeicherte Änderungen erhalten. Weitere Projektordner lassen sich über die Liste mit dem nativen Dialog hinzufügen. Im Explorer steht der aktive Projektname als feste Überschrift über seinem Dateibaum.
 
 Ein Rechtsklick auf einen Projekt-Tab (oder **Shift+F10** bei Tastaturfokus) öffnet **Reveal in Explorer**, **Copy path** und **Close project**. Die Aktionen gelten für den angeklickten Tab, ohne zuvor das aktive Projekt zu wechseln. **Close project** entfernt das Projekt aus der Sitzung; der Ordner und seine Dateien bleiben auf dem Datenträger. Bei ungespeicherten Änderungen fragt vEdit vor dem Schließen nach.
+
+### Einzelne Dateien und Drag-and-drop
+
+Dateien aus dem Windows-Explorer lassen sich in vEdit ziehen, auch mehrere auf einmal. Die Markierung zeigt den Zielbereich; in einem geteilten Editor öffnet vEdit Dateien desselben Arbeitsbereichs im Bereich unter der Maus. Dateien aus einem geöffneten Projekt landen in dessen Tabs, andere im Bereich **Other files** neben den Projekten. Bereits offene Dokumente werden wiederverwendet; ungespeicherter Text bleibt erhalten. **Ctrl+O**, Startargumente und `vedit-cli open` verwenden dieselbe Zuordnung. Ein vorhandenes Dokument behält seinen Arbeitsbereich, auch wenn später sein Ordner als Projekt geöffnet wird.
+
+Ein hineingezogener Ordner wird als Projekt hinzugefügt. Bei einer gemeinsamen Auswahl von Dateien und Ordnern werden zuerst die Ordner hinzugefügt und dann die Dateien zugeordnet. Die Daten auf dem Datenträger werden durch einen Drop weder verschoben noch kopiert. Nicht lesbare oder nicht unterstützte Dateien melden einen Fehler; andere Dateien der Auswahl werden trotzdem geöffnet.
+
+**Other files** erscheint mit der ersten losen Datei. Die Seitenleiste zeigt die geöffneten Dateien mit ihren Pfaden; der Bereich besitzt eigene Tabs und Splits. Beim Neustart werden Dateien, Entwürfe, Cursor und Ansichten wiederhergestellt. Projektweite Suche, Git, Sprachserver und Run gehören zu regulären Projekten; Textbearbeitung, Syntaxfarben, Markdown-Vorschau, Suchen in der Datei, Speichern und Konfliktschutz funktionieren auch hier. **Ctrl+N** ohne geöffneten Bereich erstellt dort ein unbenanntes Dokument.
+
+Nach dem Schließen der letzten Datei verschwindet **Other files**. **Reopen closed file** kann die letzte gespeicherte Datei in derselben Sitzung wieder öffnen. Das Schließen eines regulären Projekts lässt andere Arbeitsbereiche offen. Ungespeicherte Änderungen werden vor dem Schließen abgefragt.
 
 ## Arbeiten im Editor
 
@@ -306,7 +318,7 @@ Tab- und Bereichs-IDs kommen aus den Antworten und gelten für den laufenden App
 
 Mehrere Agenten können gleichzeitig in verschiedenen Projekten oder Git-Worktrees arbeiten. Projektbefehle wie `task`, `output`, `search`, `launch`, `git-status` und `review --working` verwenden das mit `--workspace` genannte Projekt, sonst das offene Projekt, in dessen Ordner der Agent den Befehl ausführt, und erst danach das sichtbare Projekt. Ein in ein anderes Projekt verschachtelter Worktree hat dabei Vorrang. Jede Antwort nennt das verwendete Projekt; das sichtbare Projekt wechselt dadurch nicht. Jedes Projekt hat seine eigene Aufgabe und Ausgabe, der Bereich **Output** zeigt die des sichtbaren Projekts.
 
-`open` ordnet eine Datei dem tiefsten offenen Projekt zu, das sie enthält. Liegt sie in einem tiefer verschachtelten Git-Worktree, öffnet vEdit diesen als eigenes Projekt; außerhalb aller Projekte wird ihr Repository geöffnet, sonst ihr Ordner. Mit `--background` bleiben bei `open` und `review` das sichtbare Projekt, das aktuelle Dokument samt Cursor und der Tastaturfokus unverändert, und das Fenster kommt nicht nach vorn. Die Dateien warten als Tabs in ihrem Projekt.
+`open` verwendet bereits offene Dokumente wieder. Neue Dateien landen im tiefsten offenen Projekt, das sie enthält, oder in **Other files**; Repository und übergeordneter Ordner werden dabei nicht automatisch geöffnet. Mit `--background` bleiben bei `open` und `review` der sichtbare Arbeitsbereich, das aktuelle Dokument samt Cursor und der Tastaturfokus unverändert, und das Fenster kommt nicht nach vorn. Die Dateien warten als Tabs in ihrem Arbeitsbereich. Tabs in **Other files** melden `workspace:null` und `workspace_kind:"other_files"`; Dokumentbefehle verwenden weiterhin ihre Tab-ID.
 
 `notify` meldet dem Benutzer, dass ein Agent fertig ist, nicht weiterkommt oder eine Entscheidung braucht:
 

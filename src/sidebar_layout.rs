@@ -207,7 +207,7 @@ impl VEditApp {
     }
 
     pub(super) fn sidebar_view_visible(&self, view: SidebarView) -> bool {
-        self.sidebar_layout.open_views.contains(&view)
+        self.sidebar_views(self.sidebar_side(view)).contains(&view)
             && self
                 .visible_sidebar_sides()
                 .contains(&self.sidebar_side(view))
@@ -219,6 +219,16 @@ impl VEditApp {
     }
 
     fn sidebar_views(&self, side: Side) -> Vec<SidebarView> {
+        if self.project().is_some_and(Project::is_other_files) {
+            return [SidebarView::Explorer, SidebarView::Review]
+                .into_iter()
+                .filter(|view| {
+                    self.sidebar_side(*view) == side
+                        && (*view == SidebarView::Explorer
+                            || self.sidebar_layout.open_views.contains(view))
+                })
+                .collect();
+        }
         self.sidebar_layout
             .open_views
             .iter()
@@ -340,10 +350,18 @@ impl VEditApp {
         if self.projects.is_empty() {
             return sides;
         }
-        if self.sidebar_visible && !self.sidebar_layout.collapsed[0] {
+        if self.sidebar_visible
+            && !self.sidebar_layout.collapsed[0]
+            && !(self.project().is_some_and(Project::is_other_files)
+                && self.sidebar_views(Side::Left).is_empty())
+        {
             sides.push(Side::Left);
         }
-        if self.sidebar_layout.right_visible && !self.sidebar_layout.collapsed[1] {
+        if self.sidebar_layout.right_visible
+            && !self.sidebar_layout.collapsed[1]
+            && !(self.project().is_some_and(Project::is_other_files)
+                && self.sidebar_views(Side::Right).is_empty())
+        {
             sides.push(Side::Right);
         }
         sides
@@ -812,6 +830,11 @@ impl VEditApp {
                         ui.separator();
                     }
                     for view in VIEWS {
+                        if self.project().is_some_and(Project::is_other_files)
+                            && matches!(view, SidebarView::Search | SidebarView::SourceControl)
+                        {
+                            continue;
+                        }
                         if self.sidebar_side(view) == side
                             && selected != Some(view)
                             && ui.button(format!("Show {}", view.title())).clicked()
@@ -934,7 +957,7 @@ impl VEditApp {
             ui.close();
         }
         ui.separator();
-        if ui.button("Refresh project").clicked() {
+        if self.active_folder().is_some() && ui.button("Refresh project").clicked() {
             self.index_project(self.active_project);
             if view == SidebarView::SourceControl {
                 self.refresh_git_history(self.active_project);

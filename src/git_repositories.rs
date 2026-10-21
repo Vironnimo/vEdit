@@ -1248,7 +1248,7 @@ impl VEditApp {
         self.fill_project_headlines();
         let mut seeds: Vec<(String, PathBuf)> = Vec::new();
         let mut open: HashMap<String, Option<String>> = HashMap::new();
-        for project in &self.projects {
+        for project in self.projects.iter().filter(|p| !p.is_other_files()) {
             open.entry(path_key(&project.root)).or_default();
             if let Some(summary) = &project.git_summary {
                 let key = path_key(&summary.repository);

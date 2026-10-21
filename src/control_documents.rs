@@ -339,26 +339,13 @@ impl VEditApp {
                         "The new document path already exists; open it instead. Nothing was created",
                     );
                 }
-                if self.projects.is_empty() {
-                    self.add_project(
-                        std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
-                    );
-                }
-                // A named document belongs to the project that will contain
-                // it, like `open`; a path outside every project and
-                // repository stays in the visible project.
                 if let Some(path) = &path {
-                    match super::path_owner(&self.projects, &super::canonical_target(path)) {
-                        super::PathOwner::Project(index) if index != self.active_project => {
-                            self.finish_insert_before_switch();
-                            self.switch_project(index);
-                        }
-                        super::PathOwner::Repository(root) => {
-                            self.finish_insert_before_switch();
-                            self.add_project(root);
-                        }
-                        _ => {}
-                    }
+                    let index = self.file_workspace(&super::canonical_target(path));
+                    self.finish_insert_before_switch();
+                    self.switch_project(index);
+                } else if self.projects.is_empty() {
+                    let index = self.ensure_other_files();
+                    self.switch_project(index);
                 }
                 let title = title
                     .or_else(|| {

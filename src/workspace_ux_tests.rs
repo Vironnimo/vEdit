@@ -246,7 +246,12 @@ fn review_distinguishes_identical_relative_paths_across_projects() {
 #[test]
 fn welcome_actions_shortcuts_and_version_fit_the_minimum_window() {
     let screen = harness(fixture(0));
-    for label in ["Open a project folder", "Commands at your fingertips"] {
+    for label in [
+        "Open a project folder",
+        "Open a file",
+        "Or drop files and folders here",
+        "Commands at your fingertips",
+    ] {
         let rect = screen.get_by_label(label).rect();
         assert!(
             rect.top() >= 47.0 && rect.bottom() < 613.0,

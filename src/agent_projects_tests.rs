@@ -162,38 +162,23 @@ fn project_commands_use_the_named_then_the_callers_then_the_visible_project() {
 }
 
 #[test]
-fn a_file_in_a_nested_worktree_opens_as_that_worktrees_project() {
+fn files_use_open_projects_and_other_files_without_discovering_repositories() {
     let folders = Folders::new();
     let mut app = folders.app(&["A"]);
-    let main = open(&mut app, folders.path("A/main.md"), false);
-    assert!(main.ok, "{:?}", main.error);
+    assert!(open(&mut app, folders.path("A/main.md"), false).ok);
+    assert!(open(&mut app, folders.path("A/wt/src/lib.md"), false).ok);
     assert_eq!(app.projects.len(), 1);
-    let nested = open(&mut app, folders.path("A/wt/src/lib.md"), false);
-    assert!(nested.ok, "{:?}", nested.error);
+    assert_eq!(app.active_project, 0);
+    assert!(open(&mut app, folders.path("R/sub/x.md"), false).ok);
+    assert!(app.project().unwrap().is_other_files());
+    assert!(open(&mut app, folders.path("C/loose.md"), false).ok);
     assert_eq!(app.projects.len(), 2);
-    assert_eq!(app.projects[1].root, folders.path("A/wt"));
-    assert_eq!(app.active_project, 1);
-    assert_eq!(
-        app.tab().unwrap().path.as_deref(),
-        Some(folders.path("A/wt/src/lib.md").as_path())
-    );
-    // Once open, the worktree project owns its files.
-    assert!(matches!(
-        control::path_owner(&app.projects, &folders.path("A/wt/src/lib.md")),
-        control::PathOwner::Project(1)
-    ));
-    // Outside every project: the repository, else the folder.
-    assert!(matches!(
-        control::path_owner(&app.projects, &folders.path("R/sub/x.md")),
-        control::PathOwner::Repository(root) if root == folders.path("R")
-    ));
-    assert!(matches!(
-        control::path_owner(&app.projects, &folders.path("C/loose.md")),
-        control::PathOwner::Outside
-    ));
-    let loose = open(&mut app, folders.path("C/loose.md"), false);
-    assert!(loose.ok);
-    assert_eq!(app.projects[app.active_project].root, folders.path("C"));
+    assert_eq!(app.project().unwrap().tabs.len(), 2);
+    let status = app.control_request(Request::Status {});
+    assert!(status.result["active_workspace"].is_null());
+    assert_eq!(status.result["active_workspace_kind"], "other_files");
+    assert_eq!(status.result["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(status.result["layout"]["workspace_kind"], "other_files");
 }
 
 #[test]
@@ -214,16 +199,15 @@ fn a_new_named_draft_joins_the_project_that_will_contain_it() {
         path: Some(folders.path("A/wt/src/new.md")),
     });
     assert!(nested.ok, "{:?}", nested.error);
-    assert_eq!(app.projects[app.active_project].root, folders.path("A/wt"));
-    // Outside every project and repository the draft stays where the user is.
-    let visible = app.active_project;
+    assert_eq!(app.projects[app.active_project].root, folders.path("A"));
+    // A named draft outside open projects belongs to Other files.
     let outside = app.control_request(Request::New {
         title: None,
         text: String::new(),
         path: Some(folders.path("C/missing/new.md")),
     });
     assert!(outside.ok, "{:?}", outside.error);
-    assert_eq!(app.active_project, visible);
+    assert!(app.project().unwrap().is_other_files());
 }
 
 #[test]
@@ -246,10 +230,10 @@ fn background_open_keeps_the_users_project_document_and_cursor() {
     assert!(same.ok);
     assert_eq!(
         app.active_project, 0,
-        "a new worktree project is added quietly"
+        "the existing project keeps its visible document"
     );
-    assert_eq!(app.projects.len(), 3);
-    assert_eq!(app.projects[2].root, folders.path("A/wt"));
+    assert_eq!(app.projects.len(), 2);
+    assert_eq!(app.projects[0].tabs.len(), 2);
     let behind = app.control_request(Request::Open {
         files: vec![OpenFile::source(folders.path("A/.git/HEAD"))],
         background: true,

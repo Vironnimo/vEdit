@@ -1,6 +1,27 @@
 use super::*;
 use egui_kittest::Harness;
 
+#[test]
+fn loose_file_does_not_open_its_parent_as_a_project() {
+    let fixture = Fixture::new("loose-file");
+    let path = fixture.write("notes.txt", "notes");
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.open_argument(path.clone());
+    wait_until(&mut app, |app| app.tab().is_some_and(|tab| !tab.loading));
+    assert_eq!(app.tab().unwrap().path.as_ref(), Some(&path));
+    assert_ne!(app.project().unwrap().root, fixture.0);
+    assert!(!app.project().unwrap().indexing);
+    assert!(app.project().unwrap().explorer.is_none());
+}
+
+#[test]
+fn new_file_without_project_opens_an_untitled_document() {
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.new_file();
+    assert!(app.picker.is_none());
+    assert!(app.tab().is_some_and(|tab| tab.path.is_none()));
+}
+
 struct Fixture(PathBuf);
 
 impl Fixture {

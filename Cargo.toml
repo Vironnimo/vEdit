@@ -1,6 +1,6 @@
 [package]
 name = "vedit"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "A calm, multi-project code editor for Windows"
 license = "MIT"
@@ -36,7 +36,7 @@ egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
 egui-wgpu = { version = "0.36.2", default-features = false }
 
 [patch.crates-io]
-# Windows mixed-DPI dragging and custom chrome: see vendor/winit/VEDIT_PATCH.md.
+# Windows mixed-DPI dragging, custom chrome and file-drop coordinates: see vendor/winit/VEDIT_PATCH.md.
 winit = { path = "vendor/winit" }
 
 [profile.release]

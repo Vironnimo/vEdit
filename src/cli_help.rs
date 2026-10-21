@@ -33,7 +33,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "open",
         "PATH...",
         "Open files in the window; preserves unsaved text.",
-        "Clean open buffers refresh from disk. loading:true is pending; inspect tabs until loading:false and error:null.\nOmit view flags for source. Omit --line to preserve the cursor or reveal the first annotation.\nA file opens in the deepest open project containing it. A deeper Git working tree (a nested worktree) opens as its own project; a file outside every project opens its repository, else its folder.\nRelative paths use the working directory. Starts the sibling vedit.exe if needed, except with --background.",
+        "Clean open buffers refresh from disk. loading:true is pending; inspect tabs until loading:false and error:null.\nOmit view flags for source. Omit --line to preserve the cursor or reveal the first annotation.\nReuses an existing buffer. Otherwise opens in the deepest open project containing the file, or Other files without opening a folder. Tabs in Other files have workspace:null and workspace_kind:other_files.\nRelative paths use the working directory. Starts the sibling vedit.exe if needed, except with --background.",
         [
             "--line",
             "--column",
@@ -60,7 +60,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "status",
         "",
         "Read session, projects, pending work and visible layout.",
-        "Includes a bounded tab page, file jobs, dialogs and task state. Use tabs for further pages.\nTab/pane IDs last for this app process. Each project keeps its own layout; active_workspace is the visible project.",
+        "Includes a bounded tab page, file jobs, dialogs and task state. Use tabs for further pages.\nTab/pane IDs last for this app process. Each project and Other files keeps its own layout; active_workspace is the visible folder path or null. active_workspace_kind is project or other_files; workspaces lists folder projects.",
         []
     ),
     command!(
@@ -137,7 +137,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "new",
         "[TITLE]",
         "Create an unsaved draft and return its tab ID/revision.",
-        "Creation does not write a file. Omit TITLE for the editor's default title.\nText files accept UTF-8 (with/without BOM) or UTF-16 with BOM, at most 1 MiB encoded/decoded. Omit --file for an empty draft.",
+        "Creation does not write a file. Omit TITLE for the editor's default title. Named drafts use the containing open project or Other files. Untitled drafts use the visible area, or Other files when none is open.\nText files accept UTF-8 (with/without BOM) or UTF-16 with BOM, at most 1 MiB encoded/decoded. Omit --file for an empty draft.",
         ["--file", "--path"]
     ),
     command!(

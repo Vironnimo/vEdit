@@ -330,6 +330,10 @@ impl VEditApp {
             }
         });
         design::menu(ui, "Run", "Build, test and run commands", |ui| {
+            if self.active_folder().is_none() {
+                ui.label("Open a project folder to run commands.");
+                return;
+            }
             for (name, action) in [
                 ("Run application", keybindings::Action::RunApplication),
                 ("Stop application", keybindings::Action::StopApplication),

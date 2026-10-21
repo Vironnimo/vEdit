@@ -5,7 +5,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::core::{IUnknown, GUID, HRESULT};
-use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
+use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINT, POINTL, S_OK};
+use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
@@ -17,7 +18,7 @@ use crate::platform_impl::platform::definitions::{
 };
 use crate::platform_impl::platform::WindowId;
 
-use crate::event::Event;
+use crate::event::{Event, WindowEvent};
 use crate::window::WindowId as RootWindowId;
 
 #[repr(C)]
@@ -80,11 +81,12 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::HoveredFile;
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { Self::drag_position(drop_handler, pt) };
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {
@@ -106,10 +108,11 @@ impl FileDropHandler {
     pub unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { Self::drag_position(drop_handler, pt) };
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
         }
@@ -134,11 +137,12 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: POINTL,
         _pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::DroppedFile;
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { Self::drag_position(drop_handler, pt) };
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {
@@ -152,6 +156,22 @@ impl FileDropHandler {
         }
 
         S_OK
+    }
+
+    // OLE owns mouse movement during a shell drag, so WM_MOUSEMOVE does not
+    // reliably reach the window. Publish client physical coordinates before the
+    // hover/drop events; egui then converts these using the window scale factor.
+    unsafe fn drag_position(handler: &FileDropHandlerData, point: POINTL) {
+        let mut client = POINT { x: point.x, y: point.y };
+        if unsafe { ScreenToClient(handler.window, &mut client) } != 0 {
+            handler.send_event(Event::WindowEvent {
+                window_id: RootWindowId(WindowId(handler.window)),
+                event: WindowEvent::CursorMoved {
+                    device_id: super::DEVICE_ID,
+                    position: crate::dpi::PhysicalPosition::new(client.x as f64, client.y as f64),
+                },
+            });
+        }
     }
 
     unsafe fn from_interface<'a, InterfaceT>(this: *mut InterfaceT) -> &'a mut FileDropHandlerData {

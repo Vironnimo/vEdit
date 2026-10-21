@@ -437,13 +437,16 @@ impl VEditApp {
     }
 
     pub(super) fn project_task_configuration_for(&self, index: usize) -> Option<TaskConfiguration> {
-        self.projects.get(index).map(|project| {
-            let mut config = project.tasks.clone();
-            if config.dart_executable.trim().is_empty() {
-                config.dart_executable = self.inherited_dart_executable();
-            }
-            config
-        })
+        self.projects
+            .get(index)
+            .filter(|p| !p.is_other_files())
+            .map(|project| {
+                let mut config = project.tasks.clone();
+                if config.dart_executable.trim().is_empty() {
+                    config.dart_executable = self.inherited_dart_executable();
+                }
+                config
+            })
     }
 
     pub(super) fn project_task_unsaved_count(&self) -> usize {
@@ -485,6 +488,9 @@ impl VEditApp {
             .projects
             .get(index)
             .ok_or_else(|| "Open a project before running a task.".to_owned())?;
+        if project.is_other_files() {
+            return Err("Open a project folder before running a task.".into());
+        }
         if project.run.task.is_some() {
             return Err("Stop the current task first.".into());
         }
@@ -552,6 +558,10 @@ impl VEditApp {
     }
 
     pub(super) fn project_tasks_settings_ui(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            ui.label("Open a project folder to configure tasks.");
+            return;
+        }
         let heading = ui.label(RichText::new("PROJECT TASKS").strong().color(MUTED));
         if self.project_tasks_settings_requested {
             heading.scroll_to_me(Some(Align::Min));

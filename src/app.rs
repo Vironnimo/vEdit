@@ -71,6 +71,8 @@ mod language_support;
 mod navigation;
 #[path = "notifications.rs"]
 mod notifications;
+#[path = "other_files.rs"]
+mod other_files;
 #[path = "problems.rs"]
 mod problems;
 #[path = "project_launch.rs"]
@@ -191,6 +193,7 @@ struct Session {
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct SessionProject {
+    kind: WorkspaceKind,
     launch_selected: Option<String>,
     root: PathBuf,
     tasks: project_tasks::TaskConfiguration,
@@ -213,7 +216,17 @@ struct SessionTab {
     agent_unsaved: bool,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceKind {
+    #[default]
+    Project,
+    OtherFiles,
+}
+
 struct Project {
+    instance_id: u64,
+    kind: WorkspaceKind,
     launch: project_launch::LaunchState,
     run: project_tasks::ProjectRun,
     root: PathBuf,
@@ -282,7 +295,10 @@ struct Project {
 }
 impl Project {
     fn new(root: PathBuf) -> Self {
+        static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
         Self {
+            instance_id: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            kind: WorkspaceKind::Project,
             launch: project_launch::LaunchState::default(),
             run: project_tasks::ProjectRun::default(),
             root,
@@ -663,6 +679,7 @@ struct ActiveScreenJump {
 type BookmarkMarks = Vec<(usize, u64, String)>;
 type BookmarkLineCache = HashMap<u64, (u64, BookmarkMarks)>;
 enum WorkerResult {
+    DroppedPaths(other_files::DroppedPaths),
     ExplorerDirectory {
         root: PathBuf,
         path: PathBuf,
@@ -921,6 +938,7 @@ struct CompletionPopup {
 }
 pub struct VEditApp {
     projects: Vec<Project>,
+    closed_other_files: Vec<reopen::ClosedTab>,
     active_project: usize,
     workspace_ui: workspace_ui::WorkspaceUiState,
     explorer_navigation: explorer_navigation::ExplorerNavigationState,
@@ -1134,8 +1152,13 @@ impl VEditApp {
     fn restore_session_projects(&mut self, entries: Vec<SessionProject>) -> Vec<Option<usize>> {
         let mut mapping = vec![None; entries.len()];
         for (original, entry) in entries.into_iter().enumerate() {
-            let root = entry.root;
-            if !root.is_dir()
+            let root = if entry.kind == WorkspaceKind::OtherFiles {
+                other_files::layout_key()
+            } else {
+                entry.root
+            };
+            if entry.kind == WorkspaceKind::Project
+                && !root.is_dir()
                 && !entry.tabs.iter().any(|tab| {
                     tab.recovery_path
                         .as_ref()
@@ -1144,7 +1167,11 @@ impl VEditApp {
             {
                 continue;
             }
-            let mut project = Project::new(root.clone());
+            let mut project = if entry.kind == WorkspaceKind::OtherFiles {
+                Project::other_files()
+            } else {
+                Project::new(root.clone())
+            };
             project.tasks = entry.tasks;
             project.launch.selected = entry.launch_selected;
             project.git_approved_parent = entry.git_approved_parent;
@@ -1197,20 +1224,7 @@ impl VEditApp {
         if path.is_dir() {
             self.add_project(path);
         } else if path.is_file() {
-            if let Some(index) = self
-                .projects
-                .iter()
-                .enumerate()
-                .filter(|(_, project)| path.starts_with(&project.root))
-                .max_by_key(|(_, project)| project.root.components().count())
-                .map(|(index, _)| index)
-            {
-                self.switch_project(index);
-                self.open_file(path);
-            } else if let Some(parent) = path.parent() {
-                self.add_project(parent.to_owned());
-                self.open_file(path);
-            }
+            self.open_routed_file(path);
         }
     }
     fn empty(ctx: egui::Context) -> Self {
@@ -1218,6 +1232,7 @@ impl VEditApp {
         let (sender, receiver) = mpsc::channel();
         Self {
             projects: Vec::new(),
+            closed_other_files: Vec::new(),
             active_project: 0,
             workspace_ui: workspace_ui::WorkspaceUiState::default(),
             explorer_navigation: explorer_navigation::ExplorerNavigationState::default(),
@@ -1411,6 +1426,9 @@ impl VEditApp {
     }
     fn add_project(&mut self, path: PathBuf) {
         let root = fs::canonicalize(&path).unwrap_or(path);
+        self.add_resolved_project(root);
+    }
+    fn add_resolved_project(&mut self, root: PathBuf) {
         if let Some(index) = self.projects.iter().position(|p| p.root == root) {
             self.switch_project(index);
             return;
@@ -1424,6 +1442,9 @@ impl VEditApp {
         let Some(p) = self.projects.get_mut(index) else {
             return;
         };
+        if p.is_other_files() {
+            return;
+        }
         p.index_cancel.store(true, Ordering::Relaxed);
         p.index_cancel = Arc::new(AtomicBool::new(false));
         p.index_generation += 1;
@@ -1488,40 +1509,49 @@ impl VEditApp {
         self.open_file_in_mode(path, self.settings.explorer_preview_tabs && !keep_open);
     }
     fn open_file_in_mode(&mut self, path: PathBuf, preview: bool) {
+        self.open_resolved_file(path, preview, false);
+    }
+    fn focus_open_file(&mut self, path: &Path, preview: bool) -> bool {
+        let existing = self.projects.iter().enumerate().find_map(|(project, p)| {
+            p.tabs
+                .iter()
+                .position(|tab| {
+                    tab.path
+                        .as_deref()
+                        .is_some_and(|open| control::same_workspace(open, path))
+                })
+                .map(|tab| (project, tab))
+        });
+        let Some((project, tab)) = existing else {
+            return false;
+        };
+        let id = self.projects[project].tabs[tab].id;
+        if !preview || !self.current_pane_tab_ids().contains(&id) {
+            self.keep_tab_open(id);
+        }
+        self.activate_tab(project, tab);
+        true
+    }
+    fn open_resolved_file(&mut self, path: PathBuf, preview: bool, resolved: bool) {
         if self.context_path_busy(&path) {
             self.status("Wait for the file rename to finish before opening it", true);
             return;
         }
-        if let Some(index) = self
-            .project()
-            .and_then(|p| p.tabs.iter().position(|t| t.path.as_ref() == Some(&path)))
-        {
-            let id = self.projects[self.active_project].tabs[index].id;
-            if !preview || !self.current_pane_tab_ids().contains(&id) {
-                self.keep_tab_open(id);
-            }
-            self.activate_tab(self.active_project, index);
+        if self.focus_open_file(&path, preview) {
             return;
         }
         // Explorer and quick-open paths already have the canonical workspace root.
-        let path = if self.project().is_some_and(|p| path.starts_with(&p.root))
-            && !path
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
+        let path = if resolved
+            || (self.project().is_some_and(|p| path.starts_with(&p.root))
+                && !path
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir))
         {
             path
         } else {
             fs::canonicalize(&path).unwrap_or(path)
         };
-        if let Some(index) = self
-            .project()
-            .and_then(|p| p.tabs.iter().position(|t| t.path.as_ref() == Some(&path)))
-        {
-            let id = self.projects[self.active_project].tabs[index].id;
-            if !preview || !self.current_pane_tab_ids().contains(&id) {
-                self.keep_tab_open(id);
-            }
-            self.activate_tab(self.active_project, index);
+        if self.focus_open_file(&path, preview) {
             return;
         }
         let previous_preview = preview
@@ -1644,16 +1674,18 @@ impl VEditApp {
         self.search_cancel.store(true, Ordering::Relaxed);
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_running = false;
-        self.search_dirty = self.project().is_some() && !self.project_query.trim().is_empty();
+        self.search_dirty = self.active_folder().is_some() && !self.project_query.trim().is_empty();
         self.search_last_edit = Instant::now();
     }
     fn new_file(&mut self) {
+        if self.projects.is_empty() {
+            let index = self.ensure_other_files();
+            self.switch_project(index);
+        }
         if let Some(p) = self.projects.get_mut(self.active_project) {
             p.tabs.push(EditorTab::new(None, "Untitled".into()));
             let index = p.tabs.len() - 1;
             self.activate_tab(self.active_project, index);
-        } else {
-            self.pick_project();
         }
     }
     fn pick_file(&mut self) {
@@ -1662,7 +1694,7 @@ impl VEditApp {
             .and_then(|tab| tab.path.as_deref())
             .and_then(Path::parent)
             .map(Path::to_path_buf)
-            .or_else(|| self.project().map(|project| project.root.clone()));
+            .or_else(|| self.active_folder().map(Path::to_path_buf));
         self.start_native_dialog(DialogPurpose::Files, directory, None);
     }
     fn save_tab(&mut self, id: u64, target: Option<PathBuf>) {
@@ -1938,6 +1970,7 @@ impl VEditApp {
         self.control_prune_review();
         if !matches!(action, CloseAction::Exit) {
             self.reconcile_layout_after_close();
+            self.prune_empty_other_files();
         }
         self.session_dirty = true;
     }
@@ -1973,6 +2006,7 @@ impl VEditApp {
         self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                WorkerResult::DroppedPaths(batch) => self.finish_dropped_paths(batch),
                 WorkerResult::Panicked(message) => self.status(message, true),
                 WorkerResult::ContextFile(result) => self.context_file_result(result),
                 WorkerResult::ContextFilePrepared(result) => self.context_file_prepared(result),
@@ -2727,6 +2761,9 @@ impl VEditApp {
     }
 
     fn refresh_git(&mut self, index: usize, force: bool) {
+        if self.projects.get(index).is_none_or(Project::is_other_files) {
+            return;
+        }
         static NEXT_STATUS_REQUEST: AtomicU64 = AtomicU64::new(1);
         let window_active = self.git_polling_active();
         if !force && !window_active {
@@ -3134,22 +3171,7 @@ impl VEditApp {
             }
             self.activate_tab(project, tab);
         } else {
-            let project = self
-                .projects
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| bookmark.path.starts_with(&p.root))
-                .max_by_key(|(_, p)| p.root.components().count())
-                .map(|(index, _)| index);
-            if let Some(project) = project {
-                let active = self.projects[project].active_tab;
-                self.activate_tab(project, active);
-            } else if let Some(parent) = bookmark.path.parent() {
-                self.add_project(parent.to_owned());
-            } else {
-                return Err("The bookmark has no valid file path".into());
-            }
-            self.open_file(bookmark.path.clone());
+            self.open_routed_file(bookmark.path.clone());
         }
         let tab = self
             .tab_mut()
@@ -3370,7 +3392,7 @@ impl VEditApp {
             self.search_running = false;
             return;
         }
-        let Some(p) = self.project() else {
+        let Some(p) = self.project().filter(|p| !p.is_other_files()) else {
             self.search_running = false;
             return;
         };
@@ -3403,7 +3425,7 @@ impl VEditApp {
         self.search_cancel.store(true, Ordering::Relaxed);
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_running = false;
-        self.search_dirty = self.project().is_some() && !self.project_query.trim().is_empty();
+        self.search_dirty = self.active_folder().is_some() && !self.project_query.trim().is_empty();
         self.search_last_edit = Instant::now();
         self.project_search = None;
         self.project_search_error = None;
@@ -3582,8 +3604,12 @@ impl VEditApp {
                 .projects
                 .iter()
                 .map(|p| SessionProject {
+                    kind: p.kind,
                     launch_selected: p.launch.selected.clone(),
-                    root: p.root.clone(),
+                    root: p
+                        .folder_root()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
                     tasks: p.tasks.clone(),
                     git_split_ratio: p.git_view.split_ratio,
                     git_approved_parent: p.git_approved_parent.clone(),
@@ -3670,6 +3696,7 @@ impl VEditApp {
     fn pick_project(&mut self) {
         let dir = self
             .project()
+            .filter(|p| !p.is_other_files())
             .map(|p| p.root.parent().unwrap_or(&p.root).to_path_buf())
             .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("C:\\"));
@@ -3689,8 +3716,9 @@ impl VEditApp {
                     tab.path
                         .as_deref()
                         .and_then(Path::parent)
-                        .unwrap_or(&project.root)
-                        .to_path_buf(),
+                        .or_else(|| project.folder_root())
+                        .map(Path::to_path_buf)
+                        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from)),
                     tab.title.clone(),
                     tab.path.is_none(),
                 )
@@ -3709,7 +3737,7 @@ impl VEditApp {
             return;
         }
         self.save_as = Some(id);
-        self.start_native_dialog(DialogPurpose::SaveAs(id), Some(directory), Some(title));
+        self.start_native_dialog(DialogPurpose::SaveAs(id), directory, Some(title));
     }
     fn start_native_dialog(
         &mut self,
@@ -3878,7 +3906,7 @@ impl VEditApp {
             self.status("Stop the current task first", true);
             return;
         }
-        let Some(root) = self.project().map(|p| p.root.clone()) else {
+        let Some(root) = self.active_folder().map(Path::to_path_buf) else {
             return;
         };
         if self.project_task_unsaved_count() > 0 {
@@ -3906,7 +3934,7 @@ impl VEditApp {
         ));
     }
     fn open_terminal(&mut self) {
-        let Some(root) = self.project().map(|p| p.root.clone()) else {
+        let Some(root) = self.active_folder().map(Path::to_path_buf) else {
             return;
         };
         let environment = self
@@ -4889,6 +4917,11 @@ impl VEditApp {
                             ),
                         ),
                     ] {
+                        if self.project().is_some_and(Project::is_other_files)
+                            && view != SidebarView::Explorer
+                        {
+                            continue;
+                        }
                         if icon_button(ui, icon, self.sidebar_view_visible(view), &hint).clicked() {
                             self.toggle_sidebar_view(view);
                         }
@@ -4930,6 +4963,10 @@ impl VEditApp {
             });
     }
     fn open_project_search(&mut self) {
+        if self.project().is_some_and(Project::is_other_files) {
+            self.status("Open a project folder to search across files.", false);
+            return;
+        }
         self.intel.references = None;
         self.show_sidebar(SidebarView::Search);
         self.project_search_focus = true;
@@ -4945,6 +4982,10 @@ impl VEditApp {
         self.ctx.request_repaint();
     }
     fn project_search_ui(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            ui.label("Open a project folder to search across files.");
+            return;
+        }
         if self.intel.references.is_some() {
             self.references_ui(ui);
             return;
@@ -5508,7 +5549,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
         let path = tab
             .path
             .clone()
-            .unwrap_or_else(|| project.root.join("Untitled.md"));
+            .unwrap_or_else(|| self.document_directory().join("Untitled.md"));
         if tab.scroll_to_cursor {
             let line = tab
                 .lines
@@ -5603,17 +5644,12 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                         .map(|p| crate::paths::display(p.strip_prefix(&project.root).unwrap_or(p)))
                         .unwrap_or_else(|| tab.title.clone());
                     let label = if self.projects.len() > 1 {
-                        format!("{} · {path}", file_title(&project.root))
+                        format!("{} · {path}", project.display_name())
                     } else {
                         path
                     };
                     let tooltip = tab.path.as_ref().map_or_else(
-                        || {
-                            format!(
-                                "{}\nOpen this review document",
-                                crate::paths::display(&project.root)
-                            )
-                        },
+                        || format!("{}\nOpen this review document", project.display_name()),
                         |path| {
                             format!("{}\nOpen this review document", crate::paths::display(path))
                         },
@@ -7261,12 +7297,12 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(if compact {
-                        14.0
+                        4.0
                     } else {
-                        (available_height * 0.15).max(35.0)
+                        (available_height * 0.11).max(35.0)
                     });
-                    brand(ui, if compact { 48.0 } else { 58.0 });
-                    ui.add_space(22.0 * space);
+                    brand(ui, if compact { 40.0 } else { 58.0 });
+                    ui.add_space(if compact { 6.0 } else { 22.0 });
                     ui.label(
                         RichText::new("A quieter place to build.")
                             .size(if compact { 28.0 } else { 34.0 })
@@ -7279,7 +7315,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                             .size(15.0)
                             .color(MUTED),
                     );
-                    ui.add_space(if compact { 17.0 } else { 35.0 });
+                    ui.add_space(if compact { 12.0 } else { 35.0 });
                     if accent_button(ui, "Open a project folder").clicked() {
                         self.pick_project();
                     }
@@ -7290,12 +7326,25 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                             .size(11.0)
                             .color(MUTED),
                     );
-                    ui.add_space(if compact { 19.0 } else { 46.0 });
+                    ui.add_space(10.0 * space);
+                    if ui
+                        .button("Open a file")
+                        .on_hover_text(self.shortcut_label(keybindings::Action::OpenFile))
+                        .clicked()
+                    {
+                        self.pick_file();
+                    }
+                    ui.label(
+                        RichText::new("Or drop files and folders here")
+                            .small()
+                            .color(MUTED),
+                    );
+                    ui.add_space(if compact { 12.0 } else { 20.0 });
                     egui::Frame::new()
                         .fill(PANEL)
                         .stroke(Stroke::new(1.0, BORDER))
                         .corner_radius(10.0)
-                        .inner_margin(if compact { 12 } else { 24 })
+                        .inner_margin(if compact { 8 } else { 24 })
                         .show(ui, |ui| {
                             ui.set_max_width(460.0);
                             ui.label(
@@ -7338,7 +7387,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                                         );
                                     });
                                 });
-                                ui.add_space(if compact { 4.0 } else { 6.0 });
+                                ui.add_space(if compact { 2.0 } else { 6.0 });
                             }
                         });
                     ui.add_space(if compact { 8.0 } else { 25.0 });
@@ -7884,10 +7933,14 @@ impl VEditApp {
                                 )
                             },
                         );
-                        let full_path = tab.path.as_ref().unwrap_or(&project.root);
+                        let full_path = tab
+                            .path
+                            .as_deref()
+                            .map(crate::paths::display)
+                            .unwrap_or_else(|| project.display_name());
                         Some((
-                            format!("{} · {relative}", file_title(&project.root)),
-                            crate::paths::display(full_path),
+                            format!("{} · {relative}", project.display_name()),
+                            full_path,
                         ))
                     })
                 })
@@ -8131,6 +8184,8 @@ impl VEditApp {
         }
     }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        self.prune_empty_other_files();
+        self.receive_file_drop();
         design::focus_visible(&self.ctx);
         // Observe window focus before editor input routing can consume events.
         self.refresh_visible_git();
@@ -8267,6 +8322,7 @@ impl VEditApp {
         self.autosave();
         self.sync_languages(false);
         self.watch_disk();
+        self.paint_file_drop();
         self.observe_navigation();
         if !self.projects.is_empty() {
             self.ctx.request_repaint_after(Duration::from_secs(2));

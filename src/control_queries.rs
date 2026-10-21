@@ -243,7 +243,7 @@ impl VEditApp {
             return self
                 .projects
                 .iter()
-                .position(|project| same_workspace(&project.root, path))
+                .position(|project| project.folder_root().is_some_and(|root| same_workspace(root, path)))
                 .map(|index| (index, "request"))
                 .ok_or_else(|| {
                     Response::failure(
@@ -259,7 +259,7 @@ impl VEditApp {
         {
             return Ok((index, "caller_directory"));
         }
-        if self.project().is_some() {
+        if self.active_folder().is_some() {
             return Ok((self.active_project, "active_project"));
         }
         Err(Response::failure(
@@ -615,7 +615,11 @@ pub(in crate::app) fn containing_project(projects: &[Project], path: &Path) -> O
     projects
         .iter()
         .enumerate()
-        .filter(|(_, project)| workspace_contains(&project.root, path))
+        .filter(|(_, project)| {
+            project
+                .folder_root()
+                .is_some_and(|root| workspace_contains(root, path))
+        })
         .max_by_key(|(_, project)| project.root.components().count())
         .map(|(index, _)| index)
 }

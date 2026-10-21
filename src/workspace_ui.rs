@@ -60,6 +60,7 @@ impl ProjectRow {
 }
 
 struct ProjectHeaderTab {
+    other_files: bool,
     root: PathBuf,
     label: String,
     path: String,
@@ -310,15 +311,11 @@ impl VEditApp {
                     .memory(|memory| memory.has_focus(id) || memory.had_focus_last_frame(id)))
             .then_some(id)
         });
-        let names: Vec<_> = self
-            .projects
-            .iter()
-            .map(|project| file_title(&project.root))
-            .collect();
+        let names: Vec<_> = self.projects.iter().map(Project::display_name).collect();
         let identities: Vec<_> = names
             .iter()
             .zip(&self.projects)
-            .map(|(name, project)| (name.as_str(), Some(project.root.as_path())))
+            .map(|(name, project)| (name.as_str(), project.folder_root()))
             .collect();
         let labels = crate::file_identity::disambiguate_labels(&identities);
         let tabs: Vec<_> = self
@@ -329,7 +326,8 @@ impl VEditApp {
             .map(|(index, (project, label))| ProjectHeaderTab {
                 root: project.root.clone(),
                 label,
-                path: crate::paths::display(&project.root),
+                path: project.display_location(),
+                other_files: project.is_other_files(),
                 open: project.tabs.len(),
                 dirty: project.tabs.iter().filter(|tab| tab.dirty).count(),
                 changes: project.uncommitted_change_count(),
@@ -494,10 +492,10 @@ impl VEditApp {
             .iter()
             .enumerate()
             .map(|(index, project)| {
-                let path = crate::paths::display(&project.root);
+                let path = project.display_location();
                 ProjectRow {
                     root: project.root.clone(),
-                    name: file_title(&project.root),
+                    name: project.display_name(),
                     short_path: shortened_project_path(&path),
                     path,
                     open: project.tabs.len(),
@@ -792,6 +790,10 @@ impl VEditApp {
     }
 
     pub(super) fn explorer_project_heading(&mut self, ui: &mut egui::Ui, root: &Path) {
+        if self.project().is_some_and(Project::is_other_files) {
+            ui.label(RichText::new("Other files").size(12.5).color(TEXT));
+            return;
+        }
         let title = file_title(root);
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width().max(1.0), 24.0),
@@ -899,6 +901,13 @@ fn project_context_menu(
     popup.show(|ui| {
         ui.label(RichText::new(&tab.label).strong());
         ui.separator();
+        if tab.other_files {
+            if design::menu_item(ui, "Close other files", "", "Close these documents; unsaved changes are confirmed.").clicked() {
+                action = Some(ProjectAction::Close);
+                ui.close();
+            }
+            return;
+        }
         for (label, tooltip, command) in [
             ("Reveal in Explorer", "Open this project folder in Windows Explorer", ProjectAction::Reveal),
             ("Copy path", "Copy this project's full path", ProjectAction::CopyPath),

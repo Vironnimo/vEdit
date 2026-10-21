@@ -1535,7 +1535,7 @@ impl VEditApp {
             });
         }
     }
-    fn focus_editor_pane(&mut self, pane_id: u64) -> Result<(), String> {
+    pub(super) fn focus_editor_pane(&mut self, pane_id: u64) -> Result<(), String> {
         if !self
             .editor_layout
             .panes
@@ -1794,7 +1794,7 @@ impl VEditApp {
             });
             json!({"id":pane.id,"tab_id":pane.document,"tab_ids":pane.documents,"view":current.map_or(pane.view,|tab|tab.agent_view),"focused":pane.id==self.editor_layout.focused,"location":location})
         }).collect();
-        json!({"workspace":self.project().map(|project|crate::paths::display(&project.root)),"scope":"active_workspace","focused_pane":self.editor_layout.focused,"max_panes":MAX_PANES,"tree":self.editor_layout.root,"panes":panes})
+        json!({"workspace":self.active_folder().map(crate::paths::display),"workspace_kind":self.project().map(|p|p.kind),"scope":"active_workspace","focused_pane":self.editor_layout.focused,"max_panes":MAX_PANES,"tree":self.editor_layout.root,"panes":panes})
     }
     pub(super) fn control_layout(&mut self, change: LayoutAction) -> Result<Value, String> {
         self.synchronize_layout();

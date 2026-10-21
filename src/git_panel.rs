@@ -813,6 +813,10 @@ impl VEditApp {
     }
 
     pub(super) fn git_ui(&mut self, ui: &mut egui::Ui) {
+        if self.project().is_some_and(Project::is_other_files) {
+            ui.label("Open a project folder to use source control.");
+            return;
+        }
         let height = ui.available_height();
         egui::ScrollArea::vertical()
             .id_salt(("git-panel-content", self.active_project))
