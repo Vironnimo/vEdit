@@ -86,6 +86,10 @@ crash in the NVIDIA OpenGL driver. The full parallel suite has been
 verified with that setting; see the scoped PowerShell command in
 `docs/development.md`. Serial tests also provide a verified fallback.
 
+Build into the single `target/` folder; never set `CARGO_TARGET_DIR` to a second
+folder. Never put logs, screenshots or scripts into `target/`; use a scratch
+folder outside the repository.
+
 Use proportional checks for documentation-only or small, reversible edits.
 Ignored tests require particular SDKs or are manual benchmarks; do not blanket
 run them. Inspect rendered changes before replacing snapshot baselines, and run

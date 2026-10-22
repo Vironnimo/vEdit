@@ -43,6 +43,12 @@ egui-wgpu = { version = "0.36.2", default-features = false }
 # Windows mixed-DPI dragging, custom chrome and file-drop coordinates: see vendor/winit/VEDIT_PATCH.md.
 winit = { path = "vendor/winit" }
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 2
 lto = "thin"
