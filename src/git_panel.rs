@@ -837,6 +837,7 @@ impl VEditApp {
     }
 
     fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
+        let worktree_selector = self.worktree_selector_ui(ui);
         let panel_top = ui.cursor().top();
         let panel_height = ui.available_height().max(1.0);
         let project_index = self.active_project;
@@ -883,6 +884,7 @@ impl VEditApp {
         let focus_requested = state.keyboard_focus_pending;
         let commit_message_id = git_row_id(&root, "commit-message");
         state.keyboard_controls.clear();
+        state.keyboard_controls.extend(worktree_selector);
         if repo && push_count.is_none() {
             state.keyboard_controls.push(commit_message_id);
         }

@@ -266,8 +266,19 @@ project runs, unsaved buffers, configuration repair, local selection persistence
 bounded rolling output and launch toolbar snapshots. These use isolated fixtures;
 they do not run or reconfigure the user's applications.
 
+Source control offers a compact selector when the active repository has multiple
+worktrees. Cached rows list the main working tree first; selecting a row defers
+the project switch until the frame has drawn, preserving documents and pane state.
+Unopened worktrees open as projects; missing or bare entries cannot be selected.
+The project picker remains an alternative entry point.
+
 Git history freezes traversal roots and remote reachability within each page
-generation. While Source control is visible in the focused, non-minimized window,
+generation. The sidebar traverses only HEAD and the configured upstream, retaining
+merged ancestry and tags on reachable commits. Other branch decorations are hidden.
+The full snapshot remains available to the branch switcher and repository-wide CLI
+queries. Upstream configuration participates in snapshot identity so changing it
+also refreshes the graph, without requiring an additional Git process to discover it.
+While Source control is visible in the focused, non-minimized window,
 the active repository is polled every three seconds after the previous read.
 Changed snapshots automatically replace the loaded history depth; unchanged ones
 keep the graph and pending page requests. Scroll position follows the first visible
@@ -278,7 +289,7 @@ including project indicators and worktree discovery, pause in inactive or
 minimized windows; explicit operations can still complete there. Regaining focus
 or restoring the window bypasses the polling interval and refreshes the active
 repository immediately. Worktree discovery and unopened-worktree status reads run
-only while the project picker is open. A pending read receives one follow-up;
+while Source control is visible or the project picker is open. A pending read receives one follow-up;
 an active Git action delays the read until it completes. Background reads do not
 show activity markers or disable actions. Starting an action invalidates pending
 status results for that repository; optional index locks are disabled, so those

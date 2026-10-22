@@ -645,7 +645,7 @@ fn read_git_snapshot(
             Some(
                 git::history_page(
                     &repo,
-                    &snapshot,
+                    &snapshot.current_branch(),
                     0,
                     automatic_history_limit.unwrap_or(git::HISTORY_PAGE_SIZE),
                 )
@@ -3096,8 +3096,13 @@ impl VEditApp {
             root,
             generation,
             offset,
-            result: git::history_page(&repository, &snapshot, offset, git::HISTORY_PAGE_SIZE)
-                .map_err(|error| error.to_string()),
+            result: git::history_page(
+                &repository,
+                &snapshot.current_branch(),
+                offset,
+                git::HISTORY_PAGE_SIZE,
+            )
+            .map_err(|error| error.to_string()),
         });
     }
     fn refresh_git_history(&mut self, index: usize) {

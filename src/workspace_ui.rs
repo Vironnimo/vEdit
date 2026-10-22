@@ -84,6 +84,14 @@ fn query_id() -> egui::Id {
 }
 
 impl VEditApp {
+    /// Apply a sidebar worktree selection after the current workspace has drawn.
+    pub(super) fn select_worktree(&mut self, project: Option<usize>, path: PathBuf) {
+        self.workspace_ui.pending = Some(match project {
+            Some(index) => WorkspaceAction::Select { index },
+            None => WorkspaceAction::OpenWorktree(path),
+        });
+    }
+
     pub(super) fn workspace_picker_open(&self) -> bool {
         egui::Popup::is_id_open(&self.ctx, picker_id())
     }

@@ -1,10 +1,10 @@
-//! Cached worktree discovery and details for the project picker.
+//! Cached worktree discovery for Source control and the project picker.
 //!
 //! Shows the active project's repository and its worktrees, including ones
 //! that are not open as projects. Listings stay cached across project switches.
 //! Open projects reuse their own status refreshes. Discovery starts one
 //! `worktree list` per repository and one status
-//! read per worktree that is not open, only while the project picker is open.
+//! read per worktree that is not open, while either navigation surface is visible.
 //! Request IDs keep a late worker from replacing a newer result.
 
 use super::*;
@@ -1145,6 +1145,95 @@ fn repository_tooltip(ui: &mut egui::Ui, row: &Row, now: i64) {
 }
 
 impl VEditApp {
+    pub(in crate::app) fn worktree_selector_ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Id> {
+        let rows = self.repository_rows();
+        if rows.len() < 2 {
+            return None;
+        }
+        let current = rows.iter().find(|row| row.current)?;
+        let title = if current.linked {
+            current.name.as_str()
+        } else {
+            "Main worktree"
+        };
+        let button = egui::Button::new(RichText::new(format!("{title} ▾")).size(12.5))
+            .truncate()
+            .min_size(Vec2::new(ui.available_width(), 26.0));
+        let mut chosen = None;
+        let (response, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+            ui.set_width(300.0);
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for row in &rows {
+                        let mut name = if row.linked {
+                            row.name.clone()
+                        } else {
+                            format!("Main worktree · {}", row.name)
+                        };
+                        if !row.openable() {
+                            name.push_str(&format!(" · {}", row.badge()));
+                        }
+                        let response = ui.add_enabled(
+                            row.openable(),
+                            egui::Button::new("")
+                                .selected(row.current)
+                                .min_size(Vec2::new(ui.available_width(), 46.0)),
+                        );
+                        let rect = response.rect;
+                        if ui.is_rect_visible(rect) {
+                            let painter =
+                                ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+                            for (text, y, size, color) in [
+                                (
+                                    name.as_str(),
+                                    6.0,
+                                    12.5,
+                                    if row.openable() { TEXT } else { MUTED },
+                                ),
+                                (row.summary().as_str(), 26.0, 10.5, MUTED),
+                            ] {
+                                let galley = truncated_text(
+                                    ui,
+                                    text,
+                                    FontId::proportional(size),
+                                    color,
+                                    rect.width() - 16.0,
+                                );
+                                painter.galley(rect.left_top() + Vec2::new(8.0, y), galley, color);
+                            }
+                        }
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::SelectableLabel,
+                                row.openable(),
+                                row.current,
+                                row.label(),
+                            )
+                        });
+                        let response = self.worktree_picker_hover(ui, response, row);
+                        if response.clicked() {
+                            if !row.current {
+                                chosen = Some((row.project, row.path.clone()));
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+        });
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Select worktree")
+        });
+        git_popup_focus(&response, egui::Popup::default_response_id(&response));
+        let id = response.id;
+        self.worktree_picker_hover(ui, response, current);
+        if let Some((project, path)) = chosen {
+            self.select_worktree(project, path);
+        }
+        ui.add_space(4.0);
+        Some(id)
+    }
+
     pub(in crate::app) fn worktree_picker_hover(
         &mut self,
         ui: &egui::Ui,
@@ -1240,9 +1329,12 @@ impl VEditApp {
         }
     }
 
-    /// Discovery and unopened-worktree reads run only while the picker is open.
+    /// Discovery runs while Source control or the project picker is visible.
     pub(in crate::app) fn refresh_repository_overview(&mut self) {
-        if !self.workspace_picker_open() || !self.git_polling_active() || self.git_busy.is_some() {
+        if !(self.workspace_picker_open() || self.sidebar_view_visible(SidebarView::SourceControl))
+            || !self.git_polling_active()
+            || self.git_busy.is_some()
+        {
             return;
         }
         self.fill_project_headlines();

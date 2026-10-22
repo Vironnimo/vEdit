@@ -246,7 +246,46 @@ pub struct CommitRef {
 pub struct HistorySnapshot {
     pub tips: Vec<String>,
     pub refs: Vec<CommitRef>,
+    /// Full ref name of the checked-out branch's configured upstream.
+    pub upstream: Option<String>,
     pub local_only: std::sync::Arc<std::collections::HashSet<String>>,
+}
+
+impl HistorySnapshot {
+    /// Keep the current branch and its upstream as traversal roots. Tags can
+    /// decorate reachable commits, but never pull unrelated history into view.
+    pub fn current_branch(&self) -> Self {
+        let selected = |reference: &CommitRef| {
+            reference.current
+                || self.upstream.as_deref().is_some_and(|upstream| {
+                    let prefix = match reference.kind {
+                        RefKind::Local => "refs/heads/",
+                        RefKind::Remote => "refs/remotes/",
+                        _ => return false,
+                    };
+                    upstream.strip_prefix(prefix) == Some(reference.name.as_str())
+                })
+        };
+        let mut tips: Vec<_> = self
+            .refs
+            .iter()
+            .filter(|r| selected(r))
+            .map(|r| r.hash.clone())
+            .collect();
+        tips.sort();
+        tips.dedup();
+        Self {
+            tips,
+            refs: self
+                .refs
+                .iter()
+                .filter(|r| selected(r) || r.kind == RefKind::Tag)
+                .cloned()
+                .collect(),
+            upstream: self.upstream.clone(),
+            local_only: self.local_only.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2123,6 +2162,7 @@ struct HistoryRef {
     kind: RefKind,
     commit: Option<String>,
     checked_out: bool,
+    upstream: Option<String>,
 }
 
 fn read_history_refs(root: &Path) -> GitResult<Vec<HistoryRef>> {
@@ -2130,7 +2170,7 @@ fn read_history_refs(root: &Path) -> GitResult<Vec<HistoryRef>> {
         root,
         &string_args(&[
             "for-each-ref",
-            "--format=%(objectname)%00%(refname)%00%(symref)%00%(*objectname)%00%(*objecttype)%00%(objecttype)%00%(HEAD)",
+            "--format=%(objectname)%00%(refname)%00%(symref)%00%(*objectname)%00%(*objecttype)%00%(objecttype)%00%(HEAD)%00%(upstream)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
@@ -2143,7 +2183,7 @@ fn read_history_refs(root: &Path) -> GitResult<Vec<HistoryRef>> {
             continue;
         }
         let fields: Vec<_> = line.split(|byte| *byte == 0).collect();
-        if fields.len() != 7 {
+        if fields.len() != 8 {
             return Err(GitError::new("read history branches", "invalid ref record"));
         }
         let name = String::from_utf8_lossy(fields[1]);
@@ -2173,6 +2213,8 @@ fn read_history_refs(root: &Path) -> GitResult<Vec<HistoryRef>> {
             kind,
             commit,
             checked_out: fields[6] == b"*",
+            upstream: (!fields[7].is_empty())
+                .then(|| String::from_utf8_lossy(fields[7]).into_owned()),
         });
     }
     Ok(refs)
@@ -2184,7 +2226,13 @@ fn assemble_history_snapshot(
     head: Option<String>,
     refs: Vec<HistoryRef>,
 ) -> GitResult<HistorySnapshot> {
-    let mut snapshot = HistorySnapshot::default();
+    let mut snapshot = HistorySnapshot {
+        upstream: refs
+            .iter()
+            .find(|reference| reference.checked_out)
+            .and_then(|reference| reference.upstream.clone()),
+        ..Default::default()
+    };
     for reference in refs {
         let Some(hash) = reference.commit else {
             continue;

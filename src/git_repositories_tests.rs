@@ -742,10 +742,77 @@ fn screen(app: VEditApp) -> Harness<'static, VEditApp> {
 }
 
 #[test]
-fn project_picker_lists_unopened_worktrees_without_sidebar_overview() {
+fn source_control_worktree_picker_switches_projects_and_preserves_drafts() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut app = overview_app(&folders, true);
+    let mut draft = EditorTab::new(None, "Untitled".into());
+    draft.text = "Unsaved main draft".into();
+    draft.dirty = true;
+    app.projects[0].tabs.push(draft);
+    let mut screen = screen(app);
+    screen.get_by_label("Select worktree").click();
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Worktree agent wt").is_some());
+    screen.get_by_label("Worktree vEdit-feature").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 1);
+    assert_eq!(
+        screen.state().projects[0].tabs[0].text,
+        "Unsaved main draft"
+    );
+    assert!(screen.state().projects[0].tabs[0].dirty);
+    screen.get_by_label("Select worktree").click();
+    screen.run_steps(3);
+    screen.get_by_label("Worktree vEdit").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 0);
+    assert_eq!(screen.state().projects.len(), 2);
+    screen.get_by_label("Select worktree").click();
+    screen.run_steps(3);
+    screen.get_by_label("Worktree agent wt").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().projects.len(), 3);
+    assert_eq!(
+        screen.state().projects[screen.state().active_project].root,
+        folders.path("agent wt")
+    );
+    screen.get_by_label("Select worktree").click();
+    screen.run_steps(3);
+    screen.get_by_label("Worktree agent wt").click();
+    screen.run_steps(3);
+    assert_eq!(
+        screen.state().projects.len(),
+        3,
+        "already open worktrees are reused"
+    );
+}
+
+#[test]
+fn source_control_worktree_picker_supports_keyboard_selection() {
+    let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
+    let mut screen = screen(overview_app(&folders, true));
+    screen.get_by_label("Select worktree").focus();
+    screen.run_steps(1);
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert!(
+        screen.get_by_label("Worktree vEdit").rect().top()
+            < screen.get_by_label("Worktree agent wt").rect().top()
+    );
+    screen.get_by_label("Worktree vEdit-feature").focus();
+    screen.run_steps(1);
+    screen.key_press(Key::Enter);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 1);
+    assert!(screen.query_by_label("Worktree vEdit").is_none());
+}
+
+#[test]
+fn source_control_has_a_compact_selector_and_project_picker_keeps_worktrees() {
     let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
     let mut screen = screen(overview_app(&folders, true));
     assert!(screen.query_by_label("Repositories").is_none());
+    assert!(screen.query_by_label("Select worktree").is_some());
     assert!(screen.query_by_label("Worktree agent wt").is_none());
     screen.state_mut().open_workspace_picker();
     screen.run_steps(3);
@@ -898,9 +965,10 @@ fn missing_worktrees_can_be_inspected_but_not_opened_from_the_picker() {
 }
 
 #[test]
-fn worktree_reads_pause_when_the_project_picker_is_closed() {
+fn worktree_reads_pause_when_source_control_and_project_picker_are_hidden() {
     let folders = Folders::new(&["vEdit", "vEdit-feature", "agent wt"]);
     let mut app = overview_app(&folders, true);
+    app.set_sidebar_view_visible(SidebarView::SourceControl, false);
     app.repositories.request_refresh();
     app.refresh_repository_overview();
     assert!(app.repositories.jobs.is_empty());
@@ -1018,7 +1086,13 @@ fn overview_screenshot() {
     });
     visual_tests::snapshot(&mut screen, "vedit_git_repositories");
 
-    // Worktrees live in the project picker, leaving the sidebar to History.
+    screen.get_by_label("Select worktree").click();
+    screen.run_steps(3);
+    visual_tests::snapshot(&mut screen, "vedit_worktree_selector");
+    screen.key_press(Key::Escape);
+    screen.run_steps(2);
+
+    // The general project picker remains an alternative entry point.
     screen.state_mut().open_workspace_picker();
     screen.run_steps(3);
     visual_tests::snapshot(&mut screen, "vedit_project_worktrees");

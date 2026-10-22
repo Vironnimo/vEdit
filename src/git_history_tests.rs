@@ -123,6 +123,21 @@ fn immediate_history_tooltips(screen: &mut Harness<'_, VEditApp>) {
 struct HoverRepository(PathBuf);
 
 impl HoverRepository {
+    fn git(&self, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -159,7 +174,7 @@ impl HoverRepository {
     fn app(&self) -> VEditApp {
         let mut app = history_workspace(0);
         let snapshot = git::history_snapshot(&self.0).unwrap();
-        let page = git::history_page(&self.0, &snapshot, 0, 10).unwrap();
+        let page = git::history_page(&self.0, &snapshot.current_branch(), 0, 10).unwrap();
         let project = &mut app.projects[0];
         project.root = self.0.clone();
         project.git_root = Some(self.0.clone());
@@ -169,6 +184,123 @@ impl HoverRepository {
         project.git_view.graph.append(&project.recent_commits);
         app
     }
+}
+
+#[test]
+fn source_control_history_follows_the_worktree_branch_and_upstream() {
+    let repository = HoverRepository::new();
+    repository.git(&["branch", "-M", "main"]);
+    repository.git(&["checkout", "-b", "agent/topic"]);
+    fs::write(repository.0.join("topic.txt"), "independent\n").unwrap();
+    repository.git(&["add", "topic.txt"]);
+    repository.git(&["commit", "-m", "Independent worktree"]);
+    repository.git(&["tag", "unrelated-release"]);
+    repository.git(&["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+    repository.git(&["checkout", "main"]);
+    repository.git(&["checkout", "-b", "agent/integrated"]);
+    fs::write(repository.0.join("integrated.txt"), "merged\n").unwrap();
+    repository.git(&["add", "integrated.txt"]);
+    repository.git(&["commit", "-m", "Integrated worktree"]);
+    repository.git(&["checkout", "main"]);
+    repository.git(&[
+        "merge",
+        "--no-ff",
+        "-m",
+        "Merge feature",
+        "agent/integrated",
+    ]);
+    repository.git(&["tag", "release"]);
+    repository.git(&["checkout", "-b", "incoming"]);
+    fs::write(repository.0.join("incoming.txt"), "remote\n").unwrap();
+    repository.git(&["add", "incoming.txt"]);
+    repository.git(&["commit", "-m", "Incoming commit"]);
+    repository.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repository.git(&["checkout", "main"]);
+    repository.git(&["config", "remote.origin.url", "."]);
+    repository.git(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+    repository.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+
+    let refresh = read_git_snapshot(&repository.0, None, None, None, false, None, None)
+        .unwrap()
+        .history
+        .unwrap();
+    let commits = refresh.page.unwrap().commits;
+    assert!(
+        !commits
+            .iter()
+            .any(|commit| commit.subject == "Independent worktree")
+    );
+    assert!(
+        commits
+            .iter()
+            .any(|commit| commit.subject == "Incoming commit")
+    );
+    assert!(
+        commits
+            .iter()
+            .any(|commit| commit.subject == "Integrated worktree")
+    );
+    assert_eq!(
+        commits
+            .iter()
+            .find(|commit| commit.subject == "Merge feature")
+            .unwrap()
+            .parents
+            .len(),
+        2
+    );
+    let names: Vec<_> = commits
+        .iter()
+        .flat_map(|commit| &commit.refs)
+        .map(|reference| reference.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"main") && names.contains(&"origin/main") && names.contains(&"release")
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("agent/") || *name == "incoming")
+    );
+    assert!(
+        refresh
+            .snapshot
+            .refs
+            .iter()
+            .any(|reference| reference.name == "agent/topic"),
+        "the branch switcher retains all branches"
+    );
+    assert!(
+        git::history_page(&repository.0, &refresh.snapshot, 0, 30)
+            .unwrap()
+            .commits
+            .iter()
+            .any(|commit| commit.subject == "Independent worktree"),
+        "repository-wide queries stay available"
+    );
+
+    let linked = repository.0.join("linked");
+    repository.git(&["worktree", "add", linked.to_str().unwrap(), "agent/topic"]);
+    let linked_history = read_git_snapshot(&linked, None, None, None, false, None, None)
+        .unwrap()
+        .history
+        .unwrap()
+        .page
+        .unwrap()
+        .commits;
+    assert!(
+        linked_history
+            .iter()
+            .any(|commit| commit.subject == "Independent worktree")
+    );
+    assert!(!linked_history.iter().any(|commit| matches!(
+        commit.subject.as_str(),
+        "Integrated worktree" | "Incoming commit"
+    )));
 }
 
 impl Drop for HoverRepository {
@@ -184,6 +316,76 @@ impl Drop for HoverRepository {
         );
         let _ = fs::remove_dir_all(&root);
     }
+}
+
+#[test]
+fn focused_history_handles_upstream_changes_detached_head_and_unborn_branches() {
+    let repository = HoverRepository::new();
+    repository.git(&["branch", "-M", "main"]);
+    repository.git(&["checkout", "-b", "future"]);
+    fs::write(repository.0.join("future.txt"), "future\n").unwrap();
+    repository.git(&["add", "future.txt"]);
+    repository.git(&["commit", "-m", "Local upstream"]);
+    repository.git(&["tag", "future-tag"]);
+    repository.git(&["checkout", "main"]);
+    let first = read_git_snapshot(&repository.0, None, None, None, false, None, None)
+        .unwrap()
+        .history
+        .unwrap();
+    assert_eq!(first.page.unwrap().commits.len(), 2);
+    repository.git(&["branch", "--set-upstream-to=future", "main"]);
+    let changed = read_git_snapshot(
+        &repository.0,
+        None,
+        Some(&repository.0),
+        Some(first.snapshot),
+        false,
+        None,
+        Some(git::HISTORY_PAGE_SIZE),
+    )
+    .unwrap()
+    .history
+    .unwrap();
+    let commits = changed
+        .page
+        .expect("changing the upstream alone refreshes the history")
+        .commits;
+    assert_eq!(commits.len(), 3);
+    assert!(
+        commits[0]
+            .refs
+            .iter()
+            .any(|reference| reference.name == "future")
+    );
+    repository.git(&["checkout", "--detach", "main"]);
+    let detached = read_git_snapshot(&repository.0, None, None, None, false, None, None)
+        .unwrap()
+        .history
+        .unwrap()
+        .page
+        .unwrap();
+    assert_eq!(detached.commits.len(), 2);
+    assert!(
+        detached.commits[0]
+            .refs
+            .iter()
+            .any(|reference| reference.kind == git::RefKind::Head)
+    );
+    assert!(
+        !detached
+            .commits
+            .iter()
+            .flat_map(|commit| &commit.refs)
+            .any(|reference| reference.name == "main" || reference.name == "future-tag")
+    );
+    repository.git(&["checkout", "--orphan", "empty"]);
+    let unborn = read_git_snapshot(&repository.0, None, None, None, false, None, None)
+        .unwrap()
+        .history
+        .unwrap()
+        .page
+        .unwrap();
+    assert!(unborn.commits.is_empty());
 }
 
 #[test]
@@ -492,6 +694,15 @@ fn hidden_history_catches_up_when_source_control_is_shown() {
 #[test]
 fn remote_ref_updates_refresh_history_decorations_without_a_new_local_commit() {
     let repository = HoverRepository::new();
+    repository.git(&["branch", "-M", "main"]);
+    repository.git(&["config", "remote.origin.url", "."]);
+    repository.git(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+    repository.git(&["config", "branch.main.remote", "origin"]);
+    repository.git(&["config", "branch.main.merge", "refs/heads/main"]);
     let mut app = repository.app();
     history_window_state(&mut app, true, false);
     assert!(
@@ -575,11 +786,12 @@ fn automatic_history_refresh_retains_loaded_depth_and_can_continue_paging() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    repository.git(&["checkout", "history"]);
 
     let mut app = repository.app();
     history_window_state(&mut app, true, false);
     let snapshot = app.projects[0].git_history_snapshot.clone().unwrap();
-    let page = git::history_page(&repository.0, &snapshot, 0, 120).unwrap();
+    let page = git::history_page(&repository.0, &snapshot.current_branch(), 0, 120).unwrap();
     deliver_refresh(&mut app, snapshot, Some(page));
     let selected = app.projects[0].recent_commits[90].hash.clone();
     app.projects[0].git_view.selected_commit = Some(selected.clone());
@@ -610,7 +822,7 @@ fn automatic_history_refresh_retains_loaded_depth_and_can_continue_paging() {
         app.poll();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(app.projects[0].recent_commits.len(), 139);
+    assert_eq!(app.projects[0].recent_commits.len(), 137);
     assert!(!app.projects[0].git_history_has_more);
     assert!(app.projects[0].git_history_error.is_none());
 }
@@ -1141,6 +1353,7 @@ fn only_the_expected_history_page_extends_the_existing_graph() {
 fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
     let mut app = history_workspace(git::HISTORY_PAGE_SIZE * 2);
     let snapshot = git::HistorySnapshot {
+        upstream: None,
         local_only: Default::default(),
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
@@ -1170,6 +1383,7 @@ fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
 fn hidden_history_keeps_a_consistent_pageable_snapshot_until_reloaded() {
     let mut app = history_workspace(2);
     let original = git::HistorySnapshot {
+        upstream: None,
         local_only: Default::default(),
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
@@ -1185,6 +1399,7 @@ fn hidden_history_keeps_a_consistent_pageable_snapshot_until_reloaded() {
     let prefix = app.projects[0].recent_commits.clone();
     let graph = app.projects[0].git_view.graph.clone();
     let changed = git::HistorySnapshot {
+        upstream: None,
         local_only: Default::default(),
         tips: vec![commit(99).hash],
         refs: vec![git::CommitRef {
@@ -1231,6 +1446,7 @@ fn replacing_history_invalidates_a_pending_page_even_at_the_same_offset() {
     let old_generation = app.projects[0].git_history_generation;
     let replacement = vec![commit(100), commit(101)];
     let snapshot = git::HistorySnapshot {
+        upstream: None,
         local_only: Default::default(),
         tips: vec![replacement[0].hash.clone()],
         refs: Vec::new(),
