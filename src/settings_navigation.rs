@@ -76,6 +76,16 @@ impl VEditApp {
             }
             "Layout" => {
                 editor_preferences::preference_heading(ui, "LAYOUT & EXPLORER");
+                let mut new_window = self.settings.external_open_new_window;
+                if ui
+                    .checkbox(&mut new_window, "Open external files in a new window")
+                    .changed()
+                {
+                    self.set_external_open_new_window(new_window);
+                    changed = true;
+                }
+                ui.label(RichText::new("For files opened from Windows or vedit. Off: use the last active window. Open dialogs and agent commands stay in their selected window.").small().color(MUTED));
+                ui.add_space(12.0);
                 self.sidebar_settings_ui(ui);
                 ui.add_space(12.0);
                 let mut preview = self.settings.explorer_preview_tabs;
@@ -147,6 +157,58 @@ impl VEditApp {
         changed
     }
 
+    pub(super) fn set_external_open_new_window(&mut self, enabled: bool) {
+        self.settings.external_open_new_window = enabled;
+        // Use the existing ordered recovery writer and error reporting. Only an
+        // explicit preference change writes this shared setting; closing an older
+        // window cannot silently revert it.
+        let base = self.external_open_directory();
+        let writer = self.recovery_writer.clone();
+        let stamp = writer.stamp();
+        self.external_open_revision += 1;
+        self.external_open_save_pending = true;
+        let revision = self.external_open_revision;
+        let sender = self.sender.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = writer.write(
+                &base.join("external-open.json"),
+                stamp,
+                &serde_json::to_vec(&enabled).unwrap(),
+            );
+            let _ = sender.send(WorkerResult::ExternalOpenSaved { revision, result });
+            ctx.request_repaint();
+        });
+        self.session_dirty = true;
+    }
+
+    pub(super) fn external_open_directory(&self) -> PathBuf {
+        #[cfg(not(test))]
+        {
+            crate::profile::base_recovery_directory()
+        }
+        #[cfg(test)]
+        {
+            self.recovery_session_path.parent().unwrap().to_owned()
+        }
+    }
+
+    pub(super) fn refresh_external_open_preference(&mut self) {
+        if self.external_open_save_pending {
+            return;
+        }
+        self.external_open_revision += 1;
+        let revision = self.external_open_revision;
+        let base = self.external_open_directory();
+        let sender = self.sender.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let enabled = crate::profile::read_open_mode(&base);
+            let _ = sender.send(WorkerResult::ExternalOpenRead { revision, enabled });
+            ctx.request_repaint();
+        });
+    }
+
     pub(super) fn settings_save_hint(&self) -> &'static str {
         if self.settings_section() == "Languages" {
             "Server edits need Apply and restart language · Esc closes"
@@ -160,6 +222,61 @@ impl VEditApp {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn external_open_preference_is_available_and_leaves_documents_in_place() {
+        let mut app = VEditApp::empty(egui::Context::default());
+        app.recovery_session_path = recovery_directory().join("external-open-test/session.json");
+        visual_tests::workspace(&mut app);
+        let before: Vec<_> = app
+            .projects
+            .iter()
+            .flat_map(|project| &project.tabs)
+            .map(|tab| (tab.id, tab.text.clone(), tab.dirty))
+            .collect();
+        let mut screen = visual_tests::harness(app);
+        screen.state_mut().open_settings_section("Layout");
+        screen.run_steps(3);
+        screen
+            .get_by_label("Open external files in a new window")
+            .click();
+        screen.run_steps(3);
+        assert!(screen.state().settings.external_open_new_window);
+        let stale_revision = screen.state().external_open_revision - 1;
+        screen
+            .state()
+            .sender
+            .send(WorkerResult::ExternalOpenRead {
+                revision: stale_revision,
+                enabled: false,
+            })
+            .unwrap();
+        screen.state_mut().poll();
+        assert!(screen.state().settings.external_open_new_window);
+        let after: Vec<_> = screen
+            .state()
+            .projects
+            .iter()
+            .flat_map(|project| &project.tabs)
+            .map(|tab| (tab.id, tab.text.clone(), tab.dirty))
+            .collect();
+        assert_eq!(before, after);
+        screen.get_by_label("Done").click();
+        screen.run_steps(3);
+        let response = screen
+            .state_mut()
+            .control_request(crate::cli::Request::Settings {
+                patch: Some(crate::cli::SettingsPatch {
+                    external_open_new_window: Some(false),
+                    ..Default::default()
+                }),
+            });
+        assert!(response.ok);
+        assert_eq!(
+            response.result["settings"]["external_open_new_window"],
+            false
+        );
+    }
 
     #[test]
     fn settings_categories_are_reachable_and_zoomed_pages_fit() {

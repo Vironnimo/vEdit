@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn window_prefix_preserves_payload_and_requires_a_safe_explicit_id() {
+    let (id, args) =
+        window_arguments(["--window", "w7", "open", "--", "--window"].map(OsString::from)).unwrap();
+    assert_eq!(id.as_deref(), Some("w7"));
+    assert!(
+        matches!(parse_args(args).unwrap(), Parsed::Command { request: Request::Open { files, .. }, .. } if files[0].path.ends_with("--window"))
+    );
+    assert!(window_arguments(["--window", "../main", "status"].map(OsString::from)).is_err());
+    assert!(window_arguments(["--window", "main"].map(OsString::from)).is_err());
+    let (id, args) = window_arguments(["notify", "--window"].map(OsString::from)).unwrap();
+    assert!(id.is_none());
+    assert_eq!(args[1], "--window");
+    assert!(matches!(parse(&["windows"]).unwrap(), Parsed::Windows));
+    assert!(parse(&["windows", "extra"]).is_err());
+}
+
+#[test]
 fn launch_cli_validates_profiles_options_and_unicode_file_input() {
     let json = r#"{"profiles":[{"id":"web","name":"Web 東京","program":"powershell.exe","args":["--help","café & test"]},{"id":"desktop","name":"Desktop","program":"app.exe"}],"default":"desktop"}"#;
     let mut bytes = vec![0xff, 0xfe];

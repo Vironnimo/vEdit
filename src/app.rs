@@ -125,6 +125,7 @@ struct Settings {
     vim: bool,
     swap_jk: bool,
     autosave: bool,
+    external_open_new_window: bool,
     autosave_delay_ms: u64,
     font_size: f32,
     ui_scale: f32,
@@ -154,6 +155,7 @@ impl Default for Settings {
             vim: true,
             swap_jk: false,
             autosave: true,
+            external_open_new_window: false,
             autosave_delay_ms: 850,
             font_size: 14.0,
             ui_scale: 1.0,
@@ -682,6 +684,14 @@ struct ActiveScreenJump {
 type BookmarkMarks = Vec<(usize, u64, String)>;
 type BookmarkLineCache = HashMap<u64, (u64, BookmarkMarks)>;
 enum WorkerResult {
+    ExternalOpenRead {
+        revision: u64,
+        enabled: bool,
+    },
+    ExternalOpenSaved {
+        revision: u64,
+        result: Result<(), String>,
+    },
     RecentOpened(recent::OpenResult),
     DroppedPaths(other_files::DroppedPaths),
     ExplorerDirectory {
@@ -954,6 +964,8 @@ pub struct VEditApp {
     sidebar_visible: bool,
     sidebar_layout: sidebar_layout::SidebarLayout,
     settings: Settings,
+    external_open_revision: u64,
+    external_open_save_pending: bool,
     bookmarks: crate::bookmarks::BookmarkStore,
     bookmark_lines: BookmarkLineCache,
     pending_bookmark_jump: Option<(u64, crate::bookmarks::Bookmark)>,
@@ -1073,7 +1085,7 @@ pub struct VEditApp {
     rendering_panes: bool,
 }
 impl VEditApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
         let stored: Session = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
@@ -1097,10 +1109,19 @@ impl VEditApp {
                 );
             });
         }
-        let session = manifest.unwrap_or(stored);
+        let mut session = manifest.unwrap_or(stored);
+        if session.settings.is_none() && crate::profile::window_id() != "main" {
+            // Inherit preferences, never another window's documents or layout.
+            session.settings =
+                fs::read(crate::profile::base_recovery_directory().join("session.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
+                    .and_then(|primary| primary.settings);
+        }
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
+        app.settings.external_open_new_window = crate::profile::external_open_new_window();
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
         keybindings::migrate_later_defaults(&mut app.settings.keybindings);
@@ -1121,8 +1142,10 @@ impl VEditApp {
             app.index_project(index);
         }
         app.session_dirty = false;
-        for argument in std::env::args_os().skip(1) {
-            app.open_argument(PathBuf::from(argument));
+        // Folders first, so mixed shell arguments use the same ownership rule as drops.
+        let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| path.is_dir());
+        for path in folders.into_iter().chain(files) {
+            app.open_argument(path);
         }
         app.start_control();
         app
@@ -1252,6 +1275,8 @@ impl VEditApp {
             sidebar_visible: true,
             sidebar_layout: sidebar_layout::SidebarLayout::default(),
             settings: Settings::default(),
+            external_open_revision: 0,
+            external_open_save_pending: false,
             applied_editor_font: crate::cli::EditorFont::default(),
             bookmarks: crate::bookmarks::BookmarkStore::default(),
             bookmark_lines: HashMap::new(),
@@ -2023,6 +2048,19 @@ impl VEditApp {
         self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                WorkerResult::ExternalOpenRead { revision, enabled } => {
+                    if revision == self.external_open_revision && !self.external_open_save_pending {
+                        self.settings.external_open_new_window = enabled;
+                    }
+                }
+                WorkerResult::ExternalOpenSaved { revision, result } => {
+                    if revision == self.external_open_revision {
+                        self.external_open_save_pending = false;
+                        if let Err(error) = result {
+                            self.status(error, true);
+                        }
+                    }
+                }
                 WorkerResult::RecentOpened(opened) => self.finish_recent_open(opened),
                 WorkerResult::DroppedPaths(batch) => self.finish_dropped_paths(batch),
                 WorkerResult::Panicked(message) => self.status(message, true),
@@ -2759,6 +2797,16 @@ impl VEditApp {
 
     fn refresh_visible_git(&mut self) {
         let active = self.git_polling_active();
+        if active
+            && (self.git_window_was_active != Some(true)
+                || self
+                    .ctx
+                    .input(|input| input.events.contains(&egui::Event::WindowFocused(true))))
+            && let Some(server) = &self.control
+        {
+            server.mark_active();
+            self.refresh_external_open_preference();
+        }
         // Focus events also cover a minimize/restore cycle during which the
         // native backend did not render an inactive frame.
         let resumed = active
@@ -3689,6 +3737,13 @@ impl VEditApp {
         }
     }
     fn flush_recovery(&self) {
+        if self.external_open_save_pending {
+            let _ = self.recovery_writer.write(
+                &self.external_open_directory().join("external-open.json"),
+                self.recovery_writer.stamp(),
+                &serde_json::to_vec(&self.settings.external_open_new_window).unwrap(),
+            );
+        }
         for p in &self.projects {
             for tab in &p.tabs {
                 if tab.dirty {
@@ -8001,6 +8056,18 @@ impl VEditApp {
                 t.set_cursor(at..at);
             }
         }
+        let settings_was_open = ctx
+            .data(|data| data.get_temp::<bool>(egui::Id::new("external_open_settings_seen")))
+            .unwrap_or(false);
+        if self.settings_open && !settings_was_open {
+            self.refresh_external_open_preference();
+        }
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("external_open_settings_seen"),
+                self.settings_open,
+            )
+        });
         if self.settings_open {
             let mut done = false;
             let mut changed = false;

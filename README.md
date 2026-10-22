@@ -1,6 +1,8 @@
-# vEdit 0.5.2
+# vEdit 0.5.3
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.5.3 ergänzt eine Benutzerinstallation mit Startmenü, PATH und Registrierung für **Öffnen mit** und **Standard-Apps**, außerdem unabhängige Fenster mit eigenen Sitzungen.
 
 Version 0.5.2 ergänzt **Open recent** für zuletzt genutzte Dateien und Projektordner, eine vollständige Tastaturbedienung in **Other files** sowie **Ctrl+P** für offene Dateien und unbenannte Entwürfe. **Ctrl+Shift+K** löscht ganze Zeilen, **Ctrl+Enter** / **Ctrl+Shift+Enter** fügen darunter beziehungsweise darüber eine Zeile ein. **Ctrl+G** versteht auch `Zeile:Spalte`.
 
@@ -50,7 +52,30 @@ Bestehende Sitzungen mit Projekten, Einstellungen, Fensterpositionen und ungespe
 
 ## Starten
 
-Zum direkten Start **vEdit.lnk** im Projektordner doppelklicken. Die portable Anwendung liegt unter **`dist/vEdit/vedit.exe`** und lässt sich auch dort direkt starten. Zum Bearbeiten von Textdateien ist keine Rust-Installation erforderlich. Für Git-Funktionen muss `git` im `PATH` liegen; Rust-Werkzeuge werden für Rust-Projekte benötigt.
+Für eine feste Benutzerinstallation aus dem Quellcode im Projektordner ausführen:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+Der Befehl baut das vollständige Paket und installiert es unter `%LOCALAPPDATA%\Programs\vEdit`. Er legt einen Startmenüeintrag an und nimmt `vedit` sowie `vedit-cli` in den Benutzer-PATH auf. **Derselbe Befehl aktualisiert die Installation** nach späteren Quellcodeänderungen. Ein gewöhnlicher Build allein ändert die installierte Version nicht. Eine laufende Sitzung bleibt geöffnet; die neue Version wird beim nächsten normalen Neustart verwendet. Bereits laufende Terminals und Agent-Anwendungen müssen neu gestartet werden, um den geänderten PATH zu übernehmen. Bis dahin funktioniert der absolute Programmpfad.
+
+Start über das Startmenü oder `vedit`; der Projektordner ist dafür nicht erforderlich. Installation und Aktualisierung aus einem fertig entpackten Paket funktionieren auch ohne Quellcode, Rust oder npm: dessen `scripts\install.ps1` mit PowerShell ausführen. `-PackagePath 'C:\Downloads\vEdit'` übernimmt ein bestimmtes Paket. Die enthaltenen Dateien werden vor der Installation anhand des Paketmanifests geprüft. Git-Funktionen benötigen weiterhin `git` im PATH, Sprachwerkzeuge gegebenenfalls das jeweilige SDK.
+
+Unter **Windows-Einstellungen → Apps → Standard-Apps → vEdit** lassen sich Text- und Codeformate zuordnen. vEdit erscheint auch bei **Öffnen mit**. Bestehende Standardzuordnungen werden bei der Installation erhalten. Mit `-OpenDefaultApps` öffnet das Installationsskript die passende Einstellungsseite. Unter **Installierte Apps → vEdit → Deinstallieren** wird die Anwendung entfernt; persönliche Einstellungen und Wiederherstellungsdaten bleiben erhalten.
+
+Alternativ bleibt das Paket `dist/vEdit/` portabel. **vEdit.lnk** im Projektordner startet dieses Paket; der Startmenüeintrag startet die eigenständige Installation.
+
+Ein externer Dateiaufruf öffnet im zuletzt aktiven Fenster: bereits geöffnete Dokumente werden wiederverwendet, Dateien innerhalb eines offenen Projekts bleiben dort, andere landen in **Other files**. Ordner werden als Projekte geöffnet. **Settings → Layout → Open external files in a new window** ändert externe Dateiaufrufe auf ein neues Fenster; Dateidialoge, Drag-and-drop und `vedit-cli` bleiben im jeweiligen Fenster. Für einen einzelnen Aufruf:
+
+```powershell
+vedit --new-window "C:\Notizen\Idee.txt"
+vedit --reuse-window "C:\Notizen\Idee.txt"
+vedit-cli windows
+vedit-cli --window main status
+```
+
+Jedes zusätzliche Fenster beginnt ohne die Projekte und Tabs eines anderen Fensters und übernimmt anfangs die gespeicherten Einstellungen des Hauptfensters. Fenster besitzen getrennte Sitzungen; Änderungen derselben Datei in mehreren Fenstern unterliegen dem normalen Schutz vor externen Änderungen. Nach einem Absturz stellt der nächste Hauptfensterstart auch unterbrochene Zusatzfenster wieder her. Bewusst geschlossene Zusatzfenster bleiben als gespeicherte Fenster unter `vedit-cli windows` auffindbar und lassen sich mit `vedit --window ID` wiederherstellen. CLI-Befehle verwenden bei genau einem offenen Fenster dieses; bei mehreren verlangt die CLI `--window ID` **vor** dem Befehl. Tab- und Ansichts-IDs gelten nur innerhalb dieses Fensterprozesses.
 
 Zum Bauen aus dem Quellcode: Rust mit dem stabilen Windows-Toolchain installieren und im Projektordner ausführen:
 

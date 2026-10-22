@@ -84,7 +84,10 @@ mod platform {
         spawn_arguments(executable, &[])
     }
 
-    fn spawn_arguments(executable: &Path, arguments: &[&OsStr]) -> io::Result<ApplicationProcess> {
+    pub(super) fn spawn_arguments(
+        executable: &Path,
+        arguments: &[&OsStr],
+    ) -> io::Result<ApplicationProcess> {
         let mut application: Vec<u16> = executable.as_os_str().encode_wide().collect();
         if application.contains(&0) {
             return Err(io::Error::new(
@@ -331,6 +334,15 @@ mod platform {
             self.process.try_wait().map(|status| status.is_some())
         }
     }
+    pub(super) fn spawn_window(executable: &Path, id: &str) -> io::Result<ApplicationProcess> {
+        Command::new(executable)
+            .args(["--window", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|process| ApplicationProcess { process })
+    }
     pub(super) fn spawn(executable: &Path) -> io::Result<ApplicationProcess> {
         Command::new(executable)
             .stdin(Stdio::null())
@@ -344,4 +356,18 @@ mod platform {
 pub(super) use platform::ApplicationProcess;
 pub(super) fn spawn(executable: &Path) -> io::Result<ApplicationProcess> {
     platform::spawn(executable)
+}
+
+pub(super) fn spawn_window(executable: &Path, id: &str) -> io::Result<ApplicationProcess> {
+    #[cfg(windows)]
+    {
+        platform::spawn_arguments(
+            executable,
+            &[std::ffi::OsStr::new("--window"), std::ffi::OsStr::new(id)],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        platform::spawn_window(executable, id)
+    }
 }

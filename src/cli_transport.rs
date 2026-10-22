@@ -256,6 +256,19 @@ impl Server {
     pub fn try_recv(&self) -> Option<Envelope> {
         self.receiver.try_recv().ok()
     }
+
+    /// A focus transition is rare; keep its small disk write off the UI thread.
+    pub fn mark_active(&self) {
+        let path = self.endpoint_path.with_file_name("last-active");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string();
+        thread::spawn(move || {
+            let _ = fs::write(path, stamp);
+        });
+    }
 }
 
 impl Drop for Server {
@@ -287,26 +300,136 @@ impl Drop for ConnectionCount {
     }
 }
 
-pub fn endpoint_directory() -> PathBuf {
+pub fn base_endpoint_directory() -> PathBuf {
     std::env::var_os("VEDIT_CONTROL_DIR")
         .or_else(|| std::env::var_os("MORROW_CONTROL_DIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(crate::profile::recovery_directory)
+        .unwrap_or_else(crate::profile::base_recovery_directory)
+}
+
+pub fn endpoint_directory() -> PathBuf {
+    crate::profile::window_directory(&base_endpoint_directory(), crate::profile::window_id())
+}
+
+#[derive(Clone, Serialize)]
+pub struct WindowInfo {
+    pub id: String,
+    pub pid: u32,
+    pub last_active: u128,
+    pub recovery_directory: PathBuf,
+}
+
+pub fn saved_window_ids() -> Vec<String> {
+    let mut ids = vec!["main".into()];
+    if let Ok(entries) = fs::read_dir(crate::profile::base_recovery_directory().join("windows")) {
+        ids.extend(
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|id| id != "main" && crate::profile::valid_window(id)),
+        );
+    }
+    ids.sort();
+    ids
+}
+
+fn alive_at(path: &Path) -> Option<Endpoint> {
+    read_endpoint(path).ok().filter(|endpoint| {
+        TcpStream::connect_timeout(&endpoint_address(endpoint), CONNECT_TIMEOUT).is_ok()
+    })
+}
+
+pub fn running_windows() -> Vec<WindowInfo> {
+    let base = base_endpoint_directory();
+    let mut ids = vec!["main".to_owned()];
+    if let Ok(entries) = fs::read_dir(base.join("windows")) {
+        ids.extend(
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|id| id != "main" && crate::profile::valid_window(id)),
+        );
+    }
+    ids.sort();
+    ids.into_iter()
+        .filter_map(|id| {
+            let directory = crate::profile::window_directory(&base, &id);
+            let endpoint = alive_at(&directory.join("control.json"))?;
+            let last_active = fs::read_to_string(directory.join("last-active"))
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            Some(WindowInfo {
+                recovery_directory: crate::profile::window_directory(
+                    &crate::profile::base_recovery_directory(),
+                    &id,
+                ),
+                id,
+                pid: endpoint.pid,
+                last_active,
+            })
+        })
+        .collect()
+}
+
+fn selected_endpoint() -> Result<PathBuf, String> {
+    if crate::profile::selected_window().is_some() {
+        return Ok(endpoint_directory().join("control.json"));
+    }
+    let windows = running_windows();
+    choose_endpoint(&base_endpoint_directory(), &windows)
+}
+
+fn choose_endpoint(base: &Path, windows: &[WindowInfo]) -> Result<PathBuf, String> {
+    match windows {
+        [] => Ok(base.join("control.json")),
+        [window] => Ok(crate::profile::window_directory(base, &window.id).join("control.json")),
+        _ => Err(format!(
+            "Several vEdit windows are open ({}). No request was sent. Use vedit-cli --window ID COMMAND; vedit-cli windows lists the window IDs.",
+            windows
+                .iter()
+                .map(|window| format!("{}: PID {}", window.id, window.pid))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn several_windows_require_a_destination_and_one_secondary_is_addressable() {
+    let base = Path::new("C:/isolated-control");
+    let window = |id: &str| WindowInfo {
+        id: id.into(),
+        pid: 1,
+        last_active: 0,
+        recovery_directory: base.into(),
+    };
+    assert_eq!(
+        choose_endpoint(base, &[]).unwrap(),
+        base.join("control.json")
+    );
+    assert_eq!(
+        choose_endpoint(base, &[window("w2")]).unwrap(),
+        base.join("windows/w2/control.json")
+    );
+    let error = choose_endpoint(base, &[window("main"), window("w2")]).unwrap_err();
+    assert!(error.contains("No request was sent"));
+    assert!(error.contains("--window ID"));
 }
 
 pub fn send(request: &Request) -> Result<Response, String> {
-    send_to(request, &endpoint_directory().join("control.json"))
+    send_to(request, &selected_endpoint()?)
 }
 
 /// A startup preflight only. Never use a failed probe to replay a request whose
 /// bytes might already have reached the previous server.
 pub fn endpoint_alive() -> bool {
-    read_endpoint(&endpoint_directory().join("control.json")).is_ok_and(|endpoint| {
-        TcpStream::connect_timeout(&endpoint_address(&endpoint), CONNECT_TIMEOUT).is_ok()
-    })
+    selected_endpoint().is_ok_and(|path| alive_at(&path).is_some())
 }
 
-fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
+pub(super) fn send_to(request: &Request, path: &Path) -> Result<Response, String> {
     // Canonical like the editor's project roots, so the receiver compares
     // paths without touching the disk.
     let cwd = std::env::current_dir()

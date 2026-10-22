@@ -1,4 +1,4 @@
-//! Keep Windows launches of vEdit in one editor window.
+//! One owner per independently persisted editor window.
 
 #[cfg(windows)]
 mod platform {
@@ -6,11 +6,8 @@ mod platform {
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use std::thread;
-    use std::time::Duration;
 
     const ERROR_ALREADY_EXISTS: u32 = 183;
-    const SW_RESTORE: i32 = 9;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -22,13 +19,6 @@ mod platform {
         fn GetLastError() -> u32;
         fn SetLastError(error: u32);
         fn CloseHandle(handle: *mut c_void) -> i32;
-    }
-
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn FindWindowW(class_name: *const u16, window_name: *const u16) -> *mut c_void;
-        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
-        fn SetForegroundWindow(window: *mut c_void) -> i32;
     }
 
     pub struct SingleInstanceGuard {
@@ -44,7 +34,7 @@ mod platform {
 
     pub fn acquire() -> io::Result<Option<SingleInstanceGuard>> {
         // Share the lock with Morrow while an old installed build is still open.
-        let name: Vec<u16> = std::ffi::OsStr::new("Local\\Morrow.Editor.SingleInstance")
+        let name: Vec<u16> = std::ffi::OsStr::new(&mutex_name())
             .encode_wide()
             .chain(Some(0))
             .collect();
@@ -56,39 +46,24 @@ mod platform {
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             unsafe { CloseHandle(handle) };
-            activate_existing_window();
             Ok(None)
         } else {
             Ok(Some(SingleInstanceGuard { handle }))
         }
     }
 
-    fn activate_existing_window() {
-        let titles: Vec<Vec<u16>> = ["vEdit", "Morrow"]
-            .into_iter()
-            .map(|title| {
-                std::ffi::OsStr::new(title)
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect()
-            })
-            .collect();
-        // The first process can own the mutex before eframe has created its window.
-        for _ in 0..60 {
-            let window = titles
-                .iter()
-                .map(|title| unsafe { FindWindowW(ptr::null(), title.as_ptr()) })
-                .find(|window| !window.is_null())
-                .unwrap_or(ptr::null_mut());
-            if !window.is_null() {
-                unsafe {
-                    ShowWindow(window, SW_RESTORE);
-                    SetForegroundWindow(window);
-                }
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
+    fn mutex_name() -> String {
+        if crate::profile::window_id() == "main" && std::env::var_os("VEDIT_PROFILE_DIR").is_none()
+        {
+            return "Local\\Morrow.Editor.SingleInstance".into();
         }
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        crate::profile::recovery_directory()
+            .to_string_lossy()
+            .to_lowercase()
+            .hash(&mut hash);
+        format!("Local\\vEdit.Window.{:016x}", hash.finish())
     }
 
     #[cfg(test)]
@@ -147,4 +122,4 @@ mod platform {
     }
 }
 
-pub use platform::acquire;
+pub use platform::{SingleInstanceGuard, acquire};

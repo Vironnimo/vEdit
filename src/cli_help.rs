@@ -16,6 +16,13 @@ macro_rules! command {
 
 pub const COMMANDS: &[CommandHelp] = &[
     command!(
+        "windows",
+        "",
+        "List running and saved editor windows without changing them.",
+        "windows contains IDs, PIDs and recovery directories. saved_windows contains closed window IDs.\nTarget a running window with vedit-cli --window ID COMMAND. Restore a saved window with vedit --window ID.\nWithout --window, commands use the only running window; several windows require an explicit ID.\nThe --window ID prefix goes before COMMAND. IDs belong to windows; tab IDs remain local to each process.",
+        []
+    ),
+    command!(
         "launch",
         "list | configure --file CONFIG.json | select ID | start [ID] | stop | output",
         "Configure, select and run named project applications; read their state/output.",
@@ -463,6 +470,6 @@ pub fn render(name: Option<&str>) -> String {
         }
         text.push_str("\nUse vedit-cli COMMAND --help for arguments; schema OP for structured request examples.\n");
     }
-    text.push_str("\nGlobal: --no-start prevents startup; -- ends options for literal arguments. --help is offline.\nResults: one JSON document on stdout; ok/result/error. Exit 0: applied/read; 1: failure; 2: partial execution.\nExit 0 does not prove pending loads, saves, jobs or tasks finished. Inspect reported pending/error state.\n");
+    text.push_str("\nWindow selection: vedit-cli --window ID COMMAND; omit for the only running window. List IDs with windows.\nGlobal: --no-start prevents startup; -- ends options for literal arguments. --help is offline.\nResults: one JSON document on stdout; ok/result/error. Exit 0: applied/read; 1: failure; 2: partial execution.\nExit 0 does not prove pending loads, saves, jobs or tasks finished. Inspect reported pending/error state.\n");
     text
 }

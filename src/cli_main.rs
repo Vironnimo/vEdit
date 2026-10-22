@@ -4,7 +4,15 @@ mod cli;
 mod profile;
 
 fn main() {
-    let result = match cli::parse_args(std::env::args_os().skip(1)) {
+    let arguments =
+        cli::window_arguments(std::env::args_os().skip(1)).and_then(|(window, args)| {
+            if let Some(id) = window {
+                profile::select_window(id)?;
+            }
+            cli::parse_args(args)
+        });
+    let result = match arguments {
+        Ok(cli::Parsed::Windows) => cli::windows_response(),
         Ok(cli::Parsed::Help { command }) => {
             print!("{}", cli::help::render(command.as_deref()));
             return;

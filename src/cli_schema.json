@@ -221,6 +221,7 @@
         "highlight_current_line": true,
         "git_gutter": true,
         "autosave_delay_ms": 850,
+        "external_open_new_window": false,
         "show_ignored_files": true,
         "editor_font": "jetbrains_mono",
         "tab_width": 4,
@@ -596,6 +597,7 @@
     "observation": "status.active_workspace identifies the visible project. status.layout and layout return workspace, focused pane, each pane's active tab_id and ordered local tab_ids, views, locations, orientation tree and ratios for that project only. tabs remains a page across projects with each buffer's workspace; read/edit/replace/save on inactive buffers do not change the visible project."
   },
   "settings": {
+    "external_open_new_window": "Boolean, default false. Shared external-file launch preference. True creates an independent window; false reuses the last active window. Open dialogs and CLI requests retain their selected window.",
     "get": "omit patch",
     "patch": "only supplied fields change; null leaves a field unchanged. Applied settings are returned, persistence is queued.",
     "font_size": "10..32; source editor font size in logical points",
@@ -703,5 +705,11 @@
     "create_folder": "Creates one new folder under an existing workspace directory without overwrite.",
     "completion": "File returns accepted:true, applied:false, pending:true, job_id, status:pending and phase:preparing. This proves acceptance only. Poll file_job: status is pending/applied/failed, phase preparing/applying/complete, complete indicates the job ended and applied confirms the filesystem change. A successful query with status:failed is an observed failed operation. Full job evidence includes path/destination/error/updated_tabs; after ambiguous delivery inspect status.file_jobs and files rather than replaying a rename.",
     "scope": "Registered workspaces only; canonical paths verified in a background worker. New names are single basenames, never paths. Sources that are symbolic links or Windows reparse points are refused."
+  },
+  "windows": {
+    "list": "vedit-cli windows lists running IDs/PIDs/recovery directories and saved window IDs.",
+    "selection": "vedit-cli --window ID COMMAND; prefix goes before the command. Omit for the only running window. Several windows return an error before dispatch.",
+    "restore": "vedit --window ID restores a saved window; vedit --new-window creates a separate session.",
+    "ids": "Tab and pane IDs belong to one process; keep the same window for dependent calls."
   }
 }

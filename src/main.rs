@@ -27,6 +27,7 @@ mod screen_jump;
 mod search;
 mod selection_scroll;
 mod single_instance;
+mod startup;
 mod tasks;
 mod text_statistics;
 mod typography;
@@ -44,34 +45,37 @@ mod window_dpi_tests;
 mod window_chrome_native_tests;
 
 fn main() -> eframe::Result {
-    let paths: Vec<_> = std::env::args_os()
-        .skip(1)
-        .map(std::path::PathBuf::from)
-        .collect();
-    match cli::forward_paths(paths) {
-        Ok(Some(_)) => return Ok(()),
-        Ok(None) => {}
+    let arguments = match startup::parse(std::env::args_os().skip(1)) {
+        Ok(arguments) => arguments,
         Err(error) => {
-            let _ = rfd::MessageDialog::new()
-                .set_title("vEdit")
-                .set_description(error)
-                .show();
-            return Ok(());
-        }
-    }
-    let _single_instance = match single_instance::acquire() {
-        Ok(Some(guard)) => Some(guard),
-        Ok(None) => return Ok(()),
-        Err(error) => {
-            let _ = rfd::MessageDialog::new()
-                .set_title("vEdit")
-                .set_description(format!(
-                    "vEdit could not verify that this is the only open window.\n\n{error}"
-                ))
-                .show();
+            show_startup_error(error);
             return Ok(());
         }
     };
+    if arguments.help {
+        print!("{}", startup::HELP);
+        return Ok(());
+    }
+    if arguments.version {
+        println!("vEdit {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let (paths, _single_instance) = match startup::prepare(arguments) {
+        Ok(Some(launch)) => launch,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            show_startup_error(error);
+            return Ok(());
+        }
+    };
+    let open_window = match startup::OpenWindow::mark() {
+        Ok(window) => window,
+        Err(error) => {
+            show_startup_error(error);
+            return Ok(());
+        }
+    };
+    startup::recover_interrupted_windows();
 
     let options = eframe::NativeOptions {
         persistence_path: profile::persistence_path(),
@@ -85,11 +89,22 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "vEdit",
         options,
-        Box::new(|cc| Ok(Box::new(app::VEditApp::new(cc)))),
-    )
+        Box::new(move |cc| Ok(Box::new(app::VEditApp::new(cc, paths)))),
+    );
+    if result.is_ok() {
+        open_window.closed();
+    }
+    result
+}
+
+fn show_startup_error(error: String) {
+    let _ = rfd::MessageDialog::new()
+        .set_title("vEdit")
+        .set_description(error)
+        .show();
 }
 
 fn app_icon() -> eframe::egui::IconData {

@@ -15,7 +15,7 @@ vEdit is the user's Windows code editor. Its CLI reads in-memory documents and c
 
 ## Run the CLI
 
-Use `vedit-cli.exe` on PATH when available. Otherwise derive its absolute path from this skill's folder. Replace `<skill-folder>` with the absolute folder containing this file:
+The user installation puts `vedit.exe` and `vedit-cli.exe` on the user PATH. Use `vedit-cli.exe` on PATH when available. Existing agent apps need a restart to inherit a changed PATH. Otherwise derive its absolute path from this skill's folder. Replace `<skill-folder>` with the absolute folder containing this file:
 
 ```powershell
 $VEditSkill = '<skill-folder>'
@@ -28,6 +28,8 @@ That path is for `.agents/skills/vedit/` in a checkout. In a portable bundle (`s
 Recipes run in PowerShell from the task's directory. Quoted executable paths need `&`. Text/JSON files accept UTF-8 with or without BOM and UTF-16 with BOM. Write JSON using `ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8`; pass the file instead of piping payloads into a native command. Use `--` before literal positional text beginning with `-`.
 
 `open`, `review MANIFEST.json` and `workspace` start the sibling `vedit.exe` when needed, except with `--background`; `--no-start` prevents startup. Other commands, including a change review and `notify`, require a running editor. Do not restart the user's editor to recover a CLI error; report it and preserve their session.
+
+With several running windows, commands require `--window ID` before the command. Use the window ID from the task or `windows`; `status` also reports it. Keep the same window ID for dependent calls because tab IDs belong to one process. `vedit-cli` operations stay in that window regardless of the external-file opening preference. `vedit --new-window` creates a separate window when the user asks for one.
 
 ## Read the result
 
@@ -128,6 +130,8 @@ Example profile for a repository script you have created at `scripts/start.ps1` 
 Launches use saved project files and leave agent drafts untouched. Each project can run one variant at a time, alongside build/test tasks and other projects. `launch select ID` remembers the dropdown choice locally. Configuration reloads automatically; changing it does not change an already running application. Launch output retains recent lines; line numbers count from the run's start and stay valid while old lines are trimmed (`first_line`, `skipped_lines`). Continue at `next_line`/`next_column`; at the newest line the page is empty with `next_line:null`. A long-running service has no launch timeout. Closing its project or vEdit stops its owned processes.
 
 ## Command index
+
+- `windows`: list running window IDs and saved windows; select with `--window ID` before the command.
 
 - `open`: show files at a position or in Markdown preview; `--background` keeps the user's view.
 - `review`: replace review annotations and open their files; with `--working`, `--commit REV` or `--branch`, show the user all changes as one diff to tick off.

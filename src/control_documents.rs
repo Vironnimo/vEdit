@@ -195,6 +195,9 @@ impl VEditApp {
                         .as_ref()
                         .map(|_| self.settings.search_excludes.clone());
                     apply_settings_patch(&mut self.settings, &patch);
+                    if let Some(enabled) = patch.external_open_new_window {
+                        self.set_external_open_new_window(enabled);
+                    }
                     if previous_excludes
                         .is_some_and(|previous| previous != self.settings.search_excludes)
                     {

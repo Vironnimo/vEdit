@@ -4,6 +4,24 @@ The CLI controls vEdit's editor state and presents plans and review targets. The
 
 The packaged CLI is `dist/vEdit/vedit-cli.exe`. `--help` documents the ordinary commands; `schema` returns the structured request contract. The skill entry point explains discovery, scope, and verification. `references/editor-control.md` is conditional guidance for buffers, layouts, preferences, user-selected snippets, persistent bookmarks, project queries, tasks, and file operations; `references/review.md` is loaded for marked reviews.
 
+## Installed commands and independent windows (0.5.3)
+
+The user installer adds `vedit` and `vedit-cli` to the user PATH and packages the
+same operating skill under `skills/vedit/`. Existing agent hosts inherit PATH
+changes after restarting. The installation runs independently of the checkout.
+
+`vedit-cli windows` lists running window IDs, PIDs and projects, plus saved window
+IDs. With several running windows, use `vedit-cli --window ID COMMAND`; the prefix
+comes before the command. Without it, ambiguous requests fail before dispatch.
+`status` reports its window and recovery directory. Tab/pane IDs are process-local;
+dependent calls retain their window ID. Each window has separate session storage,
+recovery documents and a control endpoint. `vedit --new-window` creates a window;
+`vedit --window ID` restores a saved one. The shared
+`settings.external_open_new_window` preference controls external file launches,
+not CLI requests. Project selection by caller directory still applies inside the
+selected window. The executable integration checks use `VEDIT_PROFILE_DIR` to
+isolate all storage and locks; see the development guide.
+
 ## Disk conflicts and draft comparison (0.5.0)
 
 Agents often rewrite a file the user has open. vEdit treats the disk as the newer truth only while the buffer has nothing to lose:

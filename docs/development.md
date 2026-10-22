@@ -1,7 +1,7 @@
 # Developing vEdit
 
 Commands and source paths in this guide require the source checkout. The portable
-application includes this guide for reference, but not the Rust sources or scripts.
+application includes this guide and the installer, but not Rust sources or development scripts.
 
 Use the stable Windows Rust toolchain with the MSVC build prerequisites. Git must
 be on PATH for repository functionality and its integration tests. The normal
@@ -118,6 +118,58 @@ build. On each run the script deletes `vedit-running-<pid>.exe` backups in
 stays while any process with that PID runs (also a reused PID), and a backup that
 cannot be deleted only produces a warning. Verify both packaged binaries and relevant copied files against the build
 outputs. `target/`, `dist/`, local backups and the shortcut are ignored by Git.
+
+## User installation and windows
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1`
+builds with `build-release.ps1`, verifies the package hashes and installs for the
+current user in `%LOCALAPPDATA%/Programs/vEdit`. Repeating it updates that
+installation. The packaged `scripts/install.ps1` installs its containing package;
+`-PackagePath PATH` uses an extracted package without building. No administrator
+rights or repository files are required to run the installed application.
+
+The installer registers HKCU capabilities, OpenWithProgids, App Paths, a Start
+menu shortcut, an uninstall entry and the user PATH. It preserves existing
+extension defaults and raw expandable PATH entries. It broadcasts environment
+and association changes; already running agent/terminal processes retain their
+inherited environment. Windows owns the actual default-app choice.
+`-OpenDefaultApps` opens `ms-settings:defaultapps?registeredAppUser=vEdit`.
+Registration follows Microsoft's [Default Programs](https://learn.microsoft.com/en-us/windows/win32/shell/default-programs)
+and [Open With](https://learn.microsoft.com/en-us/windows/win32/shell/how-to-include-an-application-on-the-open-with-dialog-box)
+documentation. The bundled icon uses the same geometry/colors as the window icon.
+
+Replacement files are staged alongside their destinations. Renamed running
+executables remain alive; failed file replacement rolls earlier replacements
+back. Locked runtime changes can require closing vEdit normally before retrying.
+The installation marker tracks owned files; uninstall refuses while an installed
+process runs, removes owned files and registration, and retains user profiles and
+unknown files. Installer validation uses a temporary directory and a redirected
+registry subtree, never the live installation:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -ExecutableDirectory dist/vEdit
+```
+
+`startup.rs` parses shell arguments and obtains the selected window's lock before
+loading any session. Main keeps the legacy single-instance lock and profile;
+additional windows use `recovery/windows/wN` with separate storage, recovery,
+control endpoints and locks. `window-open` survives abnormal exits; a main-window
+startup restores interrupted additional windows. A normal close removes the
+marker but retains the explicitly restorable saved session. `external-open.json`
+is a shared launch preference; only explicit changes write it. Other preferences
+are window-local after initial inheritance. CLI operations always target a
+specific window, ignoring the external-open preference. The prefix `--window ID`
+is parsed before the command, preserving flag-looking literal command payloads.
+`windows` reports running IDs/projects and saved IDs; status includes its window
+ID and recovery directory. More than one live window without an ID is an error
+before dispatch. GUI launches reuse the window with the newest focus timestamp.
+
+For executable integration tests, set `VEDIT_PROFILE_DIR` to an isolated absolute
+fixture directory. Both recovery and eframe storage then live below that directory,
+and the main lock is scoped to it. `VEDIT_CONTROL_DIR` remains an endpoint-only
+override, with per-window subdirectories; it does not isolate recovery by itself.
+Never use the user's profile for integration fixtures or terminate their editor.
 
 ## vEdit branding and compatibility
 

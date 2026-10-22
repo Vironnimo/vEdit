@@ -110,6 +110,20 @@ try {
     foreach ($windowDocumentation in @('LICENSE', 'VEDIT_PATCH.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/winit/$windowDocumentation") -Destination $windowLicenseDirectory -Force
     }
+    $packagedScripts = Join-Path $releaseDirectory 'scripts'
+    New-Item -ItemType Directory -Path $packagedScripts -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') -Destination $packagedScripts -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'assets/vedit.ico') -Destination $releaseDirectory -Force
+    $packageVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'Cargo.toml') | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+    $packageFiles = [ordered]@{}
+    Get-ChildItem -LiteralPath $releaseDirectory -Recurse -File | Where-Object {
+        $_.Name -ne 'package.json' -and $_.Name -notlike 'vedit-running-*.exe'
+    } | Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($releaseDirectory.Length + 1)
+        $packageFiles[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+    @{ product = 'vEdit'; version = $packageVersion; files = $packageFiles } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $releaseDirectory 'package.json') -Encoding UTF8
     if ($env:OS -eq 'Windows_NT') {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut((Join-Path $projectRoot 'vEdit.lnk'))
