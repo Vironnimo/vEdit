@@ -4,6 +4,10 @@ Set-StrictMode -Version Latest
 if (-not $ExecutableDirectory) { $ExecutableDirectory = Join-Path $PSScriptRoot '../target/debug' }
 $executable = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory 'vedit.exe'))
 $cli = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory 'vedit-cli.exe'))
+$version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable).FileVersion
+if (-not $version -or [version]$version -lt [version]'0.5.4') {
+    throw 'Profile migration tests require vEdit 0.5.4 or newer. Wait for installation to finish before running them.'
+}
 $testId = [Guid]::NewGuid().ToString('N')
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "vedit-migration-tests/$testId"
 $appdata = Join-Path $fixture 'appdata'
@@ -41,8 +45,22 @@ function Wait-Ready {
     throw 'Migrated windows did not become ready.'
 }
 function Stop-Fixture {
-    if (Test-Path -LiteralPath $profile) {
-        Get-ChildItem -LiteralPath $profile -Recurse -Filter control.json | ForEach-Object {
+    # Stop launchers before discovering children, so no new recovery window can
+    # start between the discovery and cleanup. A child can still be starting
+    # before it publishes its endpoint, or an older build can use the old path.
+    $ownedParents = @($processes | ForEach-Object Id)
+    foreach ($process in $processes) {
+        if (-not $process.HasExited) { Stop-Process -Id $process.Id; $process.WaitForExit(5000) | Out-Null }
+    }
+    Get-CimInstance Win32_Process -Filter "Name = 'vedit.exe'" | Where-Object { $_.ParentProcessId -in $ownedParents } | ForEach-Object {
+        $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+        if ($process -and $process.Path -eq $executable -and $process.StartTime -ge $began) {
+            Stop-Process -Id $process.Id
+            $process.WaitForExit(5000) | Out-Null
+        }
+    }
+    if (Test-Path -LiteralPath $appdata) {
+        Get-ChildItem -LiteralPath $appdata -Recurse -Filter control.json | ForEach-Object {
             $endpoint = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
             $process = Get-Process -Id $endpoint.pid -ErrorAction SilentlyContinue
             if ($process -and $process.Path -eq $executable -and $process.StartTime -ge $began) {
@@ -50,9 +68,6 @@ function Stop-Fixture {
                 $process.WaitForExit(5000) | Out-Null
             }
         }
-    }
-    foreach ($process in $processes) {
-        if (-not $process.HasExited) { Stop-Process -Id $process.Id; $process.WaitForExit(5000) | Out-Null }
     }
 }
 try {
