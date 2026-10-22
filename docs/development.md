@@ -179,14 +179,35 @@ and crate names). Version 0.4.17 adopts the shared dark colors from vBot's
 `src/palette.rs` owns the editor palette; green success/diff additions are
 independent of the orange action/selection accent.
 
-Existing `%APPDATA%/Morrow/recovery` and `morrow-editor/data` profiles are reused
-in place because recovery manifests include absolute paths. Fresh profiles use
-`vEdit/recovery` and `vedit-editor/data`. The recovery format signature and Windows
-single-instance lock keep their original identifiers so an older running editor
-and its unsaved documents remain safe. `VEDIT_CONTROL_DIR` takes precedence over
-the accepted `MORROW_CONTROL_DIR` alias. Task processes export both `VEDIT_*` and
-`MORROW_*` path variables so saved custom commands continue working. Historical
-review/evaluation results retain their original product names and versions.
+Since 0.5.4, all active state lives below `%APPDATA%/vEdit/recovery`,
+including the main window's `app.ron`; additional windows use `windows/<id>`.
+`src/profile_migration.rs` imports the former `Morrow/recovery`,
+`morrow-editor/data` and `vedit-editor/data` locations once, before any window
+starts. It adjusts recovery references and saved task variables, preserving
+buffer bytes, comparison baselines, formatting, geometry and independent windows.
+Original directories move to `vEdit/migration-backup` after a staged copy is ready.
+A journal resumes interrupted publication; malformed or conflicting profiles
+fail without replacing either original. Live older editors must close normally
+before migration. `VEDIT_PROFILE_DIR` bypasses migration entirely.
+
+Normal runtime locks and newly written recovery headers use vEdit. The old lock
+is checked only during migration; the reader still accepts the old record header
+to recover existing drafts. Task processes export `VEDIT_ROOT`, `VEDIT_FILE` and
+`VEDIT_PYTHON`. `VEDIT_CONTROL_DIR` selects a control endpoint directory; using
+only the obsolete `MORROW_CONTROL_DIR` fails instead of targeting another profile.
+Historical review/evaluation results retain their original product names and versions.
+
+`build.rs` embeds `assets/vedit.ico` plus product/version metadata in both Windows
+executables using `winresource` and the Windows SDK resource compiler. Shell
+shortcuts use the unquoted executable path followed by `,0`; registry icon
+locations retain their normal quoted path syntax. The running window uses the
+same design. Validate resources and actual Shell icon resolution (including a
+shortcut) with `powershell.exe -NoProfile -File scripts/test-branding.ps1`.
+Pass `-ExecutableDirectory` and `-ShortcutPath` to check the installed files.
+Profile migration regressions run with `cargo test profile_migration`.
+`powershell.exe -NoProfile -File scripts/test-profile-migration.ps1` exercises
+the actual startup import and recovery in isolated `APPDATA`, including a second
+window and a repeated launch. It accepts `-ExecutableDirectory` for release tests.
 
 ## Text statistics
 

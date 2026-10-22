@@ -9,7 +9,11 @@ fn main() {
             if let Some(id) = window {
                 profile::select_window(id)?;
             }
-            cli::parse_args(args)
+            let parsed = cli::parse_args(args)?;
+            if matches!(parsed, cli::Parsed::Command { .. } | cli::Parsed::Windows) {
+                cli::validate_environment()?;
+            }
+            Ok(parsed)
         });
     let result = match arguments {
         Ok(cli::Parsed::Windows) => cli::windows_response(),

@@ -21,6 +21,23 @@ mod transport;
 #[allow(unused_imports)]
 pub use transport::{Envelope, Server, running_windows, saved_window_ids, send};
 
+/// Reject an obsolete instance selector instead of sending a request to the
+/// default profile when an older script intended a separate test instance.
+pub fn validate_environment() -> Result<(), String> {
+    validate_control_environment(
+        std::env::var_os("VEDIT_CONTROL_DIR").is_some(),
+        std::env::var_os("MORROW_CONTROL_DIR").is_some(),
+    )
+}
+
+fn validate_control_environment(current: bool, previous: bool) -> Result<(), String> {
+    if previous && !current {
+        Err("MORROW_CONTROL_DIR is no longer supported. Set VEDIT_CONTROL_DIR to the same directory, then repeat the command. No request was sent.".into())
+    } else {
+        Ok(())
+    }
+}
+
 pub const MAX_FILES: usize = 100;
 pub const MAX_ANNOTATIONS: usize = 500;
 
@@ -2762,6 +2779,16 @@ pub fn schema_topic(topic: Option<&str>) -> Result<Value, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_instance_variable_cannot_silently_target_the_default_editor() {
+        assert!(
+            super::validate_control_environment(false, true)
+                .unwrap_err()
+                .contains("VEDIT_CONTROL_DIR")
+        );
+        assert!(super::validate_control_environment(true, true).is_ok());
+        assert!(super::validate_control_environment(false, false).is_ok());
+    }
     use super::*;
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         parse_args(args.iter().map(OsString::from))

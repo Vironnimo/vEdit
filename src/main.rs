@@ -60,6 +60,12 @@ fn main() -> eframe::Result {
         println!("vEdit {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if let Err(error) =
+        cli::validate_environment().and_then(|()| app::profile_migration::initialize())
+    {
+        show_startup_error(error);
+        return Ok(());
+    }
     let (paths, _single_instance) = match startup::prepare(arguments) {
         Ok(Some(launch)) => launch,
         Ok(None) => return Ok(()),

@@ -1,9 +1,7 @@
 /target/
 /dist/
 /.vedit-backups/
-/.morrow-backups/
 /vEdit.lnk
-/Morrow.lnk
 /tools/basedpyright/node_modules/
 *.diff.png
 *.old.png

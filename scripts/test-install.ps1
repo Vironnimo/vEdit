@@ -49,6 +49,7 @@ try {
     Assert ((RegistryValue 'Software\vEdit\Capabilities\FileAssociations' '.txt') -eq 'vEdit.Text') 'Text capability missing.'
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $fixture 'vEdit.lnk'))
     Assert ($shortcut.TargetPath -eq (Join-Path $installed 'vedit.exe')) 'Shortcut points outside installation.'
+    Assert ($shortcut.IconLocation -eq ((Join-Path $installed 'vedit.exe') + ',0')) 'Shortcut icon must use an unquoted path to the executable resource.'
     Install
     $path = RegistryValue 'Environment' 'Path'
     Assert ($path -eq "C:\keep;%USERPROFILE%\bin;$installed") 'Repeated install duplicated PATH or lost expandable entries.'

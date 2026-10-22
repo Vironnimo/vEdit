@@ -215,32 +215,6 @@ fn custom_commands_keep_source_literal_and_provide_paths_as_environment() {
 }
 
 #[test]
-fn saved_morrow_commands_keep_their_environment_after_rename() {
-    let fixture = Fixture::new();
-    let file = fixture.write("draft with spaces.py");
-    let source = "& $env:MORROW_PYTHON $env:MORROW_FILE";
-    let config = TaskConfiguration {
-        run_file: source.into(),
-        ..Default::default()
-    };
-    let resolved = config
-        .resolve(&fixture.0, Some(&file), ProjectTaskAction::RunFile)
-        .unwrap();
-    assert_eq!(resolved.command, tasks::CommandSpec::Shell(source.into()));
-    for suffix in ["ROOT", "FILE", "PYTHON"] {
-        let value = |prefix: &str| {
-            resolved
-                .environment
-                .iter()
-                .find(|(name, _)| name == &OsString::from(format!("{prefix}_{suffix}")))
-                .map(|(_, value)| value)
-        };
-        assert!(value("VEDIT").is_some());
-        assert_eq!(value("MORROW"), value("VEDIT"));
-    }
-}
-
-#[test]
 fn run_file_never_treats_readme_as_python_from_project_fallback() {
     let fixture = Fixture::new();
     fixture.write("pyproject.toml");

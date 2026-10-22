@@ -75,6 +75,8 @@ mod notifications;
 mod other_files;
 #[path = "problems.rs"]
 mod problems;
+#[path = "profile_migration.rs"]
+pub(crate) mod profile_migration;
 #[path = "project_launch.rs"]
 mod project_launch;
 #[path = "project_status.rs"]

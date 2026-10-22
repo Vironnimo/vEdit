@@ -302,7 +302,6 @@ impl Drop for ConnectionCount {
 
 pub fn base_endpoint_directory() -> PathBuf {
     std::env::var_os("VEDIT_CONTROL_DIR")
-        .or_else(|| std::env::var_os("MORROW_CONTROL_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(crate::profile::base_recovery_directory)
 }

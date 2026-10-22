@@ -130,6 +130,7 @@ try {
         $shortcut.TargetPath = $executable
         $shortcut.WorkingDirectory = $projectRoot
         $shortcut.Description = 'vEdit - Vim editor'
+        $shortcut.IconLocation = $executable + ',0'
         $shortcut.Save()
         # Retire only this checkout's former launcher, after the new one exists.
         $legacyShortcutPath = Join-Path $projectRoot 'Morrow.lnk'

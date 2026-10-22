@@ -282,12 +282,6 @@ impl TaskConfiguration {
             ("PYTHONUNBUFFERED".into(), "1".into()),
             ("PYTHONIOENCODING".into(), "utf-8".into()),
         ];
-        // Keep saved Morrow task commands working with the renamed variables.
-        for (name, value) in environment.clone() {
-            if let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix("VEDIT_")) {
-                environment.push((format!("MORROW_{suffix}").into(), value));
-            }
-        }
         let mut executable_directories = Vec::new();
         if let Some(bin) = Path::new(&python_program).parent()
             && !bin.as_os_str().is_empty()

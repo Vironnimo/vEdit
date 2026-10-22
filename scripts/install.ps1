@@ -213,7 +213,7 @@ $ownedFiles = @($files.Name) + @('package.json')
 if ($oldManifest) { $ownedFiles += @($oldManifest.files) }
 $manifest = @{ product = 'vEdit'; version = $package.version; directory = $installRoot; files = @($ownedFiles | Sort-Object -Unique) }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $markerPath -Encoding UTF8
-$icon = '"' + (Join-Path $installRoot 'vedit.ico') + '",0'
+$icon = '"' + $executable + '",0'
 $openCommand = '"' + $executable + '" -- "%1"'
 Set-RegistryValue $appKey 'InstallDirectory' $installRoot
 Set-RegistryValue "$appKey\Capabilities" 'ApplicationName' 'vEdit'
@@ -244,7 +244,8 @@ $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $executable
 $shortcut.WorkingDirectory = $installRoot
 $shortcut.Description = 'vEdit text and code editor'
-$shortcut.IconLocation = $icon
+# IShellLink stores a filename, not a command line; quotes become part of it.
+$shortcut.IconLocation = $executable + ',0'
 $shortcut.Save()
 Set-UserPath $true
 foreach ($entry in $journal) {

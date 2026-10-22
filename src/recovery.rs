@@ -21,9 +21,9 @@ use std::{
 // The NUL distinguishes a recovery record from any supported legacy text file.
 // Metadata and unescaped buffer bytes are committed in one atomic write, so a
 // newer session cannot accidentally pair an older buffer with a new baseline.
-// This is a persisted format identifier, not a display name. Keep it readable
-// by both releases so an upgrade cannot turn recovery metadata into user text.
-const DOCUMENT_HEADER: &[u8] = b"Morrow recovery v1\0";
+const DOCUMENT_HEADER: &[u8] = b"vEdit recovery v1\0";
+// Read old records without ever interpreting their metadata as buffer text.
+const LEGACY_DOCUMENT_HEADER: &[u8] = b"Morrow recovery v1\0";
 const MAX_METADATA_BYTES: usize = 4096;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -64,10 +64,14 @@ pub fn encode_document(
 /// Read a current record or an older raw-text recovery. Legacy text has no
 /// provable baseline and must never authorize replacement of a named file.
 pub fn read_document(path: &Path, max_bytes: u64) -> Result<RecoveredDocument, String> {
-    let maximum = max_bytes.saturating_add((DOCUMENT_HEADER.len() + MAX_METADATA_BYTES + 1) as u64);
+    let maximum =
+        max_bytes.saturating_add((LEGACY_DOCUMENT_HEADER.len() + MAX_METADATA_BYTES + 1) as u64);
     let (bytes, fingerprint) = crate::workspace::read_bytes(path, maximum)
         .map_err(|error| format!("Could not read recovery: {error}"))?;
-    let Some(record) = bytes.strip_prefix(DOCUMENT_HEADER) else {
+    let Some(record) = bytes
+        .strip_prefix(DOCUMENT_HEADER)
+        .or_else(|| bytes.strip_prefix(LEGACY_DOCUMENT_HEADER))
+    else {
         if bytes.len() as u64 > max_bytes {
             return Err("Recovery document exceeds the supported size".into());
         }
@@ -571,6 +575,14 @@ mod tests {
         );
         assert_eq!(recovered.bom, Some(true));
         assert_eq!(fs::read(&path).unwrap(), bytes);
+        let mut previous = LEGACY_DOCUMENT_HEADER.to_vec();
+        previous.extend_from_slice(bytes.strip_prefix(DOCUMENT_HEADER).unwrap());
+        fs::write(&path, previous).unwrap();
+        let imported = read_document(&path, 1024).unwrap();
+        assert_eq!(imported.text, recovered.text);
+        assert_eq!(imported.baseline, recovered.baseline);
+        assert_eq!(imported.line_ending, recovered.line_ending);
+        assert_eq!(imported.bom, recovered.bom);
     }
 
     #[test]

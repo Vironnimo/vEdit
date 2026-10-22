@@ -33,8 +33,11 @@ mod platform {
     }
 
     pub fn acquire() -> io::Result<Option<SingleInstanceGuard>> {
-        // Share the lock with Morrow while an old installed build is still open.
-        let name: Vec<u16> = std::ffi::OsStr::new(&mutex_name())
+        acquire_named(&mutex_name())
+    }
+
+    pub fn acquire_named(name: &str) -> io::Result<Option<SingleInstanceGuard>> {
+        let name: Vec<u16> = std::ffi::OsStr::new(name)
             .encode_wide()
             .chain(Some(0))
             .collect();
@@ -53,10 +56,6 @@ mod platform {
     }
 
     fn mutex_name() -> String {
-        if crate::profile::window_id() == "main" && std::env::var_os("VEDIT_PROFILE_DIR").is_none()
-        {
-            return "Local\\Morrow.Editor.SingleInstance".into();
-        }
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         crate::profile::recovery_directory()
@@ -90,24 +89,6 @@ mod platform {
             .expect("second mutex acquisition");
             assert!(second.is_none());
         }
-
-        fn acquire_named(name: &str) -> io::Result<Option<SingleInstanceGuard>> {
-            let name: Vec<u16> = std::ffi::OsStr::new(name)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            unsafe { SetLastError(0) };
-            let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
-            if handle.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                unsafe { CloseHandle(handle) };
-                Ok(None)
-            } else {
-                Ok(Some(SingleInstanceGuard { handle }))
-            }
-        }
     }
 }
 
@@ -120,6 +101,10 @@ mod platform {
     pub fn acquire() -> io::Result<Option<SingleInstanceGuard>> {
         Ok(Some(SingleInstanceGuard))
     }
+
+    pub fn acquire_named(_name: &str) -> io::Result<Option<SingleInstanceGuard>> {
+        acquire()
+    }
 }
 
-pub use platform::{SingleInstanceGuard, acquire};
+pub use platform::{SingleInstanceGuard, acquire, acquire_named};
