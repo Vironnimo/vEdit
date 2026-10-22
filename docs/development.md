@@ -64,7 +64,7 @@ A deliberate UI change can invalidate snapshots. First run normally, inspect the
 reported image differences, then generate candidates separately. For example:
 
 ```powershell
-$env:VEDIT_SNAPSHOT_DIR = Join-Path $PWD 'target/snapshot-candidates'
+$env:VEDIT_SNAPSHOT_DIR = Join-Path $PWD 'scratch/snapshot-candidates'
 $env:UPDATE_SNAPSHOTS = '1'
 try {
     cargo test --bin vedit app::visual_tests -- --test-threads=8
