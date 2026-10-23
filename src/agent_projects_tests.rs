@@ -364,9 +364,12 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
     assert_eq!(
         app.notifications.unread(),
         2,
-        "an unavailable project action reads nothing"
+        "a message without an attachment has no navigation action"
     );
     app.projects.push(Project::new(folders.path("B")));
+    app.run_notification(first.result["id"].as_u64().unwrap());
+    assert_eq!(app.active_project, 0, "plain messages never navigate");
+    assert_eq!(app.notifications.unread(), 2);
     // Clicking the entry switches to its project and opens the file there.
     app.run_notification(open.result["id"].as_u64().unwrap());
     settle(&mut app);

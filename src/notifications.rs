@@ -1,5 +1,5 @@
 //! Persistent messages agents send with `vedit-cli notify`: unread indicators
-//! stay until the user expands an entry or opens its file, project or review.
+//! stay until the user expands an entry or opens its file or review.
 use super::*;
 use crate::cli::{NotificationLevel, NotificationOpen, NotificationReview, OpenFile, Response};
 use serde_json::{Value, json};
@@ -45,6 +45,8 @@ pub(super) struct Inbox {
     open: bool,
     #[serde(skip)]
     expanded: Option<u64>,
+    #[serde(skip)]
+    project_filter: Option<PathBuf>,
     #[serde(skip)]
     last_flash: Option<Instant>,
 }
@@ -268,7 +270,15 @@ impl VEditApp {
         self.picker = None;
         self.completions = None;
         self.notifications.open = true;
-        self.notifications.expanded = None;
+        self.notifications.project_filter = self
+            .active_folder()
+            .filter(|root| {
+                self.notifications
+                    .items
+                    .iter()
+                    .any(|item| item.root.as_deref() == Some(*root))
+            })
+            .map(Path::to_path_buf);
         self.ctx.request_repaint();
     }
 
@@ -283,13 +293,14 @@ impl VEditApp {
         }
     }
 
-    /// The inbox button beside "For agent"; drawn only once a message arrived.
+    /// Window-level entry point, also available without documents or in a review.
     pub(super) fn notifications_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.notifications.items.is_empty() {
             return;
         }
         let unread = self.notifications.unread();
-        let width = if unread > 0 { 40.0 } else { 28.0 };
+        let width = ui.available_width().min(124.0);
+        let compact = width < 108.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), egui::Sense::click());
         let label = if unread == 1 {
             "1 unread agent notification".to_owned()
@@ -299,7 +310,7 @@ impl VEditApp {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
         });
-        if response.hovered() || response.has_focus() || self.notifications.open {
+        if unread > 0 || response.hovered() || response.has_focus() || self.notifications.open {
             ui.painter().rect_filled(rect, 4.0, HOVER);
         }
         let color = self
@@ -310,11 +321,7 @@ impl VEditApp {
             .map(|item| item.level)
             .max_by_key(|level| severity(*level))
             .map_or(MUTED, level_color);
-        let center = if unread > 0 {
-            rect.left_center() + Vec2::new(12.0, 0.0)
-        } else {
-            rect.center()
-        };
+        let center = rect.left_center() + Vec2::new(12.0, 0.0);
         // A bell drawn as paths so no symbol font is required.
         let stroke = Stroke::new(1.3, color);
         let bell = [
@@ -331,6 +338,15 @@ impl VEditApp {
         ui.painter().add(egui::Shape::line(bell.to_vec(), stroke));
         ui.painter()
             .circle_filled(center + Vec2::new(0.0, 6.0), 1.4, color);
+        if !compact {
+            ui.painter().text(
+                rect.left_center() + Vec2::new(26.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "Messages",
+                FontId::proportional(12.0),
+                if unread > 0 { TEXT } else { MUTED },
+            );
+        }
         if unread > 0 {
             let badge = if unread > 99 {
                 "99+".into()
@@ -351,7 +367,7 @@ impl VEditApp {
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
-                "Agent notifications · {label}\nMessages stay unread until you expand them or open their action."
+                "Messages from agents · {label}\nRead messages and open attached files or change reviews."
             ));
     }
 
@@ -366,13 +382,15 @@ impl VEditApp {
         let mut run = None;
         let mut expand = None;
         let mut mark_unread = None;
+        let active_root = self.active_folder().map(Path::to_path_buf);
+        let unread = self.notifications.unread();
         let items = &self.notifications.items;
         let modal = egui::Modal::new(egui::Id::new("agent_notifications_dialog"))
             .backdrop_color(Color32::from_black_alpha(80))
             .show(&ctx, |ui| {
-                ui.set_width((ctx.content_rect().width() - 48.0).clamp(260.0, 620.0));
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(240.0, 680.0));
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Agent notifications").size(20.0).strong());
+                    ui.label(RichText::new("Messages from agents").size(20.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let response = design::ghost_button(ui, "×", "Close notifications (Esc)");
                         response.widget_info(|| {
@@ -383,84 +401,111 @@ impl VEditApp {
                             )
                         });
                         close |= response.clicked();
-                        if !items.is_empty()
-                            && design::ghost_button(
-                                ui,
-                                "Clear all",
-                                "Remove all saved notifications, including unread messages",
-                            )
-                            .clicked()
-                        {
-                            clear = true;
-                        }
                     });
                 });
-                ui.add_space(6.0);
+                ui.label(RichText::new(format!("{unread} unread · Read updates and follow attached files or change reviews.")).size(12.0).color(MUTED));
+                ui.add_space(10.0);
                 if items.is_empty() {
                     ui.label(
-                        RichText::new("No notifications. Agents send them with vedit-cli notify.")
+                        RichText::new("No messages yet.")
                             .color(MUTED),
                     );
                     return;
                 }
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(root) = &active_root {
+                        let count = items.iter().filter(|item| item.root.as_ref() == Some(root) && !item.read).count();
+                        ui.selectable_value(&mut self.notifications.project_filter, Some(root.clone()), format!("This project ({count})"))
+                            .on_hover_text(crate::paths::display(root));
+                    }
+                    ui.selectable_value(&mut self.notifications.project_filter, None, format!("All projects ({unread})"))
+                        .on_hover_text("Includes messages without a project and from closed projects");
+                });
+                if let Some(root) = &self.notifications.project_filter {
+                    ui.add(egui::Label::new(RichText::new(crate::paths::display(root)).size(11.0).color(MUTED)).truncate())
+                        .on_hover_text(crate::paths::display(root));
+                }
                 ui.separator();
-                let height = (ctx.content_rect().height() - 180.0).clamp(120.0, 480.0);
+                let height = (ctx.content_rect().height() - 250.0).clamp(100.0, 540.0);
                 egui::ScrollArea::vertical()
+                    .id_salt(("agent_messages", &self.notifications.project_filter))
                     .max_height(height)
+                    // The centered modal must not derive its viewport from its
+                    // previous position; otherwise it moves under the first click.
+                    .min_scrolled_height(height)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for item in items.iter().rev() {
+                        let mut shown = false;
+                        for item in items.iter().rev().filter(|item| {
+                            self.notifications.project_filter.as_ref().is_none_or(|root| item.root.as_ref() == Some(root))
+                        }) {
+                            shown = true;
                             let expanded = self.notifications.expanded == Some(item.id);
                             ui.push_id(item.id, |ui| {
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    let (dot, _) = ui.allocate_exact_size(
-                                        Vec2::new(12.0, 16.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(dot.center(), 3.5, level_color(item.level));
-                                    let heading = item.title.clone()
-                                        .unwrap_or_else(|| short_line(&item.message, 90));
-                                    let response = ui.add(egui::Button::selectable(expanded,
-                                        RichText::new(heading).strong().color(TEXT)).wrap());
-                                    if response.on_hover_text(if expanded { "Collapse message" } else { "Read message" }).clicked() {
+                                egui::Frame::new()
+                                    .fill(if expanded { HOVER } else { PANEL })
+                                    .stroke(Stroke::new(1.0, if !item.read { level_color(item.level).linear_multiply(0.5) } else { BORDER }))
+                                    .corner_radius(6)
+                                    .inner_margin(12)
+                                    .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    let project = item.root.as_deref().map(file_title).unwrap_or_else(|| "No project".into());
+                                    let level = match item.level {
+                                        NotificationLevel::Info => "Info",
+                                        NotificationLevel::Success => "Success",
+                                        NotificationLevel::Warning => "Warning",
+                                        NotificationLevel::Error => "Error",
+                                    };
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(RichText::new(if item.read { "Read" } else { "Unread" }).size(11.0).color(if item.read { MUTED } else { BLUE }));
+                                        ui.label(RichText::new(level).size(11.0).color(level_color(item.level)));
+                                        let detail = format!("{project} · {}", git_panel::relative_time(item.time, now));
+                                        ui.label(RichText::new(detail).size(11.0).color(MUTED))
+                                            .on_hover_text(item.root.as_deref().map(crate::paths::display).unwrap_or_else(|| "No project".into()));
+                                        if item.count > 1 {
+                                            ui.label(RichText::new(format!("×{}", item.count)).size(11.0).color(MUTED));
+                                        }
+                                    });
+                                    let heading = item.title.clone().unwrap_or_else(|| short_line(&item.message, 90));
+                                    if ui.add(egui::Button::selectable(expanded, RichText::new(heading).strong().color(TEXT)).wrap())
+                                        .on_hover_text(if expanded { "Collapse message" } else { "Read full message" }).clicked() {
                                         expand = Some((item.id, !expanded));
                                     }
-                                    if item.count > 1 {
-                                        ui.label(RichText::new(format!("×{}", item.count)).size(11.0).color(MUTED));
-                                    }
+                                    ui.add_space(4.0);
+                                    let message = if expanded { item.message.clone() } else { message_preview(&item.message) };
+                                    ui.add(egui::Label::new(RichText::new(message).color(TEXT)).wrap().selectable(true));
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new(notification_target(item)).size(11.5).color(MUTED)).on_hover_text(notification_target(item));
+                                    ui.horizontal_wrapped(|ui| {
+                                        if let Some(action) = notification_action(item)
+                                            && ui.button(action).clicked() {
+                                            run = Some(item.id);
+                                        }
+                                        if !expanded && design::ghost_button(ui, "Read message", "Show the full message and mark it as read").clicked() {
+                                            expand = Some((item.id, true));
+                                        }
+                                        if expanded {
+                                            if design::ghost_button(ui, "Copy message", "Copy the full message text").clicked() {
+                                                ui.ctx().copy_text(item.message.clone());
+                                            }
+                                            if design::ghost_button(ui, "Mark unread", "Keep this message's project indicator until you read it again").clicked() {
+                                                mark_unread = Some(item.id);
+                                            }
+                                        }
+                                    });
                                 });
-                                let project = item.root.as_deref().map(file_title)
-                                    .unwrap_or_else(|| "No project".into());
-                                let level = match item.level {
-                                    NotificationLevel::Info => "info",
-                                    NotificationLevel::Success => "success",
-                                    NotificationLevel::Warning => "warning",
-                                    NotificationLevel::Error => "error",
-                                };
-                                let detail = format!("{} · {project} · {level} · {}",
-                                    if item.read { "Read" } else { "Unread" },
-                                    git_panel::relative_time(item.time, now));
-                                ui.label(RichText::new(detail).size(11.0).color(MUTED));
-                                if expanded {
-                                    ui.add(egui::Label::new(RichText::new(&item.message).color(TEXT)).wrap());
-                                }
-                                ui.horizontal(|ui| {
-                                    if let Some(action) = notification_action(item)
-                                        && design::ghost_button(ui, &action, "Switch to this project and open it").clicked()
-                                    {
-                                        run = Some(item.id);
-                                    }
-                                    if expanded && design::ghost_button(ui, "Mark unread",
-                                        "Keep this message's project indicator until you read it again").clicked() {
-                                        mark_unread = Some(item.id);
-                                    }
-                                });
-                                ui.add_space(4.0);
-                                ui.separator();
+                                ui.add_space(8.0);
                             });
                         }
+                        if !shown {
+                            ui.label(RichText::new("No messages for this project. Choose All projects to see the others.").color(MUTED));
+                        }
                     });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Read messages stay here for later.").size(11.0).color(MUTED));
+                    clear = design::ghost_button(ui, "Clear all", "Remove all saved notifications across all projects, including unread messages").clicked();
+                });
             });
         close |= modal.should_close()
             || modal
@@ -499,6 +544,9 @@ impl VEditApp {
             return;
         };
         let (root, open, review) = (item.root.clone(), item.open.clone(), item.review);
+        if open.is_none() && review.is_none() {
+            return;
+        }
         if let Some(root) = &root {
             match self
                 .projects
@@ -560,7 +608,43 @@ fn notification_action(item: &Notification) -> Option<String> {
             None => format!("Open {name}"),
         });
     }
-    item.root.as_ref().map(|_| "Show project".into())
+    None
+}
+
+fn notification_target(item: &Notification) -> String {
+    if let Some(review) = item.review {
+        return match review {
+            NotificationReview::Working => "Change review · Working changes".into(),
+            NotificationReview::Branch => "Change review · Branch changes".into(),
+        };
+    }
+    if let Some(open) = &item.open {
+        let path = item
+            .root
+            .as_deref()
+            .and_then(|root| open.path.strip_prefix(root).ok())
+            .unwrap_or(&open.path);
+        return match &open.location {
+            Some(location) => format!(
+                "File · {} · Line {}, column {}",
+                crate::paths::display(path),
+                location.line,
+                location.column
+            ),
+            None => format!("File · {}", crate::paths::display(path)),
+        };
+    }
+    "Message only · No file or change review attached".into()
+}
+
+fn message_preview(message: &str) -> String {
+    let mut chars = message.chars();
+    let mut preview: String = chars.by_ref().take(220).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    // A preview stays compact even for messages containing many short lines.
+    preview.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn short_line(text: &str, limit: usize) -> String {
@@ -657,7 +741,7 @@ mod tests {
             .build_ui_state(
                 |ui, app: &mut VEditApp| {
                     app.ctx = ui.ctx().clone();
-                    app.notifications_toolbar(ui);
+                    app.header(ui);
                     app.notifications_dialog();
                 },
                 app,
@@ -669,14 +753,24 @@ mod tests {
         });
         screen.run_steps(3);
         screen.get_by_label("20 unread agent notifications").click();
-        screen.run_steps(3);
+        screen.run();
         assert_eq!(screen.state().notifications.unread_for(&root), 20);
         assert!(
             !screen.state().session_dirty,
             "overview alone reads nothing, including offscreen entries"
         );
+        assert!(
+            screen
+                .query_by_label("Result 19: all checks passed.")
+                .is_some(),
+            "the overview shows the message preview before opening it"
+        );
+        assert!(
+            screen.query_by_label("Show project").is_none(),
+            "a message without an attachment must not suggest a navigation target"
+        );
         screen.get_by_label("Task 19 finished").click();
-        screen.run_steps(3);
+        screen.run();
         assert!(
             screen
                 .query_by_label("Result 19: all checks passed.")
@@ -708,5 +802,103 @@ mod tests {
         assert!(restored.notifications.expanded.is_none());
         let mut inbox = restored.notifications;
         assert_eq!(inbox.push(note("After clearing")), (21, false, 1));
+    }
+
+    #[test]
+    fn project_messages_distinguish_attachments_and_keep_other_projects_reachable() {
+        let mut app = VEditApp::empty(egui::Context::default());
+        let root = PathBuf::from("C:/project");
+        app.projects.push(Project::new(root.clone()));
+        // No open documents: the window header must still expose messages.
+        let mut review = note("Please check the changes on this branch.");
+        review.title = Some("Changes ready for review".into());
+        review.review = Some(NotificationReview::Branch);
+        app.notifications.push(review);
+        let mut file = note("The parser now accepts empty input. The test is linked below.");
+        file.title = Some("Parser updated".into());
+        file.open = Some(NotificationOpen {
+            path: root.join("src/parser.rs"),
+            location: Some(crate::cli::Location {
+                line: 42,
+                column: 3,
+            }),
+        });
+        app.notifications.push(file);
+        let mut plain = note("All checks passed. There is nothing else to open for this update.");
+        plain.title = Some("Checks finished".into());
+        plain.level = NotificationLevel::Success;
+        app.notifications.push(plain);
+        let mut closed = note("A message from a closed project.");
+        closed.title = Some("Other project result".into());
+        closed.root = Some(PathBuf::from("C:/closed-project"));
+        app.notifications.push(closed);
+        let mut unscoped = note("A message without a project.");
+        unscoped.title = Some("General update".into());
+        unscoped.root = None;
+        app.notifications.push(unscoped);
+        for item in &mut app.notifications.items {
+            item.time = unix_now();
+        }
+        let mut screen = visual_tests::harness(app);
+        screen.run_steps(5);
+        let button = screen.get_by_label("5 unread agent notifications");
+        assert!(
+            button.rect().bottom() < 60.0,
+            "messages belong to the project header"
+        );
+        button.click();
+        screen.run();
+        assert_eq!(
+            screen.state().notifications.project_filter.as_deref(),
+            Some(root.as_path())
+        );
+        assert!(screen.query_by_label("Checks finished").is_some());
+        assert!(screen.query_by_label("Other project result").is_none());
+        assert!(screen.query_by_label("General update").is_none());
+        assert!(
+            screen
+                .query_by_label("Message only · No file or change review attached")
+                .is_some()
+        );
+        assert!(screen.query_by_label("Open parser.rs:42").is_some());
+        assert!(screen.query_by_label("Review branch changes").is_some());
+        assert!(screen.query_by_label("Show project").is_none());
+        assert_eq!(screen.state().notifications.unread(), 5);
+        screen.get_by_label("All projects (5)").click();
+        screen.run();
+        assert!(screen.query_by_label("Other project result").is_some());
+        assert!(screen.query_by_label("General update").is_some());
+        assert_eq!(screen.state().notifications.unread(), 5);
+        screen.get_by_label("This project (3)").click();
+        screen.run();
+        screen.get_by_label("Checks finished").click();
+        screen.run();
+        assert_eq!(screen.state().notifications.unread(), 4);
+        assert!(screen.query_by_label("Copy message").is_some());
+        screen.get_by_label("Close notifications").click();
+        screen.run_steps(3);
+        screen.get_by_label("4 unread agent notifications").click();
+        screen.run();
+        assert_eq!(screen.state().notifications.expanded, Some(3));
+        assert!(screen.query_by_label("Copy message").is_some());
+        assert_eq!(screen.state().notifications.unread(), 4);
+
+        screen.set_size(Vec2::new(640.0, 480.0));
+        screen.run_steps(3);
+        screen.run();
+        for label in [
+            "Close notifications",
+            "This project (2)",
+            "All projects (4)",
+            "Clear all",
+        ] {
+            assert!(
+                screen
+                    .ctx
+                    .content_rect()
+                    .contains_rect(screen.get_by_label(label).rect()),
+                "{label} must remain visible in a small window"
+            );
+        }
     }
 }

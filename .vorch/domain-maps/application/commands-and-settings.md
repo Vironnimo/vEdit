@@ -93,6 +93,15 @@ read state through the existing recovery writer; dialog state and flash timing
 are transient. Older sessions default to an empty inbox. Receipt, read-state
 changes and clearing the inbox schedule session persistence.
 
+The window header owns the inbox entry point, separate from the pane's user-mark
+collection. The overview defaults to the active project's messages when any
+exist, with an all-project filter that includes closed projects and unscoped
+messages. Filtering and previews do not acknowledge entries. Cards distinguish
+text-only messages from file/review attachments; only actual attachments offer
+navigation actions. A plain message never implies source annotations. The last
+expanded message remains available on reopening within the same session/filter;
+filter and expansion state are not persisted.
+
 The user reads an entry by expanding it or opening its action, and can mark it
 unread again. Opening the overview, switching projects or receiving a message
 while the inbox is open does not acknowledge it. Closed/offline project entries

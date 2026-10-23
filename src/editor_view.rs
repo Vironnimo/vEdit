@@ -225,13 +225,7 @@ impl VEditApp {
         let view = self.tab().map(|tab| tab.agent_view).unwrap_or_default();
         ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let controls_width = 44.0
-            + if markdown { 38.0 } else { 0.0 }
-            + match (self.notifications.items_empty(), self.notifications.unread()) {
-                (true, _) => 0.0,
-                (false, 0) => 28.0,
-                _ => 40.0,
-            };
+        let controls_width = 44.0 + if markdown { 38.0 } else { 0.0 };
         let tab_width = (ui.available_width() - controls_width).max(20.0);
         ui.allocate_ui_with_layout(Vec2::new(tab_width, 28.0), Layout::left_to_right(Align::Min), |ui| {
         let tab_scroll = egui::ScrollArea::horizontal()
@@ -400,7 +394,6 @@ impl VEditApp {
         ui.allocate_ui_with_layout(Vec2::new(controls_width, 28.0), Layout::right_to_left(Align::Center), |ui| {
             if self.tab_pointer_interaction_active() { ui.disable(); }
             self.agent_marks_toolbar(ui);
-            self.notifications_toolbar(ui);
             if markdown {
                 ui.add_space(5.0);
                 self.markdown_preview_toggle(ui, view == crate::cli::DocumentView::Preview);

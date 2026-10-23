@@ -20,7 +20,19 @@ impl VEditApp {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::ZERO))
             .show(ui, |ui| {
                 crate::window_chrome::draw_top_bar(ui, options, |ui| {
-                    self.workspace_header_button(ui);
+                    if self.notifications.items_empty() {
+                        self.workspace_header_button(ui);
+                    } else {
+                        let messages_width = 124.0_f32.min(ui.available_width() * 0.6);
+                        let projects_width = (ui.available_width() - messages_width - 8.0).max(0.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(projects_width, 28.0),
+                            Layout::left_to_right(Align::Center),
+                            |ui| self.workspace_header_button(ui),
+                        );
+                        ui.add_space(8.0);
+                        self.notifications_toolbar(ui);
+                    }
                 })
             })
             .inner;
@@ -38,6 +50,7 @@ impl VEditApp {
             || self.picker.is_some()
             || self.settings_open
             || self.status_details.is_some()
+            || self.notifications.is_open()
             || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.context_file_dialog.is_some()
