@@ -79,6 +79,7 @@ pub(super) struct Session {
     pub(super) layout: Option<split::SessionLayout>,
     pub(super) bookmarks: Vec<crate::bookmarks::Bookmark>,
     pub(super) agent_marks: crate::agent_marks::AgentMarks,
+    pub(super) notifications: notifications::Inbox,
     /// The Find toolbar searches with regular expressions.
     pub(super) find_regex: bool,
 }
@@ -267,6 +268,7 @@ impl VEditApp {
             layout: None,
             bookmarks: self.bookmarks.items.clone(),
             agent_marks: self.agent_marks.clone(),
+            notifications: self.notifications.clone(),
             find_regex: self.find_regex,
         }
     }

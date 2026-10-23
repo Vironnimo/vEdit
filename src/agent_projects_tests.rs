@@ -342,6 +342,31 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
     });
     assert_eq!(both.error.unwrap().code, "invalid_request");
     assert_eq!(app.notifications.unread(), 2);
+    assert!(
+        app.session_dirty,
+        "receiving a notification schedules persistence"
+    );
+    // Restart retains the inbox independently of which projects are open.
+    app.flush_recovery();
+    let saved: Session =
+        serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
+    assert_eq!(saved.notifications.unread(), 2);
+    assert_eq!(saved.notifications.unread_for(&folders.path("B")), 2);
+    assert_eq!(
+        saved.notifications.status_json(&[])["unread_outside_open_projects"],
+        2
+    );
+    // Restore into a fresh application just as startup does.
+    app = folders.app(&["A"]);
+    app.notifications = saved.notifications;
+    assert!(!app.notifications.is_open());
+    app.run_notification(first.result["id"].as_u64().unwrap());
+    assert_eq!(
+        app.notifications.unread(),
+        2,
+        "an unavailable project action reads nothing"
+    );
+    app.projects.push(Project::new(folders.path("B")));
     // Clicking the entry switches to its project and opens the file there.
     app.run_notification(open.result["id"].as_u64().unwrap());
     settle(&mut app);
@@ -353,10 +378,78 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
         Some(folders.path("B/one.md").as_path())
     );
     assert_eq!(tab.selection.start, 4, "line 2 of the file");
-    // Showing the list marks everything read.
+    // Opening one action reads only its entry; the overview reads nothing.
+    assert_eq!(app.notifications.unread(), 1);
+    assert!(
+        app.session_dirty,
+        "opening an action persists its read state"
+    );
     app.open_notifications();
     let ctx = app.ctx.clone();
     let mut output = ctx.run_ui(egui::RawInput::default(), |_| app.notifications_dialog());
     output.textures_delta.clear();
-    assert_eq!(app.notifications.unread(), 0);
+    assert_eq!(app.notifications.unread(), 1);
+    let arrived_while_open = app.control_request(notify("Another result"));
+    assert_eq!(arrived_while_open.result["unread"], 2);
+    app.flush_recovery();
+    let saved: Session =
+        serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
+    let mut restored = folders.app(&["B", "A"]);
+    restored.notifications = saved.notifications;
+    assert!(
+        !restored.notifications.is_open(),
+        "the open dialog is not restored"
+    );
+    let status = restored.control_request(Request::Status {});
+    assert_eq!(status.result["notifications"]["total"], 3);
+    assert_eq!(status.result["notifications"]["unread"], 2);
+    assert_eq!(status.result["workspaces"][0]["unread_notifications"], 2);
+    assert_eq!(status.result["workspaces"][1]["unread_notifications"], 0);
+    let repeat = restored.control_request(notify("All tests pass"));
+    assert_eq!(repeat.result["id"], first.result["id"]);
+    assert_eq!(repeat.result["repeat_count"], 3);
+    let next = restored.control_request(notify("After restart"));
+    assert!(
+        next.result["id"].as_u64().unwrap() > arrived_while_open.result["id"].as_u64().unwrap()
+    );
+    let legacy: Session = serde_json::from_str("{}").unwrap();
+    assert!(
+        legacy.notifications.items_empty(),
+        "old sessions remain readable"
+    );
+}
+
+#[test]
+fn notifications_without_projects_schedule_background_session_save() {
+    let folders = Folders::new();
+    let mut app = folders.app(&[]);
+    let response = app.control_request(Request::Notify {
+        message: "Done without an open project".into(),
+        title: None,
+        level: NotificationLevel::Info,
+        workspace: None,
+        open: None,
+        review: None,
+    });
+    assert!(response.ok);
+    let ctx = app.ctx.clone();
+    let mut delay = Duration::ZERO;
+    for _ in 0..4 {
+        app.last_session_save = Instant::now();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| app.autosave());
+        delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        output.textures_delta.clear();
+    }
+    assert!(delay > Duration::ZERO && delay <= Duration::from_secs(1));
+    assert!(
+        !app.recovery_session_path.exists(),
+        "save is still debounced"
+    );
+    app.last_session_save = Instant::now() - Duration::from_secs(2);
+    app.autosave();
+    assert!(!app.session_dirty);
+    assert!(app.recovery_writer.wait_idle(Duration::from_secs(2)));
+    let saved: Session =
+        serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
+    assert_eq!(saved.notifications.unread(), 1);
 }

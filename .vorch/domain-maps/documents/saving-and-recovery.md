@@ -68,7 +68,8 @@ The app also checks recovery generation and revision when accepting completions.
 A completed save can change the baseline of unsaved newer text; a late recovery
 completion for the old baseline must not mark that text secured. Recovery and
 autosave timers are separate: recovery still runs for dirty drafts when autosave
-is disabled or held for an agent.
+is disabled or held for an agent. Dirty session metadata schedules its own delayed
+frame, so it is saved even without open projects or another source of repaints.
 
 On restore, a fresh disk read is an observation. Dirty recovered text receives
 its recorded baseline; differing disk content becomes a conflict, and missing

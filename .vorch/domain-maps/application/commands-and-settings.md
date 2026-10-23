@@ -84,12 +84,23 @@ read-only modal supports selection and copying, suppresses source input and
 restores the prior focus when closed. `src/status_message_tests.rs` covers this
 behavior; `control.md` describes the observation/mutation boundary.
 
-`src/notifications.rs` owns a bounded, session-only inbox, per-project unread
-indicators and taskbar attention throttling. Showing the inbox marks entries
-read. Identical unread entries coalesce by their message and action; a repeated
-message after reading is a new entry. Receipt does not switch workspace, steal
-focus or execute the optional open/review action.
+`src/notifications.rs` owns the inbox, per-project unread indicators and taskbar
+attention throttling. `Session` persists its messages, IDs, repeat counts and
+read state through the existing recovery writer; dialog state and flash timing
+are transient. Older sessions default to an empty inbox. Receipt, read-state
+changes and clearing the inbox schedule session persistence.
 
-Use the inline inbox tests for coalescing, bounding and flash throttling. CLI
+The user reads an entry by expanding it or opening its action, and can mark it
+unread again. Opening the overview, switching projects or receiving a message
+while the inbox is open does not acknowledge it. Closed/offline project entries
+stay in the inbox. Unread entries are retained until read or explicitly cleared;
+only the read history is limited to 100 entries, retaining the entry just opened
+while pruning older read entries. An unavailable action leaves its entry unread.
+Identical unread entries coalesce by their message and action; a repeated message
+after reading is a new entry. Receipt does not switch workspace, steal focus or execute the
+optional open/review action.
+
+Use the inline inbox tests for coalescing, retention, read interactions and flash
+throttling; `src/agent_projects_tests.rs` covers session round trips. CLI
 workspace selection, request fields, response text and schema belong to
 `control.md`; preserve that contract when editing `control_notify`.

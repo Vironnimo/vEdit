@@ -173,10 +173,17 @@ impl VEditApp {
         if let Some(delay) = delay {
             self.ctx.request_repaint_after(delay);
         }
-        if self.session_dirty && self.last_session_save.elapsed() > Duration::from_secs(1) {
-            self.persist_session();
-            self.session_dirty = false;
-            self.last_session_save = Instant::now();
+        if self.session_dirty {
+            let remaining = Duration::from_secs(1).saturating_sub(self.last_session_save.elapsed());
+            if remaining.is_zero() {
+                self.persist_session();
+                self.session_dirty = false;
+                self.last_session_save = Instant::now();
+            } else {
+                // An inbox can receive messages with no project open. Ensure
+                // the session still saves when no other work requests a frame.
+                self.ctx.request_repaint_after(remaining);
+            }
         }
     }
     fn spawn_recovery_removal(&self, id: u64, revision: u64, generation: u64, path: PathBuf) {

@@ -375,6 +375,7 @@ impl VEditApp {
             .unwrap_or_else(|_| " ".into());
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
+        app.notifications = session.notifications;
         app.find_regex = session.find_regex;
         app.restore_recent(session.recent);
         if let Some(autosave) = session.autosave {

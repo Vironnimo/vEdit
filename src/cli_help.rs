@@ -278,7 +278,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "notify",
         "MESSAGE",
         "Tell the user something in the window's agent inbox; changes nothing else.",
-        "Use it when work is finished, blocked or needs a decision. The project's tab gets a dot and the toolbar an unread count; an unfocused window flashes its taskbar button.\nThe message never switches projects or takes focus. An identical unread message counts as a repeat (repeat_count). Messages last until vEdit exits.\nThe project is --workspace, else the open project containing the current directory, else the one containing --open, else the visible one.\nMESSAGE: 1..2000 bytes; quote it. Returns id, workspace, unread counts and flashed. Never starts vEdit.",
+        "Use it when work is finished, blocked or needs a decision. The project's tab gets a dot and the toolbar an unread count; an unfocused window flashes its taskbar button.\nThe message never switches projects or takes focus. An identical unread message counts as a repeat (repeat_count). Messages and their read state survive restarts. A message becomes read when the user expands it or opens its action.\nThe project is --workspace, else the open project containing the current directory, else the one containing --open, else the visible one.\nMESSAGE: 1..2000 bytes; quote it. Returns id, workspace, unread counts and flashed. Never starts vEdit.",
         ["--title", "--level", "--workspace", "--open", "--review"]
     ),
     command!(

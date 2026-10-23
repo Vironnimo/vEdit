@@ -70,9 +70,9 @@ publication belongs to `documents.md`.
 - Git completion uses `GitActionKind` in `src/git_actions.rs` for follow-up work;
   translated or revised display labels must never select behavior. Snapshot and
   history request/completion guards live in `src/git_refresh.rs`.
-- Notifications are session-only and do not change focus or open documents on
-  receipt. The user activates their file/review action from the inbox. Identical
-  unread messages coalesce; read messages can start a new entry.
+- Notifications persist in the window's session and do not change focus or open
+  documents on receipt. Read-state and retention rules belong to
+  `application/commands-and-settings.md`.
 - App modules remain methods on the same application state. A file split does
   not introduce a second document, session or worker owner. Keep shared-document
   and pane-local state separate when changing those boundaries.
