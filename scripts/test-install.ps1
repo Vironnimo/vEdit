@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'project-temp.ps1')
+. (Join-Path $PSScriptRoot 'package-manifest.ps1')
 $projectTemp = Enter-ProjectTemp
 try {
 $testId = [Guid]::NewGuid().ToString('N')
@@ -15,11 +16,7 @@ function Assert($Condition, [string]$Message) {
     $script:checks++
 }
 function Manifest {
-    $files = [ordered]@{}
-    Get-ChildItem -LiteralPath $package -Recurse -File | Where-Object Name -ne 'package.json' | ForEach-Object {
-        $files[$_.FullName.Substring($package.Length + 1)] = (Get-FileHash -LiteralPath $_.FullName).Hash
-    }
-    @{ product = 'vEdit'; version = '0.0.1-test'; files = $files } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $package 'package.json') -Encoding UTF8
+    Write-PackageManifest $package '0.0.1-test'
 }
 function Install { & $installer -PackagePath $package -InstallDirectory $installed -TestRoot $fixture }
 function RegistryValue([string]$Key, [string]$Name = '') {
@@ -34,9 +31,11 @@ try {
     Copy-Item -LiteralPath $installer -Destination (Join-Path $package 'scripts/install.ps1')
     Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32/ping.exe') -Destination (Join-Path $package 'vedit.exe')
     Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32/whoami.exe') -Destination (Join-Path $package 'vedit-cli.exe')
-    foreach ($file in @('vedit.ico', 'tools/node.exe', 'tools/basedpyright/node_modules/basedpyright/langserver.index.js')) {
+    foreach ($file in @('00-rollback.txt', 'vedit.ico', 'tools/node.exe', 'tools/basedpyright/node_modules/basedpyright/langserver.index.js')) {
         Set-Content -LiteralPath (Join-Path $package $file) -Value 'fixture bytes'
     }
+    $nestedManifest = 'tools/basedpyright/node_modules/basedpyright/package.json'
+    Set-Content -LiteralPath (Join-Path $package $nestedManifest) -Value '{"name":"basedpyright","version":"fixture"}'
     $environment = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("$registryPath\Environment")
     $environment.SetValue('Path', 'C:\keep;%USERPROFILE%\bin', [Microsoft.Win32.RegistryValueKind]::ExpandString)
     $environment.Dispose()
@@ -44,7 +43,11 @@ try {
     $association.SetValue('', 'Keep.ExistingDefault')
     $association.Dispose()
     Manifest
+    $manifestFiles = (Get-Content -LiteralPath (Join-Path $package 'package.json') -Raw | ConvertFrom-Json).files.PSObject.Properties.Name
+    Assert ($nestedManifest.Replace('/', '\') -in $manifestFiles) 'Release manifest omitted nested npm package metadata.'
+    Assert ('package.json' -notin $manifestFiles) 'Release manifest must not hash itself.'
     Install
+    Assert ((Get-FileHash -LiteralPath (Join-Path $installed $nestedManifest)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package $nestedManifest)).Hash) 'Installed npm metadata differs.'
     Assert ((Get-FileHash -LiteralPath (Join-Path $installed 'vedit.exe')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $package 'vedit.exe')).Hash) 'Installed executable differs.'
     Assert ((RegistryValue 'Software\Classes\.txt') -eq 'Keep.ExistingDefault') 'Existing default changed.'
     Assert ((RegistryValue 'Software\RegisteredApplications' 'vEdit') -eq 'Software\vEdit\Capabilities') 'Default-app registration missing.'
@@ -56,6 +59,12 @@ try {
     Install
     $path = RegistryValue 'Environment' 'Path'
     Assert ($path -eq "C:\keep;%USERPROFILE%\bin;$installed") 'Repeated install duplicated PATH or lost expandable entries.'
+    $nestedBefore = [IO.File]::ReadAllBytes((Join-Path $package $nestedManifest))
+    Set-Content -LiteralPath (Join-Path $package $nestedManifest) -Value '{"name":"tampered"}'
+    $blocked = $false
+    try { Install } catch { $blocked = $true }
+    Assert $blocked 'Tampered npm package metadata was accepted.'
+    [IO.File]::WriteAllBytes((Join-Path $package $nestedManifest), $nestedBefore)
     # A copied Windows ping is a disposable running executable; no editor session
     # is used. It exits on its own after the update check.
     $helper = Start-Process -FilePath (Join-Path $installed 'vedit.exe') -ArgumentList @('-n', '12', '127.0.0.1') -WindowStyle Hidden -PassThru
@@ -73,6 +82,8 @@ try {
     Assert (@(Get-ChildItem -LiteralPath $installed -Recurse -Filter '*.vedit-backup-*').Count -eq 0) 'Exited executable backup was not cleaned.'
     # A later locked file makes the transaction roll back earlier replacements.
     $before = (Get-FileHash -LiteralPath (Join-Path $installed 'vedit.exe')).Hash
+    $rollbackBefore = (Get-FileHash -LiteralPath (Join-Path $installed '00-rollback.txt')).Hash
+    Set-Content -LiteralPath (Join-Path $package '00-rollback.txt') -Value 'replacement before the locked runtime'
     Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32/ping.exe') -Destination (Join-Path $package 'vedit.exe') -Force
     Set-Content -LiteralPath (Join-Path $package 'tools/node.exe') -Value 'changed runtime'
     Manifest
@@ -81,6 +92,7 @@ try {
     try { Install } catch { $blocked = $true }
     $locked.Dispose(); $locked = $null
     Assert $blocked 'Locked runtime did not reject update.'
+    Assert ((Get-FileHash -LiteralPath (Join-Path $installed '00-rollback.txt')).Hash -eq $rollbackBefore) 'Failed update did not roll back an already replaced file.'
     Assert ((Get-FileHash -LiteralPath (Join-Path $installed 'vedit.exe')).Hash -eq $before) 'Failed update did not restore previous executable.'
     Set-Content -LiteralPath (Join-Path $package 'vedit-cli.exe') -Value 'tampered'
     $blocked = $false
