@@ -122,10 +122,7 @@ impl BookmarkStore {
             line,
             column: column.max(1),
             label: String::new(),
-            context_line: context_line
-                .unwrap_or_default()
-                .trim_end_matches(['\r', '\n'])
-                .to_owned(),
+            context_line: without_line_ending(context_line.unwrap_or_default()).to_owned(),
         });
         ToggleResult::Added(id)
     }
@@ -210,8 +207,14 @@ pub struct BookmarkLocation {
 pub fn locate(document: &str, bookmark: &Bookmark) -> BookmarkLocation {
     let lines: Vec<_> = document.split('\n').collect();
     let preferred = bookmark.line.saturating_sub(1).min(lines.len() - 1);
-    let text_line = |index: usize| lines[index].strip_suffix('\r').unwrap_or(lines[index]);
-    let context = bookmark.context_line.trim_end_matches(['\r', '\n']);
+    let text_line = |index: usize| {
+        if index + 1 < lines.len() {
+            lines[index].strip_suffix('\r').unwrap_or(lines[index])
+        } else {
+            lines[index]
+        }
+    };
+    let context = without_line_ending(&bookmark.context_line);
     let mut row = preferred;
     if !context.trim().is_empty() && text_line(preferred) != context {
         let start = preferred.saturating_sub(ANCHOR_SEARCH_RADIUS);
@@ -252,6 +255,12 @@ pub fn locate(document: &str, bookmark: &Bookmark) -> BookmarkLocation {
         column: offset + 1,
         char_index,
     }
+}
+
+fn without_line_ending(line: &str) -> &str {
+    line.strip_suffix('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .unwrap_or(line)
 }
 
 fn path_key(path: &Path) -> Vec<OsString> {
@@ -438,6 +447,26 @@ mod tests {
                 column: 1,
                 char_index: 0
             }
+        );
+    }
+
+    #[test]
+    fn a_final_lone_carriage_return_is_part_of_the_bookmarked_line() {
+        let item = bookmark("file.rs", 2, 4, "");
+        assert_eq!(
+            locate("first\r\na🦀\r", &item),
+            BookmarkLocation {
+                line: 2,
+                column: 4,
+                char_index: 10,
+            }
+        );
+        let mut store = BookmarkStore::default();
+        store.toggle(Path::new("file.rs"), 2, 4, Some("a🦀\r"));
+        assert_eq!(store.items[0].context_line, "a🦀\r");
+        assert_eq!(
+            locate("first\r\na🦀\ninserted\na🦀\r", &store.items[0]).line,
+            4
         );
     }
 

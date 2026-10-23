@@ -249,7 +249,24 @@ impl VEditApp {
                     Err(error) => return Response::failure("invalid_query", error),
                 };
                 let has_more = found.len() > offset + limit;
-                let items=found.into_iter().skip(offset).take(limit).map(|range|checked_coordinate_range(tab,range.clone()).map(|coordinates|json!({"range":coordinates,"text":char_slice(&tab.text,range)}))).collect::<Result<Vec<_>,String>>();
+                let mut chars = tab.text.chars();
+                let mut previous = 0;
+                let items = found
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|range| {
+                        checked_coordinate_range(tab, range.clone()).map(|coordinates| {
+                            let text: String = chars
+                                .by_ref()
+                                .skip(range.start - previous)
+                                .take(range.len())
+                                .collect();
+                            previous = range.end;
+                            json!({"range":coordinates,"text":text})
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>();
                 let items = match items {
                     Ok(items) => items,
                     Err(error) => return Response::failure("unaddressable_match", error),
@@ -293,10 +310,8 @@ impl VEditApp {
                 let edits = matches
                     .into_iter()
                     .map(|range| {
-                        checked_coordinate_range(tab, range).map(|range| TextEdit {
-                            range,
-                            text: replacement.clone(),
-                        })
+                        checked_coordinate_range(tab, range.clone())
+                            .map(|_| (range.start, range.end, replacement.as_str()))
                     })
                     .collect::<Result<Vec<_>, String>>();
                 let edits = match edits {
@@ -308,7 +323,7 @@ impl VEditApp {
                         json!({"applied":true,"changed":false,"replaced":0,"tab":self.control_tab_value(project,index)}),
                     );
                 }
-                let edit = match prepare_edits(&tab.text, &edits) {
+                let edit = match prepare_char_edits(&tab.text, edits) {
                     Ok(edit) => edit,
                     Err(error) => return Response::failure("invalid_edit", error),
                 };
@@ -916,40 +931,52 @@ fn prepare_edits(text: &str, edits: &[TextEdit]) -> Result<PreparedEdit, String>
                 )
             })
     };
-    let mut ranges = edits
+    let ranges = edits
         .iter()
         .map(|edit| {
             Ok((
                 offset(&edit.range.start)?,
                 offset(&edit.range.end)?,
-                &edit.text,
+                edit.text.as_str(),
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    prepare_char_edits(text, ranges)
+}
+
+fn prepare_char_edits(
+    text: &str,
+    mut ranges: Vec<(usize, usize, &str)>,
+) -> Result<PreparedEdit, String> {
     ranges.sort_by_key(|(start, end, _)| (*start, *end));
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 || pair[1].0 == pair[0].0 {
             return Err("Edits overlap or insert at the same boundary; no edit was applied".into());
         }
     }
-    let chars: Vec<char> = text.chars().collect();
+    let count = ranges.len();
+    let mut chars = text.chars();
     let mut result = String::new();
     let mut previous = 0;
     let mut cursor = 0;
     for (start, end, replacement) in ranges {
-        result.extend(chars[previous..start].iter());
+        result.extend(chars.by_ref().take(start - previous));
+        if replacement.len() > (MAX_DOCUMENT as usize).saturating_sub(result.len()) {
+            return Err("Result exceeds 8 MiB; no edit was applied".into());
+        }
         result.push_str(replacement);
         cursor += start - previous + replacement.chars().count();
+        for _ in chars.by_ref().take(end - start) {}
         previous = end;
         if result.len() > MAX_DOCUMENT as usize {
             return Err("Result exceeds 8 MiB; no edit was applied".into());
         }
     }
-    result.extend(chars[previous..].iter());
+    result.extend(chars);
     Ok(PreparedEdit {
         text: result,
         cursor,
-        count: edits.len(),
+        count,
     })
 }
 fn literal_matches(
@@ -1345,6 +1372,33 @@ mod tests {
     }
 
     #[test]
+    fn paged_find_preserves_actual_unicode_match_text_and_coordinates() {
+        let (mut app, id) = app_with_text("Ä skip\r\n🦀 ä gap Ä final ä");
+        let revision = app.tab().unwrap().revision;
+        let response = app.control_request(Request::Find {
+            tab_id: id,
+            query: "ä".into(),
+            case_sensitive: false,
+            whole_word: true,
+            limit: 2,
+            offset: 1,
+        });
+        assert!(response.ok);
+        assert_eq!(response.result["items"][0]["text"], "ä");
+        assert_eq!(response.result["items"][1]["text"], "Ä");
+        assert_eq!(
+            response.result["items"][0]["range"],
+            json!({"start":{"line":2,"column":3},"end":{"line":2,"column":4}})
+        );
+        assert_eq!(
+            response.result["items"][1]["range"],
+            json!({"start":{"line":2,"column":9},"end":{"line":2,"column":10}})
+        );
+        assert_eq!(response.result["next_offset"], 3);
+        assert_eq!(app.tab().unwrap().revision, revision);
+    }
+
+    #[test]
     fn replacement_never_expands_partial_crlf_match_or_lone_final_cr() {
         let (mut app, id) = app_with_text("a\r\nb\r");
         let response = app.control_request(Request::Replace {
@@ -1361,6 +1415,28 @@ mod tests {
         let response = app.control_request(request_edit(id, 0, vec![edit(2, 2, 3, "!")]));
         assert!(response.ok, "{response:?}");
         assert_eq!(app.tab().unwrap().text, "a\r\nb!");
+    }
+
+    #[test]
+    fn repeated_large_replacement_rejects_without_changing_the_buffer() {
+        let text = "a".repeat(10_000);
+        let (mut app, id) = app_with_text(&text);
+        let revision = app.tab().unwrap().revision;
+        let response = app.control_request(Request::Replace {
+            tab_id: id,
+            expected_revision: revision,
+            query: "a".into(),
+            replacement: "b".repeat(1024 * 1024),
+            case_sensitive: true,
+            whole_word: false,
+            all: true,
+        });
+        assert_eq!(response.error.unwrap().code, "invalid_edit");
+        let tab = app.tab().unwrap();
+        assert_eq!(tab.text, text);
+        assert_eq!(tab.revision, revision);
+        assert!(!tab.dirty);
+        assert!(!tab.agent_unsaved);
     }
 
     #[test]
