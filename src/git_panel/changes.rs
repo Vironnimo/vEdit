@@ -19,6 +19,7 @@ pub(super) fn show_changes(
         busy,
         push_count,
         bindings,
+        ..
     } = panel;
     let commit_message_id = git_row_id(root, "commit-message");
     // A child UI keeps overflowing content from pushing the divider down.

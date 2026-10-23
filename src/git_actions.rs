@@ -153,7 +153,7 @@ impl ActiveGitAction {
         };
         ui.add(egui::Spinner::new().size(size).color(MUTED));
         ui.add(egui::Label::new(RichText::new(label).size(size).color(MUTED)).truncate())
-            .on_hover_details(format!(
+            .on_hover_text(format!(
                 "Git is working in {}",
                 crate::paths::display(&self.root)
             ));

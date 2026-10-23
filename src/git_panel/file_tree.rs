@@ -334,7 +334,7 @@ pub(super) fn draw_file_tree(
                 },
                 !busy,
             );
-            response.row.clone().on_hover_details(&path);
+            response.row.clone().on_hover_text(&path);
             if response.row.clicked() {
                 open = !open;
             }
@@ -431,10 +431,9 @@ pub(super) fn draw_file_tree(
                     .row
                     .on_hover_text(file_tooltip(file, context, status_label))
             } else {
-                response.row.on_hover_details_ui(|ui| {
+                response.row.on_hover_ui(|ui| {
                     let text = file_tooltip(file, context, status_label);
                     ui.add(egui::Label::new(&text).wrap());
-                    text
                 })
             };
             if row.clicked() {

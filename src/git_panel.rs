@@ -121,6 +121,7 @@ struct PanelContext<'a> {
     project_index: usize,
     root: &'a Path,
     unsaved_count: usize,
+    hover_column: egui::Rect,
     busy: bool,
     push_count: Option<usize>,
     bindings: &'a keybindings::Bindings,
@@ -208,6 +209,9 @@ impl VEditApp {
     }
 
     fn git_ui_contents(&mut self, ui: &mut egui::Ui) {
+        let hover_column = self
+            .sidebar_region_rect(self.sidebar_side(SidebarView::SourceControl))
+            .unwrap_or(ui.clip_rect());
         let worktree_selector = self.worktree_selector_ui(ui);
         let panel_top = ui.cursor().top();
         let panel_height = ui.available_height().max(1.0);
@@ -241,6 +245,7 @@ impl VEditApp {
             busy,
             push_count,
             bindings: &self.settings.keybindings,
+            hover_column,
         };
         let mut state = std::mem::take(&mut project.git_view);
         let previous_split_ratio = state.split_ratio;

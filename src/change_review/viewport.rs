@@ -1,7 +1,6 @@
 //! Continuous diff viewport, row navigation and sticky file headers.
 use super::input::take_review_keys;
 use super::*;
-use crate::design::HoverDetails;
 
 /// The first new-side line below the sticky header of `file`.
 fn line_at(view: &ChangeReview, file: usize, offset: f32) -> Option<usize> {
@@ -531,7 +530,7 @@ fn file_header(
             );
         }
         ui.add(egui::Label::new(job).truncate())
-            .on_hover_details(match &entry.original_path {
+            .on_hover_text(match &entry.original_path {
                 Some(original) => format!("{}\nRenamed from {original}", entry.path),
                 None => entry.path.clone(),
             });

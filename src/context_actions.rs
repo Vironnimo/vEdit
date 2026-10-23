@@ -1290,7 +1290,7 @@ impl VEditApp {
                     format!("Context target: {}", file_title(path)),
                 )
             });
-            target.on_hover_details(crate::paths::display(path));
+            target.on_hover_text(crate::paths::display(path));
             ui.separator();
             if !is_dir {
                 if design::menu_item(ui, "Open", "", "Open this file in the current pane").clicked()
@@ -1454,7 +1454,7 @@ impl VEditApp {
                     format!("Context target: {}", file_title(root)),
                 )
             });
-            target.on_hover_details(crate::paths::display(root));
+            target.on_hover_text(crate::paths::display(root));
             ui.separator();
             for (label, tooltip, command) in [
                 ("New file…", "Create a file in the project folder", 0),

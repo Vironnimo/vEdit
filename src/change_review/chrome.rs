@@ -114,7 +114,7 @@ pub(super) fn review_header(
                 .truncate(),
         );
         if !detail.is_empty() {
-            title.on_hover_details(detail);
+            title.on_hover_text(detail);
         }
     });
 }
@@ -272,7 +272,7 @@ fn folder_row(ui: &mut egui::Ui, folder: &str) {
         MUTED,
     );
     if truncated {
-        response.on_hover_details(folder);
+        response.on_hover_text(folder);
     }
 }
 
@@ -363,7 +363,7 @@ fn file_row(
     let toggled = check.clicked();
     let clicked = row.clicked();
     row.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_details(match &entry.original_path {
+        .on_hover_text(match &entry.original_path {
             Some(original) => format!("{}\nRenamed from {original}", entry.path),
             None => entry.path.clone(),
         });

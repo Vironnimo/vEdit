@@ -771,7 +771,7 @@ impl VEditApp {
                             center + Vec2::new(-3.5, -5.0), center + Vec2::new(3.5, -5.0),
                             center + Vec2::new(3.5, 5.0), center + Vec2::new(0.0, 2.5), center + Vec2::new(-3.5, 5.0),
                         ], ORANGE, Stroke::NONE));
-                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_details(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
+                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_text(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Bookmark at line {line}")));
                         if response.clicked() { bookmark_click = Some(id); }
                     }

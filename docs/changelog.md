@@ -3,6 +3,8 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht in der [README](../README.md).
 
+Version 0.6.3 macht Pfad-, Status- und Bedienhinweise wieder passiv. Kopierbare Detailansichten bleiben für ausführliche Inhalte; Git-History-Details stehen neben der jeweiligen Sidebar und verdecken die scrollbare Liste nicht mehr.
+
 Version 0.6.2 ergänzt die einstellbare Weitergabe von Ctrl-Kombinationen an Vim. **Settings → Vim → Control keys** zeigt pro Taste Editor- und Vim-Wirkung samt Modus; **Ctrl+C/X/V** bleiben standardmäßig bei der Windows-Zwischenablage. **Ctrl+Q** startet den neuen Visual-Block-Modus mit rechteckigen Auswahlen, Blockregistern, Einfügen, Undo und Wiederholen. Die Eingabeschicht erhält die ursprüngliche Tastenkombination auch bei leerer Zwischenablage.
 
 Version 0.6.1 vervollständigt die Tastaturbedienung für Multicursor: **Alt+Shift+↑/↓** setzt weitere Cursor, **Alt+↑/↓** verschiebt Zeilen oder Auswahlen, **Ctrl+Alt+Enter** markiert frei verteilte Stellen. Das zentrale Hotkey-System unterstützt mehrere eigene Kürzel pro Befehl, Geltungsbereiche und direkte Konfliktauflösung; auch lokale Explorer- und Review-Befehle sind konfigurierbar. **Alt+Shift+D** dupliziert Zeilen oder Auswahlen.

@@ -1,6 +1,6 @@
 //! A cached, virtualized unified diff viewer. Parsing never touches editor buffers.
 
-use crate::{design, design::HoverDetails, render};
+use crate::{design, render};
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use std::ops::Range;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub(crate) fn dialog(
                                 egui::Label::new(RichText::new(title).size(14.0).strong())
                                     .truncate(),
                             )
-                            .on_hover_details(title);
+                            .on_hover_text(title);
                             ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
                         },
                     );
@@ -672,7 +672,7 @@ pub(crate) fn paint_row(
     let kind = presentation.kind;
     let response = ui.interact(rect, id, Sense::hover());
     if let Some(tooltip) = &presentation.tooltip {
-        response.on_hover_details(tooltip);
+        response.on_hover_text(tooltip);
     }
     if let Some(fill) = palette.background(kind) {
         ui.painter().rect_filled(rect, 0.0, fill);

@@ -237,65 +237,24 @@ fn explorer_tooltip_stays_beside_the_pointer_and_inside_the_window() {
         let pointer = row_rect(&screen, "assets").center();
         screen.hover_at(pointer);
         screen.run_steps(4);
-        let tooltip_rect = screen
-            .get_by_label(&tooltip)
-            .rect()
-            .union(screen.get_by_label("Copy all").rect());
-        assert!(
-            tooltip_rect.y_range().contains(pointer.y),
-            "tooltip must stay beside the pointer"
-        );
+        assert!(screen.query_by_label("Copy all").is_none());
+        let tooltip_rect = screen.get_by_label(&tooltip).rect();
+        assert!(tooltip_rect.y_range().contains(pointer.y));
         match side {
             Side::Left => assert!(tooltip_rect.left() > pointer.x + 8.0),
             Side::Right => assert!(tooltip_rect.right() < pointer.x - 8.0),
         }
         assert!(screen.ctx.content_rect().contains_rect(tooltip_rect));
-        let original = screen.state().tab().unwrap().text.clone();
-        screen.get_by_label(&tooltip).click();
-        screen.run_steps(2);
-        screen.event(egui::Event::Text("dd".into()));
-        screen.event(egui::Event::Paste("must not reach the document".into()));
-        screen.run_steps(2);
-        assert_eq!(screen.state().tab().unwrap().text, original);
-        let copy_pos = screen.get_by_label("Copy all").rect().center();
-        screen.hover_at(copy_pos);
-        screen.run_steps(1);
-        let mut copied = Vec::new();
-        for pressed in [true, false] {
-            screen.event(egui::Event::PointerButton {
-                pos: copy_pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            });
-            screen.run_steps(1);
-            copied.extend(
-                screen
-                    .output()
-                    .platform_output
-                    .commands
-                    .iter()
-                    .filter_map(|command| {
-                        if let egui::OutputCommand::CopyText(text) = command {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    }),
-            );
-        }
-        assert_eq!(copied, vec![tooltip]);
-        if std::env::var_os("VEDIT_HOVER_PREVIEW").is_some() && side == Side::Left {
-            screen.snapshot_options(
-                "interactive_path_details",
-                &egui_kittest::SnapshotOptions::new().output_path(std::path::PathBuf::from(
-                    ".tmp/interactive-tooltips/preview",
-                )),
-            );
-        }
-        screen.key_press(egui::Key::Escape);
-        screen.run_steps(2);
-        assert!(screen.query_by_label("Copy all").is_none());
+        // Pointer input passes through the hint, even where it covers the same row.
+        assert!(
+            screen
+                .ctx
+                .layer_id_at(tooltip_rect.center())
+                .is_none_or(|layer| layer.order != egui::Order::Tooltip)
+        );
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(3);
+        assert!(screen.query_by_label(&tooltip).is_none());
     }
 }
 

@@ -14,6 +14,8 @@ Git supplies repository state, bounded subprocess operations and diff presentati
 - The panel keeps shared view state, layout and action dispatch. Private units
   in `src/git_panel/` own navigation, file trees, changes, history, commit details
   and repository controls; they use the same state and per-frame inputs.
+  History's selectable hover details use the full sidebar as an exclusion area
+  (see `rendering.md`); file paths and repository status hints stay passive.
 - `src/git_repositories.rs`, a child of the panel, caches related worktrees for Source control and the project picker. It reuses open projects' status and separately queries unopened worktrees.
 - `src/git_graph.rs` prepares history lanes. `src/git_diff_view.rs` parses and renders unified patches without modifying buffers. `src/explorer_git.rs` projects cached status onto Explorer rows.
 - `src/git_gutter.rs` compares a document with its committed base and owns gutter previews/reverts. Whole-project change reviews and user comments belong to `reviews.md`; disk conflicts and saved-buffer comparison belong to `documents.md`.

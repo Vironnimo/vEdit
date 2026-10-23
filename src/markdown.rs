@@ -1,5 +1,4 @@
 //! Cached CommonMark preview. HTML stays inert and images never fetch remotely.
-use crate::design::HoverDetails;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -1618,7 +1617,7 @@ impl Renderer<'_> {
             }
         }
         self.source_response(&response, source, hovered_link.as_deref());
-        response.on_hover_details(link_details)
+        response.on_hover_text(link_details)
     }
 
     fn source_response(&mut self, response: &egui::Response, byte: usize, link: Option<&str>) {

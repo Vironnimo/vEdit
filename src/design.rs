@@ -82,11 +82,6 @@ pub(crate) fn status_item(ui: &mut Ui, label: &str, color: Color32, tooltip: &st
     status_button(ui, label, color).on_hover_text(tooltip)
 }
 
-/// Status information whose full value can be inspected and copied.
-pub(crate) fn status_details(ui: &mut Ui, label: &str, color: Color32, tooltip: &str) -> Response {
-    status_button(ui, label, color).on_hover_details(tooltip)
-}
-
 fn status_button(ui: &mut Ui, label: &str, color: Color32) -> Response {
     ui.add(
         egui::Button::new(RichText::new(label).size(11.0).color(color))
@@ -423,7 +418,7 @@ pub(crate) fn detail_row(
     }
     response
         .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_details(tooltip)
+        .on_hover_text(tooltip)
 }
 
 /// Explorer geometry is shared by painting, virtualization and keyboard paging.
@@ -639,9 +634,7 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             color,
         );
     }
-    response
-        .on_hover_details_at_pointer(row.tooltip)
-        .on_hover_cursor(CursorIcon::PointingHand)
+    hover::hint_at_pointer(response, row.tooltip).on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn paint_explorer_file_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {

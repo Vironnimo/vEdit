@@ -88,7 +88,7 @@ fn history_screen_with(app: VEditApp, panel_menu: bool) -> Harness<'static, VEdi
     // A dispatched page stays pending across frames so its request guard can
     // be tested independently of worker scheduling and the rest of the editor.
     let screen = Harness::builder()
-        .with_size([360.0, 800.0])
+        .with_size([900.0, 800.0])
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
         .build_ui_state(
@@ -101,7 +101,15 @@ fn history_screen_with(app: VEditApp, panel_menu: bool) -> Harness<'static, VEdi
                         app.git_repository_menu(ui);
                     });
                 }
-                app.git_ui(ui);
+                // Preserve the old list width, with room beside it for history details.
+                let rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    Vec2::new(344.0, ui.available_height()),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    ui.set_clip_rect(rect);
+                    app.git_ui(ui);
+                });
                 design::end_hover_frame(&app.ctx);
             },
             app,

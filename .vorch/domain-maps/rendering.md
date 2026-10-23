@@ -13,7 +13,10 @@ and statistics while keeping reusable layout and worker results tied to their ow
   `src/palette.rs` defines shared colors; `src/design.rs` provides shared controls
   and focus/selection painting. Its `src/design_hover.rs` child owns interactive
   details (selection, clipboard, bounded scrolling and pointer lifetime); ordinary
-  `on_hover_text` hints remain passive. `palette.rs` is not the command-palette owner.
+  `on_hover_text` hints remain passive. Use those for paths, navigation and status
+  explanations; opt into details only for substantial inspectable content.
+  Explorer hints remain beside the pointer, without interactive contents.
+  `palette.rs` is not the command-palette owner.
 - `src/text_statistics.rs` computes offline token counts and formats statistics.
   Its character totals come from `render::LineIndex`.
 - App children `src/source_editor.rs`, `src/editor_view.rs` and `src/app_chrome.rs`
@@ -57,7 +60,10 @@ Details cards receive keyboard events only after a pointer press inside them.
 custom rich cards, including language documentation, use the same body and
 registration. Keep this before source shortcuts so copying or typing in a card
 cannot act on the underlying document. Plain details retain their copy value
-while the pointer is inside the card.
+while the pointer is inside the card. Column-anchored details exclude the full
+sidebar rectangle and shrink to the space toward the window center; when that
+space is too narrow, the owning view's click action remains available instead.
+Keep list scrolling outside the card's hit area.
 
 ## Constraints & Gotchas
 

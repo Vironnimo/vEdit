@@ -1077,7 +1077,7 @@ pub(super) fn paint_agent_mark_overlays(
         }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_details(format!(
+            .on_hover_text(format!(
                 "Remove this block from For agent\n{}",
                 mark.tooltip
             ));

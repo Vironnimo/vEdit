@@ -627,6 +627,105 @@ fn repeated_merges_keep_a_clear_mainline_screenshot() {
 }
 
 #[test]
+fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
+    let mut snapshots = egui_kittest::SnapshotResults::default();
+    for (side, width) in [
+        (sidebar_layout::Side::Left, 1280.0),
+        (sidebar_layout::Side::Right, 1280.0),
+        (sidebar_layout::Side::Left, 700.0),
+        (sidebar_layout::Side::Right, 700.0),
+    ] {
+        let mut app = git_workspace();
+        app.move_sidebar(SidebarView::SourceControl, side);
+        let project = &mut app.projects[0];
+        project.git_changes.clear();
+        project.git_stats = git::WorkingTreeStats::default();
+        project.git_history_has_more = false;
+        let template = project.recent_commits[0].clone();
+        project.recent_commits = (0..80)
+            .map(|index| git::CommitSummary {
+                hash: format!("{index:040x}"),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                subject: format!("History entry {index}"),
+                ..template.clone()
+            })
+            .collect();
+        project.git_view.graph.reset(None);
+        let mut screen = visual_tests::harness(app);
+        screen.set_size(Vec2::new(width, 720.0));
+        visual_tests::settle_render(&mut screen);
+        screen.ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.tooltip_grace_time = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let source = screen.get_by_label("History entry 0").rect().center();
+        screen.hover_at(source);
+        screen.run_steps(4);
+        let copy = screen.get_by_label("Copy all").rect();
+        let card = screen.ctx.memory(|m| {
+            m.area_rect(m.layer_id_at(copy.center()).unwrap().id)
+                .unwrap()
+        });
+        let sidebar = screen.state().sidebar_region_rect(side).unwrap();
+        match side {
+            sidebar_layout::Side::Left => {
+                assert!(card.left() >= sidebar.right(), "{card:?} / {sidebar:?}")
+            }
+            sidebar_layout::Side::Right => {
+                assert!(card.right() <= sidebar.left(), "{card:?} / {sidebar:?}")
+            }
+        }
+        assert!(screen.ctx.content_rect().contains_rect(card));
+        if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+            screen.snapshot_options(
+                format!("hover_history_{side:?}_{width}"),
+                &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
+            );
+        }
+        screen.hover_at(copy.center());
+        screen.run_steps(2);
+        let mut copied = Vec::new();
+        for pressed in [true, false] {
+            screen.event(egui::Event::PointerButton {
+                pos: copy.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            screen.run_steps(1);
+            copied.extend(
+                screen.output().platform_output.commands.iter().filter_map(
+                    |command| match command {
+                        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                        _ => None,
+                    },
+                ),
+            );
+        }
+        assert!(
+            copied
+                .iter()
+                .any(|text| text.contains("History entry 0") && text.contains(&"0".repeat(40)))
+        );
+        screen.hover_at(source);
+        screen.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -500.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        screen.run_steps(5);
+        assert!(
+            screen.query_by_label("History entry 0").is_none(),
+            "wheel over the list must scroll the list"
+        );
+        snapshots.extend(screen.take_snapshot_results());
+    }
+}
+
+#[test]
 fn history_bottom_uses_the_full_sidebar_height_screenshot() {
     let mut app = git_workspace();
     let project = &mut app.projects[0];

@@ -148,7 +148,7 @@ impl VEditApp {
                     .show(ui, |ui| {
                         for (label, path) in &documents {
                             ui.add(egui::Label::new(RichText::new(label).size(12.0)).truncate())
-                                .on_hover_details(path);
+                                .on_hover_text(path);
                         }
                     });
                 if self.close_after_save {

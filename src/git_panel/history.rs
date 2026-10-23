@@ -108,6 +108,7 @@ pub(super) fn show_history(
                             );
                             history_hover(
                                 &response,
+                                panel.hover_column,
                                 commit,
                                 state.hover_stats.get(&(root.to_path_buf(), commit.hash.clone())),
                                 actions,
@@ -405,11 +406,12 @@ fn history_row(
 
 fn history_hover(
     response: &egui::Response,
+    column: egui::Rect,
     commit: &git::CommitSummary,
     stats: Option<&Result<git::CommitStats, String>>,
     actions: &mut Vec<GitUiAction>,
 ) {
-    response.clone().on_hover_details_ui(|ui| {
+    response.clone().on_hover_details_beside_ui(column, |ui| {
         ui.ctx().request_repaint_after(Duration::from_secs(30));
         ui.label(RichText::new(&commit.subject).strong());
         let now = std::time::SystemTime::now()
@@ -429,7 +431,7 @@ fn history_hover(
             ))
             .color(MUTED),
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(
                 RichText::new(short_hash(&commit.hash))
@@ -475,7 +477,7 @@ fn history_hover(
         ui.separator();
         match stats {
             Some(Ok(stats)) => {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format!(
                         "{} {} changed",
                         stats.files_changed,
@@ -502,7 +504,7 @@ fn history_hover(
             }
             None => {
                 actions.push(GitUiAction::LoadCommitStats(commit.hash.clone()));
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.add(egui::Spinner::new().size(12.0).color(MUTED));
                     ui.label(RichText::new("Loading changes…").color(MUTED));
                 });

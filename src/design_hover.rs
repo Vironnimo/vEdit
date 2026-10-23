@@ -12,7 +12,6 @@ struct Open {
     id: Id,
     anchor: Rect,
     rect: Rect,
-    pointer: egui::Pos2,
     pass: u64,
     until: f64,
     interacting: bool,
@@ -142,7 +141,6 @@ pub(crate) fn register_details(ctx: &Context, id: Id, anchor: Rect, rect: Rect, 
         id,
         anchor,
         rect,
-        pointer: ctx.pointer_hover_pos().unwrap_or(anchor.center()),
         pass: ctx.cumulative_pass_nr(),
         until: now + LEAVE_DELAY,
         interacting: false,
@@ -187,7 +185,7 @@ pub(crate) fn details_body(ui: &mut Ui, id: Id, contents: impl FnOnce(&mut Ui) -
     ctx.input_mut(|i| i.events.extend(pending));
     ui.style_mut().interaction.selectable_labels = true;
     let width = (ctx.content_rect().width() - 32.0).clamp(100.0, 480.0);
-    ui.set_max_width(width);
+    ui.set_max_width(width.min(ui.max_rect().width()));
     let height = (ctx.content_rect().height() * 0.55).clamp(50.0, 360.0);
     // Areas remember their previous size. Give the scroll view room to grow
     // when background results replace a shorter loading message.
@@ -227,22 +225,31 @@ pub(crate) fn details_body(ui: &mut Ui, id: Id, contents: impl FnOnce(&mut Ui) -
 pub(crate) trait HoverDetails: Sized {
     fn on_hover_details(self, text: impl AsRef<str>) -> Self;
     fn on_hover_details_ui(self, contents: impl FnOnce(&mut Ui) -> String) -> Self;
-    fn on_hover_details_at_pointer(self, text: impl AsRef<str>) -> Self;
+    /// Place inspectable content outside a scrolling column, toward the window center.
+    fn on_hover_details_beside_ui(
+        self,
+        column: Rect,
+        contents: impl FnOnce(&mut Ui) -> String,
+    ) -> Self;
 }
 
 impl HoverDetails for Response {
     fn on_hover_details(self, text: impl AsRef<str>) -> Self {
-        show_text(self, text.as_ref(), false)
+        show_text(self, text.as_ref())
     }
-    fn on_hover_details_at_pointer(self, text: impl AsRef<str>) -> Self {
-        show_text(self, text.as_ref(), true)
+    fn on_hover_details_beside_ui(
+        self,
+        column: Rect,
+        contents: impl FnOnce(&mut Ui) -> String,
+    ) -> Self {
+        show(self, Some(column), contents)
     }
     fn on_hover_details_ui(self, contents: impl FnOnce(&mut Ui) -> String) -> Self {
-        show(self, false, contents)
+        show(self, None, contents)
     }
 }
 
-fn show_text(response: Response, text: &str, beside_pointer: bool) -> Response {
+fn show_text(response: Response, text: &str) -> Response {
     let ctx = response.ctx.clone();
     let id = response.id;
     if text.is_empty() && !details_open(&ctx, id) {
@@ -259,7 +266,7 @@ fn show_text(response: Response, text: &str, beside_pointer: bool) -> Response {
         save(&ctx, current);
         return response;
     }
-    show(response, beside_pointer, |ui| {
+    show(response, None, |ui| {
         let mut state = state(&ctx);
         let text = if let Some(open) = state.open.as_mut().filter(|open| open.id == id) {
             if !open.interacting
@@ -282,7 +289,7 @@ fn show_text(response: Response, text: &str, beside_pointer: bool) -> Response {
 
 fn show(
     response: Response,
-    beside_pointer: bool,
+    column: Option<Rect>,
     contents: impl FnOnce(&mut Ui) -> String,
 ) -> Response {
     let ctx = &response.ctx;
@@ -314,10 +321,53 @@ fn show(
         return response;
     }
     register_details(ctx, response.id, response.rect, Rect::NOTHING, false);
-    let mut tooltip = egui::Tooltip::for_widget(&response)
-        .width((ctx.content_rect().width() - 32.0).clamp(100.0, 480.0));
-    if beside_pointer {
-        let pointer = state(ctx).open.unwrap().pointer;
+    let screen = ctx.content_rect();
+    let mut width = (screen.width() - 32.0).clamp(100.0, 480.0);
+    let mut tooltip = egui::Tooltip::for_widget(&response);
+    if let Some(column) = column {
+        let right = column.center().x < screen.center().x;
+        let space = if right {
+            screen.right() - column.right()
+        } else {
+            column.left() - screen.left()
+        };
+        width = width.min(space - 30.0);
+        // Commit details remain available by click when there is no room beside the list.
+        if width < 160.0 {
+            let mut current = state(ctx);
+            current.open = None;
+            save(ctx, current);
+            return response;
+        }
+        let anchor = Rect::from_min_max(
+            egui::pos2(column.left(), response.rect.top()),
+            egui::pos2(column.right(), response.rect.bottom()),
+        );
+        tooltip.popup = tooltip
+            .popup
+            .anchor(anchor)
+            .gap(6.0)
+            .align(if right {
+                egui::emath::RectAlign::RIGHT
+            } else {
+                egui::emath::RectAlign::LEFT
+            })
+            .align_alternatives(&[]);
+    }
+    tooltip = tooltip.width(width);
+    if let Some(shown) = tooltip.show(|ui| {
+        ui.set_max_width(width);
+        details_body(ui, response.id, contents);
+    }) {
+        register_details(ctx, response.id, response.rect, shown.response.rect, false);
+    }
+    response
+}
+
+/// Passive path hints follow the pointer without retaining it or stealing input.
+pub(super) fn hint_at_pointer(response: Response, text: &str) -> Response {
+    let mut tooltip = egui::Tooltip::for_enabled(&response);
+    if let Some(pointer) = response.ctx.pointer_hover_pos() {
         tooltip.popup = tooltip
             .popup
             .anchor(pointer)
@@ -325,9 +375,9 @@ fn show(
             .align(egui::emath::RectAlign::RIGHT)
             .align_alternatives(&[egui::emath::RectAlign::LEFT]);
     }
-    if let Some(shown) = tooltip.show(|ui| details_body(ui, response.id, contents)) {
-        register_details(ctx, response.id, response.rect, shown.response.rect, false);
-    }
+    tooltip.show(|ui| {
+        ui.label(text);
+    });
     response
 }
 

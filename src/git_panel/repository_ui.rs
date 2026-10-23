@@ -109,7 +109,7 @@ pub(super) fn show_header(
                 },
             )
             .inner
-            .on_hover_details(format!(
+            .on_hover_text(format!(
                 "{}\nFetch, pull, push and other repository actions are in the panel menu (⋯).",
                 crate::paths::display(root)
             ));
@@ -349,7 +349,7 @@ fn repository_overview(
                 };
                 status = Some(ui.add(egui::Label::new(RichText::new(label).size(11.5).color(color))
                     .sense(egui::Sense::click()))
-                    .on_hover_details(format!("{breakdown}\nA partially staged file counts as staged and unstaged.")));
+                    .on_hover_text(format!("{breakdown}\nA partially staged file counts as staged and unstaged.")));
                 let (added, removed) =
                     cache.groups.iter().fold((0u64, 0u64), |(a, r), (_, tree)| {
                         (
@@ -386,7 +386,7 @@ fn repository_overview(
                     .sense(egui::Sense::click()),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_details(format!(
+                .on_hover_text(format!(
                     "Compared with local {base}: {} commits only on this branch, {} only on {base}\nClick to review this branch's changes",
                     comparison.ahead,
                     comparison.behind,
@@ -450,5 +450,5 @@ fn sync_status(ui: &mut egui::Ui, project: &Project) {
             .wrap_mode(egui::TextWrapMode::Extend)
             .selectable(false),
     )
-    .on_hover_details(tip);
+    .on_hover_text(tip);
 }

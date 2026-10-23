@@ -303,54 +303,6 @@ pub(in crate::app) struct Row {
 }
 
 impl Row {
-    fn copy_details(&self, now: i64) -> String {
-        let mut lines = vec![
-            self.name.clone(),
-            crate::paths::display(&self.path),
-            self.summary(),
-        ];
-        if let Some(head) = &self.head {
-            lines.push(head.clone());
-        }
-        if let Some(Ok(status)) = &self.status
-            && let Some(upstream) = &status.tracking.upstream
-        {
-            lines.push(format!("Tracking {upstream}"));
-        }
-        match &self.details {
-            Some(Ok(details)) => lines.push(format!("{} files changed · +{} −{}\n{} binary files · {} files with unavailable line counts", details.files, details.added, details.removed, details.binary, details.unknown)),
-            Some(Err(error)) => lines.push(format!("Line counts unavailable: {error}")),
-            None if self.openable() => lines.push("Loading line counts…".into()),
-            None => {}
-        }
-        if let Some(Err(error)) = &self.status {
-            lines.push(format!("Status unavailable: {error}"));
-        }
-        if let Some(headline) = &self.headline {
-            lines.push(format!(
-                "Last commit: {}\n{} · {}\n{}",
-                headline.subject,
-                headline.author,
-                relative_time(headline.timestamp, now),
-                headline.hash
-            ));
-        }
-        match &self.kind {
-            RowKind::Bare => lines.push("Bare repository without a working tree".into()),
-            RowKind::Missing(reason) => {
-                lines.push(format!("Worktree directory is missing: {reason}"))
-            }
-            RowKind::Worktree => {}
-        }
-        if let Some(reason) = &self.locked {
-            lines.push(format!("Locked: {reason}"));
-        }
-        if let Some(error) = &self.listing_error {
-            lines.push(format!("Worktree list unavailable: {error}"));
-        }
-        lines.join("\n")
-    }
-
     pub(in crate::app) fn openable(&self) -> bool {
         self.kind == RowKind::Worktree
     }
@@ -1289,10 +1241,9 @@ impl VEditApp {
         row: &Row,
     ) -> egui::Response {
         let mut visible = false;
-        let response = response.on_hover_details_ui(|ui| {
+        let response = response.on_hover_ui(|ui| {
             visible = true;
             repository_tooltip(ui, row, overview_now(ui));
-            row.copy_details(overview_now(ui))
         });
         if visible
             && self.git_polling_active()

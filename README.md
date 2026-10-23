@@ -1,4 +1,4 @@
-# vEdit 0.6.2
+# vEdit 0.6.3
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -55,7 +55,7 @@ Die Projekt-Tabs sitzen oben neben dem Namen der App und wechseln per Klick dire
 
 Ein Rechtsklick auf einen Projekt-Tab (oder **Shift+F10** bei Tastaturfokus) öffnet **Reveal in Explorer**, **Copy path** und **Close project**. Die Aktionen gelten für den angeklickten Tab, ohne zuvor das aktive Projekt zu wechseln. **Close project** entfernt das Projekt aus der Sitzung; der Ordner und seine Dateien bleiben auf dem Datenträger. Bei ungespeicherten Änderungen fragt vEdit vor dem Schließen nach.
 
-Kurze Bedienhinweise erscheinen als normale Tooltips. Detail-Tooltips für Pfade, Diagnosen, Git-Daten und Dokumentation lassen sich mit der Maus betreten: Text markieren und mit **Ctrl+C** kopieren oder **Copy all** verwenden. Lange Inhalte scrollen innerhalb der Anzeige. Beim Wechsel vom Auslöser zur Anzeige bleibt sie kurz offen; **Esc**, ein Klick außerhalb oder das Verlassen beider Bereiche schließt sie. Das reine Überfahren nimmt dem Editor keinen Tastaturfokus. Ein per **Show hover** geöffnetes Dokumentationsfenster bleibt wie bisher bis **Esc**, einer Cursorbewegung oder einem Klick außerhalb geöffnet. Vollständige Statusfehler bleiben zusätzlich per Klick im Detailfenster erreichbar.
+Tooltips für Bedienhinweise, Pfade, Tabs und Statuswerte bleiben kurze, passive Hinweise ohne Kopierleiste. Im Explorer erscheint der vollständige Pfad neben der Maus; **Copy path** im Kontextmenü kopiert ihn. Ausführliche Git-History-Daten, Diagnosen und Dokumentation bieten dagegen eine Detailansicht mit Textauswahl, **Ctrl+C**, **Copy all** und eigenem Scrollbereich. Die Git-History-Details erscheinen außerhalb der Sidebar: rechts neben einer linken Sidebar und links neben einer rechten. So bleibt die Liste zum Scrollen frei; bei zu wenig Platz öffnet ein Klick auf den Commit die Details. **Esc**, ein Klick außerhalb oder das Verlassen von Auslöser und Detailansicht schließt sie. Reines Überfahren nimmt dem Editor keinen Tastaturfokus. Ein per **Show hover** geöffnetes Dokumentationsfenster bleibt bis **Esc**, einer Cursorbewegung oder einem Klick außerhalb geöffnet. Vollständige Statusfehler sind zusätzlich per Klick im Detailfenster erreichbar.
 
 ### Einzelne Dateien und Drag-and-drop
 

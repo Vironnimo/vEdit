@@ -295,7 +295,7 @@ impl VEditApp {
                     let response = ui
                         .push_id(id, |ui| ui.selectable_label(selected, &label))
                         .inner
-                        .on_hover_details(path.as_deref().unwrap_or("Unsaved document"));
+                        .on_hover_text(path.as_deref().unwrap_or("Unsaved document"));
                     if response.clicked() {
                         self.explorer_navigation.other_files.selected = Some(id);
                         chosen = Some(index);
