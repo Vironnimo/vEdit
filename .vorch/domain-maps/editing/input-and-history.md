@@ -73,6 +73,15 @@ selection history. Ordinary explicit `VimState::set_cursor` or selection-boundar
 navigation clears multicursor state; pane restoration carries it through
 `VimNavigation` instead.
 
+During keyboard cursor placement the last selection is a movable cursor and the
+preceding selections remain marked. Keep coincident marked/movable selections
+until placement finishes; then merge before any edit so a shared position is
+edited once. Cursor Undo restores this placement state. Finish/exit are contextual
+registry commands, with current bindings shown in the status bar. Plain Enter
+finishes placement by default without inserting a newline; typing also finishes
+and edits all selections. The cursor limit rejects the entire finish/edit if the
+new unique selection would exceed it.
+
 `multicursor_keys` consumes the ordered source prefix before global shortcut
 dispatch. While active, TextEdit supplies layout and pointer selection without
 also mutating text, and ordinary Vim handling yields. Activation after native

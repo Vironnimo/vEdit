@@ -33,6 +33,8 @@ A change-review CLI reply waits until comparison loading completes. A replaced o
 
 Working-tree reviews exclude unsaved buffers and expose that fact in the UI. Repository changes produce a freshness warning and an explicit refresh action; they do not replace the comparison while the user reads or comments. Seen state belongs to the user; the CLI reports it rather than marking files seen.
 
+Review file navigation, seen-and-continue, opening and commenting are scoped actions in the shared shortcut registry. The comment dialog owns its separate submit action. Local handlers use the same bindings and hints as Keyboard settings; reading motions and selection arrows remain view navigation. Palette commands queue against the current review until its diff geometry is available.
+
 Taking or acknowledging marks saves session metadata atomically before success. A storage failure restores the prior live marks and receipt, including live attachment caches. Other mark changes queue normal session persistence. None of these operations saves document text.
 
 ## Verification pointers

@@ -423,11 +423,13 @@ fn benchmark_previous_git_frame(ctx: &egui::Context) -> bool {
     }
 }
 
-fn git_context_menu(response: &egui::Response, contents: impl FnOnce(&mut egui::Ui, bool)) {
+fn git_context_menu(
+    response: &egui::Response,
+    bindings: &keybindings::Bindings,
+    contents: impl FnOnce(&mut egui::Ui, bool),
+) {
     let keyboard = response.has_focus()
-        && response
-            .ctx
-            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+        && keybindings::consume(bindings, keybindings::Action::ContextMenu, &response.ctx);
     let id = response.id.with("git-context-menu");
     // Closed menus have no UI to build. Keep the previous-open marker in this
     // check so Escape still restores row focus on the frame after closing.
@@ -1217,6 +1219,7 @@ impl VEditApp {
                                         &mut state.expanded,
                                         &mut state.selected_file,
                                         busy,
+                                        &self.settings.keybindings,
                                         &mut actions,
                                     );
                                     ui.add_space(7.0);
@@ -1472,7 +1475,7 @@ impl VEditApp {
                                         actions
                                             .push(GitUiAction::ReviewCommit(commit.hash.clone()));
                                     }
-                                    git_context_menu(&response, |ui, focus| {
+                                    git_context_menu(&response, &self.settings.keybindings, |ui, focus| {
                                         if git_menu_item(
                                             ui,
                                             "Open commit",
@@ -1819,7 +1822,7 @@ impl VEditApp {
                             });
                             ui.label(RichText::new(if detail.parents.len() > 1 { "Changes against the first parent · select a file to view its patch" } else { "Select a file to view its patch in this commit" }).size(10.5).color(MUTED));
                             ui.add_space(7.0);
-                            draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &mut actions);
+                            draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &self.settings.keybindings, &mut actions);
                         });
                     state.detail_page_rows =
                         (detail_scroll.inner_rect.height() / 31.0).floor().max(1.0) as usize;
@@ -2168,6 +2171,7 @@ fn working_group(
     expanded: &mut HashMap<String, bool>,
     selected: &mut Option<String>,
     busy: bool,
+    bindings: &keybindings::Bindings,
     actions: &mut Vec<GitUiAction>,
 ) {
     let key = format!("working:{}", group.key());
@@ -2208,7 +2212,7 @@ fn working_group(
                 queue_tree_stage(tree, group, actions);
             }
         }
-        git_context_menu(&response.row, |ui, focus| {
+        git_context_menu(&response.row, bindings, |ui, focus| {
             ui.add_enabled_ui(!busy, |ui| {
                 if git_menu_item(
                     ui,
@@ -2239,6 +2243,7 @@ fn working_group(
                 expanded,
                 selected,
                 busy,
+                bindings,
                 actions,
             );
         }
@@ -2271,6 +2276,7 @@ fn draw_file_tree(
     expanded: &mut HashMap<String, bool>,
     selected: &mut Option<String>,
     busy: bool,
+    bindings: &keybindings::Bindings,
     actions: &mut Vec<GitUiAction>,
 ) {
     let namespace = context.key();
@@ -2316,7 +2322,7 @@ fn draw_file_tree(
                 response.row.request_focus();
                 queue_tree_stage(folder, group, actions);
             }
-            git_context_menu(&response.row, |ui, focus| {
+            git_context_menu(&response.row, bindings, |ui, focus| {
                 if let TreeContext::Working(group) = context {
                     ui.add_enabled_ui(!busy, |ui| {
                         if git_menu_item(
@@ -2361,6 +2367,7 @@ fn draw_file_tree(
                     expanded,
                     selected,
                     busy,
+                    bindings,
                     actions,
                 );
             }
@@ -2422,7 +2429,7 @@ fn draw_file_tree(
                     GitUiAction::Stage(paths)
                 });
             }
-            git_context_menu(&row, |ui, focus| {
+            git_context_menu(&row, bindings, |ui, focus| {
                 if git_menu_item(
                     ui,
                     "View diff",

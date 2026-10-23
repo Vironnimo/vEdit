@@ -97,6 +97,7 @@ pub(super) struct ReviewContext {
     pub(super) drafts: Vec<(String, PathBuf)>,
     /// The user swapped `j` and `k`.
     pub(super) swap_jk: bool,
+    pub(super) bindings: keybindings::Bindings,
 }
 
 /// The open "Comment for agent" dialog.
@@ -268,6 +269,7 @@ pub(super) fn paint_selected_row(ui: &egui::Ui, rect: egui::Rect) {
 pub(super) fn diff_menu(
     body: &egui::Response,
     view: &mut ChangeReview,
+    bindings: &keybindings::Bindings,
 ) -> Option<Option<CommentDraft>> {
     let mut chosen = None;
     let mut clear = false;
@@ -288,7 +290,7 @@ pub(super) fn diff_menu(
         let comment = item(
             ui,
             "Comment for agent…",
-            "C",
+            &keybindings::label(bindings, keybindings::Action::ReviewComment),
             "Write a note on the selected diff lines; the agent receives it with them",
         );
         if comment.clicked() {
@@ -379,6 +381,7 @@ pub(super) fn comment_dialog(
     ctx: &egui::Context,
     body_id: egui::Id,
     view: &mut ChangeReview,
+    bindings: &keybindings::Bindings,
     actions: &mut Vec<ReviewAction>,
 ) {
     let Some(draft) = view.comment.as_mut() else {
@@ -428,8 +431,8 @@ pub(super) fn comment_dialog(
                 }
             });
         ui.add_space(8.0);
-        // Ctrl+Enter adds the comment before the note sees a line break.
-        submit |= ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::Enter));
+        // Consume the command before the note sees its key or generated text.
+        submit |= keybindings::consume(bindings, keybindings::Action::ReviewSubmitComment, ctx);
         let note = ui.add(
             egui::TextEdit::multiline(&mut draft.note)
                 .hint_text("What should the agent change or check here?")
@@ -442,7 +445,11 @@ pub(super) fn comment_dialog(
         ui.add_space(10.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let add = design::primary_button(ui, "Add for agent", Vec2::new(110.0, 28.0))
-                .on_hover_text("Ctrl+Enter · The agent takes it with the other marks");
+                .on_hover_text(review_hint(
+                    bindings,
+                    keybindings::Action::ReviewSubmitComment,
+                    "The agent takes it with the other marks",
+                ));
             submit |= add.clicked();
             cancel |= design::ghost_button(ui, "Cancel", "Esc").clicked();
         });
@@ -500,7 +507,20 @@ impl VEditApp {
             marked_blocks: self.agent_marks.items.len(),
             drafts,
             swap_jk: self.settings.swap_jk,
+            bindings: self.settings.keybindings.clone(),
         }
+    }
+
+    pub(in crate::app) fn submit_review_comment(&mut self) {
+        let Some(draft) = self
+            .projects
+            .get_mut(self.active_project)
+            .and_then(|project| project.change_review.view.as_mut())
+            .and_then(|view| view.comment.take())
+        else {
+            return;
+        };
+        self.add_review_comment(self.active_project, draft);
     }
 
     /// Whether the active project's review is asking for a comment.

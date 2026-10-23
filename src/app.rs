@@ -1138,7 +1138,7 @@ impl VEditApp {
         app.settings.external_open_new_window = crate::profile::external_open_new_window();
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
-        keybindings::migrate_later_defaults(&mut app.settings.keybindings);
+        let shortcut_warnings = keybindings::restore_bindings(&mut app.settings.keybindings);
         app.ctx.set_zoom_factor(app.settings.ui_scale);
         app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
@@ -1155,11 +1155,17 @@ impl VEditApp {
         for index in 0..app.projects.len() {
             app.index_project(index);
         }
-        app.session_dirty = false;
+        app.session_dirty = !shortcut_warnings.is_empty();
         // Folders first, so mixed shell arguments use the same ownership rule as drops.
         let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| path.is_dir());
         for path in folders.into_iter().chain(files) {
             app.open_argument(path);
+        }
+        if !shortcut_warnings.is_empty() {
+            app.status(
+                format!("Some keyboard shortcuts could not be restored. Open Settings > Keyboard to review them.\n{}", shortcut_warnings.join("\n")),
+                true,
+            );
         }
         app.start_control();
         app
@@ -4100,7 +4106,7 @@ impl VEditApp {
         let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
-            if action.multicursor() {
+            if action.multicursor() || action.editor_command().is_some() {
                 continue;
             }
             if matches!(
@@ -4129,15 +4135,6 @@ impl VEditApp {
                     | Action::MoveTabDown
                     | Action::AgentMark
                     | Action::AgentMarks
-                    | Action::ToggleComment
-                    | Action::DuplicateLine
-                    | Action::DeleteLine
-                    | Action::InsertLineAbove
-                    | Action::InsertLineBelow
-                    | Action::MoveLineUp
-                    | Action::MoveLineDown
-                    | Action::Undo
-                    | Action::Redo
                     | Action::ZoomIn
                     | Action::ZoomOut
                     | Action::ZoomReset
@@ -4577,43 +4574,22 @@ impl VEditApp {
                     continue;
                 }
                 if tab.vim.mode != VimMode::Insert {
-                    let comment = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::ToggleComment,
-                        &event,
-                    );
-                    let duplicate = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::DuplicateLine,
-                        &event,
-                    );
-                    let move_up =
-                        keybindings::matches(&keybindings, keybindings::Action::MoveLineUp, &event);
-                    let move_down = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::MoveLineDown,
-                        &event,
-                    );
-                    let delete_line =
-                        keybindings::matches(&keybindings, keybindings::Action::DeleteLine, &event);
-                    let insert_above = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::InsertLineAbove,
-                        &event,
-                    );
-                    let insert_below = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::InsertLineBelow,
-                        &event,
-                    );
-                    if comment
-                        || duplicate
-                        || move_up
-                        || move_down
-                        || delete_line
-                        || insert_above
-                        || insert_below
-                    {
+                    let command = keybindings::Action::ALL.iter().find_map(|&action| {
+                        let command = action.editor_command()?;
+                        (!matches!(
+                            command,
+                            editor_input::Command::Undo | editor_input::Command::Redo
+                        ) && keybindings::source_matches(
+                            &keybindings,
+                            action,
+                            &event,
+                            true,
+                            false,
+                            false,
+                        ))
+                        .then_some(command)
+                    });
+                    if let Some(command) = command {
                         if events
                             .peek()
                             .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
@@ -4624,31 +4600,27 @@ impl VEditApp {
                             .vim
                             .selection(&tab.text)
                             .unwrap_or_else(|| tab.selection.clone());
-                        let edit = if comment {
-                            editor::toggle_line_comment(
-                                &tab.text,
-                                selection,
-                                crate::file_kind::comment_language(tab.path.as_deref()),
-                            )
-                        } else if duplicate {
-                            editor::duplicate_lines(&tab.text, selection)
-                        } else if delete_line {
-                            editor::delete_lines(&tab.text, selection)
-                        } else if insert_above || insert_below {
-                            editor::insert_line(
-                                &tab.text,
-                                selection,
-                                &indent.map(|indent| indent.unit()).unwrap_or_default(),
-                                insert_above,
-                            )
-                        } else {
-                            editor::move_lines(&tab.text, selection, move_down)
-                        };
-                        if move_up || move_down || duplicate {
+                        let edit = editor_input::edit(
+                            command,
+                            &tab.text,
+                            selection,
+                            indent.unwrap(),
+                            crate::file_kind::comment_language(tab.path.as_deref()),
+                        )
+                        .unwrap();
+                        if matches!(
+                            command,
+                            editor_input::Command::MoveLine(_) | editor_input::Command::Duplicate
+                        ) {
                             tab.apply_line_move(edit);
                         } else if edit.text != tab.text {
                             tab.apply(edit);
-                            if delete_line || insert_above || insert_below {
+                            if matches!(
+                                command,
+                                editor_input::Command::DeleteLine
+                                    | editor_input::Command::InsertLine(_)
+                                    | editor_input::Command::Newline
+                            ) {
                                 tab.set_cursor(tab.selection.clone());
                             }
                             tab.vim.notify_external_text_change();
@@ -4765,9 +4737,16 @@ impl VEditApp {
                         && !modifiers.command
                         && !modifiers.shift
                         && tab.vim.mode == VimMode::Normal
-                        && !keybindings::Action::ALL
-                            .iter()
-                            .any(|action| keybindings::matches(&keybindings, *action, &event)) =>
+                        && !keybindings::Action::ALL.iter().any(|action| {
+                            keybindings::source_matches(
+                                &keybindings,
+                                *action,
+                                &event,
+                                true,
+                                false,
+                                false,
+                            )
+                        }) =>
                     {
                         Some(if *key == Key::A {
                             VimKey::Increment
@@ -5339,18 +5318,20 @@ impl VEditApp {
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 ui.horizontal_centered(|ui| {
                     // Resting modes stay muted; color marks modes that change what keys do.
-                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
+                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.placing()) { ("PLACE", ORANGE) } else if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
-                        .on_hover_text("MULTI: standard editing at every cursor; Esc returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
+                        .on_hover_text(format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)));
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
-                        let count = tab.vim.multi.selections.len();
-                        ui.label(RichText::new(format!("{count} {}", if count == 1 { "cursor" } else { "cursors" })).size(11.0).color(BLUE))
-                            .on_hover_text(format!("All selections are edited together. Undo last cursor selection: {}. Esc exits multicursor editing.", self.shortcut_label(keybindings::Action::CursorUndo)));
+                        let placing = tab.vim.multi.placing();
+                        let count = tab.vim.multi.selections.len() - usize::from(placing);
+                        let noun = if placing { "marked" } else if count == 1 { "cursor" } else { "cursors" };
+                        ui.label(RichText::new(format!("{count} {noun}")).size(11.0).color(BLUE))
+                            .on_hover_text(format!("Mark another position: {}. Finish placement and include the active cursor: {}. Undo last cursor selection: {}. Return to one cursor: {}.", self.shortcut_label(keybindings::Action::MarkCursor), self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::CursorUndo), self.shortcut_label(keybindings::Action::ExitMulticursor)));
                     }
                     if let Some(tab) = self.tab() {
                         let pending = tab.vim.pending_command();
@@ -5370,6 +5351,10 @@ impl VEditApp {
                         let hint = jump.state.hint();
                         ui.add(egui::Label::new(RichText::new(&hint).size(11.0).color(ORANGE)).truncate())
                             .on_hover_text("Type 1–3 characters to find visible text, then type its letter label to jump. Home-row letters come first; possible search continuations stay available for typing. Enter locks a shorter query or jumps to the only match. Three characters lock automatically. Backspace corrects a label, unlocks an Enter-confirmed query, or deletes a search character. Esc cancels.");
+                    } else if !status_error && self.tab().is_some_and(|t| t.vim.multi.placing()) {
+                        let hint = format!("Arrows: move · {}: mark · {}: edit · {}: cancel", self.shortcut_label(keybindings::Action::MarkCursor), self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor));
+                        let width = (ui.available_width() - right_budget).clamp(24.0, 480.0);
+                        ui.add_sized([width, 20.0], egui::Label::new(RichText::new(&hint).size(11.0).color(MUTED)).truncate()).on_hover_text(hint);
                     } else if let Some((_, error, time)) = &self.status
                         && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);
@@ -6327,53 +6312,15 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
         let mut native_custom_edit = false;
         if pane_focused && source_editable && ctx.memory(|m| m.has_focus(id)) {
             let indentation = tab.indentation(&settings);
-            let indent = indentation.unit();
-            let edit = match editor_command {
-                Some(editor_input::Command::Comment) => Some(editor::toggle_line_comment(
+            let edit = editor_command.and_then(|command| {
+                editor_input::edit(
+                    command,
                     &tab.text,
                     tab.selection.clone(),
+                    indentation,
                     crate::file_kind::comment_language(tab.path.as_deref()),
-                )),
-                Some(editor_input::Command::Duplicate) => {
-                    Some(editor::duplicate_lines(&tab.text, tab.selection.clone()))
-                }
-                Some(editor_input::Command::DeleteLine) => {
-                    Some(editor::delete_lines(&tab.text, tab.selection.clone()))
-                }
-                Some(editor_input::Command::InsertLine(above)) => Some(editor::insert_line(
-                    &tab.text,
-                    tab.selection.clone(),
-                    &indent,
-                    above,
-                )),
-                Some(editor_input::Command::MoveLine(down)) => {
-                    Some(editor::move_lines(&tab.text, tab.selection.clone(), down))
-                }
-                Some(editor_input::Command::Indent(outdent)) => {
-                    Some(if !outdent && tab.selection.is_empty() {
-                        editor::insert_tab(
-                            &tab.text,
-                            tab.selection.clone(),
-                            indentation.width,
-                            indentation.tabs,
-                        )
-                    } else {
-                        editor::indent_lines_with_width(
-                            &tab.text,
-                            tab.selection.clone(),
-                            &indent,
-                            indentation.width,
-                            outdent,
-                        )
-                    })
-                }
-                Some(editor_input::Command::Newline) => Some(editor::smart_newline(
-                    &tab.text,
-                    tab.selection.clone(),
-                    &indent,
-                )),
-                _ => None,
-            };
+                )
+            });
             if let Some(edit) = edit {
                 native_custom_edit = !settings.vim && edit.text != tab.text;
                 if native_custom_edit {
@@ -7601,41 +7548,89 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
 use keybindings::COMMANDS;
 impl VEditApp {
     fn command_action(&mut self, label: &str) {
-        if let Some(action) = keybindings::Action::from_label(label).filter(|a| a.multicursor()) {
-            self.multicursor_action(action);
-            return;
+        let action = keybindings::Action::from_label(label).or(match label {
+            "Restart Rust analysis" => Some(keybindings::Action::RestartLanguage),
+            "Focus pane left" => Some(keybindings::Action::FocusLeft),
+            "Focus pane right" => Some(keybindings::Action::FocusRight),
+            "Focus pane above" => Some(keybindings::Action::FocusUp),
+            "Focus pane below" => Some(keybindings::Action::FocusDown),
+            _ => None,
+        });
+        if let Some(action) = action {
+            self.run_shortcut_action(action);
         }
-        match label {
-            "Command palette" => self.open_palette(Palette::Commands),
-            "Go to file" => self.open_palette(Palette::Files),
-            "Open recent" => self.open_palette(Palette::Recent),
-            "Save as..."
-            | "Close current tab"
-            | "Reopen closed tab"
-            | "Previous tab"
-            | "Next tab"
-            | "Find next"
-            | "Find previous"
-            | "Keyboard shortcuts"
-            | "Zoom in"
-            | "Zoom out"
-            | "Reset zoom"
-            | "Toggle line comment"
-            | "Duplicate line / selection"
-            | "Delete line / selection"
-            | "Insert line above"
-            | "Insert line below"
-            | "Undo"
-            | "Redo" => {
-                if let Some(action) = keybindings::Action::from_label(label) {
-                    self.run_shortcut_action(action);
+    }
+
+    /// Every command entry point reaches this exhaustive, typed dispatcher.
+    fn execute_action(&mut self, action: keybindings::Action) {
+        use keybindings::Action;
+        match action {
+            Action::CommandPalette => self.open_palette(Palette::Commands),
+            Action::QuickOpen => self.open_palette(Palette::Files),
+            Action::SaveAs => {
+                if let Some(id) = self.tab().map(|tab| tab.id) {
+                    self.request_save_as(id);
                 }
             }
-            "Switch project" => self.open_workspace_picker(),
-            "Next project" | "Previous project" => {
+            Action::CloseTab => {
+                if let Some(tab) = self.tab() {
+                    self.request_close(CloseAction::PaneTab {
+                        pane_id: self.current_pane_id(),
+                        id: tab.id,
+                    });
+                }
+            }
+            Action::ReopenTab => self.reopen_closed_tab(),
+            Action::NextTab | Action::PreviousTab => {
+                self.bind_current_pane();
+                let ids = self.current_pane_tab_ids();
+                if ids.is_empty() {
+                    return;
+                }
+                let active = self
+                    .tab()
+                    .and_then(|tab| ids.iter().position(|id| *id == tab.id))
+                    .unwrap_or(0);
+                let next = if action == Action::PreviousTab {
+                    (active + ids.len() - 1) % ids.len()
+                } else {
+                    (active + 1) % ids.len()
+                };
+                if let Some((project, tab)) =
+                    self.projects.iter().enumerate().find_map(|(pi, project)| {
+                        project
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.id == ids[next])
+                            .map(|ti| (pi, ti))
+                    })
+                {
+                    self.activate_tab(project, tab);
+                }
+            }
+            Action::FindNext | Action::FindPrevious => {
+                self.find_next(action == Action::FindPrevious)
+            }
+            Action::KeyboardShortcuts => {
+                self.open_settings_section("Keyboard");
+            }
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                self.interface_zoom_draft = None;
+                self.settings.ui_scale = match action {
+                    Action::ZoomIn => (self.settings.ui_scale + 0.1).min(2.0),
+                    Action::ZoomOut => (self.settings.ui_scale - 0.1).max(0.75),
+                    _ => 1.0,
+                };
+                self.settings.ui_scale = (self.settings.ui_scale * 100.0).round() / 100.0;
+                self.session_dirty = true;
+                self.ctx.set_zoom_factor(self.settings.ui_scale);
+                self.ctx.request_repaint();
+            }
+            Action::SwitchProject => self.open_workspace_picker(),
+            Action::NextProject | Action::PreviousProject => {
                 if !self.projects.is_empty() {
                     let count = self.projects.len();
-                    let next = if label == "Next project" {
+                    let next = if action == Action::NextProject {
                         (self.active_project + 1) % count
                     } else {
                         (self.active_project + count - 1) % count
@@ -7643,53 +7638,53 @@ impl VEditApp {
                     self.switch_project(next);
                 }
             }
-            "Add project folder" => self.pick_project(),
-            "Open file" => self.pick_file(),
-            "New file" => self.new_file(),
-            "Save current file" => self.save_current(),
-            "Save all files" => self.save_all(),
-            "Find in file" => {
+            Action::OpenProject => self.pick_project(),
+            Action::OpenFile => self.pick_file(),
+            Action::NewFile => self.new_file(),
+            Action::Save => self.save_current(),
+            Action::SaveAll => self.save_all(),
+            Action::Find => {
                 self.find_visible = true;
                 self.find_focus = true;
             }
-            "Replace in file" => {
+            Action::Replace => {
                 self.find_visible = true;
                 self.replace_visible = true;
                 self.find_focus = true;
             }
-            "Search project" => {
+            Action::SearchProject => {
                 self.open_project_search();
             }
-            "Go to line" => self.open_palette(Palette::Line),
-            "Toggle bookmark" => self.toggle_bookmark(),
-            "Bookmarks" => self.open_bookmarks(),
-            "Mark selection for agent" => {
+            Action::GoToLine => self.open_palette(Palette::Line),
+            Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::Bookmarks => self.open_bookmarks(),
+            Action::AgentMark => {
                 self.capture_agent_mark();
             }
-            "Agent marks" => self.open_agent_marks(),
-            "Agent notifications" => self.open_notifications(),
-            "Jump to visible text" => self.start_screen_jump(),
-            "Go to definition" => self.request_definition(),
-            "Show completions" => self.request_completion(),
-            "Show hover" => self.show_hover(),
-            "Find references" => self.find_references(),
-            "Go to symbol in file" => {
+            Action::AgentMarks => self.open_agent_marks(),
+            Action::AgentNotifications => self.open_notifications(),
+            Action::ScreenJump => self.start_screen_jump(),
+            Action::Definition => self.request_definition(),
+            Action::Completion => self.request_completion(),
+            Action::Hover => self.show_hover(),
+            Action::FindReferences => self.find_references(),
+            Action::DocumentSymbol => {
                 self.open_symbol_palette(language_intel::SymbolScope::Document)
             }
-            "Go to symbol in workspace" => {
+            Action::WorkspaceSymbol => {
                 self.open_symbol_palette(language_intel::SymbolScope::Workspace)
             }
-            "Restart language analysis" | "Restart Rust analysis" => self.restart_active_language(),
-            "Language support" => self.open_settings_section("Languages"),
-            "Show problems" => {
+            Action::RestartLanguage => self.restart_active_language(),
+            Action::LanguageSupport => self.open_settings_section("Languages"),
+            Action::Problems => {
                 self.output_visible = true;
                 self.problems_visible = true;
             }
-            "Next problem" => self.go_to_problem(false),
-            "Previous problem" => self.go_to_problem(true),
-            "Go back" => self.navigate_history(true),
-            "Go forward" => self.navigate_history(false),
-            "Markdown source / preview" => {
+            Action::NextProblem => self.go_to_problem(false),
+            Action::PreviousProblem => self.go_to_problem(true),
+            Action::NavigateBack => self.navigate_history(true),
+            Action::NavigateForward => self.navigate_history(false),
+            Action::MarkdownPreview => {
                 if self
                     .tab()
                     .is_some_and(|tab| is_markdown(tab.path.as_deref()))
@@ -7707,85 +7702,122 @@ impl VEditApp {
                     self.status("Open a Markdown document to use preview", false);
                 }
             }
-            "Split right" => self.split_command("right"),
-            "Split down" => self.split_command("down"),
-            "Focus Explorer" => {
+            Action::SplitRight => self.split_command("right"),
+            Action::SplitDown => self.split_command("down"),
+            Action::FocusExplorer => {
                 self.focus_explorer();
                 self.defer_region_focus_owner();
             }
-            "Focus editor" => {
+            Action::FocusEditor => {
                 self.focus_editor();
                 self.defer_region_focus_owner();
             }
-            "Focus Git" => {
+            Action::FocusGit => {
                 self.show_sidebar(SidebarView::SourceControl);
                 self.focus_sidebar_region(self.sidebar_side(SidebarView::SourceControl));
                 self.defer_region_focus_owner();
             }
-            "Focus output" => {
+            Action::FocusOutput => {
                 self.output_visible = true;
                 self.focus_output_region();
                 self.defer_region_focus_owner();
             }
-            "Next editor pane" => self.split_command("next"),
-            "Previous editor pane" => self.split_command("previous"),
-            "Next region" => self.split_command("region_next"),
-            "Previous region" => self.split_command("region_previous"),
-            "Focus left" | "Focus pane left" => self.split_command("focus_left"),
-            "Focus right" | "Focus pane right" => self.split_command("focus_right"),
-            "Focus above" | "Focus pane above" => self.split_command("focus_up"),
-            "Focus below" | "Focus pane below" => self.split_command("focus_down"),
-            "Move tab left" => self.split_command("move_left"),
-            "Move tab right" => self.split_command("move_right"),
-            "Move tab up" => self.split_command("move_up"),
-            "Move tab down" => self.split_command("move_down"),
-            "Close pane" => self.split_command("close"),
-            "Show agent review" => {
+            Action::FocusNextPane => self.split_command("next"),
+            Action::FocusPreviousPane => self.split_command("previous"),
+            Action::FocusNextRegion => self.split_command("region_next"),
+            Action::FocusPreviousRegion => self.split_command("region_previous"),
+            Action::FocusLeft => self.split_command("focus_left"),
+            Action::FocusRight => self.split_command("focus_right"),
+            Action::FocusUp => self.split_command("focus_up"),
+            Action::FocusDown => self.split_command("focus_down"),
+            Action::MoveTabLeft => self.split_command("move_left"),
+            Action::MoveTabRight => self.split_command("move_right"),
+            Action::MoveTabUp => self.split_command("move_up"),
+            Action::MoveTabDown => self.split_command("move_down"),
+            Action::ClosePane => self.split_command("close"),
+            Action::Review => {
                 self.show_sidebar(SidebarView::Review);
             }
-            "Show source control" => {
+            Action::SourceControl => {
                 self.show_sidebar(SidebarView::SourceControl);
             }
-            "Review working tree changes" | "Review branch against main" => {
-                let source = if label == "Review working tree changes" {
+            Action::ReviewWorkingTree | Action::ReviewBranch => {
+                let source = if action == Action::ReviewWorkingTree {
                     git::ReviewSource::WorkingTree
                 } else {
                     git::ReviewSource::Branch { base: None }
                 };
                 self.show_change_review(self.active_project, source);
             }
-            "Show explorer" => {
+            Action::Explorer => {
                 self.show_sidebar(SidebarView::Explorer);
             }
-            "Toggle left sidebar" => self.toggle_sidebar(sidebar_layout::Side::Left),
-            "Toggle right sidebar" => self.toggle_sidebar(sidebar_layout::Side::Right),
-            "Explorer left, Git right" => self.explorer_git_layout(),
-            "Toggle output" => {
+            Action::ToggleLeftSidebar => self.toggle_sidebar(sidebar_layout::Side::Left),
+            Action::ToggleRightSidebar => self.toggle_sidebar(sidebar_layout::Side::Right),
+            Action::ExplorerGitLayout => self.explorer_git_layout(),
+            Action::ToggleOutput => {
                 self.output_visible = !self.output_visible;
                 if !self.output_visible {
                     self.clear_hidden_output_focus();
                 }
             }
-            "Check project" => self.run_project_task(project_tasks::ProjectTaskAction::Check),
-            "Run tests" => self.run_project_task(project_tasks::ProjectTaskAction::Test),
-            "Build project" => self.run_project_task(project_tasks::ProjectTaskAction::Build),
-            "Run active file" => self.run_project_task(project_tasks::ProjectTaskAction::RunFile),
-            "Run application" => self.run_selected_application(),
-            "Stop application" => self.stop_application(),
-            "Configure project tasks" => self.open_project_task_settings(),
-            "Open terminal" => self.open_terminal(),
-            "Toggle word wrap" => {
+            Action::CheckProject => self.run_project_task(project_tasks::ProjectTaskAction::Check),
+            Action::TestProject => self.run_project_task(project_tasks::ProjectTaskAction::Test),
+            Action::BuildProject => self.run_project_task(project_tasks::ProjectTaskAction::Build),
+            Action::RunFile => self.run_project_task(project_tasks::ProjectTaskAction::RunFile),
+            Action::RunApplication => self.run_selected_application(),
+            Action::StopApplication => self.stop_application(),
+            Action::ConfigureTasks => self.open_project_task_settings(),
+            Action::Terminal => self.open_terminal(),
+            Action::ToggleWrap => {
                 self.settings.word_wrap = !self.settings.word_wrap;
                 self.session_dirty = true;
             }
-            "Toggle Vim motions" => {
+            Action::ToggleVim => {
                 self.settings.vim = !self.settings.vim;
                 self.session_dirty = true;
             }
-            "Reload file from disk" => self.reload_current(),
-            "Compare with saved" => self.compare_current_with_saved(),
-            "Settings" => self.settings_open = true,
-            _ => {}
+            Action::Reload => self.reload_current(),
+            Action::CompareWithSaved => self.compare_current_with_saved(),
+            Action::Settings => self.settings_open = true,
+            Action::OpenRecent => self.open_palette(Palette::Recent),
+            Action::Undo
+            | Action::Redo
+            | Action::ToggleComment
+            | Action::DuplicateLine
+            | Action::DeleteLine
+            | Action::InsertLineAbove
+            | Action::InsertLineBelow
+            | Action::MoveLineUp
+            | Action::MoveLineDown
+            | Action::InsertNewline
+            | Action::Indent
+            | Action::Outdent => {
+                self.apply_editor_command(action.editor_command().expect("editor action"));
+            }
+            Action::AddCursorAbove
+            | Action::AddCursorBelow
+            | Action::MarkCursor
+            | Action::SelectNextOccurrence
+            | Action::SelectAllOccurrences
+            | Action::SkipOccurrence
+            | Action::CursorUndo
+            | Action::CursorsAtLineEnds
+            | Action::ExitMulticursor => self.multicursor_action(action),
+            Action::FinishCursorPlacement => {
+                self.finish_cursor_placement();
+            }
+            Action::ExplorerRename | Action::ExplorerDelete => self.explorer_command(action),
+            Action::ContextMenu => self.status(
+                "Focus an Explorer, Git or project tab item to open its context menu",
+                false,
+            ),
+            Action::ReviewNextFile
+            | Action::ReviewPreviousFile
+            | Action::ReviewSeenNext
+            | Action::ReviewOpenFile
+            | Action::ReviewComment => self.review_command(action),
+            Action::ReviewSubmitComment => self.submit_review_comment(),
         }
     }
     fn quick_open_rows(&self) -> Vec<(language_intel::PaletteRow, Option<u64>)> {
@@ -7923,6 +7955,7 @@ impl VEditApp {
                     {
                         COMMANDS
                             .iter()
+                            .filter(|(name, _)| keybindings::Action::from_label(name).is_some_and(keybindings::Action::palette_visible))
                             .filter(|(name, _)| {
                                 name.to_lowercase()
                                     .contains(&self.palette_query.to_lowercase())
@@ -9311,6 +9344,10 @@ impl VEditApp {
         self.language_request_unavailable();
     }
     fn request_completion(&mut self) {
+        if self.tab().is_some_and(|tab| tab.vim.multi.placing()) && !self.finish_cursor_placement()
+        {
+            return;
+        }
         self.sync_languages(true);
         let Some(project) = self.project() else {
             return;

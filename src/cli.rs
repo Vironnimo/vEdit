@@ -198,12 +198,69 @@ pub enum LineNumbers {
     Off,
 }
 
+pub const MAX_SHORTCUT_ALIASES: usize = 8;
+pub const MAX_SHORTCUT_BYTES: usize = 100;
+
+/// A single shortcut retains its original JSON string representation. Multiple
+/// shortcuts are an ordered list of alternatives for the same action.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ShortcutBinding {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl ShortcutBinding {
+    pub fn values(&self) -> impl Iterator<Item = &str> {
+        let values = match self {
+            Self::Single(value) => std::slice::from_ref(value),
+            Self::Multiple(values) => values.as_slice(),
+        };
+        values.iter().map(String::as_str)
+    }
+}
+
+impl From<String> for ShortcutBinding {
+    fn from(value: String) -> Self {
+        Self::Single(value)
+    }
+}
+
+impl From<&str> for ShortcutBinding {
+    fn from(value: &str) -> Self {
+        Self::Single(value.into())
+    }
+}
+
+impl From<Vec<String>> for ShortcutBinding {
+    fn from(mut values: Vec<String>) -> Self {
+        if values.len() == 1 {
+            Self::Single(values.remove(0))
+        } else {
+            Self::Multiple(values)
+        }
+    }
+}
+
+impl Serialize for ShortcutBinding {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Single(value) => value.serialize(serializer),
+            Self::Multiple(values) if values.len() == 1 => values[0].serialize(serializer),
+            Self::Multiple(values) => values.serialize(serializer),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
     pub multicursor: Option<MulticursorPatch>,
     /// Complete override map: absent actions retain defaults, null disables, {} resets all.
-    pub keybindings: Option<std::collections::BTreeMap<String, Option<String>>>,
+    pub keybindings: Option<std::collections::BTreeMap<String, Option<ShortcutBinding>>>,
     pub vim: Option<bool>,
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,
@@ -2113,10 +2170,15 @@ pub fn validate(request: &Request) -> Result<(), String> {
                     || bindings.iter().any(|(id, binding)| {
                         id.is_empty()
                             || id.len() > 80
-                            || binding.as_ref().is_some_and(|value| value.len() > 100)
+                            || binding.as_ref().is_some_and(|binding| {
+                                !(1..=MAX_SHORTCUT_ALIASES).contains(&binding.values().count())
+                                    || binding.values().any(|value| {
+                                        value.is_empty() || value.len() > MAX_SHORTCUT_BYTES
+                                    })
+                            })
                     }))
             {
-                return Err("keybindings supports at most 128 action IDs (1..80 bytes) and shortcut strings up to 100 bytes".into());
+                return Err("keybindings supports at most 128 action IDs (1..80 bytes), each set to null or 1..8 shortcut strings (1..100 bytes each); no settings were changed".into());
             }
             if let Some(excludes) = &patch.search_excludes {
                 normalize_search_excludes(excludes)?;
@@ -3472,6 +3534,63 @@ mod tests {
             assert!(serde_json::from_value::<Request>(json).is_err());
         }
     }
+    #[test]
+    fn keybinding_settings_preserve_strings_disable_and_aliases_with_bounded_payloads() {
+        for (bindings, expected) in [
+            (json!({}), json!({})),
+            (
+                json!({"save":"F8","toggle_left_sidebar":null}),
+                json!({"save":"F8","toggle_left_sidebar":null}),
+            ),
+            (json!({"save":["F8"]}), json!({"save":"F8"})),
+            (
+                json!({"save":["Ctrl+S","F8"]}),
+                json!({"save":["Ctrl+S","F8"]}),
+            ),
+            (
+                json!({"save":["F1","F2","F3","F4","F5","F6","F7","F8"]}),
+                json!({"save":["F1","F2","F3","F4","F5","F6","F7","F8"]}),
+            ),
+        ] {
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":{"keybindings":bindings}}))
+                    .unwrap();
+            validate(&request).unwrap();
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["patch"]["keybindings"],
+                expected
+            );
+        }
+        for bindings in [
+            json!({"save":[]}),
+            json!({"save":vec!["F8"; MAX_SHORTCUT_ALIASES + 1]}),
+            json!({"save":""}),
+            json!({"save":["F8", ""]}),
+            json!({"save":"x".repeat(MAX_SHORTCUT_BYTES + 1)}),
+            json!({"save":["F8", "x".repeat(MAX_SHORTCUT_BYTES + 1)]}),
+        ] {
+            let request: Request = serde_json::from_value(
+                json!({"op":"settings","patch":{"vim":false,"keybindings":bindings}}),
+            )
+            .unwrap();
+            assert!(validate(&request).is_err(), "{bindings}");
+        }
+        for binding in [json!(42), json!(["F8", null]), json!({"keys":"F8"})] {
+            assert!(
+                serde_json::from_value::<Request>(
+                    json!({"op":"settings","patch":{"keybindings":{"save":binding}}})
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            transport::from_unique_json::<Request>(
+                br#"{"op":"settings","patch":{"keybindings":{"save":"F8","save":["F9"]}}}"#
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn swap_jk_cli_is_explicit_boolean_and_leaves_unrelated_settings_omitted() {
         for (input, expected) in [("true", true), ("false", false)] {

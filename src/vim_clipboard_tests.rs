@@ -532,6 +532,16 @@ fn swap_jk_preserves_literal_find_replacement_and_insert_characters() {
 #[test]
 fn alt_a_and_alt_x_change_numbers_and_unsupported_commands_report_in_the_status_bar() {
     let mut screen = harness(fixture("width 9 and -3\n"));
+    screen.state_mut().settings.keybindings.extend([
+        (
+            keybindings::Action::ReviewNextFile.id().into(),
+            Some("Alt+A".into()),
+        ),
+        (
+            keybindings::Action::ReviewPreviousFile.id().into(),
+            Some("Alt+X".into()),
+        ),
+    ]);
     events(
         &mut screen,
         [

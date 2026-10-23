@@ -35,7 +35,12 @@ fn reopen_upgrade_preserves_an_existing_custom_shortcut() {
         let mut bindings = Bindings::from([(Action::ToggleWrap.id().into(), Some(value.into()))]);
         migrate_reopen_shortcut(&mut bindings);
         assert_eq!(bindings.get(Action::ReopenTab.id()), Some(&None));
-        assert_eq!(bindings[Action::ToggleWrap.id()].as_deref(), Some(value));
+        assert_eq!(
+            bindings[Action::ToggleWrap.id()]
+                .as_ref()
+                .and_then(|keys| keys.values().next()),
+            Some(value)
+        );
         assert!(validate(&bindings).is_ok());
         let key = event(Key::T, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
         assert!(matches(&bindings, Action::ToggleWrap, &key));
@@ -345,7 +350,7 @@ fn recording_ignores_modifier_press_cancels_without_escape_leak_and_does_not_zoo
     app.preference_shortcuts();
     assert_eq!(app.settings.ui_scale, 1.0);
     assert!(app.settings.keybindings.is_empty());
-    assert!(app.keybinding_ui.feedback.as_ref().unwrap().1);
+    assert!(app.keybinding_ui.pending_conflict.is_some());
     app.keybinding_ui.capture = Some(Action::Save);
     app.ctx
         .input_mut(|input| input.events.push(event(Key::Escape, egui::Modifiers::NONE)));
@@ -481,13 +486,10 @@ fn settings_search_record_disable_and_reset_are_operable_through_widgets() {
 }
 
 #[test]
-fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
+fn keyboard_rows_allow_aliases_conflict_reassignment_and_key_search() {
     use egui_kittest::{Harness, kittest::Queryable};
     let mut app = VEditApp::empty(egui::Context::default());
     app.keybinding_ui.query = "Save current file".into();
-    app.settings
-        .keybindings
-        .insert(Action::Save.id().into(), Some("F9".into()));
     let mut screen = Harness::builder()
         .with_size([650.0, 600.0])
         .with_os(egui::os::OperatingSystem::Windows)
@@ -499,32 +501,45 @@ fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
             },
             app,
         );
-    let painted = |screen: &Harness<'_, VEditApp>, text: &str| {
-        screen.output().shapes.iter().any(|shape| {
-            matches!(&shape.shape, egui::epaint::Shape::Text(painted)
-                if painted.galley.text() == text)
-        })
-    };
-    screen.hover_at(egui::pos2(-20.0, -20.0));
     screen.run_steps(2);
-    let chip = screen.get_by_label("F9").rect();
-    assert!(chip.height() <= 26.0, "The binding is a compact chip");
-    assert!(painted(&screen, "F9"));
-    assert!(!painted(&screen, "Disable") && !painted(&screen, "Reset"));
-
-    // Hovering the action name reveals both row actions beside the chip.
-    screen.hover_at(egui::pos2(chip.left() - 200.0, chip.center().y));
+    screen.get_by_label("Add shortcut").click();
+    screen.run_steps(1);
+    screen.key_press(Key::F9);
     screen.run_steps(2);
-    assert!(painted(&screen, "Disable") && painted(&screen, "Reset"));
-    let disable = screen.get_by_label("Disable").rect();
-    assert!((disable.center().y - chip.center().y).abs() < 1.0);
-    assert!(disable.right() <= chip.left());
-    screen.hover_at(egui::pos2(-20.0, -20.0));
+    assert_eq!(screen.state().shortcut_label(Action::Save), "Ctrl+S / F9");
+    assert!(screen.query_by_label_contains("Modified").is_some());
+    screen.get_by_label("F9").click();
+    screen.run_steps(1);
+    screen.key_press_modifiers(egui::Modifiers::CTRL, Key::B);
     screen.run_steps(2);
-    assert!(!painted(&screen, "Disable"));
-
-    // Keyboard users reach the hidden actions in order and see them on focus.
-    for _ in 0..8 {
+    // A conflict only proposes changes. Confirming removes the one sidebar alias.
+    assert_eq!(screen.state().shortcut_label(Action::Save), "Ctrl+S / F9");
+    screen.get_by_label("Reassign shortcut").click();
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().shortcut_label(Action::Save),
+        "Ctrl+S / Ctrl+B"
+    );
+    assert_eq!(
+        screen.state().shortcut_label(Action::ToggleLeftSidebar),
+        "Ctrl+Alt+E"
+    );
+    screen.get_by_label("Record search").click();
+    screen.run_steps(1);
+    assert!(
+        screen.state().keybinding_ui.search_capture,
+        "Record search starts recording"
+    );
+    screen.key_press_modifiers(egui::Modifiers::CTRL, Key::B);
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state().keybinding_ui.search_stroke,
+        Stroke::parse("Ctrl+B").ok()
+    );
+    assert!(screen.query_by_label("Save current file").is_some());
+    assert!(screen.query_by_label("Toggle left sidebar").is_none());
+    // Every command control remains reachable without mouse input.
+    for _ in 0..16 {
         if screen.get_by_label("Disable").is_focused() {
             break;
         }
@@ -532,12 +547,111 @@ fn compact_rows_reveal_disable_and_reset_on_hover_or_keyboard_focus() {
         screen.run_steps(2);
     }
     assert!(screen.get_by_label("Disable").is_focused());
-    assert!(painted(&screen, "Disable"));
     screen.key_press(Key::Enter);
     screen.run_steps(2);
     assert!(screen.state().shortcut_label(Action::Save).is_empty());
-    assert_eq!(
-        screen.state().settings.keybindings.get(Action::Save.id()),
-        Some(&None)
+}
+
+#[test]
+fn scoped_aliases_preserve_legacy_formats_and_reject_real_conflicts() {
+    let mut bindings: Bindings = serde_json::from_str(r#"{"save":["Ctrl+S","F9"],"explorer_rename":"F9","review_open_file":"F9","toggle_wrap":null}"#).unwrap();
+    assert!(
+        validate(&bindings).is_err(),
+        "Workspace Save overlaps local commands"
+    );
+    bindings.insert(Action::Save.id().into(), Some("Ctrl+S".into()));
+    assert!(
+        validate(&bindings).is_ok(),
+        "Explorer and review are disjoint"
+    );
+    bindings.insert(
+        Action::Redo.id().into(),
+        Some(vec!["F10".into(), "F11".into()].into()),
+    );
+    assert!(validate(&bindings).is_ok());
+    for key in [Key::F10, Key::F11] {
+        assert!(matches(
+            &bindings,
+            Action::Redo,
+            &event(key, egui::Modifiers::NONE)
+        ));
+    }
+    let restored: Bindings =
+        serde_json::from_str(&serde_json::to_string(&bindings).unwrap()).unwrap();
+    assert_eq!(restored, bindings);
+    bindings.insert(
+        Action::Redo.id().into(),
+        Some(vec!["F10".into(), "f10".into()].into()),
+    );
+    assert!(
+        validate(&bindings).is_err(),
+        "Duplicate aliases are rejected"
+    );
+    let fresh = Bindings::new();
+    let enter = event(Key::Enter, egui::Modifiers::NONE);
+    assert!(source_matches(
+        &fresh,
+        Action::InsertNewline,
+        &enter,
+        false,
+        false,
+        false
+    ));
+    assert!(!source_matches(
+        &fresh,
+        Action::InsertNewline,
+        &enter,
+        true,
+        false,
+        false
+    ));
+    assert!(!source_matches(
+        &fresh,
+        Action::InsertNewline,
+        &enter,
+        false,
+        true,
+        true
+    ));
+    assert!(source_matches(
+        &fresh,
+        Action::FinishCursorPlacement,
+        &enter,
+        false,
+        true,
+        true
+    ));
+}
+
+#[test]
+fn restored_invalid_bindings_cannot_capture_typing_or_block_healthy_aliases() {
+    let mut bindings: Bindings = serde_json::from_str(
+        r#"{"save":["A","F9"],"redo":["F9","F11"],"future_action":"F10","toggle_wrap":null}"#,
+    )
+    .unwrap();
+    assert!(!matches(
+        &bindings,
+        Action::Save,
+        &event(Key::A, egui::Modifiers::NONE)
+    ));
+    let warnings = restore_bindings(&mut bindings);
+    assert_eq!(warnings.len(), 2);
+    assert_eq!(label(&bindings, Action::Save), "F9");
+    assert_eq!(label(&bindings, Action::Redo), "F11");
+    assert!(bindings.contains_key("future_action"));
+    assert_eq!(bindings.get(Action::ToggleWrap.id()), Some(&None));
+    let changed = assign_alias(
+        &bindings,
+        Action::Save,
+        None,
+        Stroke::parse("F12").unwrap(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(label(&changed, Action::Save), "F9 / F12");
+    assert!(label(&changed, Action::Definition).is_empty());
+    assert!(
+        restore_bindings(&mut bindings).is_empty(),
+        "Restore is idempotent"
     );
 }

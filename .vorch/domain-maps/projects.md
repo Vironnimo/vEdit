@@ -71,7 +71,10 @@ rows. Explorer may follow a user-expanded linked folder one directory at a time;
 this does not authorize recursive search or indexing through links.
 
 Explorer selection is separate from the active document. Context menus and
-keyboard actions target the selected row, including when another file is open.
+keyboard actions target the selected row, including when another file is open. Rename and delete
+commands use the shared shortcut registry. Explorer, Git rows and project tabs
+share the registry's context-menu command; their focused widgets execute it.
+These local commands do not run against the source editor or a modal text field.
 Rendering and navigation consume cached listings; filesystem enumeration belongs
 to the existing worker path. Watch changes must refresh both their appropriate
 directory listings and index state without erasing selection or expansion.

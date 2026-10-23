@@ -117,6 +117,118 @@ fn native_text_enter_and_tab_use_the_preceding_text_and_native_caret() {
 }
 
 #[test]
+fn remapped_text_commands_preserve_order_and_retire_native_keys_in_both_modes() {
+    use keybindings::Action;
+    for vim in [false, true] {
+        for (action, original_key, modifiers, original, cursor, expected) in [
+            (
+                Action::InsertNewline,
+                Key::Enter,
+                egui::Modifiers::NONE,
+                "tail",
+                0,
+                "a\nbtail",
+            ),
+            (
+                Action::Indent,
+                Key::Tab,
+                egui::Modifiers::NONE,
+                "tail",
+                0,
+                "a   btail",
+            ),
+            (
+                Action::Outdent,
+                Key::Tab,
+                egui::Modifiers::SHIFT,
+                "    tail",
+                4,
+                "abtail",
+            ),
+        ] {
+            let mut screen = harness(original, vim);
+            if vim {
+                events(&mut screen, [egui::Event::Text("i".into())]);
+            }
+            screen
+                .state_mut()
+                .tab_mut()
+                .unwrap()
+                .set_cursor(cursor..cursor);
+            screen.run_steps(1);
+            screen
+                .state_mut()
+                .settings
+                .keybindings
+                .insert(action.id().into(), Some("F9".into()));
+            events(&mut screen, [key(original_key, modifiers)]);
+            assert_eq!(
+                text(&screen),
+                original,
+                "retired default: {action:?}, vim={vim}"
+            );
+            assert_eq!(screen.state().tab().unwrap().selection, cursor..cursor);
+            screen
+                .state_mut()
+                .settings
+                .keybindings
+                .insert(action.id().into(), None);
+            events(
+                &mut screen,
+                [
+                    key(original_key, modifiers),
+                    key(Key::F9, egui::Modifiers::NONE),
+                ],
+            );
+            assert_eq!(
+                text(&screen),
+                original,
+                "disabled command: {action:?}, vim={vim}"
+            );
+            if action == Action::Indent {
+                for tab_action in [Action::NextTab, Action::PreviousTab] {
+                    screen
+                        .state_mut()
+                        .settings
+                        .keybindings
+                        .insert(tab_action.id().into(), None);
+                }
+                events(
+                    &mut screen,
+                    [
+                        key(Key::Tab, egui::Modifiers::CTRL),
+                        key(Key::Tab, egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT)),
+                    ],
+                );
+                assert_eq!(
+                    text(&screen),
+                    original,
+                    "disabled tab navigation must not insert a tab"
+                );
+            }
+            screen
+                .state_mut()
+                .settings
+                .keybindings
+                .insert(action.id().into(), Some("F9".into()));
+            events(
+                &mut screen,
+                [
+                    egui::Event::Text("a".into()),
+                    key(Key::F9, egui::Modifiers::NONE),
+                    egui::Event::Text("b".into()),
+                ],
+            );
+            assert_eq!(
+                text(&screen),
+                expected,
+                "ordered custom command: {action:?}, vim={vim}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_leading_native_command_applies_immediately() {
     let mut screen = harness("tail", false);
     screen
@@ -132,6 +244,21 @@ fn a_leading_native_command_applies_immediately() {
     events(&mut screen, [key(Key::Y, egui::Modifiers::CTRL)]);
     assert_eq!(text(&screen), "\ntail");
     assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+    screen.state_mut().settings.keybindings.insert(
+        keybindings::Action::ReviewNextFile.id().into(),
+        Some("Alt+N".into()),
+    );
+    screen.input_mut().events.extend([
+        key(Key::Enter, egui::Modifiers::NONE),
+        key(Key::N, egui::Modifiers::ALT),
+        egui::Event::Text("n".into()),
+    ]);
+    screen.run_steps(1);
+    assert_eq!(text(&screen), "\n\nntail");
+    assert!(
+        !screen.state().editor_input_pending(),
+        "an inactive review binding must not split source input"
+    );
 }
 
 #[test]
@@ -351,7 +478,7 @@ fn remapped_duplicate_applies_after_native_prefix_and_keeps_undo() {
     events(
         &mut screen,
         [key(
-            Key::ArrowDown,
+            Key::D,
             egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
         )],
     );
@@ -412,10 +539,7 @@ fn editing_command_defers_following_workspace_command_until_after_edit() {
     events(
         &mut screen,
         [
-            key(
-                Key::ArrowDown,
-                egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
-            ),
+            key(Key::D, egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT)),
             key(Key::Z, egui::Modifiers::ALT),
             egui::Event::Text("z".into()),
         ],
@@ -643,6 +767,20 @@ fn move_line_shortcuts_follow_native_prefix_and_keep_the_moved_caret_undoable() 
     events(&mut screen, [key(Key::ArrowUp, egui::Modifiers::ALT)]);
     assert_eq!(text(&screen), "Xone\ntwo🦀\nthree");
     assert_eq!(screen.state().tab().unwrap().selection, 1..1);
+    screen
+        .state_mut()
+        .command_action("Move line / selection down");
+    screen.run_steps(1);
+    settle(&mut screen);
+    assert_eq!(text(&screen), "two🦀\nXone\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 6..6);
+    screen
+        .state_mut()
+        .command_action("Move line / selection up");
+    screen.run_steps(1);
+    settle(&mut screen);
+    assert_eq!(text(&screen), "Xone\ntwo🦀\nthree");
+    assert_eq!(screen.state().tab().unwrap().selection, 1..1);
 }
 
 #[test]
@@ -702,7 +840,7 @@ fn duplicate_line_in_vim_follows_the_duplicate_and_can_be_edited_then_undone() {
     events(
         &mut screen,
         [key(
-            Key::ArrowDown,
+            Key::D,
             egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
         )],
     );

@@ -940,7 +940,14 @@ fn project_context_menu_supports_keyboard_and_copies_the_clicked_project_path() 
         .get_by_label("Project: vedit-workspace-ui-01")
         .focus();
     screen.run_steps(1);
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("context_menu".into(), Some("F9".into()));
     shortcut(&mut screen, Key::F10, egui::Modifiers::SHIFT);
+    assert!(screen.query_by_label("Reveal in Explorer").is_none());
+    shortcut(&mut screen, Key::F9, egui::Modifiers::NONE);
     assert!(screen.query_by_label("Reveal in Explorer").is_some());
     let before = screen.get_by_label("Copy path").rect();
     screen.run_steps(2);

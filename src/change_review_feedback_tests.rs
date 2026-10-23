@@ -55,14 +55,35 @@ fn diff_rows_become_a_comment_the_agent_takes_with_file_and_lines() {
     screen.run_steps(1);
     let selection = view(screen.state()).selection.clone().unwrap();
     assert_eq!(selection.file, 1);
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("review_comment".into(), Some("F9".into()));
     type_key(&mut screen, Key::C, "c");
+    assert!(!screen.state().agent_marks_modal_open());
+    screen.key_press(Key::F9);
+    screen.run_steps(2);
     assert!(screen.state().agent_marks_modal_open());
     for label in ["Comment for agent", "Add for agent", "Cancel"] {
         assert!(screen.query_by_label(label).is_some(), "missing {label}");
     }
     screen.event(egui::Event::Text("Use the configured admin account".into()));
     screen.run_steps(1);
-    screen.key_press_modifiers(egui::Modifiers::CTRL, Key::Enter);
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("review_submit_comment".into(), None);
+    screen.key_press(Key::F9);
+    screen.run_steps(2);
+    assert!(screen.state().agent_marks_modal_open());
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("review_submit_comment".into(), Some("F9".into()));
+    screen.key_press(Key::F9);
     screen.run_steps(2);
     assert!(!screen.state().agent_marks_modal_open());
     assert!(view(screen.state()).selection.is_none());

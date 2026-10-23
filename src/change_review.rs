@@ -71,6 +71,8 @@ struct ChangeReview {
     focus_pending: bool,
     /// A list row or seen box was clicked this frame.
     list_clicked: bool,
+    /// Palette commands wait for the current diff geometry.
+    pending_commands: Vec<ReviewKey>,
     follow_list: bool,
     list_offset: f32,
     list_height: f32,
@@ -107,6 +109,7 @@ impl ChangeReview {
             lazy_request: None,
             focus_pending: false,
             list_clicked: false,
+            pending_commands: Vec::new(),
             follow_list: true,
             list_offset: 0.0,
             list_height: 0.0,
@@ -367,7 +370,7 @@ enum ReviewKey {
     Close,
     /// Shift+Arrow: extend the selected diff rows by one.
     Extend(isize),
-    /// c: comment on the selected rows, or on the line on screen.
+    /// Comment on the selected rows, or on the line on screen.
     Comment,
 }
 
@@ -376,6 +379,30 @@ impl VEditApp {
     pub(super) fn change_review_visible(&self) -> bool {
         self.project()
             .is_some_and(|project| project.change_review.view.is_some())
+    }
+
+    pub(super) fn review_command(&mut self, action: keybindings::Action) {
+        let Some(command) = review_action(action) else {
+            return;
+        };
+        let body_id = self.project().map(|project| review_body_id(&project.root));
+        let Some(view) = self
+            .projects
+            .get_mut(self.active_project)
+            .and_then(|project| project.change_review.view.as_mut())
+        else {
+            self.status("Open a change review to use this command", false);
+            return;
+        };
+        if view.comment.is_some() || view.files.is_empty() {
+            return;
+        }
+        view.pending_commands.push(command);
+        view.focus_pending = true;
+        if let Some(body_id) = body_id {
+            self.ctx.memory_mut(|memory| memory.request_focus(body_id));
+        }
+        self.ctx.request_repaint();
     }
 
     /// Open (or refresh) a review in `project_index` and give it the keyboard.
@@ -888,7 +915,7 @@ fn review_ui(
         body.min.y = banner.bottom();
     }
     if view.comment.is_some() {
-        feedback::comment_dialog(ui.ctx(), body_id, view, actions);
+        feedback::comment_dialog(ui.ctx(), body_id, view, &context.bindings, actions);
     }
     if view.files.is_empty() {
         empty_review(ui, body, view, actions);
@@ -912,7 +939,7 @@ fn review_ui(
     if let Some(list) = list {
         view.list_clicked = file_list(ui, list, view, seen);
     }
-    diff_body(ui, diff, view, seen, body_id, context.swap_jk, actions);
+    diff_body(ui, diff, view, seen, body_id, context, actions);
 }
 
 fn review_header(
@@ -983,7 +1010,7 @@ fn review_header(
                 .size(11.5)
                 .color(MUTED),
         )
-        .on_hover_text("Space marks the current file seen and moves to the next unseen file. A file that changes again becomes unseen.");
+        .on_hover_text(review_hint(&context.bindings, keybindings::Action::ReviewSeenNext, "Mark the current file seen and continue to the next unseen file. A changed file becomes unseen again."));
         let (added, removed) = view.totals();
         let tip = "Lines added and removed in this comparison";
         ui.label(
@@ -1345,95 +1372,138 @@ fn paint_list_stats(
     right - x - 5.0
 }
 
-/// Take this frame's review keys. Letters normally arrive as a key press and
-/// its text; the text decides, and the key alone counts only without text.
-fn take_review_keys(ctx: &egui::Context, swap_jk: bool) -> Vec<ReviewKey> {
-    let (down, up) = if swap_jk { ('k', 'j') } else { ('j', 'k') };
-    let character = |ch: char| match ch {
-        ch if ch == down => Some(ReviewKey::Lines(1.0)),
-        ch if ch == up => Some(ReviewKey::Lines(-1.0)),
-        'n' | ']' => Some(ReviewKey::NextFile),
-        'p' | '[' => Some(ReviewKey::PreviousFile),
-        ' ' => Some(ReviewKey::SeenNext),
-        'o' => Some(ReviewKey::Open),
-        'c' => Some(ReviewKey::Comment),
+fn review_action(action: keybindings::Action) -> Option<ReviewKey> {
+    use keybindings::Action;
+    match action {
+        Action::ReviewNextFile => Some(ReviewKey::NextFile),
+        Action::ReviewPreviousFile => Some(ReviewKey::PreviousFile),
+        Action::ReviewSeenNext => Some(ReviewKey::SeenNext),
+        Action::ReviewOpenFile => Some(ReviewKey::Open),
+        Action::ReviewComment => Some(ReviewKey::Comment),
         _ => None,
+    }
+}
+
+fn review_hint(
+    bindings: &keybindings::Bindings,
+    action: keybindings::Action,
+    description: &str,
+) -> String {
+    let shortcut = keybindings::label(bindings, action);
+    if shortcut.is_empty() {
+        description.into()
+    } else {
+        format!("{shortcut} · {description}")
+    }
+}
+
+/// Commands use the registry; ordinary reading motions stay local to the view.
+/// Consume a key and its generated text together, preserving event order.
+fn take_review_keys(
+    ctx: &egui::Context,
+    swap_jk: bool,
+    bindings: &keybindings::Bindings,
+) -> Vec<ReviewKey> {
+    let actions = [
+        keybindings::Action::ReviewNextFile,
+        keybindings::Action::ReviewPreviousFile,
+        keybindings::Action::ReviewSeenNext,
+        keybindings::Action::ReviewOpenFile,
+        keybindings::Action::ReviewComment,
+    ];
+    let command = |event: &egui::Event| {
+        actions
+            .into_iter()
+            .find(|action| keybindings::matches(bindings, *action, event))
+            .and_then(review_action)
+    };
+    let motion = |key: Key, modifiers: egui::Modifiers| {
+        if modifiers == egui::Modifiers::SHIFT {
+            return match key {
+                Key::ArrowDown => Some(ReviewKey::Extend(1)),
+                Key::ArrowUp => Some(ReviewKey::Extend(-1)),
+                _ => None,
+            };
+        }
+        if !modifiers.is_none() {
+            return None;
+        }
+        match key {
+            Key::J => Some(ReviewKey::Lines(if swap_jk { -1.0 } else { 1.0 })),
+            Key::K => Some(ReviewKey::Lines(if swap_jk { 1.0 } else { -1.0 })),
+            Key::ArrowDown => Some(ReviewKey::Lines(1.0)),
+            Key::ArrowUp => Some(ReviewKey::Lines(-1.0)),
+            Key::PageDown => Some(ReviewKey::Pages(1.0)),
+            Key::PageUp => Some(ReviewKey::Pages(-1.0)),
+            Key::Home => Some(ReviewKey::Top),
+            Key::End => Some(ReviewKey::Bottom),
+            Key::Enter => Some(ReviewKey::Open),
+            Key::Escape => Some(ReviewKey::Close),
+            _ => None,
+        }
     };
     let mut keys = Vec::new();
     ctx.input_mut(|input| {
-        let text: String = input
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                egui::Event::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        input.events.retain(|event| match event {
-            egui::Event::Text(value) => {
-                if !value.is_empty() && value.chars().all(|ch| character(ch).is_some()) {
-                    keys.extend(value.chars().filter_map(character));
-                    false
-                } else {
-                    true
-                }
-            }
-            egui::Event::Key {
-                key: key @ (Key::ArrowDown | Key::ArrowUp),
-                pressed: true,
-                modifiers,
-                ..
-            } if *modifiers == egui::Modifiers::SHIFT => {
-                keys.push(ReviewKey::Extend(if *key == Key::ArrowDown {
-                    1
-                } else {
-                    -1
-                }));
-                false
-            }
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } if modifiers.is_none() => {
-                let letter = match key {
-                    Key::J => Some('j'),
-                    Key::K => Some('k'),
-                    Key::N => Some('n'),
-                    Key::P => Some('p'),
-                    Key::O => Some('o'),
-                    Key::C => Some('c'),
-                    Key::Space => Some(' '),
-                    Key::OpenBracket => Some('['),
-                    Key::CloseBracket => Some(']'),
-                    _ => None,
-                };
-                let command = match key {
-                    Key::ArrowDown => Some(ReviewKey::Lines(1.0)),
-                    Key::ArrowUp => Some(ReviewKey::Lines(-1.0)),
-                    Key::PageDown => Some(ReviewKey::Pages(1.0)),
-                    Key::PageUp => Some(ReviewKey::Pages(-1.0)),
-                    Key::Home => Some(ReviewKey::Top),
-                    Key::End => Some(ReviewKey::Bottom),
-                    Key::Enter => Some(ReviewKey::Open),
-                    Key::Escape => Some(ReviewKey::Close),
-                    _ => match letter {
-                        Some(ch) if text.contains(ch) => return false,
-                        Some(ch) => character(ch),
-                        None => None,
-                    },
-                };
-                match command {
-                    Some(command) => {
+        let mut events = std::mem::take(&mut input.events).into_iter().peekable();
+        while let Some(event) = events.next() {
+            match &event {
+                egui::Event::Key {
+                    key,
+                    modifiers,
+                    pressed: true,
+                    ..
+                } => {
+                    if let Some(command) = command(&event).or_else(|| motion(*key, *modifiers)) {
                         keys.push(command);
-                        false
+                        if events.peek().is_some_and(|next| {
+                            keybindings::shortcut_text_event(next, &event)
+                                || matches!(next, egui::Event::Text(text)
+                                    if !modifiers.ctrl && !modifiers.command && !modifiers.alt
+                                        && (text.eq_ignore_ascii_case(key.symbol_or_name())
+                                            || *key == Key::Space && text == " "))
+                        }) {
+                            events.next();
+                        }
+                    } else {
+                        input.events.push(event);
                     }
-                    None => true,
                 }
+                egui::Event::Text(text) => {
+                    let mut consumed = false;
+                    for character in text.chars() {
+                        let key = if character == ' ' {
+                            Some(Key::Space)
+                        } else {
+                            Key::from_name(&character.to_string())
+                        };
+                        if let Some(key) = key {
+                            let modifiers = if character.is_uppercase() {
+                                egui::Modifiers::SHIFT
+                            } else {
+                                egui::Modifiers::NONE
+                            };
+                            let event = egui::Event::Key {
+                                key,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers,
+                            };
+                            if let Some(command) =
+                                command(&event).or_else(|| motion(key, modifiers))
+                            {
+                                keys.push(command);
+                                consumed = true;
+                            }
+                        }
+                    }
+                    if !consumed {
+                        input.events.push(event);
+                    }
+                }
+                _ => input.events.push(event),
             }
-            _ => true,
-        });
+        }
     });
     keys
 }
@@ -1457,7 +1527,7 @@ fn diff_body(
     view: &mut ChangeReview,
     seen: &mut SeenMarks,
     body_id: egui::Id,
-    swap_jk: bool,
+    context: &feedback::ReviewContext,
     actions: &mut Vec<ReviewAction>,
 ) {
     let mut child = ui.new_child(
@@ -1560,15 +1630,18 @@ fn diff_body(
     let top_layer = ui
         .ctx()
         .memory(|memory| memory.areas().top_layer_id(ui.layer_id().order));
-    let keys = if focused
+    let mut keys = std::mem::take(&mut view.pending_commands);
+    if focused
         && ui.is_enabled()
         && !egui::Popup::is_any_open(ui.ctx())
         && top_layer.is_none_or(|layer| layer == ui.layer_id())
     {
-        take_review_keys(ui.ctx(), swap_jk)
-    } else {
-        Vec::new()
-    };
+        keys.extend(take_review_keys(
+            ui.ctx(),
+            context.swap_jk,
+            &context.bindings,
+        ));
+    }
     for key in keys {
         let current = view.file_at(offset);
         match key {
@@ -1765,6 +1838,7 @@ fn diff_body(
                 &view.files[index],
                 view.is_seen(seen, index),
                 index == current && keyboard,
+                &context.bindings,
             );
             if response.open {
                 let line = match &view.files[index].patch {
@@ -1784,7 +1858,7 @@ fn diff_body(
     if let (Some(click), Some((file, row))) = (pointer, hit) {
         feedback::click_row(view, file, row, click);
     }
-    if let Some(comment) = feedback::diff_menu(&body, view) {
+    if let Some(comment) = feedback::diff_menu(&body, view, &context.bindings) {
         match comment {
             Some(draft) => view.comment = Some(draft),
             None => actions.push(ReviewAction::Status(
@@ -1853,6 +1927,7 @@ fn file_header(
     entry: &ReviewEntry,
     seen: bool,
     keyboard_current: bool,
+    bindings: &keybindings::Bindings,
 ) -> HeaderResponse {
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, PANEL);
@@ -1886,7 +1961,11 @@ fn file_header(
             RichText::new("Seen").size(12.0).color(MUTED),
         ))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Space marks the current file seen and moves to the next unseen file");
+        .on_hover_text(review_hint(
+            bindings,
+            keybindings::Action::ReviewSeenNext,
+            "Mark the current file seen and continue to the next unseen file",
+        ));
     toggle.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Checkbox,
@@ -1901,7 +1980,11 @@ fn file_header(
             design::ghost_button(
                 ui,
                 "Open",
-                "Open the current file in the editor · Enter or o opens it at the line on screen",
+                &review_hint(
+                    bindings,
+                    keybindings::Action::ReviewOpenFile,
+                    "Open at the line on screen; Enter also opens the file",
+                ),
             )
         })
         .inner;

@@ -89,7 +89,7 @@ Der Knopf mit drei Strichen ganz links über dem Explorer öffnet das Hauptmenü
 - Bei Zeilenumbruch bleibt die Zeilennummer an der ersten sichtbaren Reihe einer Quelltextzeile stehen; Fortsetzungen bekommen keine zusätzliche Nummer.
 - In versionierten Dateien zeigt ein schmaler Balken neben den Zeilennummern die Abweichungen vom letzten Commit (HEAD), einschließlich ungespeicherter Änderungen: grün für neue, orange für geänderte Zeilen, ein roter Keil für entfernte Zeilen. Unversionierte Dateien erhalten keine Markierung. Der Tooltip zeigt die bisherigen Zeilen. Ein Klick öffnet eine kleine Ansicht mit **Revert change**: Sie stellt nur diesen Abschnitt im Editorinhalt wieder her, als ein Schritt, den **Ctrl+Z** beziehungsweise Vim `u` rückgängig macht. Datei und Git-Index bleiben unverändert, bis gespeichert wird. Die Markierungen erscheinen in allen Editorbereichen und lassen sich unter **Settings → Reading & appearance → Show Git changes in gutter** ausschalten.
 - **Ctrl+Z** sowie **Ctrl+Y** / **Ctrl+Shift+Z** verwenden mit eingeschaltetem Vim dieselbe Undo-Historie wie `u` / **Ctrl+R**, auch im Insert- und Visual-Modus. Im Insert-Modus bleibt die Texteingabe aktiv; Vim-Register und System-Zwischenablage bleiben getrennt.
-- Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** springt zur nächsten Einrückungsposition, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um. **Alt+↑/↓** verschiebt Zeilen oder ausgewählte Zeilenblöcke; **Alt+Shift+↓** dupliziert sie. Beide Aktionen erhalten Cursor beziehungsweise Vim-Auswahl und sind rückgängig machbar. Neue Zeilen übernehmen die Einrückung.
+- Im Insert-Modus oder bei ausgeschaltetem Vim: **Tab** springt zur nächsten Einrückungsposition, **Shift+Tab** rückt aus, **Ctrl+/** schaltet Zeilenkommentare um. **Alt+↑/↓** verschiebt Zeilen oder ausgewählte Zeilenblöcke; **Alt+Shift+D** dupliziert sie. Beide Aktionen erhalten Cursor beziehungsweise Vim-Auswahl und sind rückgängig machbar. Neue Zeilen übernehmen die Einrückung.
 
 Dateiindex, Dateizugriffe, Projektsuche, Git und Sprachanalyse laufen im Hintergrund. Auch die Suche in großen offenen Dateien berechnet ihre Treffer im Hintergrund; währenddessen zeigt sie **Searching…** und verwirft überholte Ergebnisse bei weiterer Eingabe oder einem Dateiwechsel. Der Explorer zeigt auch ignorierte und generierte Projektdateien. Er liest jeden geöffneten Ordner vollständig und lädt Unterordner erst beim Aufklappen; ein begrenzter Quick-Open-Index kann daher keine Explorer-Dateien ausblenden. VCS-Metadaten wie `.git` bleiben verborgen. Die Projektsuche bietet unter **Exclusions** eine gespeicherte Liste von Ordnern und Dateimustern, etwa `src/generated` oder `**/*.min.js`. Sie liest unabhängig vom Explorer den Datenträger; eine leere Filterliste erlaubt auch generierte Ordner, während `.gitignore` und VCS-Verzeichnisse weiter berücksichtigt werden. Die Projektsuche verfolgt symbolische Links nicht. Ihre Ressourcenlimits und die des Quick-Open-Index bleiben als Hinweise sichtbar.
 
@@ -180,7 +180,13 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 
 ## Eigene Tastenkürzel und räumlicher Fokus
 
-**Settings → Keyboard** oder die Palettenaktion **Keyboard shortcuts** öffnet das durchsuchbare Befehlsverzeichnis. Auf eine Belegung klicken, die neue Kombination drücken; **Esc** bricht die Aufnahme ab. **Disable**, **Reset** und **Reset all** deaktivieren beziehungsweise restaurieren Belegungen. Konflikte werden mit dem betroffenen Befehl erklärt. Auch Aktionen ohne Standardkürzel sind belegbar. Änderungen gelten sofort und bleiben nach Neustarts erhalten; Menüs und Palette zeigen die aktuelle Belegung. Die hier genannten Kombinationen sind die Standardwerte. Textnavigation, Zwischenablage und einzelne Vim-Motions behalten ihre normale Eingabebedeutung.
+**Settings → Keyboard** oder die Palettenaktion **Keyboard shortcuts** öffnet das zentrale Befehlsverzeichnis. Die Suche findet Namen, Kürzel und Geltungsbereiche; **Record search** sucht durch Drücken einer Kombination. Filter unterscheiden Standardbelegungen, eigene Änderungen und deaktivierte Befehle. Jeder Eintrag zeigt, ob er im Workspace, im Source editor, im Explorer, in einer Change review oder beim Platzieren von Cursorn gilt.
+
+Auf ein Kürzel klicken und die neue Kombination drücken; **Esc** bricht die Aufnahme ab. **Add shortcut** ergänzt eine Alternative, **Remove** entfernt nur diese eine Belegung. Pro Befehl sind bis zu acht Kürzel möglich. Bei einer Überschneidung zeigt die Aufnahme die betroffenen Befehle; **Reassign shortcut** übernimmt die Kombination und lässt deren übrige Aliase erhalten. Getrennte Geltungsbereiche dürfen dieselbe Taste verwenden. **Disable**, **Reset** und **Reset all** deaktivieren beziehungsweise restaurieren Belegungen. Auch Aktionen ohne Standardkürzel sind belegbar.
+
+Änderungen gelten sofort und bleiben nach Neustarts erhalten; Menüs, Befehlspalette und Hinweise zeigen die aktuellen Kürzel. Bestehende Einstellungen mit nur einem Kürzel bleiben gültig. Ungültige gespeicherte Belegungen werden mit einem Hinweis ausgesondert, gesunde Belegungen bleiben erhalten. Die hier genannten Kombinationen sind Standardwerte. Auch Zeilenumbruch, Ein-/Ausrücken und Abschluss der Cursorplatzierung lassen sich umbelegen. Normale Textnavigation, Zwischenablage, Dialogbedienung und einzelne Vim-Motions behalten ihre Eingabebedeutung.
+
+Explorer-Aktionen wie Umbenennen und Löschen sowie Dateiwechsel, Gesehen-Markierung, Öffnen und Kommentieren in einer Change review haben eigene Einträge. **Open context menu** ändert gemeinsam das bisherige **Shift+F10** im Explorer, in Git und auf Project tabs; die Aktion wirkt auf das dort fokussierte Element.
 
 **Ctrl+Alt+Pfeiltasten** wechseln anhand der sichtbaren Anordnung zwischen beiden Seitenleisten, Editor-Splits und dem unteren Ausgabebereich. Die Rückkehr in den Editor berücksichtigt die vorherige Zeile beziehungsweise Spalte der Splits. **F6 / Shift+F6** durchlaufen sichtbare Bereiche; ausgeblendete Seitenleisten werden dabei nicht geöffnet. **Ctrl+Alt+Shift+Pfeiltasten** verschieben den aktiven Tab in einen benachbarten Editor-Split. **Ctrl+Tab / Ctrl+Shift+Tab** wechseln Tabs im aktiven Bereich. Alle diese Befehle sind neu belegbar.
 
@@ -274,7 +280,10 @@ Mehrere Stellen lassen sich gemeinsam bearbeiten, auch bei eingeschaltetem Vim. 
 | --- | --- |
 | Cursor hinzufügen oder vorhandenen entfernen | **Alt+Klick** |
 | Rechteckauswahl über Bildschirmzeilen | **Alt+Shift+Ziehen** |
-| Cursor in der logischen Zeile darüber / darunter | **Ctrl+Shift+↑ / ↓** |
+| Cursor in der logischen Zeile darüber / darunter | **Alt+Shift+↑ / ↓** |
+| Aktuelle Stelle festhalten und nächsten Cursor frei platzieren | **Ctrl+Alt+Enter** |
+| Platzieren abschließen und alle Stellen bearbeiten | **Enter** im Modus PLACE |
+| Zeilen oder ausgewählte Zeilenblöcke verschieben | **Alt+↑ / ↓** |
 | Wort auswählen, danach nächstes Vorkommen hinzufügen | **Ctrl+D** |
 | Alle Vorkommen auswählen | **Ctrl+Shift+L** |
 | Letztes Vorkommen überspringen und nächstes auswählen | **Ctrl+Shift+D** |
@@ -282,6 +291,8 @@ Mehrere Stellen lassen sich gemeinsam bearbeiten, auch bei eingeschaltetem Vim. 
 | Cursor an den Enden ausgewählter Zeilen | **Alt+Shift+I** |
 
 Die Aktionen stehen auch unter **Selection**, im Kontextmenü und in der Befehlspalette. **Settings → Keyboard** ändert die Kürzel. Bestehende eigene Belegungen bleiben beim Upgrade erhalten; kollidierende neue Vorgaben starten unbelegt. Im Vim-Normalmodus aktiviert **Ctrl+D** die Mehrfachbearbeitung; **Ctrl+U** behält außerhalb von MULTI seine Vim-Funktion. **Ctrl+Alt+↑/↓** wechselt weiterhin den Fokus zwischen Bereichen.
+
+Für frei verteilte Stellen ohne Maus: **Ctrl+Alt+Enter** hält den aktuellen Cursor beziehungsweise die Auswahl fest und aktiviert **PLACE**. Pfeile, Home/End und Page Up/Down bewegen dann nur den aktiven Cursor; mit Shift lässt sich dort eine weitere Auswahl aufziehen. Erneutes **Ctrl+Alt+Enter** merkt diese Stelle. **Enter** übernimmt auch den aktiven Cursor und beendet das Platzieren, ohne eine neue Zeile einzufügen. Direktes Tippen beginnt ebenfalls die gemeinsame Bearbeitung. **Ctrl+U** nimmt den letzten Platzierungsschritt zurück, **Esc** kehrt zum einzelnen aktiven Cursor zurück. Die Statusleiste erklärt die jeweils eingestellten Kürzel.
 
 Tippen, Löschen, Pfeile mit Shift/Ctrl, Home/End, Page Up/Down, Enter, Tab, Ein-/Ausrücken, Kommentare und Zeilenbefehle wirken auf alle Stellen. Überlappende Auswahlen verschmelzen; Zeilen mit mehreren Cursorn werden bei Zeilenbefehlen einmal bearbeitet. **Ctrl+Z/Y** macht die gemeinsame Änderung rückgängig beziehungsweise stellt sie samt Auswahlen wieder her. Cursor und Auswahlen bleiben je Split unabhängig; zusätzliche Cursor werden beim Neustart nicht wiederhergestellt.
 

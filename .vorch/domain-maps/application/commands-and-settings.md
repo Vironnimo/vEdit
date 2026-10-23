@@ -3,16 +3,27 @@
 ## Commands and input ownership
 
 The `actions!` registry in `src/keybindings.rs` supplies action IDs, labels,
-groups, defaults and palette entries. `run_shortcut_action` and
-`src/app.rs::command_action` connect them to behavior; source editing commands
-also pass through `src/editor_input.rs`. Menus obtain shortcut labels from the
-registry so saved overrides appear in hints.
+groups, defaults, contexts and palette entries. Palette label lookup and keyboard
+dispatch both reach the exhaustive typed `src/app.rs::execute_action`. Source
+editing commands use `Action::editor_command` and the ordering/history owner in
+`src/editor_input.rs`. Local Explorer and Change review owners consume registered
+commands in their context. Menus obtain shortcut labels from the same registry.
 
 Bindings are saved by stable action ID. An absent override uses defaults, a
-custom binding replaces all default aliases, and a disabled action remains
-disabled after session restoration. Existing upgrade helpers in `keybindings.rs`
-let newly introduced defaults yield to saved custom choices. Do not turn an
-explicit disable into an absent setting during migration.
+custom binding replaces the default alias set, and a disabled action remains
+disabled after session restoration. `cli::ShortcutBinding` reads legacy strings
+and alias arrays; one alias writes as a string, several as an array, and the outer
+null disables the command. Adding/removing an alias in Keyboard settings preserves
+the rest of the set. Reassign removes only the conflicting alias from other
+commands and validates the candidate before changing preferences.
+
+Conflicts depend on overlapping scopes. Workspace commands overlap all scopes;
+ordinary source newline and finishing cursor placement use disjoint contexts.
+Clipboard, basic navigation and Vim grammar remain native input. `restore_bindings`
+keeps valid saved aliases, reports invalid/conflicting ones and lets default
+aliases yield to explicit overrides. Unknown saved IDs remain preserved but cannot
+match input or block editing known actions; new CLI patches still reject unknown
+IDs. Never turn an explicit disable into an absent setting during migration.
 
 Default shortcuts can have Vim-specific meaning: the default Find chord scrolls
 in Normal mode, New File can request completion in Insert, and Open File can

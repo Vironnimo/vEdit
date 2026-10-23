@@ -323,8 +323,6 @@ fn movement(key: Key, swap_jk: bool) -> Option<Move> {
         Key::ArrowLeft | Key::H => Move::Parent,
         Key::ArrowRight | Key::L => Move::Child,
         Key::Enter => Move::Open,
-        Key::F2 => Move::Rename,
-        Key::Delete => Move::Delete,
         Key::Escape => Move::Editor,
         _ => return None,
     })
@@ -333,7 +331,30 @@ fn movement(key: Key, swap_jk: bool) -> Option<Move> {
 /// The platform commonly delivers both Key::J and Text("j"). Process a
 /// logical key once, while consuming all text/IME/clipboard input belonging to
 /// Explorer focus, including trailing text after Enter moves focus to Source.
-fn collect_moves(events: &mut Vec<egui::Event>, swap_jk: bool) -> Vec<Move> {
+fn explorer_action(action: keybindings::Action) -> Option<Move> {
+    match action {
+        keybindings::Action::ExplorerRename => Some(Move::Rename),
+        keybindings::Action::ExplorerDelete => Some(Move::Delete),
+        keybindings::Action::ContextMenu => Some(Move::Menu),
+        _ => None,
+    }
+}
+
+fn collect_moves(
+    events: &mut Vec<egui::Event>,
+    swap_jk: bool,
+    bindings: &keybindings::Bindings,
+) -> Vec<Move> {
+    let command = |event: &egui::Event| {
+        [
+            keybindings::Action::ExplorerRename,
+            keybindings::Action::ExplorerDelete,
+            keybindings::Action::ContextMenu,
+        ]
+        .into_iter()
+        .find(|action| keybindings::matches(bindings, *action, event))
+        .and_then(explorer_action)
+    };
     let keyed_letters: HashSet<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -342,21 +363,14 @@ fn collect_moves(events: &mut Vec<egui::Event>, swap_jk: bool) -> Vec<Move> {
                 pressed: true,
                 modifiers,
                 ..
-            } if *modifiers == egui::Modifiers::NONE => Some(*key),
+            } if *modifiers == egui::Modifiers::NONE || command(event).is_some() => Some(*key),
             _ => None,
         })
         .collect();
     let mut result = Vec::new();
     events.retain(|event| match event {
-        egui::Event::Key {
-            key: Key::F10,
-            pressed,
-            modifiers,
-            ..
-        } if *modifiers == egui::Modifiers::SHIFT => {
-            if *pressed {
-                result.push(Move::Menu);
-            }
+        event if command(event).is_some() => {
+            result.push(command(event).unwrap());
             false
         }
         egui::Event::Key {
@@ -497,9 +511,13 @@ impl VEditApp {
         if let Some(project) = self.project() {
             lock_explorer_focus(&self.ctx, focus_id(&project.root));
         }
-        let moves = self
-            .ctx
-            .input_mut(|input| collect_moves(&mut input.events, self.settings.swap_jk));
+        let moves = self.ctx.input_mut(|input| {
+            collect_moves(
+                &mut input.events,
+                self.settings.swap_jk,
+                &self.settings.keybindings,
+            )
+        });
         if !moves.is_empty() {
             // egui chooses spatial widget focus before application dispatch.
             // Cancel that choice only for keys our Explorer actually handles;
@@ -507,9 +525,26 @@ impl VEditApp {
             self.ctx
                 .memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
+        self.apply_explorer_moves(moves);
+        true
+    }
+
+    pub(super) fn explorer_command(&mut self, action: keybindings::Action) {
+        let Some(movement) = explorer_action(action) else {
+            return;
+        };
+        if self.project().is_none() {
+            self.status("Open a project to work with Explorer items", false);
+            return;
+        }
+        self.focus_explorer();
+        self.apply_explorer_moves(vec![movement]);
+    }
+
+    fn apply_explorer_moves(&mut self, moves: Vec<Move>) {
         if self.project().is_some_and(Project::is_other_files) {
             self.other_files_navigation_moves(moves);
-            return true;
+            return;
         }
         let Some((root, index)) = self
             .project()
@@ -519,7 +554,7 @@ impl VEditApp {
             if moves.contains(&Move::Editor) {
                 self.focus_editor();
             }
-            return true;
+            return;
         };
         let active = self.tab().and_then(|tab| tab.path.clone());
         self.explorer_navigation
@@ -563,7 +598,6 @@ impl VEditApp {
         if changed {
             self.ctx.request_repaint();
         }
-        true
     }
 
     fn other_files_navigation_moves(&mut self, moves: Vec<Move>) {
@@ -1416,6 +1450,24 @@ mod tests {
         assert!(screen.state().context_file_dialog.is_none());
         assert!(screen.state().explorer_keyboard_focused());
         assert_eq!(screen.state().tab().unwrap().text, "# Plan\n");
+        // A saved override replaces F2, and disabling it retires the override too.
+        screen
+            .state_mut()
+            .settings
+            .keybindings
+            .insert("explorer_rename".into(), Some("F9".into()));
+        key(&mut screen, Key::F2, egui::Modifiers::NONE);
+        assert!(screen.state().context_file_dialog.is_none());
+        key(&mut screen, Key::F9, egui::Modifiers::NONE);
+        assert!(screen.state().context_file_dialog.is_some());
+        key(&mut screen, Key::Escape, egui::Modifiers::NONE);
+        screen
+            .state_mut()
+            .settings
+            .keybindings
+            .insert("explorer_rename".into(), None);
+        key(&mut screen, Key::F9, egui::Modifiers::NONE);
+        assert!(screen.state().context_file_dialog.is_none());
     }
 
     #[test]
@@ -1443,7 +1495,14 @@ mod tests {
         let (_fixture, app) = Fixture::new(0);
         let mut screen = harness(app);
         screen.state_mut().focus_explorer();
+        screen
+            .state_mut()
+            .settings
+            .keybindings
+            .insert("context_menu".into(), Some("F9".into()));
         key(&mut screen, Key::F10, egui::Modifiers::SHIFT);
+        assert!(screen.query_by_label("Rename…").is_none());
+        key(&mut screen, Key::F9, egui::Modifiers::NONE);
         assert!(screen.query_by_label("Rename…").is_some());
         assert!(screen.query_by_label("Open").is_some());
         assert!(screen.query_by_label("Copy relative path").is_some());
@@ -1532,7 +1591,29 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }];
-        assert_eq!(collect_moves(&mut events, false), vec![Move::Delete]);
+        assert_eq!(
+            collect_moves(&mut events, false, &keybindings::Bindings::default()),
+            vec![Move::Delete]
+        );
+        let event = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut bindings =
+            keybindings::Bindings::from([("explorer_delete".into(), Some("F9".into()))]);
+        let mut retired = vec![event(Key::Delete)];
+        assert!(collect_moves(&mut retired, false, &bindings).is_empty());
+        let mut remapped = vec![event(Key::F9)];
+        assert_eq!(
+            collect_moves(&mut remapped, false, &bindings),
+            vec![Move::Delete]
+        );
+        bindings.insert("explorer_delete".into(), None);
+        let mut disabled = vec![event(Key::F9)];
+        assert!(collect_moves(&mut disabled, false, &bindings).is_empty());
         assert!(events.is_empty());
         assert!(index.root.join("src/lib.rs").exists());
     }

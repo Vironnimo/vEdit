@@ -1120,12 +1120,20 @@ fn git_keyboard_shift_f10_opens_file_menu_and_escape_returns_to_row() {
     assert_eq!(screen.ctx.memory(|memory| memory.focused()), Some(first));
     assert!(screen.state().git_content_has_focus());
     assert!(screen.state().git_busy.is_none() && screen.state().diff.is_none());
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("context_menu".into(), Some("F9".into()));
+    screen.key_press_modifiers(egui::Modifiers::SHIFT, Key::F10);
+    screen.run_steps(2);
+    assert!(!egui::Popup::is_any_open(&screen.ctx));
     screen.event(egui::Event::Key {
-        key: Key::F10,
+        key: Key::F9,
         physical_key: None,
         pressed: true,
         repeat: false,
-        modifiers: egui::Modifiers::SHIFT,
+        modifiers: egui::Modifiers::NONE,
     });
     screen.run_steps(3);
     for _ in 0..3 {

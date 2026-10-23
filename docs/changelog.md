@@ -3,6 +3,8 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht in der [README](../README.md).
 
+Version 0.6.1 vervollständigt die Tastaturbedienung für Multicursor: **Alt+Shift+↑/↓** setzt weitere Cursor, **Alt+↑/↓** verschiebt Zeilen oder Auswahlen, **Ctrl+Alt+Enter** markiert frei verteilte Stellen. Das zentrale Hotkey-System unterstützt mehrere eigene Kürzel pro Befehl, Geltungsbereiche und direkte Konfliktauflösung; auch lokale Explorer- und Review-Befehle sind konfigurierbar. **Alt+Shift+D** dupliziert Zeilen oder Auswahlen.
+
 Version 0.6.0 ergänzt Multicursor: **Alt+Klick**, Rechteckauswahl, Vorkommen und Zeilenenden gemeinsam bearbeiten, mit Undo/Redo für Text und Auswahlen. **MULTI** funktioniert auch bei eingeschaltetem Vim; **Esc** kehrt zum einzelnen Cursor zurück. Mausmodifier, Einfügeverhalten, Trefferauswahl und Cursorlimit stehen unter **Settings → Editing**, alle Kürzel unter **Keyboard**.
 
 Version 0.5.6 vervollständigt Kommentare auf Diffzeilen: **For agent** zeigt die alten und neuen Zeilenbereiche samt Vergleich, auch für gelöschte Dateien. Die gespeicherten Angaben enthalten die damaligen Pfade und Vergleichsstände und bleiben beim Sammeln und Wiederherstellen erhalten. Die Sammlung ist direkt aus der Kopfzeile der Änderungsübersicht erreichbar.
