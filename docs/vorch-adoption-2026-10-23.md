@@ -255,11 +255,20 @@ supplement the dated adoption survey rather than replacing its earlier failures.
 
 ## Delivery boundary
 
-The adoption was committed on `codex/vorch-adoption` in a managed checkout
-because the primary checkout had concurrent application work. At report creation
-the primary still had staged/unstaged changes overlapping README and development
-documentation; those changes were neither stashed nor included in adoption
-commits. Shared hook activation is deferred until the hook files are available in
-the primary checkout. The final delivery message records whether integration
-subsequently completed. No unresolved confirmed application bug was established
-by the map review; observations above are follow-up candidates, not bug claims.
+The adoption was committed on `codex/vorch-adoption` in a managed checkout while
+the primary checkout had concurrent application work. The completed application
+commits were merged, then primary `main` fast-forwarded to integration commit
+`1c4072e`. The subsequent uncommitted multicursor keyboard work was preserved.
+Nothing was stashed or included in adoption commits from that unfinished work.
+Repository-local hooks and the approved author identity are now enabled in the
+primary checkout; global Git configuration was not changed.
+
+The focused adoption commits are `d8d1653` (base conventions), `07cd193` (maps and
+contracts), `ae91914` (tools and hooks), `5168b77` (fixture isolation), `b275598`
+(documentation layout), `caf5a0f` (validation report), and `dd79175` (headless
+backend repair). `5b9ba69` and `1c4072e` integrate concurrent application work.
+The managed checkout remains available with the raw trial copies and logs for
+review; compact evidence is also copied into the primary checkout's ignored
+`.tmp/vorch-adoption-evidence/`. No unresolved confirmed application bug was
+established by the map review; observations above are follow-up candidates, not
+bug claims. No push or running-editor restart was performed by this adoption.
