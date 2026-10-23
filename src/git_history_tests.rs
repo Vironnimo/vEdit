@@ -147,20 +147,14 @@ impl HoverRepository {
         ));
         fs::create_dir_all(&root).unwrap();
         git::initialize(&root).unwrap();
-        for (key, value) in [
-            ("user.name", "Hover Author"),
-            ("user.email", "hover@example.invalid"),
-            ("core.autocrlf", "false"),
-            ("commit.gpgsign", "false"),
-        ] {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(["config", key, value])
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-        }
+        // Keep each fixture independent, including all Git configuration.
+        // Appending to init's local config avoids four setup-only processes.
+        let config_path = root.join(".git/config");
+        let mut config = fs::read_to_string(&config_path).unwrap();
+        config.push_str(
+            "\n[user]\n\tname = Hover Author\n\temail = hover@example.invalid\n[core]\n\tautocrlf = false\n[commit]\n\tgpgsign = false\n",
+        );
+        fs::write(config_path, config).unwrap();
         fs::write(root.join("first.txt"), "one\n").unwrap();
         git::stage_all(&root).unwrap();
         git::commit(&root, "Initial").unwrap();
