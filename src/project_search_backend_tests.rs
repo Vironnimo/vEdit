@@ -1,7 +1,7 @@
 //! Regression coverage for user-configurable project search exclusions.
 
 use super::*;
-use std::{collections::BTreeSet, sync::atomic::AtomicU64};
+use std::{collections::BTreeSet, sync::atomic::AtomicU64, time::SystemTime};
 
 const NEEDLE: &str = "vedit_search_needle";
 
