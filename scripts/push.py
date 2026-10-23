@@ -77,7 +77,8 @@ def environment(root: Path) -> dict[str, str]:
     env.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
                 "GIT_NO_REPLACE_OBJECTS": "1",
                 "GIT_PAGER": "cat", "PAGER": "cat", "PYTHONDONTWRITEBYTECODE": "1",
-                "RUSTUP_TOOLCHAIN": TOOLCHAIN, "WGPU_BACKEND": "dx12"})
+                "RUSTUP_TOOLCHAIN": TOOLCHAIN})
+    env.setdefault("WGPU_BACKEND", "gl")
     env.pop("CARGO_TARGET_DIR", None)
     for key in ("UPDATE_SNAPSHOTS", "INSTA_UPDATE", "EGUI_KITTEST_UPDATE_SNAPSHOTS",
                 "VEDIT_SNAPSHOT_DIR"):

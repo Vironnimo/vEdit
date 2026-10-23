@@ -90,12 +90,16 @@ On this Windows setup, a parallel headless test run produced a native crash in
 the NVIDIA OpenGL driver (`nvoglv64.dll`). An earlier suite passed serially and
 with Direct3D 12 requested explicitly. The 0.4.18 run reproduced that driver crash
 even with this environment variable, so use the serial fallback below if the
-headless renderer still selects OpenGL:
+headless renderer still selects OpenGL. In the 0.6.0 integration run, the new
+multicursor harness failed during device creation with DX12 requested, while GL
+passed against its unchanged reference. The survey and push tools therefore
+default to GL, preserving explicit caller overrides. For a backend-sensitive
+test, use a scoped choice (`dx12` remains an alternative for OpenGL driver failures):
 
 ```powershell
 $previousGpuBackend = $env:WGPU_BACKEND
 try {
-    $env:WGPU_BACKEND = 'dx12'
+    $env:WGPU_BACKEND = 'gl'
     cargo test --all-targets -- --test-threads=8
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 }

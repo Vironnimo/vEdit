@@ -114,8 +114,9 @@ git diff --check
 python scripts/domain_maps.py
 ```
 
-On this Windows host set `WGPU_BACKEND=dx12` for headless rendering; use the scoped
-environment commands and serial fallback in `docs/development.md` if necessary.
+The survey requests `WGPU_BACKEND=gl` by default on Windows, matching the existing
+visual harness. Use the scoped backend choices and serial fallback in
+`docs/development.md` if necessary.
 Never update snapshot baselines during the final verification run.
 
 Commit hooks perform static checks only. The development map describes the

@@ -214,7 +214,7 @@ def main(argv=None):
               "jobs": args.jobs, "timeout": args.timeout, "tests": [], "error": None}
     env = checkout_environment(ROOT)
     if os.name == "nt":
-        env.setdefault("WGPU_BACKEND", "dx12")
+        env.setdefault("WGPU_BACKEND", "gl")
     report["wgpu_backend_request"] = env.get("WGPU_BACKEND")
     cancelled = threading.Event()
     try:

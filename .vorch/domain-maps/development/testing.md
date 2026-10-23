@@ -148,10 +148,12 @@ durability contract tests before it can suppress a sync anywhere.
 
 ## Graphics and snapshots
 
-The headless egui harness still creates graphics resources. Request
-`WGPU_BACKEND=dx12` on this Windows host; the survey does so unless a value is
-already set. `src/visual_tests.rs::harness` explicitly selects OpenGL, so this
-environment preference is not proof of the actual renderer. Driver crashes can
+The headless egui harness still creates graphics resources. The survey defaults
+to `WGPU_BACKEND=gl` on Windows unless a value is already set, matching
+`src/visual_tests.rs::harness`, which explicitly selects OpenGL. The multicursor
+harness honors the environment choice; on this host its DX12 device creation
+failed while GL passed against the unchanged snapshot. An environment preference
+is not proof of every harness's actual renderer. Driver crashes can
 require a serial run (`--jobs 1` for the survey or `--test-threads=1` for Cargo).
 Use the scoped environment example in `docs/development.md` -> Visual references.
 

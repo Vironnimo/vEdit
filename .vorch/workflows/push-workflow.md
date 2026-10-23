@@ -31,8 +31,9 @@ through `test_survey.py` (8 workers, ignored tests excluded), Clippy with warnin
 denied, the hook's source checks over every index blob, Python syntax and tooling
 regressions, domain maps, committed whitespace,
 and the isolated PowerShell temporary-directory and installer regressions.
-`WGPU_BACKEND=dx12` is set for Windows headless rendering; tests that explicitly
-select GL can ignore it. Follow the renderer and serial-run guidance in
+`WGPU_BACKEND=gl` is the default for Windows headless rendering, matching the
+existing visual harness. An explicit caller value is preserved; individual
+harnesses can still select GL themselves. Follow the renderer and serial-run guidance in
 `docs/development.md` if the driver fails. Snapshot-update environment flags are
 removed, and survey reports are preserved under `logs/test-survey/` before cleanup.
 Native branding, window and profile-migration

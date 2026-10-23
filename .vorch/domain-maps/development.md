@@ -68,9 +68,10 @@ redirect their files and registry writes; installation itself changes the user's
 registration and application files.
 
 Headless rendering still requires a working graphics driver. In particular,
-`src/visual_tests.rs::harness` explicitly requests OpenGL. Setting
-`WGPU_BACKEND=dx12` expresses the documented runtime preference but does not prove
-that every harness uses Direct3D. Preserve driver crash evidence and use the
+`src/visual_tests.rs::harness` explicitly requests OpenGL. The survey and push
+runner default to `WGPU_BACKEND=gl`, preserving explicit caller overrides.
+A backend environment value does not prove that every harness honors it.
+Preserve driver crash evidence and use the
 documented serial fallback rather than accepting changed snapshots.
 
 ## References

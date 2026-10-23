@@ -165,8 +165,8 @@ Other final validation passed:
 No additional native shared-process full suite was run during adoption. The
 survey does not expose interference between tests in one process. Headless
 rendering does not verify Windows dialogs, Snap or physical DPI transitions.
-The survey requests DX12, but existing harness code explicitly selects OpenGL;
-the environment setting alone does not establish the actual renderer.
+The initial survey requested DX12, but existing harness code explicitly selects
+OpenGL; the environment setting alone does not establish the actual renderer.
 
 ## Fresh-agent orientation trial
 
@@ -219,6 +219,26 @@ prove a stopped child cannot later write a marker. Replace those only with an
 equally strong observable completion contract. GPU/process cold starts and the
 slowest tests should be investigated before changing timeouts or assertions.
 Neither audit nor wholesale application refactoring was part of adoption.
+
+## Integration with concurrent vEdit 0.6.0 work
+
+Commit `c2b4575` subsequently added multicursor editing on `main`. It was merged
+into the adoption branch; the new manual section remains in README and its
+release paragraph joins the preserved changelog. The editing maps were updated,
+and a fresh reviewer confirmed ten new claim groups against source. Project
+ownership and the project index were adjusted. These are integration updates;
+the original measurements above retain their original baseline and counts.
+
+The integration survey with DX12 requested discovered 1,800 tests and finished in
+199.623 seconds: 1,771 passed, one failed, 28 ignored, no timeout. The sole failure
+was WGPU `Device(Lost)` while creating the multicursor test renderer, before any
+image comparison. It reproduced with a single test/thread and DX12. The exact
+same test passed with `WGPU_BACKEND=gl` and the existing reference image (2.49 s).
+The new harness honors the backend environment while the existing visual harness
+pins GL. The survey and push runner now default to GL and preserve an explicitly
+chosen caller backend; the developer guide retains DX12 as a fallback for GL
+driver failures. No application behavior, test assertion or reference image was
+changed for this repair.
 
 ## Delivery boundary
 
