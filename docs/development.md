@@ -175,10 +175,20 @@ the repository vEdit skill, all Markdown documentation under `docs/`, visual
 references and third-party licenses. Repository maps and developer scripts remain
 source-checkout material.
 
-The maintained [window backend patch](../vendor/winit/VEDIT_PATCH.md) and
-[keyboard input patch](../vendor/egui-winit/VEDIT_PATCH.md) retain their upstream
+The maintained [window backend patch](../vendor/winit/VEDIT_PATCH.md),
+[keyboard input patch](../vendor/egui-winit/VEDIT_PATCH.md) and
+[startup presentation patch](../vendor/eframe/VEDIT_PATCH.md) retain their upstream
 licenses and patch notes in the bundle's `licenses/` directories. Review the
-corresponding notes before upgrading either dependency.
+corresponding notes before upgrading these dependencies.
+
+The startup presentation regression opens and closes its own small Windows
+window, using private storage under `.tmp/startup-flash/`. Run it on a Windows
+desktop with OpenGL; it reads the first visible front buffer synchronously,
+which a headless snapshot cannot verify:
+
+```powershell
+cargo test --test startup_window -- --ignored --nocapture
+```
 
 A running editor is preserved under a process-specific filename if it locks an
 output binary. Its window and documents remain open; it continues using the old

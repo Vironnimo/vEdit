@@ -17,6 +17,8 @@ connects the custom titlebar to the maintained Windows backend.
   close requests and publishes its geometry through the patched `vendor/winit`.
 - `vendor/egui-winit` preserves keyboard provenance before clipboard translation;
   the editor input owner uses it to route configurable Ctrl chords to Vim.
+- `vendor/eframe` presents the first Glow frame before showing the native window;
+  see `vendor/eframe/VEDIT_PATCH.md` before changing startup rendering or upgrading it.
 - Endpoint discovery/forwarding lives in `src/cli_transport.rs`; see `control.md`.
   Packaging, installation, registry integration and embedded executable resources
   belong to `development.md`.
@@ -71,7 +73,8 @@ Read these only when your task matches.
 
 - Changing window startup, profile layout, crash restoration or legacy import
   -> `platform/profiles-and-migration.md`
-- Changing custom chrome, native hit testing, DPI, Explorer drops or native input
+- Changing startup rendering, custom chrome, native hit testing, DPI, Explorer
+  drops or native input
   -> `platform/native-window.md`
 - Changing endpoint/window selection or command help -> `control.md`
 - Changing runtime command wording -> `control/agent-facing-text.md`

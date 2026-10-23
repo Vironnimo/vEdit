@@ -4,6 +4,16 @@
 gate. The vendored dependency is winit 0.30.13, selected by `[patch.crates-io]`.
 Read that document and the touched native source before replacing the dependency.
 
+## First visible frame
+
+`vendor/eframe/VEDIT_PATCH.md` owns the Glow startup presentation fix. The native
+window stays hidden until the first successful buffer swap; drawing into the
+back buffer alone does not make pixels available to the visible window.
+`cargo test --test startup_window -- --ignored --nocapture` checks the actual
+front-buffer pixels synchronously at the first Windows show notification. It
+uses private storage and closes its own window; it requires a Windows desktop
+and OpenGL. Keep this native check when upgrading eframe.
+
 ## Ownership boundaries
 
 `window_chrome::draw_top_bar` reserves distinct project controls, drag areas and
