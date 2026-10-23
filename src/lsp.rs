@@ -1519,14 +1519,13 @@ impl Protocol {
     /// short-lived thread so the protocol loop keeps serving other requests.
     fn resolve_references(&self, id: u64, result: &Value, events: &EventEmitter) {
         let (locations, truncated) = parse_locations(result);
-        let open: HashMap<PathBuf, String> = locations
-            .iter()
-            .filter_map(|(path, _)| {
-                self.documents
-                    .get(path)
-                    .map(|document| (path.clone(), document.text.clone()))
-            })
-            .collect();
+        let mut open = HashMap::new();
+        for (path, _) in &locations {
+            if let Some(document) = self.documents.get(path) {
+                open.entry(path.clone())
+                    .or_insert_with(|| document.text.clone());
+            }
+        }
         let emitter = events.clone();
         if let Err(error) = thread::Builder::new()
             .name("vedit-lsp-references".into())
@@ -1855,33 +1854,50 @@ fn build_references(
     open: &HashMap<PathBuf, String>,
     read: impl Fn(&Path) -> Option<String>,
 ) -> Vec<Reference> {
-    let mut sources: HashMap<PathBuf, (PathBuf, Option<String>)> = HashMap::new();
-    locations
-        .into_iter()
-        .map(|(path, range)| {
-            let (key, text) = sources.entry(path.clone()).or_insert_with(|| {
-                let text = open.get(&path).cloned().or_else(|| read(&path));
-                (canonical_path(&path), text)
-            });
-            let line_text = text.as_deref().and_then(|text| {
-                text.split('\n')
-                    .nth(range.start.line as usize)
-                    .map(|line| line.strip_suffix('\r').unwrap_or(line))
-            });
+    let mut references = vec![None; locations.len()];
+    let mut files: HashMap<PathBuf, Vec<(usize, TextRange)>> = HashMap::new();
+    for (index, (path, range)) in locations.into_iter().enumerate() {
+        files.entry(path).or_default().push((index, range));
+    }
+    for (path, mut ranges) in files {
+        let key = canonical_path(&path);
+        let disk = if open.contains_key(&path) {
+            None
+        } else {
+            read(&path)
+        };
+        let text = open.get(&path).or(disk.as_ref());
+        let mut lines = text
+            .into_iter()
+            .flat_map(|text| text.split('\n'))
+            .enumerate();
+        let mut current = lines.next();
+        // Traverse each source once, but keep the server's original result
+        // order (including multiple references on the same line).
+        ranges.sort_unstable_by_key(|(_, range)| range.start.line);
+        for (index, range) in ranges {
+            let target = range.start.line as usize;
+            while current.is_some_and(|(line, _)| line < target) {
+                current = lines.next();
+            }
+            let line_text = current
+                .filter(|(line, _)| *line == target)
+                .map(|(_, text)| text.strip_suffix('\r').unwrap_or(text));
             let (column, preview, highlight) = match line_text {
                 Some(line) => line_preview(line, range),
                 None => (range.start.character as usize, String::new(), 0..0),
             };
-            Reference {
+            references[index] = Some(Reference {
                 path: key.clone(),
                 position: range.start,
                 line: range.start.line as usize + 1,
                 column: column + 1,
                 preview,
                 highlight,
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    references.into_iter().flatten().collect()
 }
 
 /// (zero-based scalar column, trimmed preview, highlighted scalar range in it).
@@ -2057,7 +2073,18 @@ fn plain_snippet(snippet: &str) -> String {
             chars.next();
             let mut placeholder = String::new();
             let mut depth = 1;
-            for next in chars.by_ref() {
+            while let Some(next) = chars.next() {
+                if next == '\\'
+                    && chars
+                        .peek()
+                        .is_some_and(|escaped| matches!(escaped, '$' | '}' | '\\'))
+                {
+                    // Preserve escapes for the recursive fallback conversion;
+                    // an escaped brace must not end this placeholder.
+                    placeholder.push(next);
+                    placeholder.push(chars.next().unwrap());
+                    continue;
+                }
                 if next == '{' {
                     depth += 1;
                 }
@@ -2552,6 +2579,16 @@ mod tests {
             plain_snippet("${1|red,green,blue|} ${2:${3:nested}} \\$literal $0"),
             "red nested $literal "
         );
+    }
+
+    #[test]
+    fn snippet_fallback_preserves_escaped_braces_and_nested_placeholders() {
+        assert_eq!(plain_snippet(r"${1:before\}after}"), "before}after");
+        assert_eq!(
+            plain_snippet(r"${1:before\}${2:nested}after} $0"),
+            "before}nestedafter "
+        );
+        assert_eq!(plain_snippet(r"${1:before\\}after"), r"before\after");
     }
 
     #[test]

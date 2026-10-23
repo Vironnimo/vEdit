@@ -111,6 +111,69 @@ fn reference_previews_convert_utf16_columns_to_scalars_for_emoji_cjk_and_crlf() 
 }
 
 #[test]
+fn reference_previews_preserve_result_order_and_share_each_source() {
+    let root = std::env::temp_dir().join("vedit-reference-order");
+    let open_path = root.join("open.rs");
+    let disk_path = root.join("disk.rs");
+    let open = HashMap::from([(open_path.clone(), "zero\r\n🙂 first\r\nlast\r\n".to_owned())]);
+    let reads = std::cell::Cell::new(0);
+    let references = build_references(
+        vec![
+            (open_path.clone(), text_range(2, 0, 4)),
+            (disk_path.clone(), text_range(1, 0, 3)),
+            (open_path.clone(), text_range(1, 3, 8)),
+            (open_path.clone(), text_range(1, 0, 2)),
+            (disk_path.clone(), text_range(0, 0, 3)),
+            (open_path.clone(), text_range(7, 0, 1)),
+            (open_path, text_range(3, 0, 1)),
+        ],
+        &open,
+        |path| {
+            assert_eq!(path, disk_path);
+            reads.set(reads.get() + 1);
+            Some("one\ntwo".to_owned())
+        },
+    );
+    assert_eq!(reads.get(), 1);
+    let previews: Vec<_> = references
+        .iter()
+        .map(|reference| (reference.line, reference.column, reference.preview.as_str()))
+        .collect();
+    assert_eq!(
+        previews,
+        vec![
+            (3, 1, "last"),
+            (2, 1, "two"),
+            (2, 3, "🙂 first"),
+            (2, 1, "🙂 first"),
+            (1, 1, "one"),
+            (8, 1, ""),
+            (4, 1, ""),
+        ]
+    );
+}
+
+#[test]
+#[ignore = "manual reference-preview benchmark"]
+fn benchmark_reference_preview_batches() {
+    let path = std::env::temp_dir().join("vedit-reference-benchmark.rs");
+    let text = "let value = target(); // benchmark source line\n".repeat(100_000);
+    let locations = (0..REFERENCE_LIMIT)
+        .rev()
+        .map(|index| (path.clone(), text_range((index * 50) as u32, 12, 18)))
+        .collect();
+    let open = HashMap::from([(path, text)]);
+    let started = Instant::now();
+    let references = build_references(locations, &open, |_| panic!("open source is available"));
+    eprintln!("Reference preview batch: {:?}", started.elapsed());
+    assert_eq!(references.len(), REFERENCE_LIMIT);
+    assert!(references.iter().all(|reference| {
+        reference.preview == "let value = target(); // benchmark source line"
+            && reference.highlight == (12..18)
+    }));
+}
+
+#[test]
 fn long_reference_lines_keep_the_match_visible() {
     let line = format!("{}target{}", "x".repeat(300), "y".repeat(300));
     let (column, preview, highlight) = line_preview(&line, text_range(0, 300, 306));
