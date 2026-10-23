@@ -48,6 +48,7 @@ pub(super) struct JumpList {
 impl JumpList {
     /// A new navigation starts a new branch: forward history is dropped.
     fn push(&mut self, jump: Jump) {
+        self.forward.clear();
         if self.back.last().is_some_and(|last| last.same_place(&jump)) {
             return;
         }
@@ -55,7 +56,6 @@ impl JumpList {
         if self.back.len() > MAX_JUMPS {
             self.back.remove(0);
         }
-        self.forward.clear();
     }
 
     #[cfg(test)]
@@ -332,5 +332,23 @@ mod tests {
             list.push(jump(3, line * 20));
         }
         assert_eq!(list.depths(), (MAX_JUMPS, 0));
+    }
+
+    #[test]
+    fn deduplicated_new_navigation_still_drops_forward_history() {
+        let jump = |line| Jump {
+            document: 1,
+            path: None,
+            offset: line * 10,
+            line,
+            column: 1,
+        };
+        let mut list = JumpList::default();
+        list.push(jump(5));
+        list.forward.push(jump(40));
+
+        list.push(jump(5));
+
+        assert_eq!(list.depths(), (1, 0));
     }
 }

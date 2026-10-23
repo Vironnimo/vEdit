@@ -49,25 +49,28 @@ impl VEditApp {
         }
         project.watcher_starting = true;
         let root = project.root.clone();
+        let instance = project.instance_id;
         let ctx = self.ctx.clone();
         self.worker(move || WorkerResult::FileWatcher {
             result: crate::fs_watch::ProjectWatcher::start(&root, move |delay| {
                 ctx.request_repaint_after(delay)
             }),
             root,
+            instance,
         });
     }
 
     pub(super) fn file_watcher_started(
         &mut self,
         root: PathBuf,
+        instance: u64,
         result: Result<crate::fs_watch::ProjectWatcher, String>,
     ) {
-        // A project closed meanwhile drops the late watcher here.
+        // Closing and reopening the same root creates a different owner.
         let Some(index) = self
             .projects
             .iter()
-            .position(|project| project.root == root)
+            .position(|project| project.root == root && project.instance_id == instance)
         else {
             return;
         };
@@ -178,10 +181,9 @@ impl VEditApp {
     /// window becoming active re-reads listed folders and the index instead.
     pub(super) fn refresh_unwatched_project(&mut self, index: usize) {
         if !self.file_watching
-            || self
-                .projects
-                .get(index)
-                .is_none_or(|project| project.watcher.is_some() || project.watcher_starting)
+            || self.projects.get(index).is_none_or(|project| {
+                project.is_other_files() || project.watcher.is_some() || project.watcher_starting
+            })
         {
             return;
         }
@@ -407,5 +409,52 @@ impl VEditApp {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reopened_project(root: PathBuf) -> (VEditApp, u64) {
+        let old = Project::new(root.clone());
+        let mut replacement = Project::new(root);
+        assert_ne!(old.instance_id, replacement.instance_id);
+        replacement.watcher_starting = true;
+        let mut app = VEditApp::empty(egui::Context::default());
+        app.projects.push(replacement);
+        (app, old.instance_id)
+    }
+
+    #[test]
+    fn obsolete_watcher_error_does_not_change_reopened_project() {
+        let root = std::env::temp_dir().join("repo-audit/watcher-old-error");
+        let (mut app, instance) = reopened_project(root.clone());
+
+        app.file_watcher_started(root, instance, Err("old project failed".into()));
+
+        let project = &app.projects[0];
+        assert!(project.watcher_starting);
+        assert!(project.watcher_error.is_none());
+    }
+
+    #[test]
+    fn obsolete_watcher_success_does_not_replace_reopened_project_watch() {
+        let root = std::env::temp_dir().join(format!(
+            "repo-audit/watcher-old-success-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let (mut app, instance) = reopened_project(root.clone());
+        let watcher = crate::fs_watch::ProjectWatcher::start(&root, |_| {}).unwrap();
+
+        app.file_watcher_started(root.clone(), instance, Ok(watcher));
+
+        let still_starting = app.projects[0].watcher_starting;
+        let has_watcher = app.projects[0].watcher.is_some();
+        drop(app);
+        fs::remove_dir(&root).unwrap();
+        assert!(still_starting);
+        assert!(!has_watcher);
     }
 }

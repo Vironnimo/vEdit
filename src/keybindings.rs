@@ -381,12 +381,24 @@ fn strokes(bindings: &Bindings, action: Action) -> Vec<Stroke> {
     match bindings.get(action.id()) {
         Some(Some(value)) => Stroke::parse(value).ok().into_iter().collect(),
         Some(None) => Vec::new(),
-        None => action
-            .defaults()
-            .iter()
-            .filter_map(|value| Stroke::parse(value).ok())
-            .collect(),
+        None => default_strokes(action).to_vec(),
     }
+}
+
+fn default_strokes(action: Action) -> &'static [Stroke] {
+    static DEFAULTS: std::sync::LazyLock<Vec<Vec<Stroke>>> = std::sync::LazyLock::new(|| {
+        Action::ALL
+            .iter()
+            .map(|action| {
+                action
+                    .defaults()
+                    .iter()
+                    .filter_map(|value| Stroke::parse(value).ok())
+                    .collect()
+            })
+            .collect()
+    });
+    &DEFAULTS[action as usize]
 }
 
 /// Defaults added after users could assign their keys elsewhere. Saved choices
@@ -436,7 +448,11 @@ pub(super) fn matches(bindings: &Bindings, action: Action, event: &egui::Event) 
     let Some(stroke) = Stroke::event(event) else {
         return false;
     };
-    strokes(bindings, action).contains(&stroke)
+    match bindings.get(action.id()) {
+        Some(Some(value)) => Stroke::parse(value).ok() == Some(stroke),
+        Some(None) => false,
+        None => default_strokes(action).contains(&stroke),
+    }
 }
 
 pub(super) fn label(bindings: &Bindings, action: Action) -> String {

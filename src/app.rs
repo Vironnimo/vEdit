@@ -710,6 +710,7 @@ enum WorkerResult {
     },
     FileWatcher {
         root: PathBuf,
+        instance: u64,
         result: Result<crate::fs_watch::ProjectWatcher, String>,
     },
     OutputLink {
@@ -2111,9 +2112,11 @@ impl VEditApp {
                         }
                     }
                 }
-                WorkerResult::FileWatcher { root, result } => {
-                    self.file_watcher_started(root, result)
-                }
+                WorkerResult::FileWatcher {
+                    root,
+                    instance,
+                    result,
+                } => self.file_watcher_started(root, instance, result),
                 WorkerResult::OutputLink {
                     root,
                     request,
@@ -8622,7 +8625,7 @@ const ORPHANED_RECOVERY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(test)]
 fn recovery_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
+        .join(".tmp")
         .join("test-state")
         .join(std::process::id().to_string())
         .join("recovery")

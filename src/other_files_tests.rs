@@ -118,6 +118,20 @@ fn loose_files_share_one_workspace_and_project_services_stay_idle() {
 }
 
 #[test]
+fn activating_other_files_does_not_start_a_folder_index() {
+    let mut app = VEditApp::empty(egui::Context::default());
+    let index = app.ensure_other_files();
+    app.file_watching = true;
+
+    app.refresh_unwatched_project(index);
+
+    let project = &app.projects[index];
+    assert!(!project.index_in_flight);
+    assert!(!project.watcher_starting);
+    assert!(project.index.is_none());
+}
+
+#[test]
 fn loose_files_close_independently_and_last_file_can_be_reopened() {
     let f = Fixture::new();
     let path = f.write("loose/a.txt", "kept");

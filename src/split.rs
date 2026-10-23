@@ -219,6 +219,18 @@ struct Pane {
     /// Back/forward navigation history of this pane.
     jumps: super::jump_list::JumpList,
 }
+
+/// Rendering and restoring focus only need the active tab's view. Keep the
+/// complete tab list, parked view states and jump history out of frame copies.
+struct PaneView {
+    id: u64,
+    document: Option<u64>,
+    empty_workspace: Option<PathBuf>,
+    view: DocumentView,
+    state: Option<PaneDocumentState>,
+    tab_strip_active: Option<u64>,
+}
+
 impl Pane {
     fn empty(id: u64) -> Self {
         Self {
@@ -231,6 +243,17 @@ impl Pane {
             tab_strip_active: None,
             preview_ui_id: None,
             jumps: Default::default(),
+        }
+    }
+
+    fn active_view(&self) -> PaneView {
+        PaneView {
+            id: self.id,
+            document: self.document,
+            empty_workspace: self.empty_workspace.clone(),
+            view: self.view,
+            state: self.document.and_then(|id| self.states.get(&id)).cloned(),
+            tab_strip_active: self.tab_strip_active,
         }
     }
 }
@@ -1476,7 +1499,7 @@ impl VEditApp {
             .panes
             .iter()
             .find(|p| p.id == self.editor_layout.focused)
-            .cloned()
+            .map(Pane::active_view)
         else {
             return;
         };
@@ -1505,7 +1528,7 @@ impl VEditApp {
         self.projects[pi].active_tab = ti;
         self.render_pane = pane.id;
         let tab = &mut self.projects[pi].tabs[ti];
-        if let Some(state) = pane.states.get(&id) {
+        if let Some(state) = &pane.state {
             if tab.loading {
                 tab.vim.cursor = state.navigation.cursor;
             } else {
@@ -2691,7 +2714,7 @@ impl VEditApp {
             .panes
             .iter()
             .find(|p| p.id == pane_id)
-            .cloned()
+            .map(Pane::active_view)
         else {
             return;
         };
@@ -2722,7 +2745,7 @@ impl VEditApp {
                     tab.focus,
                     tab.scroll_to_cursor,
                 ));
-                if let Some(state) = pane.states.get(&tab.id) {
+                if let Some(state) = &pane.state {
                     if tab.loading {
                         tab.vim.cursor = state.navigation.cursor;
                     } else {
