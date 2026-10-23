@@ -2202,13 +2202,12 @@ mod tests {
     fn large_wrapped_unicode_diff_keeps_offscreen_galleys_out_of_font_cache() {
         let context = egui::Context::default();
         let mut view = DiffView::default();
+        // Every unique row remains long enough to wrap at the widest viewport.
+        let source = "über界🙂e\u{301}_long_identifier ".repeat(6);
         let patch = format!(
             "@@ -0,0 +1,2000 @@\n{}",
             (0..2000)
-                .map(|index| format!(
-                    "+row {index} {}\n",
-                    "über界🙂e\u{301}_long_identifier ".repeat(30)
-                ))
+                .map(|index| format!("+row {index} {source}\n"))
                 .collect::<String>()
         );
         for (pass, width) in [360.0, 950.0, 360.0].into_iter().enumerate() {
@@ -2229,6 +2228,9 @@ mod tests {
 
             // The uncached public API must agree exactly with the cached paint
             // API, including Unicode shaping and fractional width rounding.
+            let single_row = context
+                .fonts_mut(|fonts| fonts.row_height(&FontId::monospace(FONT_SIZE)))
+                + ROW_PADDING;
             for index in [0, 997, 1999] {
                 let display = view.patch.display(index);
                 let expected = context.fonts_mut(|fonts| {
@@ -2242,6 +2244,10 @@ mod tests {
                         .y
                 }) + ROW_PADDING;
                 let measured = view.wrapped.offsets[index + 1] - view.wrapped.offsets[index];
+                assert!(
+                    measured > single_row,
+                    "row {index} must wrap at viewport width {width}"
+                );
                 assert!(
                     (measured - expected).abs() < 0.1,
                     "off-screen height changed at row {index}: measured {measured}, paint {expected}"

@@ -47,20 +47,18 @@ impl ReviewRepository {
         let root = base.join("review").join("fixtures").join("demo-project");
         fs::create_dir_all(&root).unwrap();
         let repository = Self { base, root };
-        repository.git(&["init", "--quiet"]);
-        repository.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+        repository.git(&["init", "--quiet", "--initial-branch=main"]);
         let hooks = repository.root.join(".git").join("vedit-no-hooks");
         fs::create_dir_all(&hooks).unwrap();
-        // Repository-local configuration only.
-        for (key, value) in [
-            ("user.name", "Review Author"),
-            ("user.email", "review@example.invalid"),
-            ("core.autocrlf", "false"),
-            ("commit.gpgsign", "false"),
-            ("core.hooksPath", hooks.to_str().unwrap()),
-        ] {
-            repository.git(&["config", key, value]);
-        }
+        // Preserve init's platform settings and configure only this fresh fixture.
+        let config_path = repository.root.join(".git/config");
+        let mut config = fs::read_to_string(&config_path).unwrap();
+        config.push_str(
+            "\n[user]\n\tname = Review Author\n\temail = review@example.invalid\n\
+             [core]\n\tautocrlf = false\n\thooksPath = .git/vedit-no-hooks\n\
+             [commit]\n\tgpgsign = false\n",
+        );
+        fs::write(config_path, config).unwrap();
         repository.write("src/app.rs", &app_source(false));
         repository.write("README.md", "# Demo\n\nA small project.\n");
         repository.write("docs/old.md", "Old notes\n");

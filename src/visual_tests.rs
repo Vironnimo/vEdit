@@ -1,5 +1,5 @@
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{Harness, LazyRenderer, kittest::Queryable};
 
 // Representative editor content is kept in memory: visual review must never
 // write over a repository fixture or depend on rust-analyzer startup timing.
@@ -102,7 +102,9 @@ pub(super) fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
         .with_pixels_per_point(1.0)
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();

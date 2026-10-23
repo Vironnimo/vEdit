@@ -39,6 +39,109 @@ fn diff_rect(screen: &Harness<'_, VEditApp>) -> egui::Rect {
     screen.get_by_label("Change review diff").rect()
 }
 
+/// Pointer interaction starts with a delivered comparison; Git loading has its
+/// own entry-point, freshness, generation and screenshot integration tests.
+fn loaded_branch_review_app() -> VEditApp {
+    let mut app = VEditApp::empty(egui::Context::default());
+    visual_tests::workspace(&mut app);
+    let root = app.projects[0].root.clone();
+    let source = ReviewSource::Branch { base: None };
+    let generation = next_generation();
+    let mut review = ChangeReview::new(source.clone(), root.clone());
+    review.generation = generation;
+    review.loading = true;
+    review.focus_pending = true;
+    app.projects[0].git_root = Some(root.clone());
+    app.projects[0].git_branch = Some("feature/login".into());
+    app.projects[0].change_review.view = Some(review);
+    let patches = [
+        (
+            "docs/old.md",
+            FileChange::Deleted,
+            "@@ -1 +0,0 @@\n-Old notes\n".to_owned(),
+            LineStats {
+                added: 0,
+                removed: 1,
+                binary: false,
+            },
+        ),
+        (
+            "src/app.rs",
+            FileChange::Modified,
+            concat!(
+                "@@ -12,7 +12,7 @@\n",
+                " fn line_12() {}\n fn line_13() {}\n fn line_14() {}\n",
+                "-fn line_15() {}\n+fn line_15() { crate::login::login(\"admin\"); }\n",
+                " fn line_16() {}\n fn line_17() {}\n fn line_18() {}\n",
+                "@@ -28,3 +28,4 @@\n",
+                " fn line_28() {}\n fn line_29() {}\n fn line_30() {}\n+mod login;\n",
+            )
+            .to_owned(),
+            LineStats {
+                added: 2,
+                removed: 1,
+                binary: false,
+            },
+        ),
+        (
+            "src/login.rs",
+            FileChange::Added,
+            format!(
+                "@@ -0,0 +1,5 @@\n{}",
+                LOGIN
+                    .lines()
+                    .map(|line| format!("+{line}\n"))
+                    .collect::<String>()
+            ),
+            LineStats {
+                added: 5,
+                removed: 0,
+                binary: false,
+            },
+        ),
+    ];
+    let files = patches
+        .into_iter()
+        .enumerate()
+        .map(|(index, (path, status, patch, stats))| {
+            (
+                ReviewFile {
+                    path: path.into(),
+                    original_path: None,
+                    status,
+                    stats: Some(stats),
+                    content_key: index as u64,
+                    patch: ReviewPatch::Deferred,
+                },
+                EntryPatch::from(ReviewPatch::Loaded(patch)),
+            )
+        })
+        .collect();
+    app.sender
+        .send(WorkerResult::ChangeReview {
+            root,
+            generation,
+            result: Ok(LoadedReview {
+                comparison: ReviewComparison {
+                    source,
+                    key: "pointer-fixture".into(),
+                    title: "feature/login vs main".into(),
+                    detail: "main...feature/login".into(),
+                    old: "fixture-main".into(),
+                    new: Some("fixture-feature".into()),
+                },
+                files,
+                omitted_untracked: 0,
+                basis: None,
+            }),
+        })
+        .unwrap();
+    app.poll();
+    assert!(!view(&app).loading);
+    assert_eq!(view(&app).files.len(), 3);
+    app
+}
+
 #[test]
 fn diff_rows_become_a_comment_the_agent_takes_with_file_and_lines() {
     let repository = ReviewRepository::new();
@@ -322,11 +425,7 @@ fn review_locations_keep_renames_additions_and_the_comparison_at_capture() {
 
 #[test]
 fn pointer_selects_rows_and_the_context_menu_comments_on_them() {
-    let repository = ReviewRepository::new();
-    let mut screen = harness(repository.app());
-    screen
-        .state_mut()
-        .show_change_review(0, ReviewSource::Branch { base: None });
+    let mut screen = harness(loaded_branch_review_app());
     settle(&mut screen);
     // src/app.rs at the top, below its sticky header.
     type_key(&mut screen, Key::N, "n");
