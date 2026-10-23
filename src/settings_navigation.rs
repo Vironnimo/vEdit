@@ -73,6 +73,7 @@ impl VEditApp {
                         .color(MUTED),
                 );
                 changed |= self.indentation_settings_ui(ui);
+                changed |= self.multicursor_settings_ui(ui);
             }
             "Layout" => {
                 editor_preferences::preference_heading(ui, "LAYOUT & EXPLORER");

@@ -9,6 +9,10 @@ preserving the document's edit history and each pane's navigation.
   Shared search entry points delegate to the search owner; see `search.md`.
 - `src/vim.rs` contains modal operations, motions, registers, repeat and Vim
   history. It does not own pane placement or application commands.
+- `src/multicursor.rs` owns directed selection sets and simultaneous text edits;
+  `src/multicursor_ui.rs` owns their input, pointer/layout integration, preferences
+  and application transactions. Active multicursor editing is a separate input
+  context even when Vim is enabled.
 - `src/editor_input.rs` orders native TextEdit input around application editing
   commands. `src/app.rs` integrates it with `handle_vim`, the source widget and
   global command routing. `src/ex_commands.rs` handles Vim command-line actions.
@@ -35,9 +39,15 @@ and preview/draft state. Native history needs its own existing integration;
 assigning `text` alone is not a complete edit transaction.
 
 The document owns content and edit history. `VimNavigation` is the transferable
-pane navigation snapshot; `restore_navigation` preserves shared history. Do not
+pane navigation snapshot, including multicursor selections; `restore_navigation`
+preserves shared history. Do not
 clone a whole `VimState` into each pane to preserve its cursor. Layout ownership
 and parked view states are in `projects.md`.
+
+Multicursor replacements refer to one original text snapshot and commit together.
+Normalize selections before editing; do not apply cursor edits successively to
+an already changed buffer. The primary selection is the last entry, not
+necessarily the last one in document order.
 
 ## Constraints & Gotchas
 
@@ -51,19 +61,23 @@ and parked view states are in `projects.md`.
 - Indentation settings affect later edits without reformatting existing text.
   Detection is bounded and cached by revision/byte length; reloads explicitly
   invalidate it because unchanged length/revision alone does not prove identity.
-- `src/vim.rs` (~6,200 lines, including inline tests) is a review hotspot.
-  Its navigation/history boundary matters more than reducing line count.
+- `src/vim.rs` (~6,200 lines, including inline tests) and
+  `src/multicursor_ui.rs` (~1,150 lines) are review hotspots. Their
+  navigation/history and pure-operation/UI boundaries matter more than reducing
+  line count.
 
-Pure operation regressions live inline in `src/editor.rs` and `src/vim.rs`;
-indentation regressions are inline in `src/indentation.rs`. Use the integration
-tests below when an edit crosses the widget or history boundary.
+Pure operation regressions live inline in `src/editor.rs`, `src/vim.rs` and
+`src/multicursor.rs`; indentation regressions are inline in `src/indentation.rs`.
+`src/multicursor_tests.rs` covers the multicursor UI and history integration.
+Use the integration tests below when an edit crosses the widget or history boundary.
 
 ## References
 
 Read these only when the task matches.
 
 - Changing input routing, native/Vim Undo, IME, clipboard handling or shared
-  editing history -> `editing/input-and-history.md`
+  editing history, including multicursor transactions
+  -> `editing/input-and-history.md`
 - Changing commands, remapping or shortcut hints
   -> `application/commands-and-settings.md`
 - Replacing text from disk or changing reload/restore behavior

@@ -51,7 +51,7 @@ loaded only for their stated trigger (`AGENTS.md` -> Load context for the task).
 | Map | Source paths | Covers |
 |---|---|---|
 | application.md | `src/app.rs`, `src/keybindings.rs`, `src/app_menu.rs`, `src/settings_navigation.rs` | App integration, command dispatch, settings and notifications |
-| editing.md | `src/editor.rs`, `src/vim.rs`, `src/editor_input.rs`, `src/indentation.rs` | Text operations, input order and undo |
+| editing.md | `src/editor.rs`, `src/vim.rs`, `src/multicursor*.rs`, `src/editor_input.rs`, `src/indentation.rs` | Text operations, selection sets, input order and undo |
 | documents.md | `src/workspace.rs`, `src/recovery.rs`, `src/save_state.rs`, `src/disk_sync.rs` | Documents, disk formats, save conflicts and recovery |
 | projects.md | `src/split.rs`, `src/workspace_ui.rs`, `src/explorer_*.rs`, `src/navigation.rs` | Project ownership, panes, explorer and navigation |
 | search.md | `src/search.rs`, `src/find.rs`, `src/find_worker.rs`, `src/search_cache.rs` | Buffer find and background project search |

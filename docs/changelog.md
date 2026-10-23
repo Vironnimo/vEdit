@@ -3,6 +3,8 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht in der [README](../README.md).
 
+Version 0.6.0 ergänzt Multicursor: **Alt+Klick**, Rechteckauswahl, Vorkommen und Zeilenenden gemeinsam bearbeiten, mit Undo/Redo für Text und Auswahlen. **MULTI** funktioniert auch bei eingeschaltetem Vim; **Esc** kehrt zum einzelnen Cursor zurück. Mausmodifier, Einfügeverhalten, Trefferauswahl und Cursorlimit stehen unter **Settings → Editing**, alle Kürzel unter **Keyboard**.
+
 Version 0.5.6 vervollständigt Kommentare auf Diffzeilen: **For agent** zeigt die alten und neuen Zeilenbereiche samt Vergleich, auch für gelöschte Dateien. Die gespeicherten Angaben enthalten die damaligen Pfade und Vergleichsstände und bleiben beim Sammeln und Wiederherstellen erhalten. Die Sammlung ist direkt aus der Kopfzeile der Änderungsübersicht erreichbar.
 
 Version 0.5.5 bringt die Worktree-Auswahl oben in **Source control** zurück. Das kompakte Dropdown wechselt zwischen **Main worktree** und den zugehörigen Worktrees samt Editor, Dateien und Git-Ansicht. **History** zeigt den ausgewählten Branch und seinen Upstream; unabhängige Branch-Verläufe und fremde Branch-Beschriftungen entfallen. Eingemergte Seitenzweige und Tags auf sichtbaren Commits bleiben erhalten.

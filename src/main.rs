@@ -16,6 +16,7 @@ mod git_graph;
 mod line_diff;
 mod lsp;
 mod markdown;
+mod multicursor;
 mod output_links;
 mod palette;
 mod paths;

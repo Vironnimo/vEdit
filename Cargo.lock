@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "vedit"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "egui-wgpu",
@@ -3098,6 +3098,7 @@ dependencies = [
  "similar",
  "syntect",
  "tiktoken-rs",
+ "unicode-segmentation",
  "windows",
  "winresource",
 ]

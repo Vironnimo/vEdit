@@ -67,6 +67,11 @@ mod language_intel;
 mod language_settings;
 #[path = "language_support.rs"]
 mod language_support;
+#[cfg(test)]
+#[path = "multicursor_tests.rs"]
+mod multicursor_tests;
+#[path = "multicursor_ui.rs"]
+mod multicursor_ui;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "notifications.rs"]
@@ -124,6 +129,7 @@ enum SidebarView {
 #[serde(default)]
 struct Settings {
     keybindings: keybindings::Bindings,
+    multicursor: multicursor_ui::Preferences,
     vim: bool,
     swap_jk: bool,
     autosave: bool,
@@ -154,6 +160,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             keybindings: keybindings::Bindings::new(),
+            multicursor: multicursor_ui::Preferences::default(),
             vim: true,
             swap_jk: false,
             autosave: true,
@@ -4064,12 +4071,14 @@ impl VEditApp {
         {
             return;
         }
+        self.multicursor_keys();
         if self.completion_keys() || self.split_shortcuts(&ctx) {
             return;
         }
         let vim_modal = self.settings.vim
             && self.tab().is_some_and(|tab| {
                 tab.vim.mode != VimMode::Insert
+                    && !tab.vim.multi.active()
                     && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
             });
         let vim_insert = self.settings.vim
@@ -4084,6 +4093,9 @@ impl VEditApp {
         let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
+            if action.multicursor() {
+                continue;
+            }
             if matches!(
                 action,
                 Action::SwitchProject
@@ -4271,6 +4283,7 @@ impl VEditApp {
         self.resume_editor_input();
         self.validate_vim_search();
         if !self.settings.vim
+            || self.tab().is_some_and(|tab| tab.vim.multi.active())
             || egui::Popup::is_any_open(&self.ctx)
             || self
                 .tab()
@@ -4472,6 +4485,15 @@ impl VEditApp {
             tab.vim.set_yank_register(yank_register.clone());
             let mut events = events.into_iter().peekable();
             while let Some(event) = events.next() {
+                if tab.vim.multi.active() {
+                    tab.sync_multicursor();
+                    editor_input::defer(
+                        &ctx,
+                        tab.id,
+                        std::iter::once(event).chain(events).collect(),
+                    );
+                    break;
+                }
                 if tab.vim.mode == VimMode::Insert
                     && editor_input::vim_barrier(&event, &keybindings)
                     && native_insert.iter().any(editor_input::native_input)
@@ -5306,14 +5328,19 @@ impl VEditApp {
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 ui.horizontal_centered(|ui| {
                     // Resting modes stay muted; color marks modes that change what keys do.
-                    let (mode, color) = if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
+                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
-                        .on_hover_text("Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
+                        .on_hover_text("MULTI: standard editing at every cursor; Esc returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
+                    if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
+                        let count = tab.vim.multi.selections.len();
+                        ui.label(RichText::new(format!("{count} {}", if count == 1 { "cursor" } else { "cursors" })).size(11.0).color(BLUE))
+                            .on_hover_text(format!("All selections are edited together. Undo last cursor selection: {}. Esc exits multicursor editing.", self.shortcut_label(keybindings::Action::CursorUndo)));
+                    }
                     if let Some(tab) = self.tab() {
                         let pending = tab.vim.pending_command();
                         if !pending.is_empty() { ui.label(RichText::new(pending).monospace().size(11.0).color(ORANGE)); }
@@ -6226,7 +6253,9 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             && !source_command_pending
             && ctx.memory(|memory| memory.has_focus(id))
             && self.tab().is_some_and(|tab| {
-                !tab.loading && (!settings.vim || tab.vim.mode == VimMode::Insert)
+                !tab.loading
+                    && !tab.vim.multi.active()
+                    && (!settings.vim || tab.vim.mode == VimMode::Insert)
             }) {
             editor_input::take_command(&ctx, document_id, !settings.vim, &settings.keybindings)
         } else {
@@ -6242,10 +6271,24 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             );
         }
         let Some(tab) = self.tab_mut() else { return };
+        tab.sync_multicursor();
+        let multi_before = tab.vim.multi.primary().unwrap_or_else(|| {
+            let range = if settings.vim && tab.vim.mode != VimMode::Insert {
+                tab.vim
+                    .selection(&tab.text)
+                    .unwrap_or(tab.vim.cursor..tab.vim.cursor)
+            } else {
+                tab.selection.clone()
+            };
+            crate::multicursor::Selection::new(range.start, range.end)
+        });
         let mode = tab.vim.mode;
-        let modal = settings.vim && mode != VimMode::Insert;
-        let source_editable =
-            source_interaction && !source_command_pending && !modal && !tab.loading;
+        let modal = settings.vim && mode != VimMode::Insert && !tab.vim.multi.active();
+        let source_editable = source_interaction
+            && !source_command_pending
+            && !modal
+            && !tab.loading
+            && !tab.vim.multi.active();
         let pending = tab.pending_selection.take();
         if let Some(range) = pending {
             let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
@@ -6447,13 +6490,14 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             let native_caret = ui.visuals().text_cursor.stroke;
             let native_selection = ui.visuals().selection;
             editor_selection(ui.visuals_mut());
-            if modal {
+            if modal || tab.vim.multi.active() {
                 // Modal navigation paints one block at Vim's active
                 // character, rather than a second insertion caret at the
                 // native half-open selection endpoint.
                 ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
             }
             // Immutable TextBuffer still permits native click/drag selection.
+            if tab.vim.multi.active() { ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT; }
             // Mutable source is exposed only when this editor owns editing.
             let mut readonly_text: &str;
             let editor = if source_editable {
@@ -6476,7 +6520,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                     horizontal_arrows: true,
                     vertical_arrows: true,
                     tab: true,
-                    escape: settings.vim,
+                    escape: settings.vim || tab.vim.multi.active(),
                 })
                 .desired_width(viewport_width)
                 .min_size(egui::vec2(0.0, ui.available_height()))
@@ -6514,7 +6558,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                                 horizontal_arrows: true,
                                 vertical_arrows: true,
                                 tab: true,
-                                escape: settings.vim,
+                                escape: settings.vim || tab.vim.multi.active(),
                             },
                         )
                     });
@@ -6547,7 +6591,8 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 output.state.cursor.set_char_range(Some(range));
                 output.state.clone().store(&ctx, id);
             }
-            if let Some(range) = output.state.cursor.char_range() {
+            multicursor_ui::pointer(ui, &mut output, tab, &settings.multicursor, multi_before, pane_focused && source_interaction && !source_command_pending && !tab.loading);
+            if let Some(range) = output.state.cursor.char_range().filter(|_| !tab.vim.multi.active()) {
                 tab.selection =
                     range.as_sorted_char_range().start.0..range.as_sorted_char_range().end.0;
                 if settings.vim && pointer_selection {
@@ -6571,7 +6616,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 tab.vim.notify_external_text_change();
                 tab.changed();
             }
-            if modal && !pointer_selection {
+            if modal && !pointer_selection && !tab.vim.multi.active() {
                 // A menu owns focus while egui may collapse its native range.
                 // Build its actions from the actual Vim area, not that
                 // temporary widget range; keep live drag anchors untouched.
@@ -6583,7 +6628,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 ui,
                 &output.response,
                 !tab.loading,
-                !tab.selection.is_empty(),
+                !tab.selection.is_empty() || tab.vim.multi.active(),
                 &settings,
             );
             let retained_selection_painted = !native_selection_painted
@@ -6600,7 +6645,9 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                     &output,
                     tab.selection.clone(),
                 );
-            let cursor = egui::text::CCursor::new(tab.vim.cursor);
+            let mut cursor = egui::text::CCursor::new(tab.vim.cursor);
+            if let Some(primary) = tab.vim.multi.primary() { cursor.prefer_next_row = primary.prefer_next_row; }
+            multicursor_ui::paint(ui, &output, &tab.vim.multi, focused);
             let local = output.galley.pos_from_cursor(cursor);
             let cursor_rect = local.translate(output.galley_pos.to_vec2());
             caret_rect = Some(cursor_rect);
@@ -6928,7 +6975,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 ],
                 Stroke::new(1.0, BORDER),
             );
-            if modal && focused {
+            if modal && focused && !tab.vim.multi.active() {
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(
                         cursor_rect.min,
@@ -6938,7 +6985,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                     ACCENT.linear_multiply(0.65),
                 );
             }
-            if modal {
+            if modal && !tab.vim.multi.active() {
                 let range = tab
                     .vim
                     .selection(&tab.text)
@@ -6957,6 +7004,9 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                 }
                 output.state.store(&ctx, id);
             } else if !settings.vim && pane_focused {
+                if output.response.changed() {
+                    multicursor_ui::record_native(&ctx, document_id, &tab.text, output.state.cursor.char_range().unwrap_or_default(), &tab.vim.multi);
+                }
                 context_actions::publish_native_history(
                     &ctx,
                     document_id,
@@ -7538,6 +7588,10 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
 use keybindings::COMMANDS;
 impl VEditApp {
     fn command_action(&mut self, label: &str) {
+        if let Some(action) = keybindings::Action::from_label(label).filter(|a| a.multicursor()) {
+            self.multicursor_action(action);
+            return;
+        }
         match label {
             "Command palette" => self.open_palette(Palette::Commands),
             "Go to file" => self.open_palette(Palette::Files),
@@ -9316,6 +9370,15 @@ impl VEditApp {
             }
         });
         let main_start = crate::lsp::position_to_char(&t.text, main.range.start);
+        if t.vim.multi.active() {
+            let result =
+                multicursor_ui::complete(&t.text, &t.vim.multi, &main, &edits, t.vim.cursor);
+            match result {
+                Ok((text, state)) => self.commit_multi(text, state),
+                Err(message) => self.status(message, true),
+            }
+            return;
+        }
         let mut cursor = main_start + main.new_text.chars().count();
         let mut replacements: Vec<_> = edits
             .drain(..)

@@ -30,6 +30,8 @@ separate filesystem walk, owned by `search.md`.
 `Project.tabs` owns shared `EditorTab` documents. A pane owns an ordered set of
 document IDs and per-document navigation/view state. A split is another view of
 the same document, including its edit history, rather than a copied buffer.
+`VimNavigation` also carries each pane's multicursor selections; transaction and
+selection-history rules belong to `editing/input-and-history.md`.
 Inactive projects park their `EditorLayout`; switching projects restores that
 layout without reopening their documents.
 
