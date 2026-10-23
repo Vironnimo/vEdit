@@ -1,108 +1,130 @@
 # Working in vEdit
 
-vEdit is a native Windows code editor written in Rust (edition 2024), using
-eframe/egui. It has two binaries: `vedit` (GUI) and `vedit-cli` (local editor
-control). The product UI is English; the user README is German. Start with
-`README.md` for the intended user behavior. `docs/development.md` describes build,
-test, snapshot and packaging workflows. Older versioned review documents are
-historical evidence, not current requirements or current test counts.
+These instructions govern the source checkout. In a portable bundle without
+`Cargo.toml`, use `skills/vedit/SKILL.md` for live control; the repository maps,
+Rust sources and developer scripts are not part of that bundle.
 
-Paths and build/test commands below refer to a source checkout. A portable bundle
-contains documentation and `skills/vedit/SKILL.md` for live editor control, but
-does not contain the Rust sources or development scripts.
+## Load context for the task
 
-## Find the owner
+At session start, read these core files completely unless their current contents are already in context. Load them once; re-read affected sections when they change:
 
-- `src/app.rs` owns application state, worker result handling and UI integration.
-  Most UI features are child modules selected with `#[path = "..."]`, rather than
-  a conventional `src/app/` directory. Add behavior to its existing owner.
-- `src/editor.rs`, `src/vim.rs`, `src/editor_input.rs`, `src/find.rs` and
-  `src/search.rs`: text operations, Vim, input ordering and search. Byte offsets,
-  Unicode scalar indices and LSP UTF-16 positions are different coordinate spaces.
-- `src/workspace.rs`, `src/recovery.rs`, `src/save_state.rs`: disk I/O, format
-  preservation, conflict checks and recovery. `src/split.rs` owns pane-local
-  navigation over shared documents; `src/reopen.rs` owns closed-file history.
-- `src/keybindings.rs` is the command/shortcut registry. Keep its dispatch,
-  `command_action` in `app.rs`, menu hints and README aligned for new commands.
-- `src/lsp.rs`, `src/language_support.rs`, `src/language_settings.rs`,
-  `src/project_tasks.rs`, `src/tasks.rs`: language services and project commands.
-- `src/git.rs` owns Git subprocesses; `git_panel.rs`, `git_graph.rs` and
-  `git_diff_view.rs` present their results. `src/markdown.rs` owns Markdown preview.
-- `src/cli.rs`, `cli_schema.json`, `cli_transport.rs` and `control*.rs`: CLI and GUI
-  receiver. Agent usage lives in `.agents/skills/vedit/`; protocol rationale and
-  past evaluations live in `docs/agent-interface.md`.
-- `vendor/winit` is intentionally patched. Read `vendor/winit/VEDIT_PATCH.md`
-  before window/backend changes or dependency upgrades; preserve the patch until
-  its behavior has a verified replacement.
+- `.vorch/PROJECT.md` - project context
+- `.vorch/GLOSSARY.md` - project-specific terms
 
-## Preserve the user's work
+Before working in or discussing a domain, read its root map under `.vorch/domain-maps/` (index in PROJECT.md), plus adjacent maps when ownership or contracts cross domains. Use them to locate owners, contracts, source, and tests. The task's `read:` list is a starting point; add a map only when the task reaches into its domain. Follow the root map's `## References` only for supplementary files whose triggers match the task; do not preload a supplementary folder. Supplementary files never replace the root map or enter the Domain Maps index.
 
-Keep disk I/O, Git, indexing, project search and language services off the UI
-thread. Background results must still belong to the originating document,
-revision, request and project when applied. A queue acknowledgement is not a
-completed load or save.
+Before changing a domain map or supplementary file, read `.vorch/workflows/domain-map-workflow.md` up to `## Creating or restructuring a map` unless its current contents are already in context; read the rest too when you create, split, merge, rename or restructure a map. Ordinary map reading does not require that workflow.
 
-Documents are shared across panes; cursor, selection, view and scroll state are
-pane-local. Preserve native and Vim Undo, input event order, Unicode positions,
-dirty buffers, agent drafts and existing session layouts. Disk-loaded text is
-normalized, but CLI edits can contain raw CRLF. Include that path when changing
-line operations.
+## Interpret documentation
 
-Saving must retain external-change protection and atomic replacement. Agent edits
-remain drafts until explicitly saved. Recovery preserves the original comparison
-baseline; reading newer disk content is not permission to overwrite it. Save As
-uses the source for formatting and the destination only for overwrite checks.
+Distinguish explicit user requirements and engineering contracts from descriptions of current behavior, examples, and proposals. Follow applicable requirements and contracts; a documented implementation or past choice is not automatically a constraint on new work. Existing behavior and design may be revised within the user's requested scope without a documentation exception. When the user asks to rethink or rebuild a system, its documented design, invariants and earlier decisions about it are open for revision; say which ones you would keep and why. A recorded user requirement stays in force until the user agrees to drop it by name.
 
-For live vEdit interaction use `.agents/skills/vedit/SKILL.md`; ordinary repo
-changes can use file tools. In a portable bundle use `skills/vedit/SKILL.md`
-instead. Never kill or restart the user's editor merely to run
-tests or package a release. The release script preserves a running editor; a
-restart is a separate user action. Tests should use isolated temporary fixtures,
-not the user's current session or repositories.
+Source code establishes what is implemented, not what ought to be implemented. Verify behavior claims against source and relevant tests. Correct stale descriptions; when code conflicts with an explicit requirement or contract, address the discrepancy rather than rewriting the requirement to match the code. Keep observations, requirements, and proposed changes identifiable in the docs.
 
-## Validate and deliver
+## Communication with the user
 
-Finish completed, validated work with focused local Git commits without waiting
-for another prompt. Commit at meaningful task boundaries so finished changes do
-not accumulate between tasks. Before staging, inspect the diff and separate the
-task's changes from pre-existing or concurrent work; stage only reviewed changes
-that belong to the task. Never include unrelated or unfinished work merely to
-make the working tree clean. If a commit is blocked, report the reason and what
-remains uncommitted. The final response names the commits and actual validation.
-Pushing or publishing requires authorization beyond this local-commit rule.
+### Use established terminology
 
-Start with a targeted regression for behavioral bugs. Once the affected checks
-pass, a change spanning editor state or UI integration should finish with:
+Use the project's established terms as defined in the glossary and domain maps, such as Document, Pane, Project and Agent mark. Keep these terms untranslated when you talk to the user in another language.
 
-```powershell
-cargo fmt -- --check
-cargo test --all-targets -- --test-threads=8
-cargo clippy --all-targets -- -D warnings
-git diff --check
-```
+### Present Agent-facing text changes
 
-On Windows, use `WGPU_BACKEND=dx12` for the headless render tests if they
-crash in the NVIDIA OpenGL driver. The full parallel suite has been
-verified with that setting; see the scoped PowerShell command in
-`docs/development.md`. Serial tests also provide a verified fallback.
+For runtime Agent-facing text, explain the meaningful changes in the conversation and show the relevant proposed wording verbatim. Include the corresponding current wording when comparison helps the user assess the change.
 
-Build into the single `target/` folder; never set `CARGO_TARGET_DIR` to a second
-folder. Put temporary files, fixtures, logs, screenshots and helper scripts in
-`.tmp/<task>/` in this checkout. Never use the system Temp directory or `target/`
-for that work. `.tmp/` contents are Git-ignored and survive `cargo clean`.
-Cargo redirects `TEMP`, `TMP` and `TMPDIR` automatically. For other tools,
-dot-source `scripts/project-temp.ps1`, call `Enter-ProjectTemp`, then restore its
-returned context with `Exit-ProjectTemp` in `finally`; child processes inherit
-the local paths. See `docs/development.md` for the scoped example.
+For larger changes, keep the conversation focused on the passages that materially affect Agent behavior. Make the complete changes available through the source-file diff. Do not create additional files solely to present the review. Show complete wording when the user requests it.
 
-Use proportional checks for documentation-only or small, reversible edits.
-Ignored tests require particular SDKs or are manual benchmarks; do not blanket
-run them. Inspect rendered changes before replacing snapshot baselines, and run
-the final suite without snapshot-update variables. See `docs/development.md`.
+Runtime Agent-facing text includes CLI help, protocol errors and the bundled vEdit operating skill supplied by vEdit to an Agent or Model. Repository governance and development documentation are outside this review rule.
 
-When delivering a runnable update, keep `Cargo.toml`, `Cargo.lock`, README,
-relevant docs and packaged contents consistent. Use `scripts/build-release.ps1`
-instead of copying only one binary. Report actual validation and remaining limits;
-headless egui tests do not verify native Windows dialogs, Snap or physical DPI
-transitions. Do not rewrite historical review results as if they describe the new
-build.
+## Agent-facing work
+
+Before writing or reviewing runtime Agent-facing text, load the matching Skill and follow it: `agent-text` for runtime prompts and notices, `agent-cli` for the CLI, `agent-skill-creator` for the operating skill, and `agent-eval` for fresh-agent evaluations.
+
+## Architecture & code
+
+**Few, deep modules:** Prefer clear ownership, small interfaces, and hidden implementation. Extend an existing owner when the capability belongs there. Before introducing a new responsibility, public interface, layer, or abstraction, identify the closest existing owner and explain why the new boundary is warranted. Avoid pass-through layers and abstractions that expose their internals or add little beyond their interface.
+
+Judge complexity by responsibilities, coupling, and what callers must understand, not file count alone. Tests, documentation, components, and internal file splits do not need a new-owner justification unless they introduce an architectural boundary. Split files when it improves clarity and cohesion; do not overload an existing file merely to avoid creating one.
+
+**Technical Decisions** - when making technical decisions, do not give much weight to development cost. Instead, prefer quality, simplicity, robustness, scalability, and long-term maintainability.
+
+## Testing
+
+Tests guard behavior against regressions from concurrent and later work. Every test also costs runtime and maintenance for all later tasks, so keep the suite a curated set of behavior contracts, not a record of every change.
+
+**Write tests for contracts, not for changes.**
+
+- Test behavior at the owning module's public interface: contracts, persisted formats, protocols, CLI output and visible editor behavior. Test an internal helper directly only when it carries its own contract that is impractical to reach through that interface.
+- A bug fix extends the existing test that owns the behavior, with a new parameter case or assertion. Add a new test only when no existing test covers that behavior.
+- One test per distinct behavior; parameterize only over genuinely different cases.
+- Developer scripts and probes get at most a smoke test, unless they protect data or installations (converters, installers, update and worktree tooling).
+- Keep tests fast and deterministic: controlled clocks and in-memory fakes instead of real waits, subprocesses, and network. A test that needs more than about a second must justify it. Load and scale variants use Rust's `#[ignore = "manual benchmark: ..."]` convention and run only on demand (PROJECT.md -> Testing).
+- Existing Rust persistence tests exercise real syncs. Do not disable durable I/O globally to shorten the suite; keep any future explicit durability seam in the persistence owner and test its contract.
+- When a change makes tests obsolete or redundant, delete or merge them in the same change.
+- Documentation-only edits need no tests; review content, references, and the diff.
+
+Before writing or changing a test, read `.vorch/domain-maps/development/testing.md`: what to assert, how to wait, and what the shared fixtures isolate.
+
+**Commit and merge hooks run static checks only.** Run the tests covering your change before committing. Changes spanning editor state or UI integration also require `cargo fmt -- --check`, `cargo test --all-targets -- --test-threads=8`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check` before delivery. Complete checks also run for an authorized push. Report failures and their scope; never claim an unrun check passed.
+
+Do not run full suites merely to investigate code. Read the owner and its tests with a concrete question; use a targeted probe to check a disputed behavior. Begin behavioral bug fixes with a targeted regression, extending the existing contract test where possible.
+
+## Dependencies
+
+If a task requires a new dependency, **check first** that no existing dependency already covers the need. Then install it, add it to `Cargo.toml` (or `tools/basedpyright/package.json` for the bundled Python language server), and commit the lock file changes. Do not install packages speculatively - only what the current task requires.
+
+## You maintain the docs & domain maps
+
+Maintain affected documentation as part of the task with small, factual updates:
+
+- `.vorch/PROJECT.md` - architecture, conventions, dev/test setup, domain-maps index, strategic context. Every agent reads it, so a fact whose use is confined to one domain goes into that domain's map instead
+- `.vorch/domain-maps/<domain>.md` - a domain's ownership, contracts, or documented behavior changes, including affected supplementary files, or a new domain emerges (a new domain also gets added to the domain-maps index in PROJECT.md)
+- `.vorch/GLOSSARY.md` - shared vocabulary under the Terminology rules below
+- `.vorch/FLAGGED.md` - git-ignored, never commit it; keep only confirmed, concrete, still-open concerns, with the evidence and affected behavior. During implementation, fix confirmed bugs with a clear, bounded, low-risk solution even outside the original task; defer them to this file only with a concrete reason. Investigate a suspicion before adding it; when reviewing an existing suspicion, check it before removing it. Do not add pending evaluations, missing live checks, speculative future failures, or completion notes. Append at the bottom, or fold into a related entry when one fits; delete an entry once its concern is resolved or verified fixed instead of annotating it.
+
+**Write new developer and agent documentation in English.** Keep the user README in German and preserve historical reports in their original language and version context. User-facing chat follows the user's language.
+
+## Terminology
+
+`.vorch/GLOSSARY.md` holds the terms every agent needs in every task: a term belongs there when several domains use it and an agent would otherwise misread it, especially as a concept of its own environment or of another system, such as Document, Pane, Project and Task. A term only one domain uses belongs in that domain map's `## Terms` section, even when the user mentions it; when other domains start using it, move it to the glossary and leave a pointer. Standard vocabulary gets no entry.
+
+An entry, in the glossary or in a map's Terms, says what the term means, not how it works: at most two sentences of definition plus a "Not ..." distinction where a misreading is realistic, and the map or section that owns the concept. Tables, columns, functions, syntax, limits, states and procedures stay out of entries; they belong in the owning map's Data Model, Interfaces or a supplementary file, which the entry names. Give each term one canonical home; use references elsewhere.
+
+Maintain terminology as part of relevant work when a missing, stale, or ambiguous definition could cause mistakes. Make clear, evidence-backed updates directly; no separate Skill or interview is required. Ask the user when competing meanings would materially affect the work, rather than silently establishing a new meaning.
+
+## Git
+
+- Work directly on `main` - no feature branches by default. When you finish a task, commit it (the user may also ask you to commit mid-way); you don't need to wait to be asked.
+- **Small, quick, low-risk changes go directly on `main`; use a worktree for larger or uncertain tasks, or when concurrent work could interfere.** In Codex prefer its managed worktree tools and archive through the app; otherwise use `python scripts/worktree.py create <task-name>` (see PROJECT.md -> Development). Work and commit inside the chosen checkout. Once everything is committed, follow `.vorch/workflows/worktree-workflow.md` for the matching worktree lifecycle; merge only reviewed task changes and preserve concurrent work. For conflicts, follow `.vorch/workflows/worktree-workflow.md`. No user confirmation is needed before merging.
+- **Commits carry only the user's authorship.** Never commit as an AI tool (such as `Claude <noreply@anthropic.com>`) and never add `Co-Authored-By`, `Claude-Session`, or "Generated with" lines to commit messages or PRs. The hooks enforce this (`scripts/commit_authorship.py`): a tool identity blocks the commit, attribution lines are stripped from messages, and a push carrying either is refused. If a commit is blocked, commit under the user's identity with repository-local config only, never `--global`.
+- **Line endings are handled for you.** `.gitattributes` normalizes text in Git and checks PowerShell/batch files out with CRLF; Git's `CRLF will be replaced by LF` warning is harmless. Never convert files by hand to silence it.
+- Conventional format: `<type>(<scope>): <what>` - lowercase, <=72 chars, no trailing period. Types: `feat` `fix` `docs` `refactor` `perf` `test` `chore`. Breaking change -> `!`.
+- One logical unit per commit; never batch unrelated changes; commit once the tests covering your change pass.
+- **The commit hook checks every commit.** It checks the staged Rust formatting, Python syntax, structured files and domain maps without rewriting the working tree or index (PROJECT.md -> Testing). Review and stage only task-owned changes. When it blocks, fix the reported problems, stage, and commit again; never bypass it with `--no-verify`. It reads staged content; leave another session's unstaged work alone. If a commit of source files prints no `Commit check` report, the hook is not enabled: enable it (PROJECT.md -> Development).
+- **Push only through `python scripts/push.py`**, when the user asks to push, following `.vorch/workflows/push-workflow.md`; never a plain `git push`.
+
+## Preserve the user's work and deliver
+
+Read the relevant user behavior in `README.md` before changing it. Use the vEdit
+operating skill for live-editor interaction; ordinary repository edits use file
+tools. Never kill or restart the user's editor for tests or packaging. Fixtures
+use isolated profiles and repositories, never the user's current session.
+
+Keep temporary files, logs, screenshots and helper scripts under `.tmp/<task>/`
+in this checkout. Cargo sets the environment through `.cargo/config.toml`. For
+other tools, dot-source `scripts/project-temp.ps1`, call `Enter-ProjectTemp`, and
+restore its context with `Exit-ProjectTemp` in `finally`. Build into the checkout's
+`target/`; never set `CARGO_TARGET_DIR` to a second folder.
+
+Inspect rendered differences before replacing snapshot references; the final
+suite runs without snapshot-update variables. Do not blanket-run ignored tests.
+Native dialogs, Snap and physical DPI transitions need native checks.
+
+Before staging, inspect the diff and separate this task from existing or
+concurrent work. Finish validated work with focused local commits, without
+waiting for another prompt. Name the commits, actual validation and remaining
+limits in the final report; explain any blocked commit and uncommitted changes.
+Pushing and publishing require explicit authorization.
+
+When delivering a runnable update, keep Cargo.toml, Cargo.lock, README, relevant
+docs and packaged contents consistent. Use `scripts/build-release.ps1`, not a
+single copied binary. Historical reports retain their original results.
