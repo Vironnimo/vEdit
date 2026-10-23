@@ -1039,9 +1039,10 @@ fn layout_paragraphs(
             }
         }
         let hash = egui::epaint::util::hash(&paragraph);
-        let reused = donors
-            .iter()
-            .filter_map(|donor| donor.get(&hash))
+        let reused = paragraphs
+            .get(&hash)
+            .into_iter()
+            .chain(donors.iter().filter_map(|donor| donor.get(&hash)))
             .find(|galley| galley.pixels_per_point == pixels_per_point && *galley.job == paragraph)
             .cloned();
         let galley = reused.unwrap_or_else(|| {
@@ -2028,6 +2029,24 @@ mod tests {
                         galley_and_egui_layout(&ctx, &cache, 1, &edited, "", width, tab_width);
                     assert_eq!(*galley, *expected, "{edited:?} at {width}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_paragraphs_share_shaping_on_the_first_layout() {
+        for (line, tab_width) in [("Grüße 🦀", 4), ("\tindented", 2), ("", 4)] {
+            for width in [f32::INFINITY, 80.0] {
+                let ctx = egui::Context::default();
+                ctx.set_fonts(crate::typography::fonts(crate::cli::EditorFont::default()));
+                let cache = SyntaxCache::new();
+                let text = format!("{line}\n").repeat(200);
+                let (galley, expected) =
+                    galley_and_egui_layout(&ctx, &cache, 0, &text, "", width, tab_width);
+                assert_eq!(*galley, *expected, "{line:?} at {width}");
+                // The final paragraph includes its newline; all others share
+                // one shaped layout even before a previous frame exists.
+                assert_eq!(paragraph_layouts(&cache), 2, "{line:?} at {width}");
             }
         }
     }

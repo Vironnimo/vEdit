@@ -258,24 +258,44 @@ fn literal_matches(
     boundaries.push(searchable.len());
     // Fold the query exactly like the text, one scalar at a time.
     let query: String = query.chars().flat_map(fold_case).collect();
-    searchable
-        .match_indices(&query)
-        .enumerate()
-        .take_while(|(index, _)| index & 4095 != 0 || !cancelled(cancel))
-        .filter_map(|(_, (byte_start, matched))| {
-            let start = boundaries.binary_search(&byte_start).ok()?;
-            let end = boundaries
-                .binary_search(&(byte_start + matched.len()))
-                .ok()?;
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    'scan: loop {
+        for (index, (relative_start, matched)) in
+            searchable[offset..].match_indices(&query).enumerate()
+        {
+            if index & 4095 == 0 && cancelled(cancel) {
+                return matches;
+            }
+            let byte_start = offset + relative_start;
+            let start = match boundaries.binary_search(&byte_start) {
+                Ok(start) => start,
+                Err(next) => {
+                    offset = boundaries[next];
+                    continue 'scan;
+                }
+            };
+            let end = match boundaries.binary_search(&(byte_start + matched.len())) {
+                Ok(end) => end,
+                Err(_) => {
+                    // A partial lowercase expansion is not a source match.
+                    // Resume at the next source character, so this rejected
+                    // candidate cannot consume a later complete match.
+                    offset = boundaries[start + 1];
+                    continue 'scan;
+                }
+            };
             if whole_word
                 && (start > 0 && word_char(chars[start - 1])
                     || end < chars.len() && word_char(chars[end]))
             {
-                return None;
+                continue;
             }
-            Some(start..end)
-        })
-        .collect()
+            matches.push(start..end);
+        }
+        break;
+    }
+    matches
 }
 
 /// `searchable` shares the original byte boundaries: either the original text
@@ -426,6 +446,22 @@ mod tests {
         assert_eq!(
             search("a ΟΔΟΣ b", "ΟΔΟΣ", false, true, false).unwrap(),
             vec![2..6]
+        );
+    }
+
+    #[test]
+    fn rejected_partial_case_expansions_do_not_hide_complete_matches() {
+        assert_eq!(
+            search("İİi", "İi", false, false, false).unwrap(),
+            vec![1..3]
+        );
+        assert_eq!(
+            search("İİi İİi", "İi", false, false, false).unwrap(),
+            vec![1..3, 5..7]
+        );
+        assert_eq!(
+            search("İİiİi", "İi", false, false, false).unwrap(),
+            vec![1..3, 3..5]
         );
     }
 

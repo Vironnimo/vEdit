@@ -786,13 +786,21 @@ fn assign_anchors(blocks: &mut [Block], seen: &mut std::collections::HashMap<Str
                         .map(|span| span.text.as_str())
                         .collect::<String>(),
                 );
-                let count = seen.entry(base.clone()).or_default();
-                *anchor = if *count == 0 {
-                    base
+                let mut count = seen.get(&base).copied().unwrap_or_default();
+                let mut candidate = if count == 0 {
+                    base.clone()
                 } else {
                     format!("{base}-{count}")
                 };
-                *count += 1;
+                while seen.contains_key(&candidate) {
+                    count += 1;
+                    candidate = format!("{base}-{count}");
+                }
+                seen.insert(base, count + 1);
+                // Generated suffixes must also reserve their anchor, since a
+                // later heading can contain that suffix in its own text.
+                seen.entry(candidate.clone()).or_insert(1);
+                *anchor = candidate;
             }
             BlockKind::Quote(children) => assign_anchors(children, seen),
             BlockKind::List { items, .. } => {
@@ -1873,6 +1881,25 @@ mod tests {
         assert!(
             matches!(&document.blocks[2].kind, BlockKind::Heading { anchor, .. } if anchor == "next-1")
         );
+    }
+
+    #[test]
+    fn generated_heading_anchors_do_not_collide_with_explicit_suffixes() {
+        for (text, expected) in [
+            ("# A\n\n# A-1\n\n# A\n", ["a", "a-1", "a-2"]),
+            ("# A\n\n# A\n\n# A-1\n", ["a", "a-1", "a-1-1"]),
+        ] {
+            let document = parse(text);
+            let anchors = document
+                .blocks
+                .iter()
+                .filter_map(|block| match &block.kind {
+                    BlockKind::Heading { anchor, .. } => Some(anchor.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(anchors, expected);
+        }
     }
 
     #[test]
