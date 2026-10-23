@@ -307,10 +307,7 @@ impl VEditApp {
                 } else {
                     "unavailable"
                 },
-                format!(
-                    "{error}\n{}\nUse Restart language analysis to reconnect.",
-                    config.install_hint()
-                ),
+                format!("{error}\nUse Restart language analysis to reconnect."),
                 ORANGE,
             )
         } else if session.is_some_and(|session| {
@@ -406,8 +403,17 @@ impl VEditApp {
             .collect();
         for config in relevant {
             let status = self.status_for_language(&config);
+            let error = self
+                .project()
+                .and_then(|project| project.languages.get(&config.language_id))
+                .and_then(|session| session.error.clone());
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(status.color, status.label);
+                if let Some(error) = &error
+                    && ui.button("Error details…").clicked()
+                {
+                    self.open_message_details(error.clone(), true);
+                }
                 if config.enabled
                     && ui
                         .button(format!("Restart {} analysis", config.name))
@@ -426,7 +432,18 @@ impl VEditApp {
                     self.ctx.request_repaint();
                 }
             });
-            ui.label(RichText::new(status.hint).size(11.0).color(MUTED));
+            if let Some(error) = error {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(error.lines().next().unwrap_or("Language analysis failed"))
+                            .size(11.0)
+                            .color(MUTED),
+                    )
+                    .truncate(),
+                );
+            } else {
+                ui.label(RichText::new(status.hint).size(11.0).color(MUTED));
+            }
         }
         if ui.button("Language settings…").clicked() {
             self.open_settings_section("Languages");

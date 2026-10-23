@@ -31,6 +31,13 @@ try {
 Both configurations also stop Git's parent-directory discovery at `.tmp/`, so
 an uninitialized test fixture cannot select the source repository. Normal
 per-fixture cleanup remains in place. `cargo clean` leaves `.tmp/` intact.
+
+vEdit adds `.tmp` to rust-analyzer's `files.exclude` in the resolved initialization
+and workspace settings, including existing profiles. This keeps transient test
+files out of the live editor's Rust analysis while tests run in this checkout.
+Custom exclusions are retained. A stopped server's status message and Problems
+entry open copyable details with its exit status and retained stderr.
+
 `cargo test --test project_temp` checks Cargo's paths and Git isolation;
 `powershell.exe -NoProfile -File scripts/test-project-temp.ps1` checks PowerShell
 child processes and environment restoration.

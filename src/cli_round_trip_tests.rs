@@ -4,6 +4,51 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 #[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
+fn status_message_details_cli_round_trip_in_isolated_editor() {
+    let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
+    let root = std::env::temp_dir().join(format!(
+        "vedit-cli-round-trip-message-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture(root);
+    let endpoint = fixture.0.join("control");
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.recovery_session_path = fixture.0.join("session.json");
+    app.control = Some(cli::Server::start_test(app.ctx.clone(), endpoint.clone()).unwrap());
+    let message = "Rust analysis stopped (exit code: 101).\r\nFull error ü 🦀\r\n".repeat(80);
+    app.status(message.clone(), true);
+    app.open_message_details(message.clone(), true);
+    app.status("Later status", false);
+    let mut invoke = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        command.args(args);
+        let output = run(&mut app, command, &endpoint);
+        (
+            output.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        )
+    };
+    let (code, response) = invoke(&["status"]);
+    assert_eq!(code, 0);
+    assert_eq!(response["result"]["status_message"]["text"], "Later status");
+    assert_eq!(response["result"]["message_details"]["text"], message);
+    assert_eq!(response["result"]["dialog"], "message_details");
+    let (code, response) = invoke(&["new", "Draft"]);
+    assert_ne!(code, 0);
+    assert_eq!(response["error"]["code"], "user_dialog_open");
+    let (code, response) = invoke(&["read", "999"]);
+    assert_ne!(code, 0);
+    assert_eq!(response["error"]["code"], "unknown_tab");
+    assert!(app.projects.is_empty());
+}
+
+#[test]
+#[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
 fn multicursor_settings_cli_round_trip_in_isolated_editor() {
     let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
     let root = std::env::temp_dir().join(format!(

@@ -98,6 +98,7 @@ impl LanguageServerSettings {
     pub fn resolve(&self, root: &Path, python_interpreter: &str) -> crate::lsp::ServerConfig {
         let mut args = self.args.clone();
         let mut settings = self.settings.clone();
+        let mut initialization_options = self.initialization_options.clone();
         let program = if self.program.trim().is_empty() {
             match self.language_id.as_str() {
                 "python" => {
@@ -195,16 +196,54 @@ impl LanguageServerSettings {
                 }
             }
         }
+        if self.language_id == "rust"
+            && (self.program.trim().is_empty()
+                || program
+                    .file_stem()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("rust-analyzer")))
+        {
+            exclude_temporary_projects(&mut initialization_options, None);
+            if let Some(settings) = settings.as_object_mut() {
+                let rust = settings.entry("rust-analyzer").or_insert_with(|| json!({}));
+                exclude_temporary_projects(rust, initialization_options.pointer("/files/exclude"));
+            }
+        }
         let (program, args) = unwrap_windows_launcher(program, args, root);
         crate::lsp::ServerConfig {
             name: self.name.clone(),
             program: program.to_string_lossy().into_owned(),
             args,
             language_id: self.language_id.clone(),
-            initialization_options: self.initialization_options.clone(),
+            initialization_options,
             settings,
             install_hint: self.install_hint(),
         }
+    }
+}
+
+/// Apply to resolved settings as well as fresh defaults, so existing profiles
+/// do not keep watching short-lived test projects. Preserve user exclusions.
+fn exclude_temporary_projects(options: &mut Value, initial_excludes: Option<&Value>) {
+    if options.is_null() {
+        *options = json!({});
+    }
+    let Some(options) = options.as_object_mut() else {
+        return;
+    };
+    let files = options.entry("files").or_insert_with(|| json!({}));
+    let Some(files) = files.as_object_mut() else {
+        return;
+    };
+    let exclude = files.entry("exclude").or_insert_with(|| {
+        initial_excludes
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+    });
+    if let Some(exclude) = exclude.as_array_mut()
+        && !exclude.iter().any(|path| path == ".tmp")
+    {
+        exclude.push(json!(".tmp"));
     }
 }
 
@@ -512,6 +551,74 @@ impl VEditApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_temporary_exclusion_is_present_once_and_other_servers_are_untouched() {
+        let root = Path::new("C:/workspace");
+        let mut rust = defaults().remove(0);
+        rust.initialization_options = Value::Null;
+        rust.settings = json!({"rust-analyzer":{"files":{"exclude":[".tmp","generated"]}}});
+        let resolved = rust.resolve(root, "python");
+        assert_eq!(
+            resolved.initialization_options["files"]["exclude"],
+            json!([".tmp"])
+        );
+        assert_eq!(
+            resolved.settings["rust-analyzer"]["files"]["exclude"],
+            json!([".tmp", "generated"])
+        );
+        let python = defaults().remove(1).resolve(root, "python");
+        assert!(python.initialization_options["files"].is_null());
+        rust.program = "C:/tools/custom-rust-server.exe".into();
+        assert!(
+            rust.resolve(root, "python")
+                .initialization_options
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn rust_workspace_settings_retain_initialization_only_exclusions() {
+        let mut rust = defaults().remove(0);
+        rust.initialization_options = json!({"files":{"exclude":["generated"]}});
+        rust.settings = json!({"rust-analyzer":{"files":{"watcher":"server"}}});
+        let resolved = rust.resolve(Path::new("C:/workspace"), "python");
+        assert_eq!(
+            resolved.settings["rust-analyzer"]["files"]["exclude"],
+            json!(["generated", ".tmp"])
+        );
+        assert_eq!(
+            resolved.settings["rust-analyzer"]["files"]["watcher"],
+            "server"
+        );
+    }
+
+    #[test]
+    fn rust_analysis_excludes_temporary_projects_in_existing_settings() {
+        let mut config = defaults().remove(0);
+        config.initialization_options =
+            json!({"files":{"exclude":["generated"]},"checkOnSave":false});
+        config.settings =
+            json!({"rust-analyzer":{"files":{"exclude":["scratch"]},"cargo":{"features":"all"}}});
+        let resolved = config.resolve(Path::new("C:/workspace"), "python");
+        assert_eq!(
+            resolved.initialization_options["files"]["exclude"],
+            json!(["generated", ".tmp"])
+        );
+        assert_eq!(
+            resolved.settings["rust-analyzer"]["files"]["exclude"],
+            json!(["scratch", ".tmp"])
+        );
+        assert_eq!(resolved.initialization_options["checkOnSave"], false);
+        assert_eq!(
+            resolved.settings["rust-analyzer"]["cargo"]["features"],
+            "all"
+        );
+        assert_eq!(
+            config.initialization_options["files"]["exclude"],
+            json!(["generated"])
+        );
+    }
     #[test]
     fn configs_round_trip_and_extensions_have_one_owner() {
         let settings = defaults();
