@@ -17,7 +17,6 @@ requirements or test counts.
 
 ## Historical reviews and investigations
 
-- [Vorch adoption and orientation trial — 23 October 2026](vorch-adoption-2026-10-23.md)
 - [CLI and operating-skill audit — 0.4.19](cli-audit-0.4.19.md)
 - [Morrow 0.4.10: drei unabhängige Code-Reviews](code-review-0.4.10.md)
 - [Idle CPU investigation](idle-performance-0.4.19.md)
