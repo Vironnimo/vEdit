@@ -29,6 +29,12 @@ snapshot that was actually written.
 
 ## History boundaries
 
+Within the Vim owner, `src/vim/navigation.rs` transfers pane-local state while
+`src/vim/history.rs` implements shared Undo/Redo, insert transactions and dot
+replay. `src/vim/commands.rs` decodes pending keys; `src/vim.rs::handle_key`
+coordinates the completed action and repeat bookkeeping. These are private
+implementation units, not additional application interfaces.
+
 `VimState` owns document history; `VimNavigation` captures the pane-local modal
 and multicursor state. Finish an active Insert transaction before switching views, then restore
 navigation without replacing shared Undo/Redo. Counted insertion can change text
@@ -44,7 +50,7 @@ TextEdit must also use the appropriate native checkpoint path.
 
 `src/disk_sync.rs::replace_with_disk_version` is the existing model for an
 undoable disk replacement: checkpoint both histories, replace content, and map
-every pane's navigation. The ordinary initial/manual load path in `app.rs` is a
+every pane's navigation. The ordinary initial/manual load path in `src/document_loading.rs` is a
 different lifecycle and can reset history; do not substitute it for automatic
 disk synchronization.
 
@@ -91,6 +97,10 @@ boundary remains in `language-services.md`.
 
 ## Regression entry points
 
+- `src/vim/tests/navigation.rs` and `src/vim/tests/history.rs`: pane state,
+  shared history, insert grouping and replay. Clipboard/register contracts live
+  in `src/vim/tests/clipboard.rs`; motions and operators have their own files.
+  `cargo test --bin vedit vim::tests` selects the complete Vim contract set.
 - `src/editor_input_tests.rs`: mixed text/command batches, remapped save/history,
   canceled suffixes after external edits, generated Alt text, AltGr, line edits
   and shared Undo across panes.

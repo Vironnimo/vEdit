@@ -4,8 +4,16 @@ Git supplies repository state, bounded subprocess operations and diff presentati
 
 ## Overview
 
-- `src/git.rs` owns Git invocation, repository detection, status/history parsing, mutations, comparison resolution and patch loading. It is independent of egui.
-- `src/app.rs` owns project Git caches, request identities, worker dispatch/results and the running Git action. `src/git_panel.rs` presents those caches and translates input into actions; it does not run Git while painting.
+- `src/git.rs` owns the egui-independent API and Git data model. Private units in
+  `src/git/` separate repository/status/mutations, changes/patch parsing,
+  review comparisons, history, and bounded command execution.
+- App children `src/git_refresh.rs` and `src/git_actions.rs` own project Git
+  caches, request identities, worker results and the running typed Git action.
+  `src/git_panel.rs` presents those caches and translates input into actions;
+  it does not run Git while painting.
+- The panel keeps shared view state, layout and action dispatch. Private units
+  in `src/git_panel/` own navigation, file trees, changes, history, commit details
+  and repository controls; they use the same state and per-frame inputs.
 - `src/git_repositories.rs`, a child of the panel, caches related worktrees for Source control and the project picker. It reuses open projects' status and separately queries unopened worktrees.
 - `src/git_graph.rs` prepares history lanes. `src/git_diff_view.rs` parses and renders unified patches without modifying buffers. `src/explorer_git.rs` projects cached status onto Explorer rows.
 - `src/git_gutter.rs` compares a document with its committed base and owns gutter previews/reverts. Whole-project change reviews and user comments belong to `reviews.md`; disk conflicts and saved-buffer comparison belong to `documents.md`.
@@ -32,7 +40,7 @@ Paths passed to path-based Git helpers are repository-relative. Invocation uses 
 
 ## Verification pointers
 
-`src/git.rs` tests use real temporary repositories for status, renames, worktrees, frozen history, comparisons and process limits. `src/git_history_tests.rs` covers refresh/page generations and CLI branch switching; `src/git_repositories_tests.rs` covers discovery/cache ownership. `src/git_gutter_tests.rs` covers revision guards, CRLF and Undo. `src/git_ui_tests.rs`, `src/git_ux_tests.rs` and `src/git_modal_tests.rs` cover actual egui interaction and modal ownership; diff parser and graph tests are inline in their owners.
+Tests in `src/git/tests/` use real temporary repositories for status, renames, worktrees, frozen history, comparisons and process limits. `src/git_history_tests.rs` covers refresh/page generations and CLI branch switching; `src/git_repositories_tests.rs` covers discovery/cache ownership. `src/git_gutter_tests.rs` covers revision guards, CRLF and Undo. `src/git_ui_tests.rs`, `src/git_ux_tests.rs` and `src/git_modal_tests.rs` cover actual egui interaction and modal ownership. Panel contracts live in `src/git_panel/tests.rs`; diff parser and graph tests are inline in their owners.
 
 ## References
 

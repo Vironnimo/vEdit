@@ -2,7 +2,7 @@
 
 ## Disk format and save guard
 
-`src/workspace.rs::read_bytes` reads regular files with a size bound and rejects
+`src/workspace/documents.rs::read_bytes` reads regular files with a size bound and rejects
 metadata changes during the read. `decode_document` accepts UTF-8 with an optional
 BOM and rejects binary/invalid UTF-8 input. Document files are not the same input
 surface as CLI text files, which can accept UTF-16 before sending an edit.
@@ -20,7 +20,7 @@ destination confirmed through the native dialog. If the format source cannot be
 verified, saving can succeed with an explicit LF fallback; the returned format
 and user status reflect that fallback. Do not infer formatting from the target.
 
-`app.rs::save_tab_expected` prevents concurrent document load/save jobs, retains
+`document_saving.rs::save_tab_expected` prevents concurrent document load/save jobs, retains
 a confirmed Save As for later completion, and checks filesystem-operation and
 Git checkout guards. Pull/branch-switch operations defer autosave and reject
 explicit saves into their working tree; see `git.md`. The opened path is retained
@@ -29,7 +29,7 @@ document.
 
 ## Completion and external changes
 
-`app.rs::poll` accepts a load only while the document is loading, not saving and
+`document_loading.rs::finish_document_load` accepts a load only while the document is loading, not saving and
 has no new edits. A successful save updates saved text and fingerprint from the
 written snapshot, then recomputes dirty state against the current buffer. If
 newer edits remain, recovery must be rewritten with the new baseline even though
@@ -85,7 +85,7 @@ in `platform.md`.
 
 ## Regression entry points
 
-- Inline `src/workspace.rs` tests cover UTF-8/size rejection, BOM and CRLF,
+- `src/workspace/documents_tests.rs` covers UTF-8/size rejection, BOM and CRLF,
   mixed endings, existing/deleted Save As targets, same-size external changes,
   read-only files and stale temporary-file cleanup.
 - `src/recovery_audit_tests.rs` covers source-versus-target formatting, missing

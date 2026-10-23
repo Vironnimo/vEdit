@@ -5,8 +5,10 @@ application output without turning the editor into an interactive terminal.
 
 ## Overview
 
-- `src/tasks.rs` owns process spawning, pipe readers, UTF-8 decoding, output
-  budgets, cancellation and process-tree cleanup. It contains no UI code.
+- `src/tasks.rs` owns the public command/event API, background worker and
+  cancellation lifecycle. `src/tasks/output.rs` owns pipe readers, UTF-8
+  decoding and shared output budgets; `src/tasks/process.rs` owns process-tree
+  cleanup. They contain no UI code; regressions live in `src/tasks/tests.rs`.
 - `src/project_tasks.rs` owns task profiles, interpreter/environment selection,
   start prerequisites and each project's `ProjectRun`.
 - `src/project_launch.rs` owns application lifecycle, asynchronous launch-config
@@ -14,7 +16,8 @@ application output without turning the editor into an interactive terminal.
   `src/cli_launch.rs` defines and validates the shared launch configuration/actions.
 - `src/task_output_ui.rs` owns cached output presentation and clickable locations;
   `src/output_links.rs` parses locations and resolves their paths.
-- `src/app.rs` integrates task polling and Output; CLI routing belongs to
+- App's `src/app_workers.rs` polls task completions; `src/task_controls.rs`
+  integrates task controls and Output. CLI routing belongs to
   `control.md`. File writes and external-change protection belong to `documents.md`.
 
 ## Terms
@@ -52,6 +55,8 @@ response or a stop request alone does not prove a running/terminated process.
   dropping a project/app handle ends its owned process tree. External services
   outside that tree, including externally managed containers, are not controlled.
   A launcher script must remain alive until its application ends.
+  Task guards terminate remaining descendants even after the parent exits;
+  Git's successful-command release policy in `src/git/command.rs` is different.
 - Output-pane stdin is closed. `open_terminal` intentionally creates a visible,
   independent PowerShell window whose lifetime is separate from task handles.
 - Output links resolve on a worker, trying project root before command working

@@ -2,11 +2,13 @@
 
 ## Commands and input ownership
 
-The `actions!` registry in `src/keybindings.rs` supplies action IDs, labels,
-groups, defaults and palette entries. `run_shortcut_action` and
-`src/app.rs::command_action` connect them to behavior; source editing commands
-also pass through `src/editor_input.rs`. Menus obtain shortcut labels from the
-registry so saved overrides appear in hints.
+The `actions!` registry in `src/command_registry.rs` supplies action IDs, labels,
+groups and defaults. `src/application_commands.rs::run_shortcut_action` matches
+every action exhaustively. `src/command_palette.rs` carries the selected action,
+so a label change cannot change dispatch. Source editing commands also pass
+through `src/editor_input.rs`; `src/workspace_shortcuts.rs` preserves the frame's
+shortcut gates. Menus obtain hints through `keybindings.rs` so saved overrides
+appear in hints.
 
 Bindings are saved by stable action ID. An absent override uses defaults, a
 custom binding replaces all default aliases, and a disabled action remains
@@ -35,10 +37,13 @@ Evidence and regression entry points:
   aliases. A menu-only check does not cover source input dispatch.
 - `src/app_menu_tests.rs`: menu access at the minimum window size and the custom
   close button's unsaved-document guard.
+- `src/palette_ui_tests.rs`: selected command execution, focus restoration and
+  moving lines with one-step Undo in native and Vim modes.
 
 ## Settings
 
-`Settings` and its defaults live in `src/app.rs`; the visible section router is
+`Settings`, defaults and session serialization live in `src/app_session.rs`;
+the visible section router is
 `src/settings_navigation.rs`. Keep specialized updates in their owner: for
 example preview-tab policy, indentation detection, language configuration and
 project tasks have behavior beyond changing a scalar setting.

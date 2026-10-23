@@ -17,8 +17,9 @@ The client uses bounded command, event and reader/writer channels. Its superviso
 waits for wakeups and deadlines; dropping `LanguageServer` requests shutdown and
 wakes it. Event backpressure preserves lifecycle/results/diagnostics, extends
 request/write deadlines, and remains interruptible by shutdown. Read the
-`EventEmitter`, `Protocol` and `ProcessGuard` owners together when changing queues
-or teardown. Protocol size limits and request/write timeouts are named constants
+`EventEmitter`/`ProcessGuard` in `src/lsp/runtime.rs` and `Protocol` operations in
+`src/lsp/protocol.rs` together when changing queues or teardown. Protocol size
+limits and request/write timeouts are named constants
 near the top of `src/lsp.rs`; do not create a second timeout policy in UI code.
 
 After process exit, the worker waits at most 200 ms for the final stderr read so
@@ -74,8 +75,9 @@ pane.
 
 Run targeted filters with `cargo test --bin vedit <filter>` as appropriate:
 
-- `lsp::tests`: framing limits, Unicode/CRLF coordinates, sync capabilities,
-  coalescing, request failures, queue pressure and worker shutdown.
+- `lsp::tests`: `src/lsp/tests/codec.rs` checks framing limits, Unicode/CRLF and
+  reply conversion; `synchronization.rs` checks sync capabilities, coalescing and
+  request failures; `runtime.rs` checks queue pressure, wakeups and shutdown.
 - `server_exit_reports_status_and_panic_before_older_warnings`: exit context,
   panic prioritization and retained server log text.
 - `language_support::tests` (`src/language_support_tests.rs`): restart isolation,

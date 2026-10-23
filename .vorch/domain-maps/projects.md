@@ -5,16 +5,17 @@ trees and navigation without taking ownership of document text or disk saves.
 
 ## Overview
 
-- `src/app.rs` owns `Project`, file opening, project activation and worker-result
-  integration. `src/workspace_ui.rs` owns the project tabs, picker and deferred
+- `src/project_workspace.rs`, private to App, owns `Project`, file opening,
+  project activation and index-result integration. `src/workspace_ui.rs` owns the project tabs, picker and deferred
   worktree selection; Git discovers worktrees (see `git.md`).
 - `src/split.rs` owns pane layouts, document views, pane-local navigation and
   focus routing. `src/tab_drag.rs` handles tab gestures;
   `src/spatial_navigation.rs` selects visible regions geometrically.
 - `src/other_files.rs` routes loose files and drops. It reuses the document and
   layout lifecycle while withholding folder-based services.
-- `src/workspace.rs` owns the Quick Open index and lazy Explorer directory cache
-  as well as disk operations owned by `documents.md`. `src/fs_watch.rs` reports
+- `src/workspace.rs` owns the Quick Open index; its private
+  `src/workspace/explorer.rs` owns the lazy Explorer directory cache. Document
+  I/O is a separate private unit (see `documents.md`). `src/fs_watch.rs` reports
   filesystem changes; `src/explorer_tree_ui.rs`, `src/explorer_navigation.rs` and
   `src/explorer_git.rs` own tree presentation, selection and Git decorations.
 - `src/jump_list.rs` owns per-pane back/forward history. `src/navigation.rs`
@@ -93,6 +94,8 @@ Behavioral entry points are `src/split_tests.rs`, `src/project_layout_tests.rs`,
 `src/navigation_history_tests.rs` and the inline Explorer navigation tests.
 `src/explorer_watch_tests.rs` exercises external changes;
 `src/explorer_filter_tests.rs` checks the Explorer/index boundary.
+`src/workspace/explorer_tests.rs` and `src/workspace/index_tests.rs` cover their
+distinct completeness, publication and resource-bound contracts.
 
 For a targeted pane run use
 `cargo test --bin vedit app::split::tests -- --test-threads=8`.

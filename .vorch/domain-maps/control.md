@@ -4,7 +4,8 @@ The local CLI exposes editor state and actions through a bounded protocol to one
 
 ## Overview
 
-- `src/cli_main.rs` is the executable entry point. `src/cli.rs` owns request/response types, argument parsing, validation, input decoding, schema selection and command execution; `src/cli_help.rs` owns the command catalog and focused help, and `src/cli_schema.json` holds structured examples.
+- `src/cli_main.rs` is the executable entry point. `src/cli.rs` owns request/response types, schema selection and the control facade. Its private `src/cli/` units own token/option parsing (`arguments.rs`), command translation (`commands.rs`), bounded input/path resolution (`input.rs`), shared request invariants (`validation.rs`) and window startup/delivery (`client.rs`). They remain one control owner.
+- `src/cli_help.rs` owns the command catalog and focused help; `src/cli_schema.json` holds structured examples.
 - `src/cli_transport.rs` owns endpoint discovery, authenticated local framing, strict JSON decoding and delivery. `src/cli_spawn.rs` starts the sibling GUI when the selected operation permits it. Window/profile identity belongs to `platform.md`.
 - `src/control.rs` is the GUI-thread adapter and dispatch gate. Its children `src/control_documents.rs` and `src/control_queries.rs` implement document mutations and bounded observations. Feature adapters remain with their existing owners: marks/reviews (`reviews.md`), launches (`execution.md`) and notifications (`application.md`).
 - `.agents/skills/vedit/` is the operating skill, bundled as `skills/vedit/` in portable builds. `docs/agent-interface.md` retains protocol rationale and dated evaluation records. Maps route implementation work; they do not replace the operating skill.
@@ -32,7 +33,7 @@ Edits to existing document text require the observed revision and validate the w
 
 ## Verification pointers
 
-Inline `src/cli.rs` and `src/cli_transport.rs` tests cover parser, validation and transport admission. `src/cli_workflow_tests.rs` covers direct file input/discovery and Unicode encoding. `src/control_documents.rs` tests cover actual mutation, revision, CRLF, Undo and batch effects; `src/agent_projects_tests.rs` covers caller routing/background presentation. `src/cli_round_trip_tests.rs` exercises the actual CLI executable against an isolated receiving editor. Feature-specific receiver tests live with their owner.
+`src/cli/tests.rs` and its `tests/marks.rs` / `tests/settings.rs` children cover parser and validation contracts; inline `src/cli_transport.rs` tests cover transport admission. `src/cli_workflow_tests.rs` covers direct file input/discovery and Unicode encoding. `src/control_documents.rs` tests cover actual mutation, revision, CRLF, Undo and batch effects; `src/agent_projects_tests.rs` covers caller routing/background presentation. `src/cli_round_trip_tests.rs` exercises the actual CLI executable against an isolated receiving editor. Feature-specific receiver tests live with their owner.
 
 ## Agent-facing text
 

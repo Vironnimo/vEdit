@@ -5,12 +5,14 @@ saves and external file changes complete asynchronously.
 
 ## Overview
 
-- `src/app.rs::EditorTab` owns document identity, content, saved comparison,
-  revisions, draft and load/save state. The app also starts and completes
-  document jobs and constructs session snapshots.
-- `src/workspace.rs` owns document reads, decoding, fingerprints and atomic
-  writes. Its indexing/explorer/search responsibilities belong to `projects.md`
-  and `search.md`; the file name is not an ownership boundary.
+- `src/document_state.rs::EditorTab`, private to App, owns document identity,
+  content, saved comparison, revisions, draft and load/save state. App children
+  `src/document_loading.rs`, `src/document_saving.rs` and
+  `src/document_recovery.rs` start and complete their respective jobs;
+  `src/app_session.rs` constructs and restores session snapshots.
+- `src/workspace/documents.rs`, private to `workspace`, owns document reads,
+  decoding, fingerprints and atomic writes. Callers use `workspace`'s existing
+  API. Indexing/explorer/search belong to `projects.md` and `search.md`.
 - `src/disk_sync.rs` observes external versions, performs undoable clean reloads,
   tracks conflicts and presents saved/disk comparisons.
 - `src/recovery.rs` owns recovery records and ordered atomic publication/removal.
@@ -60,9 +62,9 @@ can invalidate a late disk result.
 - A disk conflict preserves the editable buffer and blocks saving to its
   original path until resolved. Clean external reloads remain one Undo step in
   both histories and retain each pane's logical reading position.
-- `workspace.rs` (~2,750 lines, including tests) also owns unrelated filesystem
-  concerns. Treat it as a review hotspot and follow the function's domain before
-  extracting code or changing a shared filesystem helper.
+- The `workspace` owner keeps document I/O, Explorer listings and project search
+  in separate private units. Changing one filesystem policy does not authorize
+  applying it to the other paths.
 
 ## References
 

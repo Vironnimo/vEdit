@@ -10,10 +10,11 @@ with separate ownership and freshness rules for the two paths.
 - `src/find.rs` connects matching to the Find toolbar and Vim search prompt,
   including history, highlight state, cancellation and pending navigation.
   `src/find_worker.rs` performs large-buffer searches off the UI thread.
-- `src/app.rs` renders Find/Replace and project search, performs replacements,
-  schedules project workers and accepts their results.
-- `src/workspace.rs` implements production project search through
-  `search_with_excludes`. `src/cli.rs` validates/normalizes exclusion settings.
+- App children `src/find_toolbar.rs` and `src/project_search_ui.rs` render
+  Find/Replace and project search, perform replacements, schedule project workers
+  and accept their results. The worker poll in `src/app_workers.rs` routes completions.
+- `src/workspace/search.rs` implements production project search through
+  `workspace::search_with_excludes`. `src/cli.rs` validates/normalizes exclusion settings.
   Ex substitutions are owned by `src/ex_commands.rs` (see `editing.md`).
 
 Quick Open searches filenames using the workspace index; it is not content
@@ -48,7 +49,7 @@ display preview. `SearchResults` also reports skipped files, truncation and
 warnings; a bounded or unreadable search must not look complete.
 
 The project worker result carries root, generation, query and exclusions. The
-receiver in `app.rs` accepts only the current combination. Root changes and
+receiver in `project_search_ui.rs` accepts only the current combination. Root changes and
 exclusion edits invalidate outstanding searches, including when an earlier
 worker has already produced a result.
 
@@ -74,12 +75,12 @@ keep its CLI/settings behavior aligned rather than accepting a pattern only in
 one caller.
 
 Project search has separate match, file-size, total-read, traversal and time
-bounds in `workspace.rs`. Bytes read from binary or undecodable files still count
+bounds in `workspace/search.rs`. Bytes read from binary or undecodable files still count
 toward the read budget. Buffer match caching evicts retained results rather than
 truncating a document's matches; do not import project-search truncation into
 in-buffer navigation.
 
-`workspace::search_project` is a test-only index-based helper. Production calls
+`workspace/search.rs::search_project` is a private test-only index-based helper. Production calls
 `search_with_excludes`; changing only that helper cannot change shipped project
 search behavior.
 
@@ -92,5 +93,5 @@ The worker and match cache also have inline cancellation and eviction tests.
 
 `src/project_search_backend_tests.rs` covers exclusions and resource bounds;
 `src/project_search_ui_tests.rs` covers settings and stale worker integration.
-`src/workspace.rs` contains disk-search decoding and coordinate regressions.
+`src/workspace/search_tests.rs` contains disk-search decoding and coordinate regressions.
 See `development.md` for application-level checks after behavior changes.

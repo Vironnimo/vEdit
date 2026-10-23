@@ -21,6 +21,7 @@ Node/npm package the pinned basedpyright server under `tools/basedpyright`.
 src/main.rs            GUI startup, crate modules, window lifecycle
 src/app.rs             App state, frame integration, worker result ownership
 src/<feature>.rs       Core modules or app child modules selected via #[path]
+src/<owner>/           Private implementation units and tests of a core owner
 src/cli_main.rs        Local control client entry point, shared CLI protocol
 scripts/              Developer checks, packaging, installation, worktrees
 tests/                Integration fixtures and headless visual references
@@ -29,6 +30,8 @@ vendor/winit/         Maintained Windows backend patch
 
 Extend the existing owner. The flat file layout does not imply independent
 top-level modules: inspect declarations in `main.rs`, `app.rs` and `cli.rs`.
+Core owners keep private units in a matching directory; App children use the
+explicit paths in `app.rs`. Existing entry points remain the caller's boundary.
 Use about 1,000 lines as a review signal for a source file, not a mechanical split
 requirement. Split by cohesive internal responsibilities behind the same contract.
 

@@ -5,13 +5,18 @@ the egui frame without becoming the owner of every feature it displays.
 
 ## Overview
 
-- `src/app.rs` owns `VEditApp`, shared application types, worker dispatch and
-  `poll`, frame orchestration, the command palette and `command_action`.
+- `src/app.rs` owns `VEditApp`, construction and frame orchestration.
   Its `#[path]` declarations make many flat `src/` files child modules with
   access to this state; check those declarations before changing visibility.
-- `src/keybindings.rs` owns command identities, shortcut defaults and overrides,
-  matching, recording, dispatch integration and visible shortcut labels.
-  `src/app_menu.rs` owns the main menu and status-bar composition.
+- `src/app_workers.rs` owns worker execution, `WorkerResult` and `poll` routing;
+  feature modules apply their results beside the requests they complete.
+- `src/command_registry.rs` owns command identities and defaults;
+  `src/keybindings.rs` owns overrides, matching, recording and visible hints.
+  `src/application_commands.rs` executes typed actions; `src/command_palette.rs`
+  retains those actions independently of displayed labels.
+- `src/app_menu.rs` owns the main menu.
+  `src/app_chrome.rs` renders surrounding workspace chrome and the status bar;
+  `src/app_overlays.rs` orders settings, close and diff dialogs.
 - `src/settings_navigation.rs` routes settings sections;
   `src/editor_preferences.rs` owns reading preferences and their UI.
   Feature-specific settings remain with indentation, language, task and sidebar
@@ -23,7 +28,7 @@ the egui frame without becoming the owner of every feature it displays.
 
 Document lifecycle is in `documents.md`, text/input semantics in `editing.md`,
 pane/project ownership in `projects.md`, and window startup/chrome in
-`platform.md`. The definitions being in `app.rs` do not move those responsibilities.
+`platform.md`. App child modules integrate those owners without replacing them.
 
 ## Interfaces
 
@@ -45,23 +50,27 @@ actions. Event order and focus are behavioral contracts: drawing an overlay late
 in the frame does not by itself prevent earlier source handlers from receiving
 its keys. Read `editing/input-and-history.md` before moving input phases.
 
-Settings and sessions use serde defaults and compatibility aliases in `app.rs`.
+Settings and sessions use serde defaults and compatibility aliases in
+`src/app_session.rs` (sidebar aliases remain on `SidebarView` in `app.rs`).
 Additions must survive old saved sessions and mark persistence dirty where the
 existing owner does so. Layout restoration belongs to `projects.md`; recovery
 publication belongs to `documents.md`.
 
 ## Constraints & Gotchas
 
-- Commands have several entry points. A registry entry alone does not implement
-  palette, menu, keyboard and source-editor behavior. Keep `keybindings.rs`,
-  `command_action`, applicable menus and README behavior aligned.
+- The exhaustive action dispatcher serves shortcuts, palette and command menu
+  items behind existing input gates. Source-editor input ordering still belongs
+  to `editor_input.rs` and `workspace_shortcuts.rs`; registry additions must
+  preserve those gates, menu availability and README behavior.
+- Git completion uses `GitActionKind` in `src/git_actions.rs` for follow-up work;
+  translated or revised display labels must never select behavior. Snapshot and
+  history request/completion guards live in `src/git_refresh.rs`.
 - Notifications are session-only and do not change focus or open documents on
   receipt. The user activates their file/review action from the inbox. Identical
   unread messages coalesce; read messages can start a new entry.
-- `app.rs` (~9,700 lines) and `keybindings.rs` (~1,300 lines) are review hotspots.
-  Their size includes integration and tests; it is not proof of a defect. Keep
-  changes with the existing feature owner, and preserve the above boundaries if
-  extracting cohesive responsibilities.
+- App modules remain methods on the same application state. A file split does
+  not introduce a second document, session or worker owner. Keep shared-document
+  and pane-local state separate when changing those boundaries.
 
 ## References
 

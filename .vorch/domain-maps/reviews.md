@@ -4,7 +4,7 @@ Reviews present changes and preserve the user's selected feedback for agents wit
 
 ## Overview
 
-- `src/change_review.rs`, an app child module, owns each project's continuous change-review view, seen files, parked reading position, lazy patch requests and CLI completion replies. It uses comparisons from `src/git.rs` and patch rendering from `src/git_diff_view.rs` (`git.md`).
+- `src/change_review.rs`, an app child module, owns each project's review state, seen files, parked reading position, lazy patch requests, CLI completion replies and view composition. Private `src/change_review/chrome.rs` owns the header/checklist; `viewport.rs` owns continuous diff geometry, keyboard navigation and sticky file headers. They use comparisons from `src/git.rs` and patch rendering from `src/git_diff_view.rs` (`git.md`).
 - `src/change_review_feedback.rs`, a child of change review, owns diff-row selection, frozen comment drafts, freshness notices and conversion into user marks.
 - `src/agent_marks.rs` owns captured excerpts, source attachment, notes and recoverable delivery receipts. `src/agent_marks_control.rs` adapts that model to app buffers, session persistence and bounded CLI responses; `src/agent_marks_ui.rs` owns the collection and highlights.
 - Agent-authored review annotations use `src/cli.rs` types and the open/review receiver in `src/control.rs`. That protocol belongs to `control.md`; it is separate from the user's mark collection.

@@ -14,7 +14,8 @@ and statistics while keeping reusable layout and worker results tied to their ow
   and focus/selection painting. `palette.rs` is not the command-palette owner.
 - `src/text_statistics.rs` computes offline token counts and formats statistics.
   Its character totals come from `render::LineIndex`.
-- `src/app.rs` composes the source editor, status bar and Markdown view with input,
+- App children `src/source_editor.rs`, `src/editor_view.rs` and `src/app_chrome.rs`
+  compose the source editor, status bar and Markdown view with input,
   selection, search, diagnostics and Git decorations. Per-pane view ownership
   belongs to `projects.md`; text changes belong to `editing.md`.
 

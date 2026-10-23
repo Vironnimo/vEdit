@@ -7,14 +7,16 @@ preserving the document's edit history and each pane's navigation.
 
 - `src/editor.rs` contains pure editing operations returning `EditResult`.
   Shared search entry points delegate to the search owner; see `search.md`.
-- `src/vim.rs` contains modal operations, motions, registers, repeat and Vim
-  history. It does not own pane placement or application commands.
+- `src/vim.rs` owns modal state and the `handle_key` transaction returning an
+  `Action`. Private units in `src/vim/` implement command decoding, navigation,
+  operators, paste/surround edits, history/insert replay and text geometry.
+  The public owner remains `vim`; it does not own pane placement or app commands.
 - `src/multicursor.rs` owns directed selection sets and simultaneous text edits;
   `src/multicursor_ui.rs` owns their input, pointer/layout integration, preferences
   and application transactions. Active multicursor editing is a separate input
   context even when Vim is enabled.
 - `src/editor_input.rs` orders native TextEdit input around application editing
-  commands. `src/app.rs` integrates it with `handle_vim`, the source widget and
+  commands. App's `src/vim_input.rs` and `src/source_editor.rs` integrate `handle_vim`, the source widget and
   global command routing. `src/ex_commands.rs` handles Vim command-line actions.
 - `src/indentation.rs` derives document indentation and exposes its preferences;
   `src/editor_feedback.rs` provides transient source feedback.
@@ -61,13 +63,16 @@ necessarily the last one in document order.
 - Indentation settings affect later edits without reformatting existing text.
   Detection is bounded and cached by revision/byte length; reloads explicitly
   invalidate it because unchanged length/revision alone does not prove identity.
-- `src/vim.rs` (~6,200 lines, including inline tests) and
-  `src/multicursor_ui.rs` (~1,150 lines) are review hotspots. Their
-  navigation/history and pure-operation/UI boundaries matter more than reducing
-  line count.
+- Vim's private units share the document's `VimState`; moving navigation logic
+  does not give panes separate histories or registers. `handle_key` keeps the
+  before/after transaction and repeat bookkeeping in the owner.
+- `src/multicursor_ui.rs` remains a review hotspot; preserve its boundary with
+  the pure simultaneous-edit operations in `src/multicursor.rs`.
 
-Pure operation regressions live inline in `src/editor.rs`, `src/vim.rs` and
-`src/multicursor.rs`; indentation regressions are inline in `src/indentation.rs`.
+Pure operation regressions live inline in `src/editor.rs` and
+`src/multicursor.rs`; Vim contracts are grouped under `src/vim/tests/`, with shared
+input helpers in `src/vim/tests.rs`. Indentation regressions are inline in
+`src/indentation.rs`.
 `src/multicursor_tests.rs` covers the multicursor UI and history integration.
 Use the integration tests below when an edit crosses the widget or history boundary.
 

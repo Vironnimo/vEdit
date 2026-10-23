@@ -72,11 +72,12 @@ tests. `text_statistics` has a `display_at` time input for debounce checks.
 `RevisionTracker::wait_idle` bounds recovery work but currently polls with real
 sleeps. Prefer the owner's explicit completion or time seam when extending tests.
 
-There is no universal fake clock or no-sleep fixture. Several Git process-tree
-regressions intentionally wait seconds to prove a killed child never writes a
-completion marker, and GUI helpers poll real workers. Treat long tests as audit
-candidates: preserve the process-lifecycle contract when replacing waits with
-observable completion. Do not monkey-patch process-wide timing behavior.
+There is no universal fake clock or no-sleep fixture. Windows Git process-tree
+regressions open a native handle to the ready writer, wait for that process to
+exit and then check the absent completion marker. Detached helpers are explicitly
+released after proving they survived the command. The real pipe-exit grace remains
+tested; GUI helpers poll real workers. Preserve these lifecycle contracts rather
+than monkey-patching process-wide timing behavior.
 
 ## Isolation that exists
 
@@ -148,9 +149,10 @@ durability contract tests before it can suppress a sync anywhere.
 
 ## Graphics and snapshots
 
-The headless egui harness still creates graphics resources. The survey defaults
-to `WGPU_BACKEND=gl` on Windows unless a value is already set, matching
-`src/visual_tests.rs::harness`, which explicitly selects OpenGL. The multicursor
+The shared `src/visual_tests.rs::harness` creates its explicitly selected OpenGL
+renderer on the first snapshot/render call. UI-only assertions keep the renderer
+lazy; real renders still receive accumulated texture updates. The survey defaults
+to `WGPU_BACKEND=gl` on Windows unless a value is already set. The multicursor
 harness honors the environment choice; on this host its DX12 device creation
 failed while GL passed against the unchanged snapshot. An environment preference
 is not proof of every harness's actual renderer. Driver crashes can

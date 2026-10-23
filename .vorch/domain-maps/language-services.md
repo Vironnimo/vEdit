@@ -5,13 +5,16 @@ present diagnostics, completions and code navigation in the editor.
 
 ## Overview
 
-- `src/lsp.rs` owns the process, JSON-RPC framing, initialization, document sync,
-  request deadlines, capability negotiation and protocol/text conversions.
+- `src/lsp.rs` owns the language-client types, nonblocking handle and protocol
+  state. Its private `src/lsp/` units own process/event supervision (`runtime.rs`),
+  negotiated sync and request dispatch (`protocol.rs`), bounded reply conversion
+  (`replies.rs`) and wire framing/UTF-16/path conversion (`codec.rs`). These are
+  internal units of the same owner, not separate language services.
 - `src/language_support.rs` owns per-project, per-language `LanguageSession`
   lifecycle, document transmission state, diagnostics ownership and restart.
 - `src/language_settings.rs` validates language configurations and resolves server
   executables; `src/project_tasks.rs` supplies the project's Python interpreter.
-- `src/app.rs` integrates `poll_languages`, definition/completion requests and
+- App's `src/language_integration.rs` integrates `poll_languages`, definition/completion requests and
   completion edits. `src/language_intel.rs` owns hover, references and symbols;
   `src/problems.rs` owns diagnostic lists and next/previous problem navigation.
 - These UI modules are children of `app`, not separate crate-level services.
@@ -55,7 +58,7 @@ these checks into a single global "latest result".
 - Diagnostics without a version do not prove freshness. Support-file diagnostics
   can belong to a session even when their extension is not that session's source
   extension. Deleted/renamed paths must not return through late publications.
-- Process shutdown, bounded queues and backpressure belong in `lsp.rs`; moving
+- Process shutdown, bounded queues and backpressure belong in `lsp/runtime.rs`; moving
   work into UI polling would bypass the client's cancellation and timeout rules.
 
 ## References
