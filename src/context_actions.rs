@@ -816,6 +816,7 @@ impl VEditApp {
                 EditorAction::SelectAll => {
                     let tab = self.tab_mut().unwrap();
                     tab.vim.multi.checkpoint();
+                    tab.vim.multi.finish_placement(usize::MAX);
                     tab.vim.multi.selections = vec![crate::multicursor::Selection::new(
                         0,
                         tab.text.chars().count(),
@@ -1266,12 +1267,12 @@ impl VEditApp {
                     let response = design::menu_item(
                         ui,
                         "Rename…",
-                        "F2",
+                        &self.shortcut_label(keybindings::Action::ExplorerRename),
                         "Rename without replacing another file; unsaved buffers stay open",
                     );
                     // egui concatenates the shortcut into a Button's default
                     // accessible name. Keep the command name stable while its
-                    // visible F2 hint remains available alongside it.
+                    // visible shortcut hint remains available alongside it.
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -1292,7 +1293,7 @@ impl VEditApp {
                     let response = design::menu_item(
                         ui,
                         "Delete",
-                        "Del",
+                        &self.shortcut_label(keybindings::Action::ExplorerDelete),
                         "Move this item to the Windows Recycle Bin",
                     );
                     response.widget_info(|| {
@@ -1512,7 +1513,7 @@ impl VEditApp {
             dialog.return_to_explorer = true;
         }
         // The name field owns the next frame's keyboard input. Explorer has
-        // already consumed this frame's F2 and trailing text before opening it.
+        // already consumed the rename command and trailing text before opening it.
         if let Some(tab) = self.tab_mut() {
             tab.focus = false;
         }

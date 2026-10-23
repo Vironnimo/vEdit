@@ -70,7 +70,7 @@ pub(super) fn review_header(
                 .size(11.5)
                 .color(MUTED),
         )
-        .on_hover_text("Space marks the current file seen and moves to the next unseen file. A file that changes again becomes unseen.");
+        .on_hover_text(review_hint(&context.bindings, keybindings::Action::ReviewSeenNext, "Mark the current file seen and continue to the next unseen file. A changed file becomes unseen again."));
         let (added, removed) = view.totals();
         let tip = "Lines added and removed in this comparison";
         ui.label(

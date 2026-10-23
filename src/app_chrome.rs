@@ -159,18 +159,20 @@ impl VEditApp {
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 ui.horizontal_centered(|ui| {
                     // Resting modes stay muted; color marks modes that change what keys do.
-                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
+                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.placing()) { ("PLACE", ORANGE) } else if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
-                        .on_hover_text("MULTI: standard editing at every cursor; Esc returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal");
+                        .on_hover_text(format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)));
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
-                        let count = tab.vim.multi.selections.len();
-                        ui.label(RichText::new(format!("{count} {}", if count == 1 { "cursor" } else { "cursors" })).size(11.0).color(BLUE))
-                            .on_hover_text(format!("All selections are edited together. Undo last cursor selection: {}. Esc exits multicursor editing.", self.shortcut_label(keybindings::Action::CursorUndo)));
+                        let placing = tab.vim.multi.placing();
+                        let count = tab.vim.multi.selections.len() - usize::from(placing);
+                        let noun = if placing { "marked" } else if count == 1 { "cursor" } else { "cursors" };
+                        ui.label(RichText::new(format!("{count} {noun}")).size(11.0).color(BLUE))
+                            .on_hover_text(format!("Mark another position: {}. Finish placement and include the active cursor: {}. Undo last cursor selection: {}. Return to one cursor: {}.", self.shortcut_label(keybindings::Action::MarkCursor), self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::CursorUndo), self.shortcut_label(keybindings::Action::ExitMulticursor)));
                     }
                     if let Some(tab) = self.tab() {
                         let pending = tab.vim.pending_command();
@@ -190,6 +192,10 @@ impl VEditApp {
                         let hint = jump.state.hint();
                         ui.add(egui::Label::new(RichText::new(&hint).size(11.0).color(ORANGE)).truncate())
                             .on_hover_text("Type 1–3 characters to find visible text, then type its letter label to jump. Home-row letters come first; possible search continuations stay available for typing. Enter locks a shorter query or jumps to the only match. Three characters lock automatically. Backspace corrects a label, unlocks an Enter-confirmed query, or deletes a search character. Esc cancels.");
+                    } else if !status_error && self.tab().is_some_and(|t| t.vim.multi.placing()) {
+                        let hint = format!("Arrows: move · {}: mark · {}: edit · {}: cancel", self.shortcut_label(keybindings::Action::MarkCursor), self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor));
+                        let width = (ui.available_width() - right_budget).clamp(24.0, 480.0);
+                        ui.add_sized([width, 20.0], egui::Label::new(RichText::new(&hint).size(11.0).color(MUTED)).truncate()).on_hover_text(hint);
                     } else if let Some((_, error, time)) = &self.status
                         && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);

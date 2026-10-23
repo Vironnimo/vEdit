@@ -11,7 +11,12 @@ pub(super) fn show_history(
     keyboard_target: Option<egui::Id>,
     actions: &mut Vec<GitUiAction>,
 ) {
-    let &PanelContext { root, busy, .. } = panel;
+    let &PanelContext {
+        root,
+        busy,
+        bindings,
+        ..
+    } = panel;
     let initial_history_loading = project.git_loading
         && project.git_history_snapshot.is_none()
         && project.recent_commits.is_empty();
@@ -117,7 +122,7 @@ pub(super) fn show_history(
                                 actions
                                     .push(GitUiAction::ReviewCommit(commit.hash.clone()));
                             }
-                            git_context_menu(&response, |ui, focus| {
+                            git_context_menu(&response, bindings, |ui, focus| {
                                 if git_menu_item(
                                     ui,
                                     "Open commit",

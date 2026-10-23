@@ -149,7 +149,7 @@ impl VEditApp {
                             });
                             ui.label(RichText::new(if detail.parents.len() > 1 { "Changes against the first parent · select a file to view its patch" } else { "Select a file to view its patch in this commit" }).size(10.5).color(MUTED));
                             ui.add_space(7.0);
-                            draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &mut actions);
+                            draw_file_tree(ui, tree, "", 0, TreeContext::Commit(&hash), &root, &mut state.expanded, &mut state.selected_file, false, &self.settings.keybindings, &mut actions);
                         });
                     state.detail_page_rows =
                         (detail_scroll.inner_rect.height() / 31.0).floor().max(1.0) as usize;

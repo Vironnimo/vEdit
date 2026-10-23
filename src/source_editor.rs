@@ -182,53 +182,15 @@ impl VEditApp {
         let mut native_custom_edit = false;
         if pane_focused && source_editable && ctx.memory(|m| m.has_focus(id)) {
             let indentation = tab.indentation(&settings);
-            let indent = indentation.unit();
-            let edit = match editor_command {
-                Some(editor_input::Command::Comment) => Some(editor::toggle_line_comment(
+            let edit = editor_command.and_then(|command| {
+                editor_input::edit(
+                    command,
                     &tab.text,
                     tab.selection.clone(),
+                    indentation,
                     crate::file_kind::comment_language(tab.path.as_deref()),
-                )),
-                Some(editor_input::Command::Duplicate) => {
-                    Some(editor::duplicate_lines(&tab.text, tab.selection.clone()))
-                }
-                Some(editor_input::Command::DeleteLine) => {
-                    Some(editor::delete_lines(&tab.text, tab.selection.clone()))
-                }
-                Some(editor_input::Command::InsertLine(above)) => Some(editor::insert_line(
-                    &tab.text,
-                    tab.selection.clone(),
-                    &indent,
-                    above,
-                )),
-                Some(editor_input::Command::MoveLine(down)) => {
-                    Some(editor::move_lines(&tab.text, tab.selection.clone(), down))
-                }
-                Some(editor_input::Command::Indent(outdent)) => {
-                    Some(if !outdent && tab.selection.is_empty() {
-                        editor::insert_tab(
-                            &tab.text,
-                            tab.selection.clone(),
-                            indentation.width,
-                            indentation.tabs,
-                        )
-                    } else {
-                        editor::indent_lines_with_width(
-                            &tab.text,
-                            tab.selection.clone(),
-                            &indent,
-                            indentation.width,
-                            outdent,
-                        )
-                    })
-                }
-                Some(editor_input::Command::Newline) => Some(editor::smart_newline(
-                    &tab.text,
-                    tab.selection.clone(),
-                    &indent,
-                )),
-                _ => None,
-            };
+                )
+            });
             if let Some(edit) = edit {
                 native_custom_edit = !settings.vim && edit.text != tab.text;
                 if native_custom_edit {

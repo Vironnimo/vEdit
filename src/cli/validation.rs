@@ -263,10 +263,15 @@ pub fn validate(request: &Request) -> Result<(), String> {
                     || bindings.iter().any(|(id, binding)| {
                         id.is_empty()
                             || id.len() > 80
-                            || binding.as_ref().is_some_and(|value| value.len() > 100)
+                            || binding.as_ref().is_some_and(|binding| {
+                                !(1..=MAX_SHORTCUT_ALIASES).contains(&binding.values().count())
+                                    || binding.values().any(|value| {
+                                        value.is_empty() || value.len() > MAX_SHORTCUT_BYTES
+                                    })
+                            })
                     }))
             {
-                return Err("keybindings supports at most 128 action IDs (1..80 bytes) and shortcut strings up to 100 bytes".into());
+                return Err("keybindings supports at most 128 action IDs (1..80 bytes), each set to null or 1..8 shortcut strings (1..100 bytes each); no settings were changed".into());
             }
             if let Some(excludes) = &patch.search_excludes {
                 normalize_search_excludes(excludes)?;

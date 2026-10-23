@@ -297,6 +297,10 @@ impl VEditApp {
         self.language_request_unavailable();
     }
     pub(super) fn request_completion(&mut self) {
+        if self.tab().is_some_and(|tab| tab.vim.multi.placing()) && !self.finish_cursor_placement()
+        {
+            return;
+        }
         self.sync_languages(true);
         let Some(project) = self.project() else {
             return;

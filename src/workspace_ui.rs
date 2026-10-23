@@ -421,7 +421,11 @@ impl VEditApp {
                                     if response.clicked() {
                                         chosen = Some((index, response.rect));
                                     }
-                                    if let Some(action) = project_context_menu(&response, tab) {
+                                    if let Some(action) = project_context_menu(
+                                        &response,
+                                        tab,
+                                        &self.settings.keybindings,
+                                    ) {
                                         self.workspace_ui.pending =
                                             Some(WorkspaceAction::Project {
                                                 root: tab.root.clone(),
@@ -882,12 +886,11 @@ fn project_text(
 fn project_context_menu(
     response: &egui::Response,
     tab: &ProjectHeaderTab,
+    bindings: &keybindings::Bindings,
 ) -> Option<ProjectAction> {
     let mut action = None;
     let keyboard = response.has_focus()
-        && response
-            .ctx
-            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+        && keybindings::consume(bindings, keybindings::Action::ContextMenu, &response.ctx);
     let popup = egui::Popup::context_menu(response);
     let position_key = popup.get_id().with("keyboard-position");
     if keyboard {

@@ -699,7 +699,13 @@ fn commands_navigation_keeps_query_focus_and_enter_runs_only_the_selection() {
     open(&mut screen, Palette::Commands);
     screen.key_press(Key::End);
     screen.run_steps(3);
-    let commands = keybindings::Action::ALL;
+    let commands: Vec<_> = keybindings::Action::ALL
+        .iter()
+        .copied()
+        .filter(|action| action.palette_visible())
+        .collect();
+    assert!(!commands.contains(&keybindings::Action::ContextMenu));
+    assert!(!commands.contains(&keybindings::Action::ReviewSubmitComment));
     assert_eq!(screen.state().palette_selected, commands.len() - 1);
     let action = commands[commands.len() - 1];
     let name = action.label();

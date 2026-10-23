@@ -1,116 +1,7 @@
 //! Continuous diff viewport, row navigation and sticky file headers.
+use super::input::take_review_keys;
 use super::*;
 use crate::design::HoverDetails;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ReviewKey {
-    Lines(f32),
-    Pages(f32),
-    Top,
-    Bottom,
-    NextFile,
-    PreviousFile,
-    SeenNext,
-    Open,
-    Close,
-    /// Shift+Arrow: extend the selected diff rows by one.
-    Extend(isize),
-    /// c: comment on the selected rows, or on the line on screen.
-    Comment,
-}
-
-/// Take this frame's review keys. Letters normally arrive as a key press and
-/// its text; the text decides, and the key alone counts only without text.
-fn take_review_keys(ctx: &egui::Context, swap_jk: bool) -> Vec<ReviewKey> {
-    let (down, up) = if swap_jk { ('k', 'j') } else { ('j', 'k') };
-    let character = |ch: char| match ch {
-        ch if ch == down => Some(ReviewKey::Lines(1.0)),
-        ch if ch == up => Some(ReviewKey::Lines(-1.0)),
-        'n' | ']' => Some(ReviewKey::NextFile),
-        'p' | '[' => Some(ReviewKey::PreviousFile),
-        ' ' => Some(ReviewKey::SeenNext),
-        'o' => Some(ReviewKey::Open),
-        'c' => Some(ReviewKey::Comment),
-        _ => None,
-    };
-    let mut keys = Vec::new();
-    ctx.input_mut(|input| {
-        let text: String = input
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                egui::Event::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        input.events.retain(|event| match event {
-            egui::Event::Text(value) => {
-                if !value.is_empty() && value.chars().all(|ch| character(ch).is_some()) {
-                    keys.extend(value.chars().filter_map(character));
-                    false
-                } else {
-                    true
-                }
-            }
-            egui::Event::Key {
-                key: key @ (Key::ArrowDown | Key::ArrowUp),
-                pressed: true,
-                modifiers,
-                ..
-            } if *modifiers == egui::Modifiers::SHIFT => {
-                keys.push(ReviewKey::Extend(if *key == Key::ArrowDown {
-                    1
-                } else {
-                    -1
-                }));
-                false
-            }
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } if modifiers.is_none() => {
-                let letter = match key {
-                    Key::J => Some('j'),
-                    Key::K => Some('k'),
-                    Key::N => Some('n'),
-                    Key::P => Some('p'),
-                    Key::O => Some('o'),
-                    Key::C => Some('c'),
-                    Key::Space => Some(' '),
-                    Key::OpenBracket => Some('['),
-                    Key::CloseBracket => Some(']'),
-                    _ => None,
-                };
-                let command = match key {
-                    Key::ArrowDown => Some(ReviewKey::Lines(1.0)),
-                    Key::ArrowUp => Some(ReviewKey::Lines(-1.0)),
-                    Key::PageDown => Some(ReviewKey::Pages(1.0)),
-                    Key::PageUp => Some(ReviewKey::Pages(-1.0)),
-                    Key::Home => Some(ReviewKey::Top),
-                    Key::End => Some(ReviewKey::Bottom),
-                    Key::Enter => Some(ReviewKey::Open),
-                    Key::Escape => Some(ReviewKey::Close),
-                    _ => match letter {
-                        Some(ch) if text.contains(ch) => return false,
-                        Some(ch) => character(ch),
-                        None => None,
-                    },
-                };
-                match command {
-                    Some(command) => {
-                        keys.push(command);
-                        false
-                    }
-                    None => true,
-                }
-            }
-            _ => true,
-        });
-    });
-    keys
-}
 
 /// The first new-side line below the sticky header of `file`.
 fn line_at(view: &ChangeReview, file: usize, offset: f32) -> Option<usize> {
@@ -131,7 +22,7 @@ pub(super) fn diff_body(
     view: &mut ChangeReview,
     seen: &mut SeenMarks,
     body_id: egui::Id,
-    swap_jk: bool,
+    context: &feedback::ReviewContext,
     actions: &mut Vec<ReviewAction>,
 ) {
     let mut child = ui.new_child(
@@ -234,15 +125,18 @@ pub(super) fn diff_body(
     let top_layer = ui
         .ctx()
         .memory(|memory| memory.areas().top_layer_id(ui.layer_id().order));
-    let keys = if focused
+    let mut keys = std::mem::take(&mut view.pending_commands);
+    if focused
         && ui.is_enabled()
         && !egui::Popup::is_any_open(ui.ctx())
         && top_layer.is_none_or(|layer| layer == ui.layer_id())
     {
-        take_review_keys(ui.ctx(), swap_jk)
-    } else {
-        Vec::new()
-    };
+        keys.extend(take_review_keys(
+            ui.ctx(),
+            context.swap_jk,
+            &context.bindings,
+        ));
+    }
     for key in keys {
         let current = view.file_at(offset);
         match key {
@@ -439,6 +333,7 @@ pub(super) fn diff_body(
                 &view.files[index],
                 view.is_seen(seen, index),
                 index == current && keyboard,
+                &context.bindings,
             );
             if response.open {
                 let line = match &view.files[index].patch {
@@ -458,7 +353,7 @@ pub(super) fn diff_body(
     if let (Some(click), Some((file, row))) = (pointer, hit) {
         feedback::click_row(view, file, row, click);
     }
-    if let Some(comment) = feedback::diff_menu(&body, view) {
+    if let Some(comment) = feedback::diff_menu(&body, view, &context.bindings) {
         match comment {
             Some(draft) => view.comment = Some(draft),
             None => actions.push(ReviewAction::Status(
@@ -527,6 +422,7 @@ fn file_header(
     entry: &ReviewEntry,
     seen: bool,
     keyboard_current: bool,
+    bindings: &keybindings::Bindings,
 ) -> HeaderResponse {
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, PANEL);
@@ -560,7 +456,11 @@ fn file_header(
             RichText::new("Seen").size(12.0).color(MUTED),
         ))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Space marks the current file seen and moves to the next unseen file");
+        .on_hover_text(review_hint(
+            bindings,
+            keybindings::Action::ReviewSeenNext,
+            "Mark the current file seen and continue to the next unseen file",
+        ));
     toggle.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Checkbox,
@@ -575,7 +475,11 @@ fn file_header(
             design::ghost_button(
                 ui,
                 "Open",
-                "Open the current file in the editor · Enter or o opens it at the line on screen",
+                &review_hint(
+                    bindings,
+                    keybindings::Action::ReviewOpenFile,
+                    "Open at the line on screen; Enter also opens the file",
+                ),
             )
         })
         .inner;

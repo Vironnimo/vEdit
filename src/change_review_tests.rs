@@ -434,6 +434,34 @@ fn keys_scroll_jump_mark_seen_and_open_the_line_on_screen() {
     // first hunk of src/app.rs starts at line 12.
     type_key(&mut screen, Key::P, "p");
     assert_eq!(position(&screen), (1, tops[1]));
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("review_next_file".into(), Some("F9".into()));
+    type_key(&mut screen, Key::N, "n");
+    type_key(&mut screen, Key::CloseBracket, "]");
+    assert_eq!(position(&screen), (1, tops[1]), "old aliases are retired");
+    screen.key_press(Key::F9);
+    screen.run_steps(2);
+    assert_eq!(position(&screen), (2, tops[2]));
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert("review_next_file".into(), None);
+    screen
+        .state_mut()
+        .run_shortcut_action(keybindings::Action::ReviewPreviousFile);
+    screen.run_steps(2);
+    assert_eq!(position(&screen), (1, tops[1]));
+    screen.key_press(Key::F9);
+    screen.run_steps(2);
+    assert_eq!(
+        position(&screen),
+        (1, tops[1]),
+        "a disabled command has no keyboard alias"
+    );
     screen.key_press(Key::Enter);
     settle(&mut screen);
     assert!(!screen.state().change_review_visible());

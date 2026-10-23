@@ -33,7 +33,9 @@ impl Selection {
 pub struct State {
     /// Empty means ordinary single-cursor editing. The last entry is primary.
     pub selections: Vec<Selection>,
-    history: Vec<Vec<Selection>>,
+    /// During placement the last selection moves independently of marked ones.
+    placing: bool,
+    history: Vec<(Vec<Selection>, bool)>,
 }
 
 impl State {
@@ -42,6 +44,45 @@ impl State {
     }
     pub fn primary(&self) -> Option<Selection> {
         self.selections.last().copied()
+    }
+    pub fn placing(&self) -> bool {
+        self.placing
+    }
+    pub fn moving_selections(&mut self) -> &mut [Selection] {
+        let start = if self.placing {
+            self.selections.len().saturating_sub(1)
+        } else {
+            0
+        };
+        &mut self.selections[start..]
+    }
+    pub fn mark_cursor(&mut self, limit: usize) -> bool {
+        let Some(primary) = self.primary() else {
+            return true;
+        };
+        let mut next = self.clone();
+        if !next.finish_placement(limit) {
+            return false;
+        }
+        self.checkpoint();
+        self.selections = next.selections;
+        self.selections.push(primary);
+        self.placing = true;
+        true
+    }
+    pub fn finish_placement(&mut self, limit: usize) -> bool {
+        if !self.placing {
+            return true;
+        }
+        let mut next = self.clone();
+        next.placing = false;
+        next.normalize(usize::MAX);
+        if next.selections.len() > limit {
+            return false;
+        }
+        self.placing = false;
+        self.selections = next.selections;
+        true
     }
     pub fn start(&mut self, selection: Selection) {
         if !self.active() {
@@ -52,16 +93,19 @@ impl State {
         *self = Self::default();
     }
     pub fn checkpoint(&mut self) {
-        if self.history.last() != Some(&self.selections) {
-            self.history.push(self.selections.clone());
+        if self.history.last().is_none_or(|(selections, placing)| {
+            selections != &self.selections || *placing != self.placing
+        }) {
+            self.history.push((self.selections.clone(), self.placing));
             if self.history.len() > 100 {
                 self.history.remove(0);
             }
         }
     }
     pub fn undo_selection(&mut self) {
-        if let Some(previous) = self.history.pop() {
-            self.selections = previous;
+        if let Some((selections, placing)) = self.history.pop() {
+            self.selections = selections;
+            self.placing = placing;
         }
     }
     pub fn remap(&mut self, map: impl Fn(usize) -> usize) {
@@ -75,6 +119,13 @@ impl State {
         self.normalize(usize::MAX);
     }
     pub fn normalize(&mut self, len: usize) {
+        // The movable cursor may coincide with a marked one. Keep both until
+        // placement finishes so moving away does not erase the marked position.
+        let moving = if self.placing {
+            self.selections.pop()
+        } else {
+            None
+        };
         // Keep creation order (and the newest primary) while merging overlaps.
         let mut indexed: Vec<_> = self
             .selections
@@ -110,8 +161,16 @@ impl State {
         }
         merged.sort_by_key(|(index, _)| *index);
         self.selections = merged.into_iter().map(|(_, s)| s).collect();
+        if let Some(mut moving) = moving {
+            moving.anchor = moving.anchor.min(len);
+            moving.head = moving.head.min(len);
+            self.selections.push(moving);
+        }
     }
     pub fn toggle(&mut self, position: usize, limit: usize) -> bool {
+        if !self.finish_placement(limit) {
+            return false;
+        }
         self.checkpoint();
         if let Some(index) = self
             .selections
@@ -145,7 +204,11 @@ impl State {
             return false;
         }
         let column = primary.column.unwrap_or(primary.head - rows[row].start);
-        let at = (rows[target].start + column).min(rows[target].end);
+        let boundaries = grapheme_boundaries(text);
+        let at = grapheme_at_or_after(
+            &boundaries,
+            (rows[target].start + column).min(rows[target].end),
+        );
         if self
             .selections
             .iter()
@@ -316,7 +379,7 @@ pub fn move_selections(state: &mut State, text: &str, motion: Motion, extend: bo
     let chars: Vec<_> = text.chars().collect();
     let boundaries = grapheme_boundaries(text);
     let rows = lines(&chars);
-    for s in &mut state.selections {
+    for s in state.moving_selections() {
         let row = row_at(&rows, s.head);
         let range = s.range();
         let head = match motion {
@@ -332,7 +395,10 @@ pub fn move_selections(state: &mut State, text: &str, motion: Motion, extend: bo
                 } else {
                     (row + 1).min(rows.len() - 1)
                 };
-                (rows[target].start + col).min(rows[target].end)
+                grapheme_at_or_after(
+                    &boundaries,
+                    (rows[target].start + col).min(rows[target].end),
+                )
             }
             Motion::Home => {
                 let first = rows[row].start
@@ -371,6 +437,10 @@ fn grapheme_boundaries(text: &str) -> Vec<usize> {
             at
         }))
         .collect()
+}
+
+fn grapheme_at_or_after(boundaries: &[usize], at: usize) -> usize {
+    boundaries[boundaries.partition_point(|boundary| *boundary < at)]
 }
 
 fn previous(chars: &[char], boundaries: &[usize], mut at: usize, by_word: bool) -> usize {
@@ -582,6 +652,46 @@ mod tests {
         s.add_vertical("abcdef\nx\nabcdef", true, 100);
         s.add_vertical("abcdef\nx\nabcdef", true, 100);
         assert_eq!(s.primary().unwrap().head, 13);
+        for ending in ["\n", "\r\n"] {
+            for grapheme in ["👩‍💻", "e\u{301}"] {
+                let text = ["ab", &format!("{grapheme}x"), "cd"].join(ending);
+                let after_grapheme = 2 + ending.len() + grapheme.chars().count();
+                let mut s = state(&[(1, 1)]);
+                s.add_vertical(&text, true, 100);
+                assert_eq!(s.primary().unwrap().head, after_grapheme);
+                assert_eq!(
+                    replace(&text, &mut s, &["X".into()]),
+                    ["aXb", &format!("{grapheme}Xx"), "cd"].join(ending)
+                );
+                let mut s = state(&[(1, 1)]);
+                s.mark_cursor(100);
+                move_selections(&mut s, &text, Motion::Down, false, false);
+                assert_eq!(s.primary().unwrap().head, after_grapheme);
+                move_selections(&mut s, &text, Motion::Down, false, false);
+                assert_eq!(s.primary().unwrap().head, text.chars().count() - 1);
+            }
+        }
+    }
+    #[test]
+    fn placement_limit_is_atomic_and_cursor_undo_restores_marking() {
+        let mut s = state(&[(0, 0)]);
+        assert!(s.mark_cursor(2));
+        move_selections(&mut s, "abcd", Motion::Right, false, false);
+        assert!(s.mark_cursor(2));
+        move_selections(&mut s, "abcd", Motion::Right, false, false);
+        let before = s.clone();
+        assert!(!s.mark_cursor(2));
+        assert!(!s.finish_placement(2));
+        assert_eq!(s, before);
+        s.undo_selection();
+        assert!(s.placing());
+        assert_eq!(
+            s.selections,
+            vec![Selection::new(0, 0), Selection::new(1, 1)]
+        );
+        assert!(s.finish_placement(2));
+        assert!(!s.placing());
+        assert_eq!(replace("abcd", &mut s, &["X".into()]), "XaXbcd");
     }
     #[test]
     fn paste_distributes_in_document_order() {

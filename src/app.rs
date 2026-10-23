@@ -368,7 +368,7 @@ impl VEditApp {
         app.settings.external_open_new_window = crate::profile::external_open_new_window();
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
-        keybindings::migrate_later_defaults(&mut app.settings.keybindings);
+        let shortcut_warnings = keybindings::restore_bindings(&mut app.settings.keybindings);
         app.ctx.set_zoom_factor(app.settings.ui_scale);
         app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
@@ -385,11 +385,17 @@ impl VEditApp {
         for index in 0..app.projects.len() {
             app.index_project(index);
         }
-        app.session_dirty = false;
+        app.session_dirty = !shortcut_warnings.is_empty();
         // Folders first, so mixed shell arguments use the same ownership rule as drops.
         let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| path.is_dir());
         for path in folders.into_iter().chain(files) {
             app.open_argument(path);
+        }
+        if !shortcut_warnings.is_empty() {
+            app.status(
+                format!("Some keyboard shortcuts could not be restored. Open Settings > Keyboard to review them.\n{}", shortcut_warnings.join("\n")),
+                true,
+            );
         }
         app.start_control();
         app

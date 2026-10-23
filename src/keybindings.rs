@@ -1,10 +1,13 @@
-//! Shortcut parsing, persistence, input ownership and keyboard preferences.
+//! Shortcut parsing, persistence, input ownership and recording state.
 use super::*;
 use std::collections::BTreeMap;
 
-pub(super) type Bindings = BTreeMap<String, Option<String>>;
+pub(super) type Bindings = BTreeMap<String, Option<crate::cli::ShortcutBinding>>;
 
-pub(super) use super::command_registry::Action;
+pub(super) use super::command_registry::{Action, Scope};
+
+#[path = "keyboard_settings.rs"]
+mod settings_ui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stroke {
@@ -135,11 +138,24 @@ impl Stroke {
                 "Ctrl+C/X/V (with any modifiers) are reserved for the system clipboard.".into(),
             );
         }
-        if self.key == Key::Escape {
+        let contextual_plain = !self.ctrl
+            && !self.alt
+            && (matches!(
+                (action, self.key),
+                (
+                    Action::InsertNewline | Action::FinishCursorPlacement,
+                    Key::Enter
+                ) | (Action::Indent | Action::Outdent, Key::Tab)
+                    | (Action::ExitMulticursor, Key::Escape)
+                    | (Action::ExplorerDelete, Key::Delete)
+            ) || action.scope() == Scope::Review
+                && (self.key == Key::Space || self.key.symbol_or_name().chars().count() == 1));
+        if self.key == Key::Escape && !contextual_plain {
             return Err("Esc is reserved for closing dialogs and leaving Vim modes.".into());
         }
         if !self.ctrl
             && !self.alt
+            && !contextual_plain
             && !matches!(
                 self.key,
                 Key::F1
@@ -220,7 +236,11 @@ impl Stroke {
 
 fn strokes(bindings: &Bindings, action: Action) -> Vec<Stroke> {
     match bindings.get(action.id()) {
-        Some(Some(value)) => Stroke::parse(value).ok().into_iter().collect(),
+        Some(Some(value)) => value
+            .values()
+            .filter_map(|value| Stroke::parse(value).ok())
+            .filter(|stroke| stroke.safe(action).is_ok())
+            .collect(),
         Some(None) => Vec::new(),
         None => default_strokes(action).to_vec(),
     }
@@ -242,32 +262,13 @@ fn default_strokes(action: Action) -> &'static [Stroke] {
     &DEFAULTS[action as usize]
 }
 
-/// Defaults added after users could assign their keys elsewhere. Saved choices
-/// keep their key; the new command starts without a shortcut instead.
-const LATER_DEFAULTS: [Action; 12] = [
-    Action::ReopenTab,
-    Action::NavigateBack,
-    Action::NavigateForward,
-    Action::NextProblem,
-    Action::PreviousProblem,
-    Action::AddCursorAbove,
-    Action::AddCursorBelow,
-    Action::SelectNextOccurrence,
-    Action::SelectAllOccurrences,
-    Action::SkipOccurrence,
-    Action::CursorUndo,
-    Action::CursorsAtLineEnds,
-];
-
+/// Newly available defaults yield to saved custom choices in overlapping scopes.
 pub(super) fn migrate_later_defaults(bindings: &mut Bindings) {
-    for action in LATER_DEFAULTS {
+    for &action in Action::ALL {
         migrate_later_default(bindings, action);
     }
 }
 
-/// The Reopen default was added after users could assign Ctrl+Shift+T elsewhere.
-/// Preserve those saved choices when upgrading, without changing conflict rules
-/// for new assignments or an explicitly configured Reopen action.
 #[cfg(test)]
 pub(super) fn migrate_reopen_shortcut(bindings: &mut Bindings) {
     migrate_later_default(bindings, Action::ReopenTab);
@@ -277,19 +278,73 @@ fn migrate_later_default(bindings: &mut Bindings, added: Action) {
     if bindings.contains_key(added.id()) {
         return;
     }
-    let defaults = strokes(bindings, added);
-    let occupied = bindings.iter().any(|(id, value)| {
-        let Some(action) = Action::from_id(id) else {
-            return false;
-        };
-        value
-            .as_deref()
-            .and_then(|value| Stroke::parse(value).ok())
-            .is_some_and(|stroke| stroke.safe(action).is_ok() && defaults.contains(&stroke))
-    });
-    if occupied {
-        bindings.insert(added.id().into(), None);
+    let defaults = default_strokes(added);
+    let available: Vec<_> = defaults
+        .iter()
+        .copied()
+        .filter(|stroke| {
+            !bindings
+                .keys()
+                .filter_map(|id| Action::from_id(id))
+                .any(|other| {
+                    added.scope().overlaps(other.scope())
+                        && strokes(bindings, other).contains(stroke)
+                })
+        })
+        .collect();
+    if available.len() != defaults.len() {
+        set_strokes(bindings, added, &available);
     }
+}
+
+fn set_strokes(bindings: &mut Bindings, action: Action, values: &[Stroke]) {
+    bindings.insert(
+        action.id().into(),
+        (!values.is_empty()).then(|| {
+            values
+                .iter()
+                .map(|stroke| stroke.label())
+                .collect::<Vec<_>>()
+                .into()
+        }),
+    );
+}
+
+/// Restore each healthy override independently. Unknown IDs remain available for
+/// a newer version, but cannot match events or block editing known actions.
+pub(super) fn restore_bindings(bindings: &mut Bindings) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut assigned: Vec<(Stroke, Action)> = Vec::new();
+    for &action in Action::ALL {
+        let Some(Some(binding)) = bindings.get(action.id()) else {
+            continue;
+        };
+        let mut valid = Vec::new();
+        for value in binding.values() {
+            let stroke = Stroke::parse(value)
+                .ok()
+                .filter(|stroke| stroke.safe(action).is_ok());
+            if let Some(stroke) = stroke
+                && valid.len() < crate::cli::MAX_SHORTCUT_ALIASES
+                && !valid.contains(&stroke)
+                && !assigned
+                    .iter()
+                    .any(|(old, other)| *old == stroke && action.scope().overlaps(other.scope()))
+            {
+                valid.push(stroke);
+                assigned.push((stroke, action));
+            } else {
+                warnings.push(format!(
+                    "{}: ignored invalid or conflicting shortcut '{}'",
+                    action.label(),
+                    value
+                ));
+            }
+        }
+        set_strokes(bindings, action, &valid);
+    }
+    migrate_later_defaults(bindings);
+    warnings
 }
 
 pub(super) fn matches(bindings: &Bindings, action: Action, event: &egui::Event) -> bool {
@@ -297,10 +352,68 @@ pub(super) fn matches(bindings: &Bindings, action: Action, event: &egui::Event) 
         return false;
     };
     match bindings.get(action.id()) {
-        Some(Some(value)) => Stroke::parse(value).ok() == Some(stroke),
+        Some(Some(values)) => values.values().any(|value| {
+            value.len() <= crate::cli::MAX_SHORTCUT_BYTES
+                && Stroke::parse(value).ok() == Some(stroke)
+                && stroke.safe(action).is_ok()
+        }),
         Some(None) => false,
         None => default_strokes(action).contains(&stroke),
     }
+}
+
+pub(super) fn source_matches(
+    bindings: &Bindings,
+    action: Action,
+    event: &egui::Event,
+    vim_modal: bool,
+    multi: bool,
+    placing: bool,
+) -> bool {
+    if !matches(bindings, action, event) {
+        return false;
+    }
+    let in_scope = match action.scope() {
+        Scope::Global | Scope::Source => true,
+        Scope::SourceEditing => !placing,
+        Scope::CursorPlacement => placing,
+        Scope::Multicursor => multi,
+        _ => false,
+    };
+    if !in_scope {
+        return false;
+    }
+    if vim_modal && !bindings.contains_key(action.id()) {
+        if matches!(
+            action,
+            Action::Find | Action::InsertNewline | Action::Indent | Action::Outdent
+        ) {
+            return false;
+        }
+        if action == Action::ToggleLeftSidebar
+            && matches!(event, egui::Event::Key { modifiers, .. } if !modifiers.alt)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Local widgets consume their own contextual commands after taking focus.
+pub(super) fn consume(bindings: &Bindings, action: Action, ctx: &egui::Context) -> bool {
+    ctx.input_mut(|input| {
+        let Some(index) = input.events.iter().position(|event| matches(bindings, action, event)) else { return false; };
+        let event = input.events.remove(index);
+        if input.events.get(index).is_some_and(|next| shortcut_text_event(next, &event)
+            || matches!((&event, next),
+                (egui::Event::Key { key, modifiers, .. }, egui::Event::Text(text))
+                    if !modifiers.ctrl && !modifiers.command && !modifiers.alt
+                        && (text.eq_ignore_ascii_case(key.symbol_or_name()) || *key == Key::Space && text == " ")))
+        {
+            input.events.remove(index);
+        }
+        true
+    })
 }
 
 pub(super) fn label(bindings: &Bindings, action: Action) -> String {
@@ -367,19 +480,38 @@ fn altgr_text_event(key_event: &egui::Event, text_event: &egui::Event) -> bool {
 }
 
 pub(super) fn validate(bindings: &Bindings) -> Result<(), String> {
+    validate_inner(bindings, false)
+}
+
+fn validate_inner(bindings: &Bindings, allow_unknown: bool) -> Result<(), String> {
     for (id, binding) in bindings {
-        let action =
-            Action::from_id(id).ok_or_else(|| format!("Unknown shortcut action '{id}'"))?;
+        let Some(action) = Action::from_id(id) else {
+            if allow_unknown {
+                continue;
+            }
+            return Err(format!("Unknown shortcut action '{id}'"));
+        };
         if let Some(value) = binding {
-            Stroke::parse(value)?.safe(action)?;
+            let values: Vec<_> = value.values().collect();
+            if values.is_empty() || values.len() > crate::cli::MAX_SHORTCUT_ALIASES {
+                return Err(format!(
+                    "Choose 1–{} shortcuts per command, or disable it.",
+                    crate::cli::MAX_SHORTCUT_ALIASES
+                ));
+            }
+            for value in values {
+                Stroke::parse(value)?.safe(action)?;
+            }
         }
     }
     let mut assigned: Vec<(Stroke, Action)> = Vec::new();
     for &action in Action::ALL {
         for stroke in strokes(bindings, action) {
-            if let Some((_, other)) = assigned.iter().find(|(assigned, _)| *assigned == stroke) {
+            if let Some((_, other)) = assigned.iter().find(|(assigned, other)| {
+                *assigned == stroke && action.scope().overlaps(other.scope())
+            }) {
                 return Err(format!(
-                    "{} is assigned to both '{}' and '{}'. Disable or rebind one of them first.",
+                    "{} is assigned to both '{}' and '{}' in overlapping contexts.",
                     stroke.label(),
                     other.label(),
                     action.label()
@@ -391,10 +523,83 @@ pub(super) fn validate(bindings: &Bindings) -> Result<(), String> {
     Ok(())
 }
 
+fn conflicts(bindings: &Bindings, action: Action, stroke: Stroke) -> Vec<Action> {
+    Action::ALL
+        .iter()
+        .copied()
+        .filter(|other| {
+            *other != action
+                && action.scope().overlaps(other.scope())
+                && strokes(bindings, *other).contains(&stroke)
+        })
+        .collect()
+}
+
+fn assign_alias(
+    bindings: &Bindings,
+    action: Action,
+    index: Option<usize>,
+    stroke: Stroke,
+    reassign: bool,
+) -> Result<Bindings, String> {
+    stroke.safe(action)?;
+    let mut candidate = bindings.clone();
+    if reassign {
+        for other in conflicts(bindings, action, stroke) {
+            let retained: Vec<_> = strokes(bindings, other)
+                .into_iter()
+                .filter(|other| *other != stroke)
+                .collect();
+            set_strokes(&mut candidate, other, &retained);
+        }
+    }
+    let mut values = strokes(bindings, action);
+    if let Some(index) = index.filter(|index| *index < values.len()) {
+        values[index] = stroke;
+    } else {
+        values.push(stroke);
+    }
+    set_strokes(&mut candidate, action, &values);
+    validate_inner(&candidate, true)?;
+    Ok(candidate)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Filter {
+    #[default]
+    All,
+    Modified,
+    Disabled,
+    Default,
+}
+
+impl Filter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All commands",
+            Self::Modified => "Modified",
+            Self::Disabled => "Disabled",
+            Self::Default => "Default",
+        }
+    }
+}
+
+struct PendingConflict {
+    action: Action,
+    index: Option<usize>,
+    stroke: Stroke,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     query: String,
     capture: Option<Action>,
+    capture_index: usize,
+    capture_add: bool,
+    search_capture: bool,
+    search_stroke: Option<Stroke>,
+    filter: Filter,
+    pending_conflict: Option<PendingConflict>,
     feedback: Option<(String, bool)>,
     continuation: Option<WidgetContinuation>,
 }
@@ -520,46 +725,35 @@ impl VEditApp {
         event: &egui::Event,
         (source, vim_modal): (bool, bool),
     ) -> bool {
-        if !self.shortcut_matches(action, event) {
-            return false;
-        }
-        if action.multicursor()
-            && (!source
-                || action == Action::CursorUndo && self.tab().is_none_or(|t| !t.vim.multi.active()))
-        {
-            return false;
-        }
         if matches!(
-            action,
-            Action::Undo
-                | Action::Redo
-                | Action::ToggleComment
-                | Action::DuplicateLine
-                | Action::DeleteLine
-                | Action::InsertLineAbove
-                | Action::InsertLineBelow
-                | Action::MoveLineUp
-                | Action::MoveLineDown
-        ) && !source
-        {
+            action.scope(),
+            Scope::Explorer | Scope::ContextMenu | Scope::Review | Scope::ReviewComment
+        ) {
             return false;
         }
-        if vim_modal && !self.settings.keybindings.contains_key(action.id()) {
-            if action == Action::Find {
-                return false;
-            }
-            if action == Action::OpenFile
-                && self
-                    .tab()
-                    .is_some_and(|tab| tab.vim.mode == VimMode::Normal)
-            {
-                return false;
-            }
-            if action == Action::ToggleLeftSidebar
-                && matches!(event, egui::Event::Key { modifiers, .. } if !modifiers.alt)
-            {
-                return false;
-            }
+        if action.scope().source() && !source {
+            return false;
+        }
+        let multi = self.tab().is_some_and(|tab| tab.vim.multi.active());
+        let placing = self.tab().is_some_and(|tab| tab.vim.multi.placing());
+        if !source_matches(
+            &self.settings.keybindings,
+            action,
+            event,
+            vim_modal,
+            multi,
+            placing,
+        ) {
+            return false;
+        }
+        if vim_modal
+            && action == Action::OpenFile
+            && !self.settings.keybindings.contains_key(action.id())
+            && self
+                .tab()
+                .is_some_and(|tab| tab.vim.mode == VimMode::Normal)
+        {
+            return false;
         }
         true
     }
@@ -594,7 +788,7 @@ impl VEditApp {
         label(&self.settings.keybindings, action)
     }
     pub(super) fn take_shortcut(&self, action: Action) -> bool {
-        if self.keybinding_ui.capture.is_some() {
+        if self.keybinding_ui.capture.is_some() || self.keybinding_ui.search_capture {
             return false;
         }
         let context = self.shortcut_input_context();
@@ -629,6 +823,8 @@ impl VEditApp {
                 .map(|action| serde_json::json!({
                     "action":action.id(), "label":action.label(), "group":action.group(),
                     "shortcut":self.shortcut_label(*action), "defaults":action.defaults(),
+                    "shortcuts":strokes(&self.settings.keybindings,*action).iter().map(|stroke|stroke.label()).collect::<Vec<_>>(),
+                    "context":action.scope().label(),
                     "customized":self.settings.keybindings.contains_key(action.id())
                 }))
                 .collect::<Vec<_>>()
@@ -637,9 +833,10 @@ impl VEditApp {
     /// Before zoom, global commands or modal close logic sees keyboard events.
     pub(super) fn capture_shortcut_input(&mut self) {
         preserve_altgr_text(&self.ctx);
-        let Some(action) = self.keybinding_ui.capture else {
+        let action = self.keybinding_ui.capture;
+        if action.is_none() && !self.keybinding_ui.search_capture {
             return;
-        };
+        }
         let (stroke, clipboard) = self.ctx.input_mut(|input| {
             let stroke = input.events.iter().find_map(|event| {
                 if matches!(event, egui::Event::Key { repeat: true, .. }) {
@@ -669,325 +866,56 @@ impl VEditApp {
         });
         if clipboard {
             self.keybinding_ui.capture = None;
+            self.keybinding_ui.search_capture = false;
             self.keybinding_ui.feedback = Some((
-                "This shortcut is reserved for the system clipboard. Choose another chord.".into(),
+                "This shortcut is reserved for the system clipboard. Choose another combination."
+                    .into(),
                 true,
             ));
             return;
         }
         let Some(stroke) = stroke else { return };
-        self.keybinding_ui.capture = None;
         if stroke.key == Key::Escape {
+            self.keybinding_ui.capture = None;
+            self.keybinding_ui.search_capture = false;
             self.keybinding_ui.feedback =
-                Some(("Recording cancelled; shortcut unchanged.".into(), false));
+                Some(("Recording cancelled; shortcuts unchanged.".into(), false));
             return;
         }
-        let mut candidate = self.settings.keybindings.clone();
-        candidate.insert(action.id().into(), Some(stroke.label()));
-        match validate(&candidate) {
-            Ok(()) => {
+        if self.keybinding_ui.search_capture {
+            self.keybinding_ui.search_capture = false;
+            self.keybinding_ui.search_stroke = Some(stroke);
+            self.keybinding_ui.query.clear();
+            self.keybinding_ui.filter = Filter::All;
+            return;
+        }
+        let action = action.unwrap();
+        if let Err(error) = stroke.safe(action) {
+            self.keybinding_ui.feedback = Some((error, true));
+            return;
+        }
+        let index = (!self.keybinding_ui.capture_add).then_some(self.keybinding_ui.capture_index);
+        if !conflicts(&self.settings.keybindings, action, stroke).is_empty() {
+            self.keybinding_ui.capture = None;
+            self.keybinding_ui.pending_conflict = Some(PendingConflict {
+                action,
+                index,
+                stroke,
+            });
+            self.keybinding_ui.feedback = None;
+            return;
+        }
+        match assign_alias(&self.settings.keybindings, action, index, stroke, false) {
+            Ok(candidate) => {
                 self.settings.keybindings = candidate;
                 self.session_dirty = true;
-                self.keybinding_ui.feedback =
-                    Some((format!("{} → {}", action.label(), stroke.label()), false));
-            }
-            Err(error) => {
-                self.keybinding_ui.capture = Some(action);
-                self.keybinding_ui.feedback = Some((error, true));
-            }
-        }
-    }
-    pub(super) fn keyboard_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut changed = false;
-        editor_preferences::preference_heading(ui, "KEYBOARD SHORTCUTS");
-        ui.label(
-            RichText::new(
-                "Search an action or shortcut, then click its binding to record a new chord.",
-            )
-            .size(11.0)
-            .color(MUTED),
-        );
-        ui.label(RichText::new("Application commands work across the workspace; editing commands require source focus. Plain typing, arrow navigation and clipboard keys are reserved. Custom bindings take priority over the default Vim exceptions.").size(10.5).color(MUTED));
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.keybinding_ui.query)
-                    .id(egui::Id::new("keyboard_shortcut_search"))
-                    .hint_text("Search keyboard shortcuts")
-                    .desired_width((ui.available_width() - 100.0).max(80.0)),
-            );
-            if ui
-                .add_enabled(
-                    !self.settings.keybindings.is_empty(),
-                    egui::Button::new("Reset all"),
-                )
-                .clicked()
-            {
-                self.settings.keybindings.clear();
                 self.keybinding_ui.capture = None;
                 self.keybinding_ui.feedback =
-                    Some(("All shortcuts restored to defaults.".into(), false));
-                changed = true;
+                    Some((format!("{}: {}", action.label(), stroke.label()), false));
             }
-        });
-        if let Some(action) = self.keybinding_ui.capture {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Press shortcut for {} · Esc cancels",
-                        action.label()
-                    ))
-                    .color(TEXT),
-                );
-                if ui.button("Cancel recording").clicked() {
-                    self.keybinding_ui.capture = None;
-                }
-            });
+            Err(error) => self.keybinding_ui.feedback = Some((error, true)),
         }
-        if let Some((message, error)) = &self.keybinding_ui.feedback {
-            ui.label(
-                RichText::new(message)
-                    .size(11.0)
-                    .color(if *error { RED } else { MUTED }),
-            );
-        }
-        let query = self.keybinding_ui.query.trim().to_lowercase();
-        let rows: Vec<_> = Action::ALL
-            .iter()
-            .copied()
-            .filter(|action| {
-                format!(
-                    "{} {} {} {}",
-                    action.label(),
-                    action.id(),
-                    action.group(),
-                    self.shortcut_label(*action)
-                )
-                .to_lowercase()
-                .contains(&query)
-            })
-            .collect();
-        ui.label(
-            RichText::new(format!("{} actions", rows.len()))
-                .size(10.0)
-                .color(MUTED),
-        );
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for action in rows {
-                ui.push_id(action.id(), |ui| {
-                    changed |= self.keyboard_shortcut_row(ui, action)
-                });
-            }
-        });
-        changed
     }
-
-    /// One compact row per action: its name on the left and the binding chip on
-    /// the right. Disable and Reset appear while the row is hovered or focused;
-    /// they stay in the keyboard order after the chip.
-    fn keyboard_shortcut_row(&mut self, ui: &mut egui::Ui, action: Action) -> bool {
-        let mut changed = false;
-        let binding = self.shortcut_label(action);
-        let recording = self.keybinding_ui.capture == Some(action);
-        let can_disable = !binding.is_empty();
-        let can_reset = self.settings.keybindings.contains_key(action.id());
-        let (row, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), SHORTCUT_ROW_HEIGHT),
-            egui::Sense::hover(),
-        );
-        let chip_id = ui.id().with("binding");
-        let disable_id = ui.id().with("disable");
-        let reset_id = ui.id().with("reset");
-        let focused = ui.ctx().memory(|memory| {
-            [chip_id, disable_id, reset_id]
-                .into_iter()
-                .any(|id| memory.has_focus(id))
-        });
-        let active = recording || focused || ui.rect_contains_pointer(row);
-        if active {
-            ui.painter().rect_filled(row, 4.0, SURFACE);
-        }
-
-        let chip_text = if recording {
-            "Press a shortcut…"
-        } else if binding.is_empty() {
-            "Unassigned"
-        } else {
-            &binding
-        };
-        let chip_galley =
-            ui.painter()
-                .layout_no_wrap(chip_text.to_owned(), FontId::proportional(11.5), TEXT);
-        let chip_size = Vec2::new(chip_galley.size().x + 14.0, 20.0);
-        let chip_rect = egui::Rect::from_min_size(
-            egui::pos2(
-                row.right() - 4.0 - chip_size.x,
-                row.center().y - chip_size.y * 0.5,
-            ),
-            chip_size,
-        );
-        let action_galley = |label: &str| {
-            ui.painter()
-                .layout_no_wrap(label.to_owned(), FontId::proportional(11.0), TEXT)
-        };
-        let mut right = chip_rect.left() - 4.0;
-        let mut place = |enabled: bool, galley: Arc<egui::Galley>| {
-            enabled.then(|| {
-                let rect = egui::Rect::from_min_max(
-                    egui::pos2(right - galley.size().x - 14.0, chip_rect.top()),
-                    egui::pos2(right, chip_rect.bottom()),
-                );
-                right = rect.left() - 2.0;
-                (rect, galley)
-            })
-        };
-        let reset_place = place(can_reset, action_galley("Reset"));
-        let disable_place = place(can_disable, action_galley("Disable"));
-
-        let label_rect = egui::Rect::from_x_y_ranges(row.left() + 8.0..=right - 6.0, row.y_range());
-        let label_galley = ui.painter().layout_no_wrap(
-            action.label().to_owned(),
-            FontId::proportional(12.0),
-            TEXT,
-        );
-        ui.painter()
-            .with_clip_rect(label_rect.intersect(ui.clip_rect()))
-            .galley(
-                egui::pos2(
-                    label_rect.left(),
-                    row.center().y - label_galley.size().y * 0.5,
-                ),
-                label_galley,
-                TEXT,
-            );
-        let label = ui.interact(label_rect, ui.id().with("label"), egui::Sense::hover());
-        label.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), action.label())
-        });
-        label.on_hover_text(format!("{} · {}", action.group(), action.context_hint()));
-
-        let chip = ui.interact(chip_rect, chip_id, egui::Sense::click());
-        chip.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), chip_text)
-        });
-        let painter = ui.painter();
-        if chip.hovered() {
-            painter.rect_filled(chip_rect, 4.0, HOVER);
-        } else if !binding.is_empty() || recording {
-            painter.rect_filled(chip_rect, 4.0, SURFACE);
-        }
-        if recording || chip.has_focus() {
-            painter.rect_stroke(
-                chip_rect,
-                4.0,
-                egui::Stroke::new(1.5, ACCENT),
-                egui::StrokeKind::Inside,
-            );
-        } else if !binding.is_empty() {
-            painter.rect_stroke(
-                chip_rect,
-                4.0,
-                egui::Stroke::new(1.0, crate::palette::BORDER_STRONG),
-                egui::StrokeKind::Inside,
-            );
-        }
-        painter.galley_with_override_text_color(
-            chip_rect.center() - chip_galley.size() * 0.5,
-            chip_galley,
-            if binding.is_empty() && !recording && !chip.hovered() {
-                MUTED
-            } else {
-                TEXT
-            },
-        );
-        if chip
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(format!("Record shortcut for {}", action.label()))
-            .clicked()
-        {
-            self.keybinding_ui.capture = Some(action);
-            self.keybinding_ui.feedback = None;
-            if let Some(id) = self.ctx.memory(|memory| memory.focused()) {
-                self.ctx.memory_mut(|memory| memory.surrender_focus(id));
-            }
-        }
-
-        if let Some((rect, galley)) = disable_place
-            && shortcut_row_action(ui, rect, disable_id, "Disable", galley, active)
-                .on_hover_text(format!("Remove the shortcut for {}", action.label()))
-                .clicked()
-        {
-            self.settings.keybindings.insert(action.id().into(), None);
-            self.keybinding_ui.capture = None;
-            self.keybinding_ui.feedback =
-                Some((format!("{} shortcut disabled.", action.label()), false));
-            changed = true;
-        }
-        if let Some((rect, galley)) = reset_place
-            && shortcut_row_action(ui, rect, reset_id, "Reset", galley, active)
-                .on_hover_text(format!(
-                    "Restore the default shortcut for {}",
-                    action.label()
-                ))
-                .clicked()
-        {
-            let mut candidate = self.settings.keybindings.clone();
-            candidate.remove(action.id());
-            match validate(&candidate) {
-                Ok(()) => {
-                    self.settings.keybindings = candidate;
-                    self.keybinding_ui.capture = None;
-                    self.keybinding_ui.feedback =
-                        Some((format!("{} restored to default.", action.label()), false));
-                    changed = true;
-                }
-                Err(error) => self.keybinding_ui.feedback = Some((error, true)),
-            }
-        }
-        changed
-    }
-}
-
-const SHORTCUT_ROW_HEIGHT: f32 = 26.0;
-
-/// A frameless row action that is painted only while its row is active, yet
-/// remains focusable so keyboard users can reach it.
-fn shortcut_row_action(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    id: egui::Id,
-    label: &str,
-    galley: Arc<egui::Galley>,
-    row_active: bool,
-) -> egui::Response {
-    let response = ui.interact(rect, id, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    if row_active || response.has_focus() {
-        let painter = ui.painter();
-        if response.hovered() {
-            painter.rect_filled(rect, 4.0, HOVER);
-        }
-        if response.has_focus() {
-            painter.rect_stroke(
-                rect,
-                4.0,
-                egui::Stroke::new(1.5, ACCENT),
-                egui::StrokeKind::Inside,
-            );
-        }
-        painter.galley_with_override_text_color(
-            rect.center() - galley.size() * 0.5,
-            galley,
-            if response.hovered() || response.has_focus() {
-                TEXT
-            } else {
-                MUTED
-            },
-        );
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[cfg(test)]

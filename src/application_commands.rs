@@ -1,25 +1,9 @@
 //! Typed application command execution, shared by shortcuts, menus and palette.
 use super::*;
-use keybindings::Action;
 
 impl VEditApp {
-    pub(super) fn run_shortcut_action(&mut self, action: Action) {
-        if self.tab().is_some_and(|t| t.vim.multi.active()) {
-            let command = match action {
-                Action::ToggleComment => Some(editor_input::Command::Comment),
-                Action::DuplicateLine => Some(editor_input::Command::Duplicate),
-                Action::DeleteLine => Some(editor_input::Command::DeleteLine),
-                Action::InsertLineAbove => Some(editor_input::Command::InsertLine(true)),
-                Action::InsertLineBelow => Some(editor_input::Command::InsertLine(false)),
-                Action::MoveLineUp => Some(editor_input::Command::MoveLine(false)),
-                Action::MoveLineDown => Some(editor_input::Command::MoveLine(true)),
-                _ => None,
-            };
-            if let Some(command) = command {
-                self.multi_command(command);
-                return;
-            }
-        }
+    pub(super) fn run_shortcut_action(&mut self, action: keybindings::Action) {
+        use keybindings::Action;
         match action {
             Action::CommandPalette => self.open_palette(Palette::Commands),
             Action::QuickOpen => self.open_palette(Palette::Files),
@@ -70,79 +54,6 @@ impl VEditApp {
             Action::KeyboardShortcuts => {
                 self.open_settings_section("Keyboard");
             }
-            Action::Undo | Action::Redo => {
-                if let Some(id) = self.tab().map(|tab| tab.id) {
-                    self.apply_editor_context_action(
-                        id,
-                        if action == Action::Undo {
-                            context_actions::EditorAction::Undo
-                        } else {
-                            context_actions::EditorAction::Redo
-                        },
-                    );
-                }
-            }
-            Action::ToggleComment
-            | Action::DuplicateLine
-            | Action::DeleteLine
-            | Action::InsertLineAbove
-            | Action::InsertLineBelow
-            | Action::MoveLineUp
-            | Action::MoveLineDown => {
-                let Some(id) = self.tab().map(|tab| tab.id) else {
-                    return;
-                };
-                self.context_native_undo_checkpoint(id);
-                let vim = self.settings.vim;
-                let indent = self.tab().unwrap().indentation(&self.settings).unit();
-                let Some(tab) = self.tab_mut().filter(|tab| !tab.loading) else {
-                    return;
-                };
-                let selection = if vim {
-                    tab.vim
-                        .selection(&tab.text)
-                        .unwrap_or_else(|| tab.selection.clone())
-                } else {
-                    tab.selection.clone()
-                };
-                let edit = match action {
-                    Action::ToggleComment => editor::toggle_line_comment(
-                        &tab.text,
-                        selection,
-                        crate::file_kind::comment_language(tab.path.as_deref()),
-                    ),
-                    Action::MoveLineUp | Action::MoveLineDown => {
-                        editor::move_lines(&tab.text, selection, action == Action::MoveLineDown)
-                    }
-                    Action::DeleteLine => editor::delete_lines(&tab.text, selection),
-                    Action::InsertLineAbove | Action::InsertLineBelow => editor::insert_line(
-                        &tab.text,
-                        selection,
-                        &indent,
-                        action == Action::InsertLineAbove,
-                    ),
-                    _ => editor::duplicate_lines(&tab.text, selection),
-                };
-                if edit.text == tab.text {
-                    return;
-                }
-                if matches!(
-                    action,
-                    Action::MoveLineUp | Action::MoveLineDown | Action::DuplicateLine
-                ) {
-                    tab.apply_line_move(edit);
-                } else {
-                    tab.vim.begin_external_edit(&tab.text);
-                    tab.apply(edit);
-                    if matches!(
-                        action,
-                        Action::DeleteLine | Action::InsertLineAbove | Action::InsertLineBelow
-                    ) {
-                        tab.set_cursor(tab.selection.clone());
-                    }
-                    tab.vim.notify_external_text_change();
-                }
-            }
             Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
                 self.interface_zoom_draft = None;
                 self.settings.ui_scale = match action {
@@ -155,7 +66,6 @@ impl VEditApp {
                 self.ctx.set_zoom_factor(self.settings.ui_scale);
                 self.ctx.request_repaint();
             }
-            Action::OpenRecent => self.open_palette(Palette::Recent),
             Action::SwitchProject => self.open_workspace_picker(),
             Action::NextProject | Action::PreviousProject => {
                 if !self.projects.is_empty() {
@@ -310,14 +220,44 @@ impl VEditApp {
             Action::Reload => self.reload_current(),
             Action::CompareWithSaved => self.compare_current_with_saved(),
             Action::Settings => self.settings_open = true,
+            Action::OpenRecent => self.open_palette(Palette::Recent),
+            Action::Undo
+            | Action::Redo
+            | Action::ToggleComment
+            | Action::DuplicateLine
+            | Action::DeleteLine
+            | Action::InsertLineAbove
+            | Action::InsertLineBelow
+            | Action::MoveLineUp
+            | Action::MoveLineDown
+            | Action::InsertNewline
+            | Action::Indent
+            | Action::Outdent => {
+                self.apply_editor_command(action.editor_command().expect("editor action"));
+            }
             Action::AddCursorAbove
             | Action::AddCursorBelow
+            | Action::MarkCursor
             | Action::SelectNextOccurrence
             | Action::SelectAllOccurrences
             | Action::SkipOccurrence
             | Action::CursorUndo
             | Action::CursorsAtLineEnds
             | Action::ExitMulticursor => self.multicursor_action(action),
+            Action::FinishCursorPlacement => {
+                self.finish_cursor_placement();
+            }
+            Action::ExplorerRename | Action::ExplorerDelete => self.explorer_command(action),
+            Action::ContextMenu => self.status(
+                "Focus an Explorer, Git or project tab item to open its context menu",
+                false,
+            ),
+            Action::ReviewNextFile
+            | Action::ReviewPreviousFile
+            | Action::ReviewSeenNext
+            | Action::ReviewOpenFile
+            | Action::ReviewComment => self.review_command(action),
+            Action::ReviewSubmitComment => self.submit_review_comment(),
         }
     }
 }

@@ -10,8 +10,10 @@ the egui frame without becoming the owner of every feature it displays.
   access to this state; check those declarations before changing visibility.
 - `src/app_workers.rs` owns worker execution, `WorkerResult` and `poll` routing;
   feature modules apply their results beside the requests they complete.
-- `src/command_registry.rs` owns command identities and defaults;
+- `src/command_registry.rs` owns command identities, defaults and contexts;
   `src/keybindings.rs` owns overrides, matching, recording and visible hints.
+  Its private `src/keyboard_settings.rs` child renders alias editing, conflict
+  reassignment and command filtering over that same state.
   `src/application_commands.rs` executes typed actions; `src/command_palette.rs`
   retains those actions independently of displayed labels.
 - `src/app_menu.rs` owns the main menu.

@@ -4,7 +4,7 @@ Reviews present changes and preserve the user's selected feedback for agents wit
 
 ## Overview
 
-- `src/change_review.rs`, an app child module, owns each project's review state, seen files, parked reading position, lazy patch requests, CLI completion replies and view composition. Private `src/change_review/chrome.rs` owns the header/checklist; `viewport.rs` owns continuous diff geometry, keyboard navigation and sticky file headers. They use comparisons from `src/git.rs` and patch rendering from `src/git_diff_view.rs` (`git.md`).
+- `src/change_review.rs`, an app child module, owns each project's review state, seen files, parked reading position, lazy patch requests, CLI completion replies and view composition. Private `src/change_review/chrome.rs` owns the header/checklist; `input.rs` owns command mapping, shortcut hints and ordered reading input; `viewport.rs` owns continuous diff geometry, navigation effects and sticky file headers. They use comparisons from `src/git.rs` and patch rendering from `src/git_diff_view.rs` (`git.md`).
 - `src/change_review_feedback.rs`, a child of change review, owns diff-row selection, frozen comment drafts, freshness notices and conversion into user marks.
 - `src/agent_marks.rs` owns captured excerpts, source attachment, notes and recoverable delivery receipts. `src/agent_marks_control.rs` adapts that model to app buffers, session persistence and bounded CLI responses; `src/agent_marks_ui.rs` owns the collection and highlights.
 - Agent-authored review annotations use `src/cli.rs` types and the open/review receiver in `src/control.rs`. That protocol belongs to `control.md`; it is separate from the user's mark collection.
@@ -32,6 +32,8 @@ Review worker results carry project root and an app-unique generation. Closing/r
 A change-review CLI reply waits until comparison loading completes. A replaced or closed pending review replies with its specific error. Loaded comparison does not mean every deferred large patch was read. Git's bounded patch classification remains visible to the reader.
 
 Working-tree reviews exclude unsaved buffers and expose that fact in the UI. Repository changes produce a freshness warning and an explicit refresh action; they do not replace the comparison while the user reads or comments. Seen state belongs to the user; the CLI reports it rather than marking files seen.
+
+Review file navigation, seen-and-continue, opening and commenting are scoped actions in the shared shortcut registry. The comment dialog owns its separate submit action. Local handlers use the same bindings and hints as Keyboard settings; reading motions and selection arrows remain view navigation. Palette commands queue against the current review until its diff geometry is available.
 
 Taking or acknowledging marks saves session metadata atomically before success. A storage failure restores the prior live marks and receipt, including live attachment caches. Other mark changes queue normal session persistence. None of these operations saves document text.
 

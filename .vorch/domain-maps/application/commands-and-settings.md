@@ -3,18 +3,31 @@
 ## Commands and input ownership
 
 The `actions!` registry in `src/command_registry.rs` supplies action IDs, labels,
-groups and defaults. `src/application_commands.rs::run_shortcut_action` matches
+groups, defaults and contexts. `src/application_commands.rs::run_shortcut_action` matches
 every action exhaustively. `src/command_palette.rs` carries the selected action,
-so a label change cannot change dispatch. Source editing commands also pass
-through `src/editor_input.rs`; `src/workspace_shortcuts.rs` preserves the frame's
-shortcut gates. Menus obtain hints through `keybindings.rs` so saved overrides
-appear in hints.
+so a label change cannot change dispatch. Source editing commands use
+`Action::editor_command` and the ordering/history owner in `src/editor_input.rs`;
+`src/workspace_shortcuts.rs` preserves the frame's shortcut gates. Local Explorer
+and Change review owners consume registered commands in their context. Menus
+obtain hints through `keybindings.rs` so saved overrides appear in hints.
+The private `src/keyboard_settings.rs` child renders alias editing, conflict
+reassignment and command filters using that same binding state.
 
 Bindings are saved by stable action ID. An absent override uses defaults, a
-custom binding replaces all default aliases, and a disabled action remains
-disabled after session restoration. Existing upgrade helpers in `keybindings.rs`
-let newly introduced defaults yield to saved custom choices. Do not turn an
-explicit disable into an absent setting during migration.
+custom binding replaces the default alias set, and a disabled action remains
+disabled after session restoration. `cli::ShortcutBinding` reads legacy strings
+and alias arrays; one alias writes as a string, several as an array, and the outer
+null disables the command. Adding/removing an alias in Keyboard settings preserves
+the rest of the set. Reassign removes only the conflicting alias from other
+commands and validates the candidate before changing preferences.
+
+Conflicts depend on overlapping scopes. Workspace commands overlap all scopes;
+ordinary source newline and finishing cursor placement use disjoint contexts.
+Clipboard, basic navigation and Vim grammar remain native input. `restore_bindings`
+keeps valid saved aliases, reports invalid/conflicting ones and lets default
+aliases yield to explicit overrides. Unknown saved IDs remain preserved but cannot
+match input or block editing known actions; new CLI patches still reject unknown
+IDs. Never turn an explicit disable into an absent setting during migration.
 
 Default shortcuts can have Vim-specific meaning: the default Find chord scrolls
 in Normal mode, New File can request completion in Insert, and Open File can

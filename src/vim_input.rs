@@ -291,43 +291,22 @@ impl VEditApp {
                     continue;
                 }
                 if tab.vim.mode != VimMode::Insert {
-                    let comment = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::ToggleComment,
-                        &event,
-                    );
-                    let duplicate = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::DuplicateLine,
-                        &event,
-                    );
-                    let move_up =
-                        keybindings::matches(&keybindings, keybindings::Action::MoveLineUp, &event);
-                    let move_down = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::MoveLineDown,
-                        &event,
-                    );
-                    let delete_line =
-                        keybindings::matches(&keybindings, keybindings::Action::DeleteLine, &event);
-                    let insert_above = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::InsertLineAbove,
-                        &event,
-                    );
-                    let insert_below = keybindings::matches(
-                        &keybindings,
-                        keybindings::Action::InsertLineBelow,
-                        &event,
-                    );
-                    if comment
-                        || duplicate
-                        || move_up
-                        || move_down
-                        || delete_line
-                        || insert_above
-                        || insert_below
-                    {
+                    let command = keybindings::Action::ALL.iter().find_map(|&action| {
+                        let command = action.editor_command()?;
+                        (!matches!(
+                            command,
+                            editor_input::Command::Undo | editor_input::Command::Redo
+                        ) && keybindings::source_matches(
+                            &keybindings,
+                            action,
+                            &event,
+                            true,
+                            false,
+                            false,
+                        ))
+                        .then_some(command)
+                    });
+                    if let Some(command) = command {
                         if events
                             .peek()
                             .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
@@ -338,31 +317,27 @@ impl VEditApp {
                             .vim
                             .selection(&tab.text)
                             .unwrap_or_else(|| tab.selection.clone());
-                        let edit = if comment {
-                            editor::toggle_line_comment(
-                                &tab.text,
-                                selection,
-                                crate::file_kind::comment_language(tab.path.as_deref()),
-                            )
-                        } else if duplicate {
-                            editor::duplicate_lines(&tab.text, selection)
-                        } else if delete_line {
-                            editor::delete_lines(&tab.text, selection)
-                        } else if insert_above || insert_below {
-                            editor::insert_line(
-                                &tab.text,
-                                selection,
-                                &indent.map(|indent| indent.unit()).unwrap_or_default(),
-                                insert_above,
-                            )
-                        } else {
-                            editor::move_lines(&tab.text, selection, move_down)
-                        };
-                        if move_up || move_down || duplicate {
+                        let edit = editor_input::edit(
+                            command,
+                            &tab.text,
+                            selection,
+                            indent.unwrap(),
+                            crate::file_kind::comment_language(tab.path.as_deref()),
+                        )
+                        .unwrap();
+                        if matches!(
+                            command,
+                            editor_input::Command::MoveLine(_) | editor_input::Command::Duplicate
+                        ) {
                             tab.apply_line_move(edit);
                         } else if edit.text != tab.text {
                             tab.apply(edit);
-                            if delete_line || insert_above || insert_below {
+                            if matches!(
+                                command,
+                                editor_input::Command::DeleteLine
+                                    | editor_input::Command::InsertLine(_)
+                                    | editor_input::Command::Newline
+                            ) {
                                 tab.set_cursor(tab.selection.clone());
                             }
                             tab.vim.notify_external_text_change();
@@ -479,9 +454,16 @@ impl VEditApp {
                         && !modifiers.command
                         && !modifiers.shift
                         && tab.vim.mode == VimMode::Normal
-                        && !keybindings::Action::ALL
-                            .iter()
-                            .any(|action| keybindings::matches(&keybindings, *action, &event)) =>
+                        && !keybindings::Action::ALL.iter().any(|action| {
+                            keybindings::source_matches(
+                                &keybindings,
+                                *action,
+                                &event,
+                                true,
+                                false,
+                                false,
+                            )
+                        }) =>
                     {
                         Some(if *key == Key::A {
                             VimKey::Increment

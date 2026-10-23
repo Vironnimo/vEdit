@@ -160,6 +160,63 @@ fn exclusion_rules_validate_globs_and_actual_payload_bounds_before_effects() {
     }
 }
 #[test]
+fn keybinding_settings_preserve_strings_disable_and_aliases_with_bounded_payloads() {
+    for (bindings, expected) in [
+        (json!({}), json!({})),
+        (
+            json!({"save":"F8","toggle_left_sidebar":null}),
+            json!({"save":"F8","toggle_left_sidebar":null}),
+        ),
+        (json!({"save":["F8"]}), json!({"save":"F8"})),
+        (
+            json!({"save":["Ctrl+S","F8"]}),
+            json!({"save":["Ctrl+S","F8"]}),
+        ),
+        (
+            json!({"save":["F1","F2","F3","F4","F5","F6","F7","F8"]}),
+            json!({"save":["F1","F2","F3","F4","F5","F6","F7","F8"]}),
+        ),
+    ] {
+        let request: Request =
+            serde_json::from_value(json!({"op":"settings","patch":{"keybindings":bindings}}))
+                .unwrap();
+        validate(&request).unwrap();
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["patch"]["keybindings"],
+            expected
+        );
+    }
+    for bindings in [
+        json!({"save":[]}),
+        json!({"save":vec!["F8"; MAX_SHORTCUT_ALIASES + 1]}),
+        json!({"save":""}),
+        json!({"save":["F8", ""]}),
+        json!({"save":"x".repeat(MAX_SHORTCUT_BYTES + 1)}),
+        json!({"save":["F8", "x".repeat(MAX_SHORTCUT_BYTES + 1)]}),
+    ] {
+        let request: Request = serde_json::from_value(
+            json!({"op":"settings","patch":{"vim":false,"keybindings":bindings}}),
+        )
+        .unwrap();
+        assert!(validate(&request).is_err(), "{bindings}");
+    }
+    for binding in [json!(42), json!(["F8", null]), json!({"keys":"F8"})] {
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"op":"settings","patch":{"keybindings":{"save":binding}}})
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        transport::from_unique_json::<Request>(
+            br#"{"op":"settings","patch":{"keybindings":{"save":"F8","save":["F9"]}}}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn swap_jk_cli_is_explicit_boolean_and_leaves_unrelated_settings_omitted() {
     for (input, expected) in [("true", true), ("false", false)] {
         let Parsed::Command {

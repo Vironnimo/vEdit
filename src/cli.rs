@@ -217,12 +217,69 @@ pub enum LineNumbers {
     Off,
 }
 
+pub const MAX_SHORTCUT_ALIASES: usize = 8;
+pub const MAX_SHORTCUT_BYTES: usize = 100;
+
+/// A single shortcut retains its original JSON string representation. Multiple
+/// shortcuts are an ordered list of alternatives for the same action.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ShortcutBinding {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl ShortcutBinding {
+    pub fn values(&self) -> impl Iterator<Item = &str> {
+        let values = match self {
+            Self::Single(value) => std::slice::from_ref(value),
+            Self::Multiple(values) => values.as_slice(),
+        };
+        values.iter().map(String::as_str)
+    }
+}
+
+impl From<String> for ShortcutBinding {
+    fn from(value: String) -> Self {
+        Self::Single(value)
+    }
+}
+
+impl From<&str> for ShortcutBinding {
+    fn from(value: &str) -> Self {
+        Self::Single(value.into())
+    }
+}
+
+impl From<Vec<String>> for ShortcutBinding {
+    fn from(mut values: Vec<String>) -> Self {
+        if values.len() == 1 {
+            Self::Single(values.remove(0))
+        } else {
+            Self::Multiple(values)
+        }
+    }
+}
+
+impl Serialize for ShortcutBinding {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Single(value) => value.serialize(serializer),
+            Self::Multiple(values) if values.len() == 1 => values[0].serialize(serializer),
+            Self::Multiple(values) => values.serialize(serializer),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
     pub multicursor: Option<MulticursorPatch>,
     /// Complete override map: absent actions retain defaults, null disables, {} resets all.
-    pub keybindings: Option<std::collections::BTreeMap<String, Option<String>>>,
+    pub keybindings: Option<std::collections::BTreeMap<String, Option<ShortcutBinding>>>,
     pub vim: Option<bool>,
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,

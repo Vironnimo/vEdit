@@ -333,12 +333,11 @@ pub(super) fn benchmark_previous_git_frame(ctx: &egui::Context) -> bool {
 
 pub(super) fn git_context_menu(
     response: &egui::Response,
+    bindings: &keybindings::Bindings,
     contents: impl FnOnce(&mut egui::Ui, bool),
 ) {
     let keyboard = response.has_focus()
-        && response
-            .ctx
-            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F10));
+        && keybindings::consume(bindings, keybindings::Action::ContextMenu, &response.ctx);
     let id = response.id.with("git-context-menu");
     // Closed menus have no UI to build. Keep the previous-open marker in this
     // check so Escape still restores row focus on the frame after closing.

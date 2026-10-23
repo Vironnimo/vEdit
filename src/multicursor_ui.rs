@@ -48,7 +48,7 @@ pub(super) struct Geometry {
 }
 
 fn visual_move(state: &mut State, galley: &egui::Galley, down: bool, extend: bool, steps: usize) {
-    for selection in &mut state.selections {
+    for selection in state.moving_selections() {
         let mut cursor = head_cursor(*selection);
         let mut x = selection.visual_x.map(|x| x as f32 / 64.0);
         for _ in 0..steps {
@@ -204,6 +204,12 @@ impl VEditApp {
     }
     pub(super) fn multicursor_action(&mut self, action: keybindings::Action) {
         use keybindings::Action::*;
+        if action == FinishCursorPlacement {
+            if self.tab().is_some_and(|tab| tab.vim.multi.placing()) {
+                self.finish_cursor_placement();
+            }
+            return;
+        }
         if action == ExitMulticursor
             && let Some(tab) = self.tab()
         {
@@ -215,6 +221,10 @@ impl VEditApp {
             return;
         };
         let preferences = self.settings.multicursor.clone();
+        if action == MarkCursor {
+            self.completions = None;
+            self.completion_request = None;
+        }
         let Some(tab) = self
             .tab_mut()
             .filter(|t| !t.loading && t.agent_view == crate::cli::DocumentView::Source)
@@ -230,24 +240,31 @@ impl VEditApp {
         }
         tab.start_multicursor(selection);
         let state = &mut tab.vim.multi;
-        let complete = match action {
-            AddCursorAbove | AddCursorBelow => {
-                state.add_vertical(&tab.text, action == AddCursorBelow, preferences.limit)
+        let complete = if !matches!(action, MarkCursor | CursorUndo)
+            && !state.finish_placement(preferences.limit)
+        {
+            false
+        } else {
+            match action {
+                MarkCursor => state.mark_cursor(preferences.limit),
+                AddCursorAbove | AddCursorBelow => {
+                    state.add_vertical(&tab.text, action == AddCursorBelow, preferences.limit)
+                }
+                CursorsAtLineEnds => state.line_ends(&tab.text, preferences.limit),
+                SelectNextOccurrence | SelectAllOccurrences | SkipOccurrence => state.occurrences(
+                    &tab.text,
+                    action == SelectAllOccurrences,
+                    action == SkipOccurrence,
+                    preferences.match_case,
+                    preferences.whole_word,
+                    preferences.limit,
+                ),
+                CursorUndo => {
+                    state.undo_selection();
+                    true
+                }
+                _ => true,
             }
-            CursorsAtLineEnds => state.line_ends(&tab.text, preferences.limit),
-            SelectNextOccurrence | SelectAllOccurrences | SkipOccurrence => state.occurrences(
-                &tab.text,
-                action == SelectAllOccurrences,
-                action == SkipOccurrence,
-                preferences.match_case,
-                preferences.whole_word,
-                preferences.limit,
-            ),
-            CursorUndo => {
-                state.undo_selection();
-                true
-            }
-            _ => true,
         };
         tab.sync_multicursor();
         tab.focus = true;
@@ -255,6 +272,19 @@ impl VEditApp {
         if !complete {
             self.status(format!("Cursor limit reached ({}). Refine the selection or increase the limit in Settings → Editing.", preferences.limit), true);
         }
+    }
+
+    pub(super) fn finish_cursor_placement(&mut self) -> bool {
+        let limit = self.settings.multicursor.limit;
+        let Some(tab) = self.tab_mut() else {
+            return false;
+        };
+        if !tab.vim.multi.finish_placement(limit) {
+            self.status(format!("Cursor limit reached ({limit}). Undo the last marked position or move onto an existing cursor."), true);
+            return false;
+        }
+        tab.sync_multicursor();
+        true
     }
 
     pub(super) fn commit_multi(&mut self, text: String, state: State) {
@@ -301,6 +331,9 @@ impl VEditApp {
         ctx.request_repaint();
     }
     pub(super) fn multi_replace(&mut self, text: &str, paste: bool) {
+        if !self.finish_cursor_placement() {
+            return;
+        }
         let tab = self.tab().unwrap();
         let mut state = tab.vim.multi.clone();
         let parts: Vec<_> = text
@@ -319,6 +352,9 @@ impl VEditApp {
         self.commit_multi(output, state);
     }
     pub(super) fn multi_clipboard(&mut self, cut: bool) {
+        if !self.finish_cursor_placement() {
+            return;
+        }
         let tab = self.tab().unwrap();
         let (text, ranges) = multi::clipboard(&tab.text, &tab.vim.multi);
         self.ctx.copy_text(text);
@@ -352,6 +388,9 @@ impl VEditApp {
                     context_actions::EditorAction::Undo
                 },
             );
+            return;
+        }
+        if !self.finish_cursor_placement() {
             return;
         }
         let tab = self.tab().unwrap();
@@ -430,6 +469,7 @@ impl VEditApp {
                         let tab = self.tab_mut().unwrap();
                         tab.start_multicursor(selection);
                         if modifiers.shift {
+                            tab.vim.multi.finish_placement(usize::MAX);
                             tab.vim.multi.checkpoint();
                             self.ctx
                                 .data_mut(|d| d.insert_temp(widget.with("multicursor_box"), *pos));
@@ -455,10 +495,42 @@ impl VEditApp {
                     continue;
                 }
             }
+            let placing = self.tab().is_some_and(|tab| tab.vim.multi.placing());
+            let vim_modal = self.settings.vim
+                && self
+                    .tab()
+                    .is_some_and(|tab| tab.vim.mode != VimMode::Insert)
+                && !active;
+            // Popup navigation has first claim on its ordinary control keys.
+            // Remapped source commands continue through the normal registry.
+            if active
+                && self.completions.is_some()
+                && matches!(
+                    &event,
+                    egui::Event::Key {
+                        key: Key::ArrowUp | Key::ArrowDown | Key::Enter | Key::Tab | Key::Escape,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if !modifiers.ctrl && !modifiers.command && !modifiers.alt && !modifiers.shift
+                )
+            {
+                remaining.push(event);
+                remaining.extend(events);
+                break;
+            }
+            let source_matches = |action| {
+                keybindings::source_matches(
+                    &self.settings.keybindings,
+                    action,
+                    &event,
+                    vim_modal,
+                    active,
+                    placing,
+                )
+            };
             let action = Action::ALL.iter().copied().find(|a| {
-                a.multicursor()
-                    && self.shortcut_matches(*a, &event)
-                    && (*a != Action::CursorUndo || active)
+                a.multicursor() && source_matches(*a) && (*a != Action::CursorUndo || active)
             });
             if let Some(action) = action {
                 if remaining.iter().any(editor_input::native_input) {
@@ -476,27 +548,20 @@ impl VEditApp {
                     events.next();
                 }
                 self.multicursor_action(action);
+                if action == Action::ExitMulticursor {
+                    editor_input::defer(&self.ctx, id, events.collect());
+                    break;
+                }
                 continue;
             }
             if !active {
                 remaining.push(event);
                 continue;
             }
-            if self.completions.is_some()
-                && matches!(
-                    event,
-                    egui::Event::Key {
-                        key: Key::ArrowUp | Key::ArrowDown | Key::Enter | Key::Tab | Key::Escape,
-                        pressed: true,
-                        ..
-                    }
-                )
-            {
-                remaining.push(event);
-                remaining.extend(events);
-                break;
-            }
-            if let Some(command) = editor_input::command(&event, true, &self.settings.keybindings) {
+            if let Some(command) = Action::ALL.iter().find_map(|&action| {
+                let command = action.editor_command()?;
+                source_matches(action).then_some(command)
+            }) {
                 if events
                     .peek()
                     .is_some_and(|next| keybindings::shortcut_text_event(next, &event))
@@ -509,7 +574,7 @@ impl VEditApp {
             // Workspace commands are dispatched in order by the normal router.
             if Action::ALL
                 .iter()
-                .any(|a| !a.multicursor() && self.shortcut_matches(*a, &event))
+                .any(|a| !a.multicursor() && source_matches(*a))
             {
                 remaining.push(event);
                 remaining.extend(events);
@@ -542,14 +607,6 @@ impl VEditApp {
                     modifiers,
                     ..
                 } => {
-                    if key == Key::Escape {
-                        self.ctx.data_mut(|d| {
-                            d.remove::<String>(self.document_widget_id(id).with("multi_ime"))
-                        });
-                        self.tab_mut().unwrap().exit_multicursor();
-                        editor_input::defer(&self.ctx, id, events.collect());
-                        break;
-                    }
                     let command = modifiers.ctrl || modifiers.command;
                     if !modifiers.alt {
                         if command && key == Key::C || command && key == Key::Insert {
@@ -577,12 +634,16 @@ impl VEditApp {
                     if command && key == Key::A && !modifiers.alt {
                         let tab = self.tab_mut().unwrap();
                         tab.vim.multi.checkpoint();
+                        tab.vim.multi.finish_placement(usize::MAX);
                         tab.vim.multi.selections =
                             vec![Selection::new(0, tab.text.chars().count())];
                         tab.sync_multicursor();
                         continue;
                     }
                     if matches!(key, Key::Backspace | Key::Delete) && !modifiers.alt {
+                        if !self.finish_cursor_placement() {
+                            continue;
+                        }
                         let tab = self.tab().unwrap();
                         let mut state = tab.vim.multi.clone();
                         let output =
@@ -947,6 +1008,7 @@ pub(super) fn pointer(
                 .index
                 .0;
             if modifiers.shift {
+                tab.vim.multi.finish_placement(usize::MAX);
                 tab.vim.multi.checkpoint();
                 ui.ctx().data_mut(|d| d.insert_temp(drag_id, pos));
             } else if !tab.vim.multi.toggle(at, preferences.limit) {

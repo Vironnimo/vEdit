@@ -18,10 +18,13 @@ use serde_json::{Value, json};
 
 #[path = "change_review/chrome.rs"]
 mod chrome;
+#[path = "change_review/input.rs"]
+mod input;
 #[path = "change_review/viewport.rs"]
 mod viewport;
 
 use chrome::{empty_review, file_list, review_header};
+use input::{ReviewKey, review_action, review_hint};
 use viewport::diff_body;
 
 const HEADER_HEIGHT: f32 = 36.0;
@@ -79,6 +82,8 @@ struct ChangeReview {
     focus_pending: bool,
     /// A list row or seen box was clicked this frame.
     list_clicked: bool,
+    /// Palette commands wait for the current diff geometry.
+    pending_commands: Vec<ReviewKey>,
     follow_list: bool,
     list_offset: f32,
     list_height: f32,
@@ -115,6 +120,7 @@ impl ChangeReview {
             lazy_request: None,
             focus_pending: false,
             list_clicked: false,
+            pending_commands: Vec::new(),
             follow_list: true,
             list_offset: 0.0,
             list_height: 0.0,
@@ -367,6 +373,30 @@ impl VEditApp {
     pub(super) fn change_review_visible(&self) -> bool {
         self.project()
             .is_some_and(|project| project.change_review.view.is_some())
+    }
+
+    pub(super) fn review_command(&mut self, action: keybindings::Action) {
+        let Some(command) = review_action(action) else {
+            return;
+        };
+        let body_id = self.project().map(|project| review_body_id(&project.root));
+        let Some(view) = self
+            .projects
+            .get_mut(self.active_project)
+            .and_then(|project| project.change_review.view.as_mut())
+        else {
+            self.status("Open a change review to use this command", false);
+            return;
+        };
+        if view.comment.is_some() || view.files.is_empty() {
+            return;
+        }
+        view.pending_commands.push(command);
+        view.focus_pending = true;
+        if let Some(body_id) = body_id {
+            self.ctx.memory_mut(|memory| memory.request_focus(body_id));
+        }
+        self.ctx.request_repaint();
     }
 
     /// Open (or refresh) a review in `project_index` and give it the keyboard.
@@ -879,7 +909,7 @@ fn review_ui(
         body.min.y = banner.bottom();
     }
     if view.comment.is_some() {
-        feedback::comment_dialog(ui.ctx(), body_id, view, actions);
+        feedback::comment_dialog(ui.ctx(), body_id, view, &context.bindings, actions);
     }
     if view.files.is_empty() {
         empty_review(ui, body, view, actions);
@@ -903,7 +933,7 @@ fn review_ui(
     if let Some(list) = list {
         view.list_clicked = file_list(ui, list, view, seen);
     }
-    diff_body(ui, diff, view, seen, body_id, context.swap_jk, actions);
+    diff_body(ui, diff, view, seen, body_id, context, actions);
 }
 
 #[path = "change_review_feedback.rs"]

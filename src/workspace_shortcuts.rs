@@ -49,7 +49,7 @@ impl VEditApp {
         let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
-            if action.multicursor() {
+            if action.multicursor() || action.editor_command().is_some() {
                 continue;
             }
             if matches!(
@@ -78,15 +78,6 @@ impl VEditApp {
                     | Action::MoveTabDown
                     | Action::AgentMark
                     | Action::AgentMarks
-                    | Action::ToggleComment
-                    | Action::DuplicateLine
-                    | Action::DeleteLine
-                    | Action::InsertLineAbove
-                    | Action::InsertLineBelow
-                    | Action::MoveLineUp
-                    | Action::MoveLineDown
-                    | Action::Undo
-                    | Action::Redo
                     | Action::ZoomIn
                     | Action::ZoomOut
                     | Action::ZoomReset

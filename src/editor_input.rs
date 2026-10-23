@@ -18,6 +18,33 @@ pub(super) enum Command {
     Newline,
 }
 
+/// The shared text operation for keyboard, palette and context dispatch. Input
+/// owners retain their own ordering and history checkpoint boundaries.
+pub(super) fn edit(
+    command: Command,
+    text: &str,
+    selection: Range<usize>,
+    indentation: indentation::Indent,
+    language: &str,
+) -> Option<editor::EditResult> {
+    let unit = indentation.unit();
+    Some(match command {
+        Command::Undo | Command::Redo => return None,
+        Command::Comment => editor::toggle_line_comment(text, selection, language),
+        Command::Duplicate => editor::duplicate_lines(text, selection),
+        Command::DeleteLine => editor::delete_lines(text, selection),
+        Command::InsertLine(above) => editor::insert_line(text, selection, &unit, above),
+        Command::MoveLine(down) => editor::move_lines(text, selection, down),
+        Command::Indent(false) if selection.is_empty() => {
+            editor::insert_tab(text, selection, indentation.width, indentation.tabs)
+        }
+        Command::Indent(outdent) => {
+            editor::indent_lines_with_width(text, selection, &unit, indentation.width, outdent)
+        }
+        Command::Newline => editor::smart_newline(text, selection, &unit),
+    })
+}
+
 #[derive(Clone, PartialEq)]
 struct Owner {
     pane: u64,
@@ -67,56 +94,18 @@ pub(super) fn native_input(event: &egui::Event) -> bool {
 pub(super) fn command(
     event: &egui::Event,
     history: bool,
-    bindings: &std::collections::BTreeMap<String, Option<String>>,
+    bindings: &keybindings::Bindings,
 ) -> Option<Command> {
-    for (action, command) in [
-        (keybindings::Action::Undo, Command::Undo),
-        (keybindings::Action::Redo, Command::Redo),
-        (keybindings::Action::ToggleComment, Command::Comment),
-        (keybindings::Action::DuplicateLine, Command::Duplicate),
-        (keybindings::Action::DeleteLine, Command::DeleteLine),
-        (
-            keybindings::Action::InsertLineAbove,
-            Command::InsertLine(true),
-        ),
-        (
-            keybindings::Action::InsertLineBelow,
-            Command::InsertLine(false),
-        ),
-        (keybindings::Action::MoveLineUp, Command::MoveLine(false)),
-        (keybindings::Action::MoveLineDown, Command::MoveLine(true)),
-    ] {
-        if (!matches!(command, Command::Undo | Command::Redo) || history)
-            && keybindings::matches(bindings, action, event)
-        {
-            return Some(command);
-        }
-    }
-    let egui::Event::Key {
-        key,
-        pressed: true,
-        modifiers,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    let command = modifiers.command || modifiers.ctrl;
-    if !command && !modifiers.alt {
-        return match key {
-            Key::Tab => Some(Command::Indent(modifiers.shift)),
-            Key::Enter => Some(Command::Newline),
-            _ => None,
-        };
-    }
-    None
+    keybindings::Action::ALL.iter().find_map(|&action| {
+        let command = action.editor_command()?;
+        ((!matches!(command, Command::Undo | Command::Redo) || history)
+            && keybindings::source_matches(bindings, action, event, false, false, false))
+        .then_some(command)
+    })
 }
 
 /// Vim must finish native editing before any action that observes the buffer.
-pub(super) fn vim_barrier(
-    event: &egui::Event,
-    bindings: &std::collections::BTreeMap<String, Option<String>>,
-) -> bool {
+pub(super) fn vim_barrier(event: &egui::Event, bindings: &keybindings::Bindings) -> bool {
     if [keybindings::Action::Undo, keybindings::Action::Redo]
         .into_iter()
         .any(|action| keybindings::matches(bindings, action, event))
@@ -173,10 +162,10 @@ pub(super) fn take_command(
     ctx: &egui::Context,
     document: u64,
     history: bool,
-    bindings: &std::collections::BTreeMap<String, Option<String>>,
+    bindings: &keybindings::Bindings,
 ) -> Option<Command> {
     let mut events = ctx.input_mut(|input| std::mem::take(&mut input.events));
-    // Native TextEdit also handles history and Ctrl+Shift+K (as kill-to-end).
+    // Native TextEdit also handles history, Enter, Tab and Ctrl+Shift+K.
     // Once the user changes a binding, retired aliases must stop reaching it.
     // With Vim enabled, active history commands have already been consumed by
     // the Vim handler; retired aliases must not reach native Insert mode either.
@@ -203,9 +192,9 @@ pub(super) fn take_command(
     }
     if let Some(next) = events.iter().position(|event| {
         command(event, history, bindings).is_some()
-            || keybindings::Action::ALL
-                .iter()
-                .any(|&action| keybindings::matches(bindings, action, event))
+            || keybindings::Action::ALL.iter().any(|&action| {
+                keybindings::source_matches(bindings, action, event, false, false, false)
+            })
     }) {
         let suffix = events.split_off(next);
         defer(ctx, document, suffix);
@@ -220,11 +209,73 @@ fn native_command_key(event: &egui::Event) -> bool {
         pressed: true,
         modifiers,
         ..
-    } if (modifiers.command || modifiers.ctrl) && !modifiers.alt
-        && (matches!(key, Key::Z | Key::Y) || *key == Key::K && modifiers.shift))
+    } if matches!(key, Key::Enter | Key::Tab)
+        || !modifiers.alt && (modifiers.command || modifiers.ctrl)
+            && (matches!(key, Key::Z | Key::Y) || *key == Key::K && modifiers.shift)
+    )
 }
 
 impl VEditApp {
+    pub(super) fn apply_editor_command(&mut self, command: Command) {
+        let Some(tab) = self
+            .tab()
+            .filter(|tab| !tab.loading && tab.agent_view == crate::cli::DocumentView::Source)
+        else {
+            return;
+        };
+        let id = tab.id;
+        if matches!(command, Command::Undo | Command::Redo) {
+            self.apply_editor_context_action(
+                id,
+                if command == Command::Undo {
+                    context_actions::EditorAction::Undo
+                } else {
+                    context_actions::EditorAction::Redo
+                },
+            );
+            return;
+        }
+        if tab.vim.multi.active() {
+            self.multi_command(command);
+            return;
+        }
+        let indentation = tab.indentation(&self.settings);
+        let selection = if self.settings.vim {
+            tab.vim
+                .selection(&tab.text)
+                .unwrap_or_else(|| tab.selection.clone())
+        } else {
+            tab.selection.clone()
+        };
+        let Some(edit) = edit(
+            command,
+            &tab.text,
+            selection,
+            indentation,
+            crate::file_kind::comment_language(tab.path.as_deref()),
+        ) else {
+            return;
+        };
+        if edit.text == tab.text {
+            return;
+        }
+        self.context_native_undo_checkpoint(id);
+        let tab = self.tab_mut().unwrap();
+        if matches!(command, Command::MoveLine(_) | Command::Duplicate) {
+            tab.apply_line_move(edit);
+        } else {
+            tab.vim.begin_external_edit(&tab.text);
+            tab.apply(edit);
+            if matches!(
+                command,
+                Command::DeleteLine | Command::InsertLine(_) | Command::Newline
+            ) {
+                tab.set_cursor(tab.selection.clone());
+            }
+            tab.vim.notify_external_text_change();
+        }
+    }
+
     fn editor_input_owner(&self) -> Option<Owner> {
         let tab = self.tab()?;
         Some(Owner {
@@ -331,6 +382,12 @@ mod binding_tests {
     #[test]
     fn default_editing_bindings_use_exact_modifiers_and_both_redo_aliases() {
         let bindings = std::collections::BTreeMap::new();
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            assert_eq!(
+                command(&key(Key::Enter, modifiers), false, &bindings),
+                Some(Command::Newline),
+            );
+        }
         assert_eq!(
             command(&key(Key::Z, egui::Modifiers::CTRL), true, &bindings),
             Some(Command::Undo)
@@ -364,10 +421,7 @@ mod binding_tests {
         );
         assert_eq!(
             command(
-                &key(
-                    Key::ArrowDown,
-                    egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT)
-                ),
+                &key(Key::D, egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT)),
                 false,
                 &bindings
             ),

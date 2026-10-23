@@ -82,6 +82,7 @@ impl VEditApp {
                     {
                         keybindings::Action::ALL
                             .iter().copied()
+                            .filter(|action| action.palette_visible())
                             .filter(|action| action.label().to_lowercase().contains(&self.palette_query.to_lowercase()))
                             .map(|action| ((action.label().to_owned(), self.shortcut_label(action), None, None), None, Some(action)))
                             .collect()

@@ -1,4 +1,61 @@
-//! Stable command identities and display metadata, independent of UI execution.
+//! Stable command identities, contexts and display metadata.
+use super::editor_input;
+
+/// Contexts that can own the same chord. Source subcontexts overlap except for
+/// ordinary text entry and cursor placement, where Enter has distinct meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Scope {
+    Global,
+    Source,
+    SourceEditing,
+    CursorPlacement,
+    Multicursor,
+    Explorer,
+    ContextMenu,
+    Review,
+    ReviewComment,
+}
+
+impl Scope {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Workspace",
+            Self::Source => "Source editor",
+            Self::SourceEditing => "Source editing · outside cursor placement",
+            Self::CursorPlacement => "Cursor placement",
+            Self::Multicursor => "Multicursor editing",
+            Self::Explorer => "Explorer",
+            Self::ContextMenu => "Explorer, Git and Project tabs",
+            Self::Review => "Change review",
+            Self::ReviewComment => "Review comment editor",
+        }
+    }
+
+    pub(super) fn source(self) -> bool {
+        matches!(
+            self,
+            Self::Source | Self::SourceEditing | Self::CursorPlacement | Self::Multicursor
+        )
+    }
+
+    pub(super) fn overlaps(self, other: Self) -> bool {
+        self == Self::Global
+            || other == Self::Global
+            || self == other
+            || matches!(
+                (self, other),
+                (Self::ContextMenu, Self::Explorer) | (Self::Explorer, Self::ContextMenu)
+            )
+            || self.source()
+                && other.source()
+                && !matches!(
+                    (self, other),
+                    (Self::SourceEditing, Self::CursorPlacement)
+                        | (Self::CursorPlacement, Self::SourceEditing)
+                )
+    }
+}
+
 macro_rules! actions {
     ($($name:ident, $id:literal, $label:literal, $group:literal, [$($key:literal),*];)*) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,22 +145,36 @@ actions! {
     ToggleWrap, "toggle_wrap", "Toggle word wrap", "Editing", ["Alt+Z"];
     ToggleVim, "toggle_vim", "Toggle Vim motions", "Editing", [];
     ToggleComment, "toggle_comment", "Toggle line comment", "Editing", ["Ctrl+Slash", "Ctrl+Shift+Slash"];
-    DuplicateLine, "duplicate_line", "Duplicate line / selection", "Editing", ["Alt+Shift+ArrowDown"];
+    DuplicateLine, "duplicate_line", "Duplicate line / selection", "Editing", ["Alt+Shift+D"];
     DeleteLine, "delete_line", "Delete line / selection", "Editing", ["Ctrl+Shift+K"];
     InsertLineAbove, "insert_line_above", "Insert line above", "Editing", ["Ctrl+Shift+Enter"];
     InsertLineBelow, "insert_line_below", "Insert line below", "Editing", ["Ctrl+Enter"];
     MoveLineUp, "move_line_up", "Move line / selection up", "Editing", ["Alt+ArrowUp"];
     MoveLineDown, "move_line_down", "Move line / selection down", "Editing", ["Alt+ArrowDown"];
+    InsertNewline, "insert_newline", "Insert newline", "Editing", ["Enter", "Shift+Enter"];
+    Indent, "indent", "Indent / insert tab", "Editing", ["Tab"];
+    Outdent, "outdent", "Outdent", "Editing", ["Shift+Tab"];
     Undo, "undo", "Undo", "Editing", ["Ctrl+Z"];
     Redo, "redo", "Redo", "Editing", ["Ctrl+Y", "Ctrl+Shift+Z"];
-    AddCursorAbove, "add_cursor_above", "Add cursor above", "Multicursor", ["Ctrl+Shift+ArrowUp"];
-    AddCursorBelow, "add_cursor_below", "Add cursor below", "Multicursor", ["Ctrl+Shift+ArrowDown"];
+    AddCursorAbove, "add_cursor_above", "Add cursor above", "Multicursor", ["Alt+Shift+ArrowUp"];
+    AddCursorBelow, "add_cursor_below", "Add cursor below", "Multicursor", ["Alt+Shift+ArrowDown"];
+    MarkCursor, "mark_cursor", "Mark cursor and move independently", "Multicursor", ["Ctrl+Alt+Enter"];
     SelectNextOccurrence, "select_next_occurrence", "Add next occurrence", "Multicursor", ["Ctrl+D"];
     SelectAllOccurrences, "select_all_occurrences", "Select all occurrences", "Multicursor", ["Ctrl+Shift+L"];
     SkipOccurrence, "skip_occurrence", "Skip current occurrence", "Multicursor", ["Ctrl+Shift+D"];
     CursorUndo, "cursor_undo", "Undo last cursor selection", "Multicursor", ["Ctrl+U"];
     CursorsAtLineEnds, "cursors_at_line_ends", "Cursors at selected line ends", "Multicursor", ["Alt+Shift+I"];
-    ExitMulticursor, "exit_multicursor", "Exit multicursor editing", "Multicursor", [];
+    FinishCursorPlacement, "finish_cursor_placement", "Finish cursor placement", "Multicursor", ["Enter"];
+    ExitMulticursor, "exit_multicursor", "Exit multicursor editing", "Multicursor", ["Escape"];
+    ExplorerRename, "explorer_rename", "Rename Explorer item", "Explorer", ["F2"];
+    ExplorerDelete, "explorer_delete", "Delete Explorer item", "Explorer", ["Delete"];
+    ContextMenu, "context_menu", "Open context menu", "Navigation", ["Shift+F10"];
+    ReviewNextFile, "review_next_file", "Next review file", "Change review", ["N", "CloseBracket"];
+    ReviewPreviousFile, "review_previous_file", "Previous review file", "Change review", ["P", "OpenBracket"];
+    ReviewSeenNext, "review_seen_next", "Mark review file seen and continue", "Change review", ["Space"];
+    ReviewOpenFile, "review_open_file", "Open review file", "Change review", ["O"];
+    ReviewComment, "review_comment", "Comment on review selection", "Change review", ["C"];
+    ReviewSubmitComment, "review_submit_comment", "Submit review comment", "Change review", ["Ctrl+Enter"];
     ToggleBookmark, "toggle_bookmark", "Toggle bookmark", "Navigation", [];
     Bookmarks, "bookmarks", "Bookmarks", "Navigation", [];
     ScreenJump, "screen_jump", "Jump to visible text", "Navigation", [];
@@ -121,16 +192,57 @@ actions! {
 }
 
 impl Action {
+    pub(super) fn palette_visible(self) -> bool {
+        !matches!(self, Self::ContextMenu | Self::ReviewSubmitComment)
+    }
+    pub(super) fn scope(self) -> Scope {
+        match self {
+            Self::InsertNewline => Scope::SourceEditing,
+            Self::FinishCursorPlacement => Scope::CursorPlacement,
+            Self::ExitMulticursor | Self::CursorUndo => Scope::Multicursor,
+            Self::ExplorerRename | Self::ExplorerDelete => Scope::Explorer,
+            Self::ContextMenu => Scope::ContextMenu,
+            Self::ReviewNextFile
+            | Self::ReviewPreviousFile
+            | Self::ReviewSeenNext
+            | Self::ReviewOpenFile
+            | Self::ReviewComment => Scope::Review,
+            Self::ReviewSubmitComment => Scope::ReviewComment,
+            action if action.multicursor() || action.editor_command().is_some() => Scope::Source,
+            _ => Scope::Global,
+        }
+    }
+
+    pub(super) fn editor_command(self) -> Option<editor_input::Command> {
+        use editor_input::Command;
+        Some(match self {
+            Self::Undo => Command::Undo,
+            Self::Redo => Command::Redo,
+            Self::ToggleComment => Command::Comment,
+            Self::DuplicateLine => Command::Duplicate,
+            Self::DeleteLine => Command::DeleteLine,
+            Self::InsertLineAbove => Command::InsertLine(true),
+            Self::InsertLineBelow => Command::InsertLine(false),
+            Self::MoveLineUp => Command::MoveLine(false),
+            Self::MoveLineDown => Command::MoveLine(true),
+            Self::InsertNewline => Command::Newline,
+            Self::Indent => Command::Indent(false),
+            Self::Outdent => Command::Indent(true),
+            _ => return None,
+        })
+    }
     pub(super) fn multicursor(self) -> bool {
         matches!(
             self,
             Self::AddCursorAbove
                 | Self::AddCursorBelow
+                | Self::MarkCursor
                 | Self::SelectNextOccurrence
                 | Self::SelectAllOccurrences
                 | Self::SkipOccurrence
                 | Self::CursorUndo
                 | Self::CursorsAtLineEnds
+                | Self::FinishCursorPlacement
                 | Self::ExitMulticursor
         )
     }
@@ -155,7 +267,10 @@ impl Action {
                 "Errors and warnings of the active file first, then the next file with problems. In Vim Normal mode also ]d / [d."
             }
             Self::ToggleLeftSidebar => {
-                "Ctrl+Alt+E works in every editor mode. The default Ctrl+B alias remains page-back in Vim Normal mode."
+                "Custom bindings work in every editor mode. The default Ctrl+B alias remains page-back in Vim Normal mode."
+            }
+            Self::MarkCursor => {
+                "Keep this selection in place and move only the active cursor with arrows, Home/End or Page Up/Down. Invoke again to mark another position. Finish cursor placement starts editing at every position; Exit multicursor editing returns to one cursor."
             }
             Self::Undo
             | Self::Redo

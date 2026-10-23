@@ -196,6 +196,7 @@ pub(super) fn working_group(
     expanded: &mut HashMap<String, bool>,
     selected: &mut Option<String>,
     busy: bool,
+    bindings: &keybindings::Bindings,
     actions: &mut Vec<GitUiAction>,
 ) {
     let key = format!("working:{}", group.key());
@@ -236,7 +237,7 @@ pub(super) fn working_group(
                 queue_tree_stage(tree, group, actions);
             }
         }
-        git_context_menu(&response.row, |ui, focus| {
+        git_context_menu(&response.row, bindings, |ui, focus| {
             ui.add_enabled_ui(!busy, |ui| {
                 if git_menu_item(
                     ui,
@@ -267,6 +268,7 @@ pub(super) fn working_group(
                 expanded,
                 selected,
                 busy,
+                bindings,
                 actions,
             );
         }
@@ -303,6 +305,7 @@ pub(super) fn draw_file_tree(
     expanded: &mut HashMap<String, bool>,
     selected: &mut Option<String>,
     busy: bool,
+    bindings: &keybindings::Bindings,
     actions: &mut Vec<GitUiAction>,
 ) {
     let namespace = context.key();
@@ -348,7 +351,7 @@ pub(super) fn draw_file_tree(
                 response.row.request_focus();
                 queue_tree_stage(folder, group, actions);
             }
-            git_context_menu(&response.row, |ui, focus| {
+            git_context_menu(&response.row, bindings, |ui, focus| {
                 if let TreeContext::Working(group) = context {
                     ui.add_enabled_ui(!busy, |ui| {
                         if git_menu_item(
@@ -393,6 +396,7 @@ pub(super) fn draw_file_tree(
                     expanded,
                     selected,
                     busy,
+                    bindings,
                     actions,
                 );
             }
@@ -454,7 +458,7 @@ pub(super) fn draw_file_tree(
                     GitUiAction::Stage(paths)
                 });
             }
-            git_context_menu(&row, |ui, focus| {
+            git_context_menu(&row, bindings, |ui, focus| {
                 if git_menu_item(
                     ui,
                     "View diff",

@@ -18,6 +18,7 @@ pub(super) fn show_changes(
         unsaved_count,
         busy,
         push_count,
+        bindings,
     } = panel;
     let commit_message_id = git_row_id(root, "commit-message");
     // A child UI keeps overflowing content from pushing the divider down.
@@ -75,6 +76,7 @@ pub(super) fn show_changes(
                                 &mut state.expanded,
                                 &mut state.selected_file,
                                 busy,
+                                bindings,
                                 actions,
                             );
                             ui.add_space(7.0);

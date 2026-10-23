@@ -123,6 +123,7 @@ struct PanelContext<'a> {
     unsaved_count: usize,
     busy: bool,
     push_count: Option<usize>,
+    bindings: &'a keybindings::Bindings,
 }
 
 enum GitUiAction {
@@ -239,6 +240,7 @@ impl VEditApp {
             unsaved_count,
             busy,
             push_count,
+            bindings: &self.settings.keybindings,
         };
         let mut state = std::mem::take(&mut project.git_view);
         let previous_split_ratio = state.split_ratio;
