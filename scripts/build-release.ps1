@@ -78,23 +78,14 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot '.agents/skills/vedit/references') -Destination $skillDirectory -Recurse -Force
     $documentationDirectory = Join-Path $releaseDirectory 'docs'
     New-Item -ItemType Directory -Path $documentationDirectory -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/agent-interface.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/cli-audit-0.4.19.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/development.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/maintenance-0.4.16.md') -Destination $documentationDirectory -Force
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -File -Filter '*.md' | ForEach-Object {
+        $packagedDocument = [System.IO.File]::ReadAllText($_.FullName).
+            Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md').
+            Replace('../.agents/skills/vedit/SKILL.md', '../skills/vedit/SKILL.md').
+            Replace('- [Project and domain index](../.vorch/PROJECT.md): source owners and task-specific working context.', '- Project and domain maps are available in the source checkout.')
+        [System.IO.File]::WriteAllText((Join-Path $documentationDirectory $_.Name), $packagedDocument, [System.Text.UTF8Encoding]::new($false))
+    }
     Copy-Item -LiteralPath (Join-Path $projectRoot 'AGENTS.md') -Destination $releaseDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/user-review-0.4.9.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/code-review-0.4.10.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/usability-review-0.4.11.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/polyglot-keyboard-review-0.4.12.md') -Destination $documentationDirectory -Force
-    $packagedPolish = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/interaction-polish-0.4.13.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
-    [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'interaction-polish-0.4.13.md'), $packagedPolish, [System.Text.UTF8Encoding]::new($false))
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/ux-fixes-0.4.14.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/idle-performance-0.4.19.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/performance-audit-0.4.20.md') -Destination $documentationDirectory -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/performance-audit-0.4.25.md') -Destination $documentationDirectory -Force
-    $packagedChrome = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/window-chrome-0.4.15.md')).Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md')
-    [System.IO.File]::WriteAllText((Join-Path $documentationDirectory 'window-chrome-0.4.15.md'), $packagedChrome, [System.Text.UTF8Encoding]::new($false))
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
     New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
     foreach ($fontDocumentation in @('OFL.txt', 'README.md')) {

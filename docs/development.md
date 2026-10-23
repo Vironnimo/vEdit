@@ -3,7 +3,8 @@
 Commands and source paths in this guide require the source checkout. The portable
 application includes this guide and the installer, but not Rust sources or development scripts.
 
-Use the stable Windows Rust toolchain with the MSVC build prerequisites. Git must
+The source checkout pins Rust 1.97.1, rustfmt and Clippy in `rust-toolchain.toml`.
+Use Rustup with the Windows MSVC build prerequisites. Git must
 be on PATH for repository functionality and its integration tests. The normal
 test suite uses temporary fixtures and headless egui harnesses; it does not need
 to control a running vEdit window.
@@ -54,6 +55,30 @@ git diff --check
 existing instance. Use it intentionally, not as an isolated test command.
 `vedit-cli` controls that same live instance unless an isolated test profile has
 been configured. Never use the live session for destructive test fixtures.
+
+## Repository workflow
+
+The user guide is `README.md`; `docs/README.md` indexes current documentation and
+historical reports. Coding agents read `AGENTS.md`, `.vorch/PROJECT.md` and the
+relevant domain maps. The live-editor skill remains a separate operating guide.
+
+Python 3.9+ and Git 2.38+ support the repository tools. Enable the local hooks once
+per clone with `git config --local core.hooksPath .githooks`. The hooks validate
+staged content without rewriting the worktree or index; full Clippy and tests are
+separate checks. Details and commands live in `.vorch/domain-maps/development.md`.
+
+Use Codex's managed worktree tools in Codex, or `python scripts/worktree.py create
+<task-name>` in a terminal. Read `.vorch/workflows/worktree-workflow.md` for merging
+and cleanup. Each checkout owns its dependencies, profile fixtures and `target/`;
+never connect worktrees with junctions. Local commits do not authorize a push.
+For an authorized push follow `.vorch/workflows/push-workflow.md`.
+
+`python scripts/test_survey.py --jobs 8` builds and runs all non-ignored Rust tests
+with individual deadlines and a top-20 timing report below `.tmp/test-survey/`.
+Each test gets a separate process and isolated user profile; timings include that
+startup and fresh caches. This is distinct from the shared-process `cargo test`
+commands above. The testing guide documents the isolation limits and existing
+ignored SDK/manual cases: `.vorch/domain-maps/development/testing.md`.
 
 ## Visual references
 
@@ -135,7 +160,9 @@ The script builds both release binaries and prepares `dist/vEdit/` plus
 `vEdit.lnk`. Packaging needs Node and npm on PATH. It installs the pinned Python
 language server with `npm ci` when needed, and obtains the license for the bundled
 Node version if it is not cached. The bundle includes user/developer documentation,
-the repository vEdit skill, visual references and third-party licenses.
+the repository vEdit skill, all Markdown documentation under `docs/`, visual
+references and third-party licenses. Repository maps and developer scripts remain
+source-checkout material.
 
 A running editor is preserved under a process-specific filename if it locks an
 output binary. Its window and documents remain open; it continues using the old

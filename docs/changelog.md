@@ -1,0 +1,56 @@
+# Versionsverlauf
+
+Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
+steht in der [README](../README.md).
+
+Version 0.5.6 vervollständigt Kommentare auf Diffzeilen: **For agent** zeigt die alten und neuen Zeilenbereiche samt Vergleich, auch für gelöschte Dateien. Die gespeicherten Angaben enthalten die damaligen Pfade und Vergleichsstände und bleiben beim Sammeln und Wiederherstellen erhalten. Die Sammlung ist direkt aus der Kopfzeile der Änderungsübersicht erreichbar.
+
+Version 0.5.5 bringt die Worktree-Auswahl oben in **Source control** zurück. Das kompakte Dropdown wechselt zwischen **Main worktree** und den zugehörigen Worktrees samt Editor, Dateien und Git-Ansicht. **History** zeigt den ausgewählten Branch und seinen Upstream; unabhängige Branch-Verläufe und fremde Branch-Beschriftungen entfallen. Eingemergte Seitenzweige und Tags auf sichtbaren Commits bleiben erhalten.
+
+Version 0.5.4 ergänzt eingebettete Windows-Icons und Produktinformationen, repariert das Startmenü-Icon und führt alle aktiven Profildaten unter `%APPDATA%\vEdit` zusammen. Der einmalige Umzug erhält Sitzungen, Entwürfe und Fensterpositionen; die Originaldaten bleiben unter `vEdit\migration-backup` gesichert. Vor dem ersten Start dieser Version ältere Editorfenster normal schließen.
+
+Version 0.5.3 ergänzt eine Benutzerinstallation mit Startmenü, PATH und Registrierung für **Öffnen mit** und **Standard-Apps**, außerdem unabhängige Fenster mit eigenen Sitzungen.
+
+Version 0.5.2 ergänzt **Open recent** für zuletzt genutzte Dateien und Projektordner, eine vollständige Tastaturbedienung in **Other files** sowie **Ctrl+P** für offene Dateien und unbenannte Entwürfe. **Ctrl+Shift+K** löscht ganze Zeilen, **Ctrl+Enter** / **Ctrl+Shift+Enter** fügen darunter beziehungsweise darüber eine Zeile ein. **Ctrl+G** versteht auch `Zeile:Spalte`.
+
+Version 0.5.1 ergänzt **Other files** neben den Projekt-Tabs und Drag-and-drop aus dem Windows-Explorer. Einzelne Dateien außerhalb geöffneter Projekte bleiben dort mit eigenen Tabs und Splits erhalten, ohne ihren Ordner zum Projekt zu machen. Dateien und ungespeicherte Entwürfe werden beim nächsten Start wiederhergestellt.
+
+Version 0.5.0 ist ein größeres Paket für die Arbeit neben KI-Agenten. Ändert ein Agent eine offene Datei auf der Festplatte, lädt vEdit saubere Dateien rückgängig machbar nach und hält Cursor und Scrollposition in allen Ansichten an derselben Textstelle; bei ungespeicherten eigenen Änderungen bietet ein Banner **Compare**, **Use disk version**, **Keep my version** und **Save as** an. Der Rand zeigt Änderungen gegenüber `HEAD` mit Vorschau und **Revert change**; aus Diffs heraus lassen sich Kommentare als Agent-Markierungen anlegen. `vedit-cli` findet das passende Projekt jetzt über das Arbeitsverzeichnis des aufrufenden Agenten, und Agents können mit `notify` Hinweise in vEdit hinterlassen. Neu sind außerdem Hover-Dokumentation, Referenzsuche und Symbolsuche (**Shift+F12**, `@`, **Ctrl+T**), eine Problems-Liste mit **F8**, Vor/Zurück-Navigation mit **Alt+←/→**, automatisch aktualisierter Explorer, klickbare Fundstellen in der Ausgabe, weitere Vim-Befehle sowie robustere Git-Aufrufe, Wiederherstellung und Hintergrundarbeit.
+
+Version 0.4.35 macht den Bildschirm-Sprung mit **Space Space f** über Buchstaben bedienbar. Die Labels bevorzugen die Grundreihe und halten mögliche Suchfortsetzungen frei; nach drei Suchzeichen oder **Enter** folgt die Zielauswahl. Bei vielen Treffern erscheinen kurze Buchstabenpaare. Die Anzeige erklärt Suche, Auswahl und Korrektur, und **Enter** springt bei einem einzelnen Treffer direkt dorthin.
+
+Version 0.4.34 bündelt die Worktree-Auswahl im oberen Projektwähler. Source control zeigt direkt Branch, Änderungen und History. Im Verlauf bleibt der aktuelle Branch auf der linken Spur; Seitenzweige behalten ihre Farbe bis zum gemeinsamen Commit. Commit- und Push-Beschriftungen sind zentriert. Die History-Scrollbar bleibt wie im Explorer schmal und wird beim Überfahren breiter; die Hover-Farbe ist dezenter.
+
+Version 0.4.33 zeigt Zeichen und eine Token-Vergleichszahl in der Statusleiste. Eine Auswahl zeigt ihre eigenen Werte; der Tooltip enthält weiterhin die Dateisumme. Der Referenz-Tokenizer `o200k_base` läuft vollständig offline im Hintergrund. Die Zahlen beziehen sich auf den aktuellen Editorinhalt einschließlich ungespeicherter Änderungen.
+
+Version 0.4.32 ergänzt benannte Startoptionen pro Projekt: **▶ Run** startet die im Dropdown gewählte Variante, zum Beispiel Web UI, Desktop oder Headless. Agents können die Optionen samt Startskripten einrichten. Anwendungen haben eigene Ausgaben und Stop pro Projekt, laufen ohne Zeitlimit und unabhängig von Build- und Testaufgaben.
+
+Version 0.4.31 vereinfacht den Explorer: Ordner zeigen nur ihren Aufklapppfeil, Dateien kleinere Symbole; die Namen stehen bündig in einer gemeinsamen Spalte. Dateitabs sind schmaler und so hoch wie die Projekttabs. Beide verwenden dezent gerundete Hover-Flächen und eine schmale Linie für den aktiven Tab. Der zusätzliche Abstand über den Dateitabs entfällt.
+
+Version 0.4.30 hält automatische Git-Abfragen unsichtbar: keine blinkenden Ladepunkte und kein ausgegrauter Push-Button. Git-Aktionen bleiben während einer Statusabfrage bedienbar; veraltete Abfrageergebnisse können den Stand nach einer Aktion nicht überschreiben. Ältere History-Einträge werden ohne springende Sidebar nachgeladen. Der reservierte Leerraum unter dem Verlauf entfällt.
+
+Version 0.4.29 liest den Git-Status beim Aktivieren oder Wiederherstellen des Fensters sofort neu ein. Source control zeigt den Änderungsstatus nur noch einmal; die zusätzliche Changes-Überschrift und der leere Erklärungstext entfallen. Bei sauberem Arbeitsverzeichnis und ausstehenden Commits wird die Hauptaktion zu **Push**. Sobald Dateien oder offene Dokumente geändert sind, erscheinen wieder Commit-Nachricht und **Commit**. Eine bereits geschriebene Nachricht bleibt erhalten.
+
+Version 0.4.28 aktualisiert die Git-History automatisch, solange Source control im aktiven Fenster sichtbar ist. Neue Commits und geänderte Branches erscheinen ohne Refresh-Klick. Der Verlauf wird nur bei Änderungen neu geladen; beim Lesen älterer Commits bleibt die Leseposition am bisherigen Commit, soweit dieser noch im geladenen Ausschnitt liegt. Automatische Git-Abfragen pausieren bei inaktivem oder minimiertem Fenster.
+
+Version 0.4.27 gliedert die Worktree-Tooltips in Projekt und Branch, Änderungen und letzten Commit. Hinzugefügte Zeilen erscheinen grün, entfernte rot; Konflikte und Warnungen sind separat hervorgehoben. Projektnamen und ihre Änderungsmarkierung sitzen jetzt gemeinsam zentriert im Tab. Die Seitenleisten haben kompaktere Kopfzeilen mit größenstabilen Menübuttons. Im Explorer steht der Projektname direkt in der Kopfzeile; darunter beginnt der scrollbare Dateibaum.
+
+Version 0.4.26 ergänzt ein Kontextmenü für Projekt-Tabs: Projekt schließen, Pfad kopieren und im Windows-Explorer öffnen. Die Worktree-Liste in Source control gehört jetzt zum aktiven Projekt und wechselt mit dessen Tab. Beim Überfahren eines Worktrees zeigt der Tooltip geänderte Dateien sowie hinzugefügte und entfernte Zeilen; die Zahlen werden bei Bedarf im Hintergrund geladen.
+
+Version 0.4.25 richtet vEdit auf das Begleiten von KI-Agenten aus. Die neue **Änderungsübersicht** zeigt alle Änderungen des Arbeitsverzeichnisses, eines Commits oder eines Branches gegenüber `main` als durchgehenden Diff mit abhakbaren Dateien (Absatz **Änderungen durchsehen** unter „Git und Befehle“). Source control listet oben alle Repositories und Worktrees mit Branch, offenen Änderungen, ↑↓ und Alter des letzten Commits; ein Klick wechselt zum Projekt. Der Explorer färbt geänderte Dateien und Ordner nach Git-Status. Der Git-Verlauf ähnelt VS Code, Auswahllisten zeigen eine Zeile pro Eintrag, und Fokusrahmen erscheinen nur noch bei Tastaturbedienung. Leerlauf, Git-Aktualisierung und Tippen in großen Dateien sind deutlich sparsamer; Details stehen in der [Performance-Untersuchung](performance-audit-0.4.25.md).
+
+Version 0.4.24 macht die Oberfläche ruhiger: Die Codeschrift ist leichter (JetBrains Mono Light statt Regular). Source control zeigt oben nur noch Branch, Commits zu pushen/pullen, geänderte Dateien mit hinzugefügten/entfernten Zeilen und den Abstand zu `main`; **Fetch**, **Pull** und **Push** stehen im **⋯**-Menü des Panels. Seitenleistenköpfe haben kein **×** mehr, und ihr **⋯**-Menü erscheint ohne Rahmen.
+
+Version 0.4.23 macht **Interface zoom** zuverlässig einstellbar: Beim Ziehen am Regler oder Prozentfeld bleibt die Oberfläche unverändert. Erst beim Loslassen wird der gewählte Wert angewendet, sodass die Auswahl nicht mehr durch das Skalieren verrutscht. Zoom-Tastenkürzel wirken weiterhin sofort.
+
+Version 0.4.22 ergänzt Vorschau-Tabs beim Durchklicken im Explorer und beruhigt die Darstellung: Die Auswahl bleibt auf der Datei- oder Ordnerzeile, ohne Rahmen um den gesamten Explorer und ohne linken Akzentstrich. Git-ignorierte Dateien und Ordner erscheinen grau und bleiben vollständig bedienbar. Pfad-Tooltips stehen seitlich neben der Maus. Markdown-Listen verwenden normale helle Schrift und dezente blaue Aufzählungszeichen.
+
+Version 0.4.21 stellt den Repository-Stand oben in Source control dar: geänderte Dateien, Abstand zum Tracking-Branch und Vergleich mit dem lokalen `main` (ersatzweise `master`). **Fetch**, **Pull** und **Push** sind direkt sichtbar. Ein Repository oberhalb des geöffneten Projektordners wird erst nach ausdrücklicher Auswahl verwendet.
+
+Version 0.4.20 beschleunigt das Bearbeiten großer Dateien, die Projektsuche, Explorer, Git-Verlauf und -Graph sowie Markdown-Tabellen und die Anzeige von Taskausgaben. Die [Performance-Untersuchung](performance-audit-0.4.20.md) dokumentiert die gemessenen Verbesserungen und verbleibenden Engpässe.
+
+Version 0.4.19 verbessert die Agentenbedienung: Jeder CLI-Befehl hat eine eigene Hilfe, `schema OP` zeigt gezielt seine JSON-Beispiele, und Textdateien lassen sich direkt als Entwurf laden oder revisionsgeschützt in einen Puffer übernehmen. UTF-16-Dateien mit BOM aus Windows PowerShell werden akzeptiert. Lange Pufferzeilen und Taskausgaben lassen sich vollständig weiterlesen. Der Agenten-Skill enthält die häufigen Abläufe direkt und trennt die Spezialthemen.
+
+Version 0.4.18 ergänzt die geteilte Git-Ansicht mit verschiebbarer Trennlinie, lokalen und entfernten Commits, Branch-Wechsel und genauen Zeitangaben. Die Statusleiste bietet mehr Platz und richtet Modus, Branch und Speicherstatus einheitlich aus. Der Explorer markiert das Ziel eines Rechtsklicks deutlich und kann Dateien und Ordner in den Windows-Papierkorb verschieben. Seit Version 0.4.17 heißt Morrow **vEdit** und übernimmt das Farbschema von vBot und Watchtower: warmes Graphit, helle cremefarbene Schrift und Orange für Aktionen und Auswahl. Grün, Gelb, Blau und Rot kennzeichnen weiterhin Erfolg, Warnungen, Informationen und Fehler.
+
+Bestehende Sitzungen mit Projekten, Einstellungen, Fensterpositionen und ungespeicherten Entwürfen werden weiterverwendet. Die Programme heißen jetzt `vedit.exe` und `vedit-cli.exe`; der Starter heißt **vEdit.lnk**. Eine bereits laufende Morrow-Version bleibt bis zum normalen Schließen geöffnet. Beim nächsten Start über den neuen Starter erscheint vEdit.
