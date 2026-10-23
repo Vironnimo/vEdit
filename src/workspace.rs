@@ -257,6 +257,9 @@ pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<Explorer
     // A fresh matcher observes edits on refresh; ancestors are cached within
     // this listing, including the inherited status of ignored directories.
     let mut ignored = WalkBuilder::new(root)
+        // Cargo's Git ceiling does not affect the ignore crate. Test fixtures
+        // must not inherit the checkout's .tmp exclusion; shipped builds do.
+        .parents(!cfg!(test))
         .hidden(false)
         .ignore(false)
         .git_ignore(true)
@@ -576,6 +579,8 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
     let show_ignored_files = options.show_ignored_files;
     let mut builder = WalkBuilder::new(root);
     builder
+        // Keep test fixtures independent of ancestor checkout ignore files.
+        .parents(!cfg!(test))
         .hidden(false)
         .follow_links(false)
         .ignore(true)
@@ -844,6 +849,8 @@ pub fn search_with_excludes(
     let bounded_walk = bounded.clone();
     let mut walker = WalkBuilder::new(&root);
     walker
+        // Keep test fixtures independent of ancestor checkout ignore files.
+        .parents(!cfg!(test))
         .hidden(false)
         .follow_links(false)
         .git_ignore(true)
