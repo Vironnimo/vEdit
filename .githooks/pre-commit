@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuse an AI tool identity (scripts/commit_authorship.py), then check the staged
+# source, formatting and domain maps without rewriting files (scripts/commit_check.py).
+# Enable once per clone: git config core.hooksPath .githooks
+PYTHON=python
+command -v python >/dev/null 2>&1 || PYTHON=python3
+"$PYTHON" scripts/commit_authorship.py identity || exit 1
+exec "$PYTHON" scripts/commit_check.py

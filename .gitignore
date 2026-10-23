@@ -9,3 +9,6 @@
 *.diff.png
 *.old.png
 *.new.png
+/.worktrees/
+/.vorch-worktree
+__pycache__/
