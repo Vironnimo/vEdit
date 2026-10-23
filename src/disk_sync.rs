@@ -351,7 +351,6 @@ impl VEditApp {
     /// Record a newer disk version for a buffer whose edits must be kept. A
     /// buffer that already has the disk text simply adopts it as saved.
     pub(super) fn observe_disk_version(&mut self, id: u64, disk: workspace::LoadedDocument) {
-        let recovery_writer = self.recovery_writer.clone();
         let Some(tab) = self.tab_by_id_mut(id) else {
             return;
         };
@@ -364,7 +363,13 @@ impl VEditApp {
             tab.dirty = false;
             tab.clear_agent_draft_when_saved();
             tab.disk_conflict = None;
-            let _ = recovery_writer.remove(&tab.recovery_path, recovery_writer.stamp());
+            // As for a completed save, older snapshots no longer describe the
+            // recovery state. Cleanup runs off the UI thread and retries if a
+            // reader temporarily holds the file without delete sharing.
+            tab.recovery_generation = tab.recovery_generation.wrapping_add(1);
+            tab.recovery_stale = true;
+            self.session_dirty = true;
+            self.start_recovery_cleanup(id);
             return;
         }
         let first = tab.disk_conflict.is_none();

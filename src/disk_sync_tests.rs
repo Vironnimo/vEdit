@@ -348,6 +348,53 @@ fn keep_my_version_adopts_the_disk_baseline_and_saves_over_it() {
     assert!(!app.tab().unwrap().dirty);
 }
 
+#[cfg(windows)]
+#[test]
+fn matching_external_save_retries_locked_recovery_cleanup() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let fixture = Fixture::new("matching-disk-recovery");
+    let (mut app, id, path) = fixture.app("old\n");
+    change_tab(&mut app, "saved externally 🦀\n");
+    app.tab_mut().unwrap().last_edit = Instant::now() - Duration::from_secs(2);
+    app.autosave();
+    wait_until(&mut app, |app| !app.tab().unwrap().recovery_pending);
+    let recovery_path = app.tab().unwrap().recovery_path.clone();
+    assert!(recovery_path.is_file());
+    assert_eq!(
+        app.tab().unwrap().recovery_revision,
+        app.tab().unwrap().revision
+    );
+
+    // A scanner may read the snapshot without allowing its deletion yet.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&recovery_path)
+        .unwrap();
+    change_on_disk(&mut app, id, &path, "saved externally 🦀\n");
+    assert!(!app.tab().unwrap().dirty);
+    wait_until(&mut app, |app| {
+        app.tab().unwrap().recovery_cleanup_pending.is_none()
+    });
+    assert!(
+        app.tab().unwrap().recovery_stale,
+        "a failed cleanup must remain eligible for retry even at the same revision"
+    );
+    assert!(app.tab().unwrap().recovery_cleanup_retry_at.is_some());
+    assert!(recovery_path.is_file());
+
+    drop(held);
+    app.tab_mut().unwrap().recovery_cleanup_retry_at = Some(Instant::now());
+    app.autosave();
+    wait_until(&mut app, |app| {
+        !app.tab().unwrap().recovery_stale && app.tab().unwrap().recovery_cleanup_pending.is_none()
+    });
+    assert!(!recovery_path.exists());
+    assert!(app.session().projects[0].tabs[0].recovery_path.is_none());
+    assert_eq!(fs::read_to_string(path).unwrap(), "saved externally 🦀\n");
+}
+
 #[test]
 fn keep_my_version_resumes_autosave_only_for_user_edits() {
     let fixture = Fixture::new("keep-autosave");
