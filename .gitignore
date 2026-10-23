@@ -1,4 +1,6 @@
 /target/
+/.tmp/*
+!/.tmp/.gitkeep
 /scratch/
 /dist/
 /.vedit-backups/

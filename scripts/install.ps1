@@ -9,6 +9,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Only source checkouts have the development helper; packaged installs stand alone.
+$projectTemp = $null
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '../Cargo.toml')) {
+    . (Join-Path $PSScriptRoot 'project-temp.ps1')
+    $projectTemp = Enter-ProjectTemp
+}
+try {
 $installIdentity = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\', '/').ToLowerInvariant()
 $hasher = [Security.Cryptography.SHA256]::Create()
 try { $lockId = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($installIdentity))).Replace('-', '') }
@@ -268,4 +275,7 @@ if ($TestRoot) { $userRegistry.Dispose() }
 } finally {
     if ($ownsMutex) { $installMutex.ReleaseMutex() }
     $installMutex.Dispose()
+}
+} finally {
+    if ($projectTemp) { Exit-ProjectTemp $projectTemp }
 }

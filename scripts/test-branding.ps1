@@ -1,6 +1,9 @@
 param([string]$ExecutableDirectory, [string]$ShortcutPath)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 if (-not $ExecutableDirectory) { $ExecutableDirectory = Join-Path $PSScriptRoot '../target/debug' }
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -56,7 +59,7 @@ try {
         Assert-BrandIcon $path
     }
     if (-not $ShortcutPath) {
-        $temporaryShortcut = Join-Path ([IO.Path]::GetTempPath()) ('vedit-icon-test-' + [Guid]::NewGuid().ToString('N') + '.lnk')
+        $temporaryShortcut = Join-Path $projectTemp.Root ('vedit-icon-test-' + [Guid]::NewGuid().ToString('N') + '.lnk')
         $ShortcutPath = $temporaryShortcut
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
         $shortcut.TargetPath = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory 'vedit.exe'))
@@ -69,4 +72,7 @@ try {
     Write-Output "$checks Windows resource and Shell icon checks passed."
 } finally {
     if ($temporaryShortcut) { Remove-Item -LiteralPath $temporaryShortcut -ErrorAction SilentlyContinue }
+}
+} finally {
+    Exit-ProjectTemp $projectTemp
 }

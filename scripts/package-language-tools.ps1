@@ -2,6 +2,9 @@ param([Parameter(Mandatory = $true)][string]$ReleaseDirectory)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $packageRoot = Join-Path $projectRoot 'tools/basedpyright'
 $packageManifest = Get-Content -LiteralPath (Join-Path $packageRoot 'package.json') -Raw | ConvertFrom-Json
@@ -30,7 +33,7 @@ $nodeVersion = (& $nodePath --version).Trim()
 if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v\d+\.\d+\.\d+$') {
     throw 'Could not identify the Node runtime for Python language support.'
 }
-$licensePath = Join-Path $projectRoot "target/node-$nodeVersion-LICENSE.txt"
+$licensePath = Join-Path $projectTemp.Root "node-$nodeVersion-LICENSE.txt"
 if (-not (Test-Path -LiteralPath $licensePath)) {
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE" -OutFile $licensePath
 }
@@ -45,3 +48,6 @@ if (-not $nodeAlreadyPackaged) {
 Copy-Item -LiteralPath $licensePath -Destination (Join-Path $toolsDirectory 'node-LICENSE.txt') -Force
 Set-Content -LiteralPath (Join-Path $toolsDirectory 'node-version.txt') -Value $nodeVersion -Encoding utf8
 Write-Output "Python language support packaged: basedpyright $installedVersion, Node $nodeVersion"
+} finally {
+    Exit-ProjectTemp $projectTemp
+}

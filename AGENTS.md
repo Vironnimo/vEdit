@@ -87,8 +87,13 @@ verified with that setting; see the scoped PowerShell command in
 `docs/development.md`. Serial tests also provide a verified fallback.
 
 Build into the single `target/` folder; never set `CARGO_TARGET_DIR` to a second
-folder. Never put logs, screenshots or scripts into `target/`; put them into
-`scratch/<task>/` in the checkout, which Git ignores and `cargo clean` keeps.
+folder. Put temporary files, fixtures, logs, screenshots and helper scripts in
+`.tmp/<task>/` in this checkout. Never use the system Temp directory or `target/`
+for that work. `.tmp/` contents are Git-ignored and survive `cargo clean`.
+Cargo redirects `TEMP`, `TMP` and `TMPDIR` automatically. For other tools,
+dot-source `scripts/project-temp.ps1`, call `Enter-ProjectTemp`, then restore its
+returned context with `Exit-ProjectTemp` in `finally`; child processes inherit
+the local paths. See `docs/development.md` for the scoped example.
 
 Use proportional checks for documentation-only or small, reversible edits.
 Ignored tests require particular SDKs or are manual benchmarks; do not blanket

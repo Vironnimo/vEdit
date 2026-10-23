@@ -1,7 +1,10 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 $testId = [Guid]::NewGuid().ToString('N')
-$fixture = Join-Path ([IO.Path]::GetTempPath()) "vedit-installer-tests/$testId"
+$fixture = Join-Path $projectTemp.Root "vedit-installer-tests/$testId"
 $package = Join-Path $fixture 'package'
 $installed = Join-Path $fixture 'installed app'
 $installer = Join-Path $PSScriptRoot 'install.ps1'
@@ -98,8 +101,11 @@ try {
     $env:PATH = $originalProcessPath
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($registryPath, $false)
     $resolved = [IO.Path]::GetFullPath($fixture)
-    $testPrefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'vedit-installer-tests')) + '\'
+    $testPrefix = [IO.Path]::GetFullPath((Join-Path $projectTemp.Root 'vedit-installer-tests')) + '\'
     if ($resolved.StartsWith($testPrefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolved) -eq $testId) {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
+}
+} finally {
+    Exit-ProjectTemp $projectTemp
 }

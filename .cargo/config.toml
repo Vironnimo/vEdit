@@ -1,0 +1,8 @@
+# Keep compiler, test and child-process temporary files inside this checkout.
+# Relative paths are resolved from the directory containing .cargo/.
+[env]
+TEMP = { value = ".tmp", relative = true, force = true }
+TMP = { value = ".tmp", relative = true, force = true }
+TMPDIR = { value = ".tmp", relative = true, force = true }
+# An uninitialized fixture must not discover or change the enclosing vEdit repo.
+GIT_CEILING_DIRECTORIES = { value = ".tmp", relative = true, force = true }

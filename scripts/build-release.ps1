@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $releaseDirectory = Join-Path $projectRoot 'dist/vEdit'
 $preservedBinaries = [System.Collections.Generic.List[object]]::new()
@@ -155,4 +158,7 @@ catch {
 }
 finally {
     Pop-Location
+}
+} finally {
+    Exit-ProjectTemp $projectTemp
 }

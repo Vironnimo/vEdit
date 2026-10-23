@@ -2,11 +2,14 @@
 param([string]$ExecutableDirectory)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 if (-not $ExecutableDirectory) { $ExecutableDirectory = Join-Path (Split-Path -Parent $PSScriptRoot) 'target/debug' }
 $executable = (Resolve-Path -LiteralPath (Join-Path $ExecutableDirectory 'vedit.exe')).Path
 $cli = (Resolve-Path -LiteralPath (Join-Path $ExecutableDirectory 'vedit-cli.exe')).Path
 $testId = [Guid]::NewGuid().ToString('N')
-$fixture = Join-Path ([IO.Path]::GetTempPath()) "vedit-window-tests/$testId"
+$fixture = Join-Path $projectTemp.Root "vedit-window-tests/$testId"
 $profile = Join-Path $fixture 'profile'
 $began = Get-Date
 $processes = [Collections.Generic.List[object]]::new()
@@ -167,8 +170,11 @@ try {
     $env:VEDIT_CONTROL_DIR = $previousControl
     $env:MORROW_CONTROL_DIR = $previousLegacyControl
     $resolved = [IO.Path]::GetFullPath($fixture)
-    $prefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'vedit-window-tests')) + '\'
+    $prefix = [IO.Path]::GetFullPath((Join-Path $projectTemp.Root 'vedit-window-tests')) + '\'
     if ($resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolved) -eq $testId) {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
+}
+} finally {
+    Exit-ProjectTemp $projectTemp
 }

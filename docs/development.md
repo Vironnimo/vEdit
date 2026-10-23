@@ -8,6 +8,33 @@ be on PATH for repository functionality and its integration tests. The normal
 test suite uses temporary fixtures and headless egui harnesses; it does not need
 to control a running vEdit window.
 
+Temporary work belongs in `.tmp/` in the checkout, including test fixtures,
+logs, screenshots and agent helper scripts. Its contents are Git-ignored; the
+tracked `.gitkeep` makes the directory available in fresh clones. Cargo sets
+`TEMP`, `TMP` and `TMPDIR` to this absolute path for builds, tests and child
+processes, overriding inherited system Temp paths. Run Cargo from this checkout
+or one of its subdirectories so it loads `.cargo/config.toml`.
+
+The PowerShell build and test scripts use the same directory and restore the
+calling process's environment on exit. For other tools or direct test binaries:
+
+```powershell
+. ./scripts/project-temp.ps1
+$projectTemp = Enter-ProjectTemp
+try {
+    # Run the tool here; store task-specific files under .tmp/<task>/.
+} finally {
+    Exit-ProjectTemp $projectTemp
+}
+```
+
+Both configurations also stop Git's parent-directory discovery at `.tmp/`, so
+an uninitialized test fixture cannot select the source repository. Normal
+per-fixture cleanup remains in place. `cargo clean` leaves `.tmp/` intact.
+`cargo test --test project_temp` checks Cargo's paths and Git isolation;
+`powershell.exe -NoProfile -File scripts/test-project-temp.ps1` checks PowerShell
+child processes and environment restoration.
+
 ```powershell
 cargo build
 cargo test --bin vedit reopen::tests -- --test-threads=8
@@ -64,7 +91,7 @@ A deliberate UI change can invalidate snapshots. First run normally, inspect the
 reported image differences, then generate candidates separately. For example:
 
 ```powershell
-$env:VEDIT_SNAPSHOT_DIR = Join-Path $PWD 'scratch/snapshot-candidates'
+$env:VEDIT_SNAPSHOT_DIR = Join-Path $PWD '.tmp/snapshot-candidates'
 $env:UPDATE_SNAPSHOTS = '1'
 try {
     cargo test --bin vedit app::visual_tests -- --test-threads=8
@@ -143,7 +170,7 @@ executables remain alive; failed file replacement rolls earlier replacements
 back. Locked runtime changes can require closing vEdit normally before retrying.
 The installation marker tracks owned files; uninstall refuses while an installed
 process runs, removes owned files and registration, and retains user profiles and
-unknown files. Installer validation uses a temporary directory and a redirected
+unknown files. Installer validation uses a directory under `.tmp/` and a redirected
 registry subtree, never the live installation:
 
 ```powershell

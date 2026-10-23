@@ -1,6 +1,9 @@
 param([string]$ExecutableDirectory)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'project-temp.ps1')
+$projectTemp = Enter-ProjectTemp
+try {
 if (-not $ExecutableDirectory) { $ExecutableDirectory = Join-Path $PSScriptRoot '../target/debug' }
 $executable = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory 'vedit.exe'))
 $cli = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory 'vedit-cli.exe'))
@@ -9,7 +12,7 @@ if (-not $version -or [version]$version -lt [version]'0.5.4') {
     throw 'Profile migration tests require vEdit 0.5.4 or newer. Wait for installation to finish before running them.'
 }
 $testId = [Guid]::NewGuid().ToString('N')
-$fixture = Join-Path ([IO.Path]::GetTempPath()) "vedit-migration-tests/$testId"
+$fixture = Join-Path $projectTemp.Root "vedit-migration-tests/$testId"
 $appdata = Join-Path $fixture 'appdata'
 $profile = Join-Path $appdata 'vEdit'
 $old = Join-Path $appdata 'Morrow/recovery'
@@ -117,8 +120,11 @@ try {
     Stop-Fixture
     foreach ($key in $environment.Keys) { [Environment]::SetEnvironmentVariable($key, $environment[$key], 'Process') }
     $resolved = [IO.Path]::GetFullPath($fixture)
-    $prefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'vedit-migration-tests')) + '\'
+    $prefix = [IO.Path]::GetFullPath((Join-Path $projectTemp.Root 'vedit-migration-tests')) + '\'
     if ($resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolved) -eq $testId) {
         Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+} finally {
+    Exit-ProjectTemp $projectTemp
 }
