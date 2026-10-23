@@ -1,3 +1,4 @@
+use crate::design::HoverDetails;
 use crate::{
     design, editor, git, tasks,
     vim::{VimKey, VimMode, VimState, Yank},
@@ -913,7 +914,7 @@ impl ActiveGitAction {
         };
         ui.add(egui::Spinner::new().size(size).color(MUTED));
         ui.add(egui::Label::new(RichText::new(label).size(size).color(MUTED)).truncate())
-            .on_hover_text(format!(
+            .on_hover_details(format!(
                 "Git is working in {}",
                 crate::paths::display(&self.root)
             ));
@@ -5258,7 +5259,7 @@ impl VEditApp {
                     .size(10.5)
                     .color(ORANGE),
                 )
-                .on_hover_text(results.warnings.join("\n"));
+                .on_hover_details(results.warnings.join("\n"));
             }
             egui::ScrollArea::vertical()
                 .id_salt("search_results")
@@ -5360,7 +5361,7 @@ impl VEditApp {
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
                         let budget = (ui.available_width() - right_budget).clamp(30.0, 180.0);
-                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_details(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if !narrow && let Some(action) = &self.git_action && action.progress_ui(ui, 11.0) {
                         self.cancel_git_action();
@@ -5383,12 +5384,12 @@ impl VEditApp {
                             if !show_statistics && let Some(statistics) = &statistics {
                                 position_hint.push_str(&format!("\n\n{}", statistics.tooltip()));
                             }
-                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(position_hint);
+                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_details(position_hint);
                             if show_statistics && let Some(statistics) = &statistics {
-                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_text(statistics.tooltip());
+                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_details(statistics.tooltip());
                             }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_details(details); }
                             if !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
                                 ui.label(RichText::new("Plain text: file too large for highlighting").size(11.0).color(MUTED)).on_hover_text(format!(
                                     "Syntax colors are off for files larger than {} KiB so editing stays fast. This file has {} KiB. Editing, search and language analysis work as usual.",
@@ -6112,7 +6113,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                         }
                         tooltip.push_str("\nDrag to reorder or move to another editor pane");
                         response
-                            .on_hover_text(tooltip)
+                            .on_hover_details(tooltip)
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
                     ui.add_space(7.0);
@@ -6736,7 +6737,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                     let response = ui
                         .interact(target, id.with(("git_change", placement.index)), egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_ui(|ui| git_gutter::tooltip_ui(ui, markers, hunk));
+                        .on_hover_details_ui(|ui| git_gutter::tooltip_ui(ui, markers, hunk));
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Git change")
                     });
@@ -6850,7 +6851,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                             .with(("review_mark", tab.id, &annotation.id, row_index)),
                         egui::Sense::hover(),
                     )
-                    .on_hover_text(&annotation.note);
+                    .on_hover_details(&annotation.note);
                 }
             }
             for diagnostic in &diagnostics {
@@ -6905,7 +6906,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                                 ui.id().with(("diagnostic", tab.id, start, row_index)),
                                 egui::Sense::hover(),
                             )
-                            .on_hover_text(format!("{}: {}", severity.label(), diagnostic.message));
+                            .on_hover_details(format!("{}: {}", severity.label(), diagnostic.message));
                         }
                     }
                 }
@@ -6944,7 +6945,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
                             center + Vec2::new(-3.5, -5.0), center + Vec2::new(3.5, -5.0),
                             center + Vec2::new(3.5, 5.0), center + Vec2::new(0.0, 2.5), center + Vec2::new(-3.5, 5.0),
                         ], ORANGE, Stroke::NONE));
-                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_text(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
+                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_details(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Bookmark at line {line}")));
                         if response.clicked() { bookmark_click = Some(id); }
                     }
@@ -7197,7 +7198,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             if let Some(error) = app.editor_search_error() {
                 let invalid = ui
                     .label(RichText::new("Invalid pattern").size(11.0).color(RED))
-                    .on_hover_text(format!("This regular expression cannot search: {error}"));
+                    .on_hover_details(format!("This regular expression cannot search: {error}"));
                 invalid.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Invalid pattern")
                 });
@@ -8274,7 +8275,7 @@ impl VEditApp {
                     .show(ui, |ui| {
                         for (label, path) in &documents {
                             ui.add(egui::Label::new(RichText::new(label).size(12.0)).truncate())
-                                .on_hover_text(path);
+                                .on_hover_details(path);
                         }
                     });
                 if self.close_after_save {
@@ -8481,6 +8482,7 @@ impl VEditApp {
         }
     }
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        design::begin_hover_frame(&self.ctx);
         self.prune_empty_other_files();
         self.receive_file_drop();
         design::focus_visible(&self.ctx);
@@ -8616,6 +8618,7 @@ impl VEditApp {
         self.navigation_ui();
         self.completion_ui();
         self.hover_ui();
+        design::end_hover_frame(&self.ctx);
         self.finish_agent_mark_input_owner();
         self.finish_shortcut_input();
         self.autosave();

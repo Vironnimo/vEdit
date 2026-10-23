@@ -1,4 +1,4 @@
-# vEdit 0.6.0
+# vEdit 0.6.1
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -54,6 +54,8 @@ Beim ersten Start mit **Ctrl+Shift+O** Projektordner hinzufügen. **Ctrl+O**, da
 Die Projekt-Tabs sitzen oben neben dem Namen der App und wechseln per Klick direkt zum Projekt. Ein gelber Punkt direkt hinter dem Namen zeigt uncommittete Git-Änderungen; der Tooltip nennt die Anzahl. Saubere Projekte erhalten keinen Punkt. Auch inaktive Projekte werden im Hintergrund aktualisiert. Viele Projekte lassen sich horizontal durchscrollen; Tastenkürzel machen den aktiven Tab sichtbar. Der **+**-Knopf beziehungsweise **Ctrl+Alt+P** öffnet die durchsuchbare Projektliste; Namen, Pfade sowie offene und geänderte Dateien helfen bei der Auswahl. Pfeiltasten und **Enter** wechseln direkt zum Projekt, **Esc** schließt die Liste. **Ctrl+Alt+PageDown** / **Ctrl+Alt+PageUp** wechseln zum nächsten beziehungsweise vorherigen offenen Projekt. Jedes Projekt besitzt eigene Tab-Leisten, Ansichten und Splits, die beim Wechsel zusammen mitwechseln und nach einem Neustart wiederhergestellt werden. Die Dateien bleiben geöffnet und ungespeicherte Änderungen erhalten. Weitere Projektordner lassen sich über die Liste mit dem nativen Dialog hinzufügen. Im Explorer steht der aktive Projektname als feste Überschrift über seinem Dateibaum.
 
 Ein Rechtsklick auf einen Projekt-Tab (oder **Shift+F10** bei Tastaturfokus) öffnet **Reveal in Explorer**, **Copy path** und **Close project**. Die Aktionen gelten für den angeklickten Tab, ohne zuvor das aktive Projekt zu wechseln. **Close project** entfernt das Projekt aus der Sitzung; der Ordner und seine Dateien bleiben auf dem Datenträger. Bei ungespeicherten Änderungen fragt vEdit vor dem Schließen nach.
+
+Kurze Bedienhinweise erscheinen als normale Tooltips. Detail-Tooltips für Pfade, Diagnosen, Git-Daten und Dokumentation lassen sich mit der Maus betreten: Text markieren und mit **Ctrl+C** kopieren oder **Copy all** verwenden. Lange Inhalte scrollen innerhalb der Anzeige. Beim Wechsel vom Auslöser zur Anzeige bleibt sie kurz offen; **Esc**, ein Klick außerhalb oder das Verlassen beider Bereiche schließt sie. Das reine Überfahren nimmt dem Editor keinen Tastaturfokus. Ein per **Show hover** geöffnetes Dokumentationsfenster bleibt wie bisher bis **Esc**, einer Cursorbewegung oder einem Klick außerhalb geöffnet. Vollständige Statusfehler bleiben zusätzlich per Klick im Detailfenster erreichbar.
 
 ### Einzelne Dateien und Drag-and-drop
 

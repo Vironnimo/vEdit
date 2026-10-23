@@ -80,6 +80,15 @@ pub(super) struct HoverPopup {
 }
 
 impl HoverPopup {
+    fn details_id(&self) -> egui::Id {
+        egui::Id::new((
+            "language_details",
+            self.target.tab_id,
+            self.target.revision,
+            self.target.index,
+        ))
+    }
+
     fn visible(&self) -> bool {
         !self.diagnostics.is_empty() || matches!(self.body, HoverBody::Ready(Some(_)))
     }
@@ -643,10 +652,10 @@ fn hover_document_ui(ui: &mut egui::Ui, document: &HoverDocument, font: f32) {
                     ui.horizontal_top(|ui| {
                         ui.add_space(*depth as f32 * 12.0);
                         ui.label(RichText::new("•").size(12.5).color(MUTED));
-                        ui.add(egui::Label::new(job).wrap().selectable(false));
+                        ui.add(egui::Label::new(job).wrap().selectable(true));
                     });
                 } else {
-                    ui.add(egui::Label::new(job).wrap().selectable(false));
+                    ui.add(egui::Label::new(job).wrap().selectable(true));
                 }
             }
             HoverBlock::Code { language, text } => {
@@ -657,14 +666,14 @@ fn hover_document_ui(ui: &mut egui::Ui, document: &HoverDocument, font: f32) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let job = crate::render::highlight_snippet(ui.ctx(), text, language, font);
-                        ui.add(egui::Label::new(job).wrap().selectable(false));
+                        ui.add(egui::Label::new(job).wrap().selectable(true));
                     });
             }
             HoverBlock::Plain(text) => {
                 ui.add(
                     egui::Label::new(RichText::new(text).monospace().size(font).color(TEXT))
                         .wrap()
-                        .selectable(false),
+                        .selectable(true),
                 );
             }
             HoverBlock::Rule => {
@@ -1041,6 +1050,15 @@ impl VEditApp {
     }
 
     pub(super) fn hover_escape(&mut self) {
+        if self
+            .intel
+            .hover
+            .as_ref()
+            .is_some_and(|popup| design::details_dismissed(&self.ctx, popup.details_id()))
+        {
+            self.intel.close_hover();
+            return;
+        }
         if !self.intel.hover_visible() {
             return;
         }
@@ -1102,13 +1120,14 @@ impl VEditApp {
             .as_ref()
             .filter(|popup| popup.target.source == HoverSource::Pointer);
         let keep_open = pointer_popup.is_some_and(|popup| {
-            hover_pos.is_some_and(|position| {
-                popup.target.anchor.expand(2.0).contains(position)
-                    || self
-                        .intel
-                        .hover_rect
-                        .is_some_and(|rect| rect.expand(8.0).contains(position))
-            })
+            design::details_open(&self.ctx, popup.details_id())
+                || hover_pos.is_some_and(|position| {
+                    popup.target.anchor.expand(2.0).contains(position)
+                        || self
+                            .intel
+                            .hover_rect
+                            .is_some_and(|rect| rect.expand(8.0).contains(position))
+                })
         });
         match pointer {
             Some(target) => {
@@ -1228,37 +1247,53 @@ impl VEditApp {
                     })
                     .show(ui, |ui| {
                         ui.set_max_width(width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("language_hover_scroll")
-                            .max_height(HOVER_MAX_HEIGHT)
-                            .auto_shrink([true, true])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 6.0;
-                                for (severity, message) in &popup.diagnostics {
-                                    let (label, color) = severity_label(*severity);
-                                    ui.horizontal_top(|ui| {
-                                        ui.label(
-                                            RichText::new(label).size(11.0).strong().color(color),
-                                        );
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(message).size(12.5).color(TEXT),
-                                            )
-                                            .wrap()
-                                            .selectable(false),
-                                        );
-                                    });
+                        design::details_body(ui, popup.details_id(), |ui| {
+                            let mut copy = Vec::new();
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            for (severity, message) in &popup.diagnostics {
+                                let (label, color) = severity_label(*severity);
+                                copy.push(format!("{label}: {message}"));
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new(label).size(11.0).strong().color(color));
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(message).size(12.5).color(TEXT),
+                                        )
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                            }
+                            if let HoverBody::Ready(Some(document)) = &popup.body {
+                                if !popup.diagnostics.is_empty() {
+                                    ui.separator();
                                 }
-                                if let HoverBody::Ready(Some(document)) = &popup.body {
-                                    if !popup.diagnostics.is_empty() {
-                                        ui.separator();
+                                hover_document_ui(ui, document, font);
+                                copy.extend(document.blocks.iter().map(|block| {
+                                    match block {
+                                        HoverBlock::Text { spans, .. } => spans
+                                            .iter()
+                                            .map(|span| span.text.as_str())
+                                            .collect::<String>(),
+                                        HoverBlock::Code { text, .. } | HoverBlock::Plain(text) => {
+                                            text.clone()
+                                        }
+                                        HoverBlock::Rule => String::new(),
                                     }
-                                    hover_document_ui(ui, document, font);
-                                }
-                            });
+                                }));
+                            }
+                            copy.join("\n\n")
+                        });
                     });
             });
         self.intel.hover_rect = Some(response.response.rect);
+        design::register_details(
+            &ctx,
+            popup.details_id(),
+            anchor,
+            response.response.rect,
+            popup.target.source == HoverSource::Keyboard,
+        );
     }
 
     /// Requests references to the symbol at the cursor and shows them in the

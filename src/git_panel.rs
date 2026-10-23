@@ -1050,7 +1050,7 @@ impl VEditApp {
                     },
                 )
                 .inner
-                .on_hover_text(format!(
+                .on_hover_details(format!(
                     "{}\nFetch, pull, push and other repository actions are in the panel menu (⋯).",
                     crate::paths::display(&root)
                 ));
@@ -1787,7 +1787,7 @@ impl VEditApp {
                         ui.label(RichText::new(format_date(&detail.date)).size(11.5).color(MUTED));
                     });
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(RichText::new(&detail.hash).monospace().size(11.0).color(MUTED)).truncate()).on_hover_text(&detail.hash);
+                        ui.add(egui::Label::new(RichText::new(&detail.hash).monospace().size(11.0).color(MUTED)).truncate()).on_hover_details(&detail.hash);
                         if small_button(ui, "Copy hash", "Copy the full commit identifier").clicked() {
                             ui.ctx().copy_text(detail.hash.clone());
                         }
@@ -2016,7 +2016,7 @@ fn repository_overview(
                 };
                 status = Some(ui.add(egui::Label::new(RichText::new(label).size(11.5).color(color))
                     .sense(egui::Sense::click()))
-                    .on_hover_text(format!("{breakdown}\nA partially staged file counts as staged and unstaged.")));
+                    .on_hover_details(format!("{breakdown}\nA partially staged file counts as staged and unstaged.")));
                 let (added, removed) =
                     cache.groups.iter().fold((0u64, 0u64), |(a, r), (_, tree)| {
                         (
@@ -2053,7 +2053,7 @@ fn repository_overview(
                     .sense(egui::Sense::click()),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(format!(
+                .on_hover_details(format!(
                     "Compared with local {base}: {} commits only on this branch, {} only on {base}\nClick to review this branch's changes",
                     comparison.ahead,
                     comparison.behind,
@@ -2069,7 +2069,7 @@ fn repository_overview(
                             .size(11.5)
                             .color(ORANGE),
                     )
-                    .on_hover_text(error);
+                    .on_hover_details(error);
                 }
             }
         })
@@ -2117,7 +2117,7 @@ fn sync_status(ui: &mut egui::Ui, project: &Project) {
             .wrap_mode(egui::TextWrapMode::Extend)
             .selectable(false),
     )
-    .on_hover_text(tip);
+    .on_hover_details(tip);
 }
 
 /// A quiet, left-aligned section title. It stays clickable to move keyboard
@@ -2299,7 +2299,7 @@ fn draw_file_tree(
                 },
                 !busy,
             );
-            response.row.clone().on_hover_text(&path);
+            response.row.clone().on_hover_details(&path);
             if response.row.clicked() {
                 open = !open;
             }
@@ -2395,11 +2395,10 @@ fn draw_file_tree(
                     .row
                     .on_hover_text(file_tooltip(file, context, status_label))
             } else {
-                response.row.on_hover_ui(|ui| {
-                    // Match egui's on_hover_text layout while delaying string
-                    // formatting until this specific tooltip is actually shown.
-                    ui.set_max_width(ui.spacing().tooltip_width);
-                    ui.add(egui::Label::new(file_tooltip(file, context, status_label)));
+                response.row.on_hover_details_ui(|ui| {
+                    let text = file_tooltip(file, context, status_label);
+                    ui.add(egui::Label::new(&text).wrap());
+                    text
                 })
             };
             if row.clicked() {
@@ -3059,9 +3058,8 @@ fn history_hover(
     stats: Option<&Result<git::CommitStats, String>>,
     actions: &mut Vec<GitUiAction>,
 ) {
-    response.clone().on_hover_ui(|ui| {
+    response.clone().on_hover_details_ui(|ui| {
         ui.ctx().request_repaint_after(Duration::from_secs(30));
-        ui.set_max_width(460.0);
         ui.label(RichText::new(&commit.subject).strong());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3159,6 +3157,45 @@ fn history_hover(
                 });
             }
         }
+        let mut copy = format!(
+            "{}\n{} · {}\n{}\n{}\n{}",
+            commit.subject,
+            commit.author,
+            relative_time(commit.timestamp, now),
+            commit.date,
+            commit.hash,
+            commit
+                .refs
+                .iter()
+                .map(|r| if r.current {
+                    format!("HEAD → {}", r.name)
+                } else {
+                    r.name.clone()
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        );
+        copy.push_str(if commit.on_remote {
+            "\non remote"
+        } else {
+            "\nlocal only"
+        });
+        match stats {
+            Some(Ok(stats)) => copy.push_str(&format!(
+                "\n{} files changed · +{} −{}{}",
+                stats.files_changed,
+                stats.lines.added,
+                stats.lines.removed,
+                if stats.lines.binary {
+                    " · Includes binary changes"
+                } else {
+                    ""
+                }
+            )),
+            Some(Err(error)) => copy.push_str(&format!("\nChange statistics unavailable: {error}")),
+            None => copy.push_str("\nLoading changes…"),
+        }
+        copy
     });
 }
 

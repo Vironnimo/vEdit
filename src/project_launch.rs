@@ -849,7 +849,7 @@ impl VEditApp {
         }
         if let Some(error) = &self.projects[index].launch.config_error {
             ui.colored_label(ORANGE, "Configuration error")
-                .on_hover_text(error);
+                .on_hover_details(error);
         }
         if let Some(action) = action {
             self.begin_launch_action(index, action, None);

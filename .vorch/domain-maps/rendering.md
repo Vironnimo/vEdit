@@ -11,7 +11,9 @@ and statistics while keeping reusable layout and worker results tied to their ow
   reveal and per-view preview scroll state.
 - `src/typography.rs` selects bundled/system fonts and tab-width font families;
   `src/palette.rs` defines shared colors; `src/design.rs` provides shared controls
-  and focus/selection painting. `palette.rs` is not the command-palette owner.
+  and focus/selection painting. Its `src/design_hover.rs` child owns interactive
+  details (selection, clipboard, bounded scrolling and pointer lifetime); ordinary
+  `on_hover_text` hints remain passive. `palette.rs` is not the command-palette owner.
 - `src/text_statistics.rs` computes offline token counts and formats statistics.
   Its character totals come from `render::LineIndex`.
 - `src/app.rs` composes the source editor, status bar and Markdown view with input,
@@ -48,6 +50,13 @@ Tokenization waits for an input pause, with at most one active calculation and
 one retained snapshot. Selection-only changes reuse the file count; stale
 selection results cannot replace the current selection count. Closing the last
 tab releases its snapshot without allowing a second worker to overlap the first.
+
+Details cards receive keyboard events only after a pointer press inside them.
+`draw_ui` brackets input with `design::begin_hover_frame` / `end_hover_frame`;
+custom rich cards, including language documentation, use the same body and
+registration. Keep this before source shortcuts so copying or typing in a card
+cannot act on the underlying document. Plain details retain their copy value
+while the pointer is inside the card.
 
 ## Constraints & Gotchas
 

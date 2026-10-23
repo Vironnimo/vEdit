@@ -824,7 +824,7 @@ impl VEditApp {
             galley,
             TEXT,
         );
-        response.on_hover_text(crate::paths::display(root));
+        response.on_hover_details(crate::paths::display(root));
         self.explorer_background_menu(ui, root, rect);
     }
 }
@@ -1045,7 +1045,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
                     format!("{description} in {}", tab.label),
                 )
             });
-            status.on_hover_text(description);
+            status.on_hover_details(description);
         }
         if let Some(color) = tab.unread_color {
             // Apart from the Git dot, in the corner, like a badge.
@@ -1073,7 +1073,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
+        .on_hover_details(tooltip)
 }
 
 fn compact_project_action(
@@ -1131,7 +1131,7 @@ fn project_list_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
     ));
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
+        .on_hover_details(tooltip)
 }
 
 fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Response {
@@ -1211,7 +1211,7 @@ fn project_row(ui: &mut egui::Ui, row: &ProjectRow, selected: bool) -> egui::Res
     if row.worktree.is_some() {
         return response;
     }
-    response.on_hover_text(format!(
+    response.on_hover_details(format!(
         "{}\n{} open files · {} unsaved{}",
         row.path,
         row.open,

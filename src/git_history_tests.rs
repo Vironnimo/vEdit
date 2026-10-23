@@ -94,6 +94,7 @@ fn history_screen_with(app: VEditApp, panel_menu: bool) -> Harness<'static, VEdi
         .build_ui_state(
             move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
+                design::begin_hover_frame(&app.ctx);
                 if panel_menu {
                     // Repository actions live in the sidebar header's menu.
                     ui.menu_button("Repository actions", |ui| {
@@ -101,6 +102,7 @@ fn history_screen_with(app: VEditApp, panel_menu: bool) -> Harness<'static, VEdi
                     });
                 }
                 app.git_ui(ui);
+                design::end_hover_frame(&app.ctx);
             },
             app,
         );

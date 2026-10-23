@@ -503,7 +503,7 @@ impl VEditApp {
                                     ListEntry::Group { title, tooltip } => {
                                         let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GROUP_HEIGHT), egui::Sense::hover());
                                         paint_single_line(ui, rect.shrink2(Vec2::new(8.0, 0.0)), title, FontId::proportional(11.0), MUTED);
-                                        response.on_hover_text(tooltip);
+                                        response.on_hover_details(tooltip);
                                     }
                                     ListEntry::Mark(index) => {
                                         let row = &rows[*index];
@@ -801,7 +801,7 @@ fn mark_row(ui: &mut egui::Ui, row: &MarkRow, selected: bool, enabled: bool) -> 
     };
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(&row.tooltip);
+        .on_hover_details(&row.tooltip);
     note.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Add or edit a note for the agent");
     remove
@@ -1012,7 +1012,7 @@ pub(super) fn paint_agent_mark_overlays(
                 widget.with(("agent_mark_hover", mark.id, row_index)),
                 egui::Sense::hover(),
             )
-            .on_hover_text(&mark.tooltip);
+            .on_hover_details(&mark.tooltip);
         }
         let Some(first) = first_rect else {
             continue;
@@ -1077,7 +1077,7 @@ pub(super) fn paint_agent_mark_overlays(
         }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(format!(
+            .on_hover_details(format!(
                 "Remove this block from For agent\n{}",
                 mark.tooltip
             ));
