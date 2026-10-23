@@ -171,6 +171,7 @@ impl State {
             self.changes.index = true;
             return true;
         }
+        #[derive(Clone, Copy)]
         enum Name {
             Added,
             Removed,
@@ -189,7 +190,21 @@ impl State {
             _ => return false,
         };
         let mut recorded = false;
-        for path in &event.paths {
+        for (index, path) in event.paths.iter().enumerate() {
+            // Paired rename events carry the old path first and the new path
+            // second. Forget the old listing just as with a separate From
+            // event; otherwise expanded renamed folders retain stale rows.
+            let name = if event.kind == EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+                && event.paths.len() == 2
+            {
+                if index == 0 {
+                    Name::Removed
+                } else {
+                    Name::Added
+                }
+            } else {
+                name
+            };
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
@@ -352,6 +367,25 @@ mod tests {
         );
         assert_eq!(state.changes.removed, set(&["old"]));
         assert_eq!(state.changes.directories, set(&["", "kept"]));
+    }
+
+    #[test]
+    fn paired_renames_drop_the_old_listing_and_refresh_the_destination() {
+        let mut state = state(&["", "old", "new"]);
+        let rename = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root().join("old"))
+            .add_path(root().join("new"));
+        assert!(state.classify(&root(), &rename));
+        assert_eq!(state.changes.removed, set(&["old"]));
+        assert_eq!(state.changes.directories, set(&["", "new"]));
+        assert!(state.changes.index);
+
+        let returned = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root().join("new"))
+            .add_path(root().join("old"));
+        assert!(state.classify(&root(), &returned));
+        assert_eq!(state.changes.removed, set(&["new"]));
+        assert!(state.changes.directories.contains(&root().join("old")));
     }
 
     #[test]

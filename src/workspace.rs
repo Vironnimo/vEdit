@@ -315,11 +315,13 @@ pub fn read_explorer_directory(root: &Path, directory: &Path) -> Result<Explorer
             ignored: matched.is_ignore(),
         });
     }
-    listing.entries.sort_unstable_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.path.cmp(&b.path))
+    // Cache allocating keys once per entry, rather than once per comparison.
+    listing.entries.sort_by_cached_key(|entry| {
+        (
+            Reverse(entry.is_dir),
+            entry.name.to_lowercase(),
+            entry.path.clone(),
+        )
     });
     Ok(listing)
 }
@@ -669,13 +671,13 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
             ignored: false,
         });
     }
-    index.entries.sort_unstable_by(|a, b| {
-        a.path
-            .parent()
-            .cmp(&b.path.parent())
-            .then_with(|| b.is_dir.cmp(&a.is_dir))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.path.cmp(&b.path))
+    index.entries.sort_by_cached_key(|entry| {
+        (
+            entry.path.parent().map(Path::to_path_buf),
+            Reverse(entry.is_dir),
+            entry.name.to_lowercase(),
+            entry.path.clone(),
+        )
     });
     for (position, entry) in index.entries.iter().enumerate() {
         if let Some(parent) = entry.path.parent() {
@@ -689,7 +691,7 @@ pub fn build_index(root: &Path, options: IndexOptions) -> Result<WorkspaceIndex,
             index.files.push(entry.path.clone());
         }
     }
-    index.files.sort_unstable_by_key(|path| {
+    index.files.sort_by_cached_key(|path| {
         path.strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
