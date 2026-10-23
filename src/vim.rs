@@ -2791,7 +2791,7 @@ impl VimState {
         let chars: Vec<char> = text.chars().collect();
         let rows = lines(&chars);
         let last = last.min(rows.len() - 1);
-        if right {
+        let added = if right {
             let width = if self.indent_with_tabs {
                 count
             } else {
@@ -2801,27 +2801,37 @@ impl VimState {
                 .iter()
                 .filter(|line| line.start != line.end)
                 .count();
-            if width
+            let Some(added) = width
                 .checked_mul(affected)
-                .and_then(|added| text.len().checked_add(added))
-                .is_none_or(|size| size > MAX_PASTE_BYTES)
-            {
+                .filter(|added| text.len().saturating_add(*added) <= MAX_PASTE_BYTES)
+            else {
                 return false;
-            }
+            };
+            added
+        } else {
+            0
+        };
+        if right && added == 0 {
+            return false;
         }
-        for line in rows[first..=last].iter().rev() {
+        let indent = if !right {
+            String::new()
+        } else if self.indent_with_tabs {
+            "\t".repeat(count)
+        } else {
+            " ".repeat(self.indent_width.saturating_mul(count))
+        };
+        // Copy each source character once. Inserting/removing each line in
+        // place repeatedly scans UTF-8 prefixes and moves the document tail.
+        let mut result = String::with_capacity(text.len() + added);
+        let mut copied = 0;
+        for line in &rows[first..=last] {
+            result.extend(chars[copied..line.start].iter());
+            copied = line.start;
             if right {
-                if line.start == line.end {
-                    continue;
+                if line.start != line.end {
+                    result.push_str(&indent);
                 }
-                text.insert_str(
-                    char_to_byte(text, line.start),
-                    &if self.indent_with_tabs {
-                        "\t".repeat(count)
-                    } else {
-                        " ".repeat(self.indent_width.saturating_mul(count))
-                    },
-                );
             } else {
                 let mut at = line.start;
                 let mut columns = 0;
@@ -2834,12 +2844,14 @@ impl VimState {
                     }
                     at += 1;
                 }
-                text.replace_range(char_to_byte(text, line.start)..char_to_byte(text, at), "");
+                copied = at;
             }
         }
-        if *text == before.text {
+        result.extend(chars[copied..].iter());
+        if result == *text {
             return false;
         }
+        *text = result;
         let chars: Vec<char> = text.chars().collect();
         let rows = lines(&chars);
         self.cursor = first_nonblank(&chars, rows[first]);
@@ -4796,6 +4808,52 @@ mod tests {
         assert_eq!(text, "\tif ready:\n\trun()\n");
         keys(&mut state, &mut text, "<<");
         assert_eq!(text, "if ready:\n\trun()\n");
+    }
+
+    #[test]
+    fn block_indentation_preserves_unicode_raw_endings_counts_and_undo() {
+        for (tabs, count, right, expected) in [
+            (
+                false,
+                2,
+                true,
+                "head\r\n        α🙂\r\n\r\n           β\r\n        \tγ\r\ntail",
+            ),
+            (
+                true,
+                2,
+                true,
+                "head\r\n\t\tα🙂\r\n\r\n\t\t   β\r\n\t\t\tγ\r\ntail",
+            ),
+            (false, 1, false, "head\r\nα🙂\r\n\r\nβ\r\nγ\r\ntail"),
+        ] {
+            let mut state = VimState::new();
+            state.set_indentation(4, tabs);
+            let original = "head\r\nα🙂\r\n\r\n   β\r\n\tγ\r\ntail";
+            let mut text = original.to_owned();
+            assert!(state.shift_lines(&mut text, 1, 4, right, count));
+            assert_eq!(text, expected);
+            assert_eq!(
+                state.cursor,
+                6 + if right { if tabs { 2 } else { 8 } } else { 0 }
+            );
+            assert!(state.history_edit(&mut text, false).text_changed);
+            assert_eq!(text, original);
+            assert!(state.history_edit(&mut text, true).text_changed);
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn empty_lines_do_not_allocate_counted_indentation() {
+        for tabs in [false, true] {
+            let mut state = VimState::new();
+            state.set_indentation(4, tabs);
+            let mut text = "\r\n\r\n".to_owned();
+            assert!(!state.shift_lines(&mut text, 0, 2, true, usize::MAX));
+            assert_eq!(text, "\r\n\r\n");
+            assert!(!state.can_undo());
+        }
     }
     #[test]
     fn visual_character_selection_yank_cut_and_change() {
