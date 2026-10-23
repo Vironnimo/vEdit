@@ -24,6 +24,7 @@ Edits to existing document text require the observed revision and validate the w
 ## Constraints & Gotchas
 
 - User interaction gates distinguish observation from mutation. An open dialog, Vim search or tab drag can block an action; notifications and specific owner-dialog operations have deliberate exceptions. Reuse the gate instead of dismissing user interaction to admit a request.
+- Status observations expose `status_message` and `message_details` as null or `{text,error}`. The first is the latest message, the second the stable open snapshot; `dialog:message_details` blocks mutations while observations and notify remain available. The presentation owner is `src/status_messages.rs`; `src/cli_round_trip_tests.rs` checks the actual CLI boundary.
 - Ordered batches preserve already-applied effects and stop on failure/partial execution by default. They neither roll back nor replay completed actions; invalid batch members are rejected before dispatch.
 - Settings patches validate as a whole. Some supplied maps replace overrides rather than merging them; retain that meaning in UI, CLI and skill guidance.
 - Cached Git/diagnostic observations expose readiness; empty output alone is not proof of a clean repository or completed analysis. Project search reads saved files, while buffer find reads current text.

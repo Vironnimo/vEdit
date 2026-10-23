@@ -265,6 +265,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()

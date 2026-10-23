@@ -135,6 +135,7 @@ impl VEditApp {
     pub(super) fn workspace_keys(&mut self) -> bool {
         if self.picker.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -207,6 +208,7 @@ impl VEditApp {
         if let Some(action) = self.workspace_ui.pending.take()
             && self.picker.is_none()
             && !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()

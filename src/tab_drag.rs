@@ -154,6 +154,7 @@ impl VEditApp {
         let modal = self.picker.is_some()
             || self.save_as.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.palette.is_some()

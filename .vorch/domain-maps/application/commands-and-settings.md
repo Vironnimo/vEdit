@@ -59,6 +59,13 @@ overwrite a newer shared preference. Window/profile ownership is in
 
 ## Notifications
 
+Status messages and the notification inbox are separate surfaces.
+`src/status_messages.rs` captures the selected full message when details or its
+context menu opens; later status updates do not replace that snapshot. The
+read-only modal supports selection and copying, suppresses source input and
+restores the prior focus when closed. `src/status_message_tests.rs` covers this
+behavior; `control.md` describes the observation/mutation boundary.
+
 `src/notifications.rs` owns a bounded, session-only inbox, per-project unread
 indicators and taskbar attention throttling. Showing the inbox marks entries
 read. Identical unread entries coalesce by their message and action; a repeated

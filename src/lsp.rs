@@ -861,6 +861,7 @@ fn run_server(
     drop(inbound_tx);
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
     let tail = Arc::clone(&stderr_tail);
+    let (stderr_done, stderr_finished) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("vedit-lsp-stderr".into())
         .spawn(move || {
@@ -878,6 +879,7 @@ fn run_server(
                     }
                 }
             }
+            let _ = stderr_done.send(());
         })
         .map_err(|error| format!("Could not read language server logs: {error}"))?;
 
@@ -923,18 +925,19 @@ fn run_server(
             .try_wait()
             .map_err(|error| format!("Could not monitor language server: {error}"))?
         {
+            // Process exit can beat the final stderr read. Wait only on this
+            // worker, and stay bounded if a descendant still holds the pipe.
+            let _ = stderr_finished.recv_timeout(Duration::from_millis(200));
             let tail = stderr_tail
                 .lock()
                 .map(|tail| String::from_utf8_lossy(&tail).trim().to_owned())
                 .unwrap_or_default();
-            return Err(if tail.is_empty() {
-                format!(
-                    "{} stopped ({status}). {}",
-                    protocol.config.name, protocol.config.install_hint
-                )
-            } else {
-                format!("{} stopped: {tail}", protocol.config.name)
-            });
+            return Err(server_exit_message(
+                &protocol.config.name,
+                &protocol.root,
+                &status.to_string(),
+                &tail,
+            ));
         }
         for _ in 0..128 {
             match commands.try_recv() {
@@ -1004,6 +1007,47 @@ fn run_server(
     // Dropping the guard stops the entire language server process tree. Waiting
     // for an LSP shutdown response here would make closing the editor fragile.
     Ok(())
+}
+
+fn server_exit_message(name: &str, root: &Path, status: &str, log: &str) -> String {
+    let mut message = format!(
+        "{name} analysis stopped ({status}).\nProject: {}\nUse Restart language analysis to reconnect. Editing is still available.",
+        root.display()
+    );
+    let mut lines = log.lines();
+    if let Some(panic) = lines.find(|line| line.contains("panicked at")) {
+        message.push_str("\n\nCause: ");
+        message.push_str(panic);
+        if let Some(reason) = lines.next().filter(|line| !line.trim().is_empty()) {
+            message.push('\n');
+            message.push_str(reason);
+        }
+    }
+    if !log.is_empty() {
+        message.push_str("\n\nRecent server output (up to 16 KiB):\n");
+        message.push_str(log);
+    }
+    message
+}
+
+#[test]
+fn server_exit_reports_status_and_panic_before_older_warnings() {
+    let log = "old WARN notify error\nthread 'LspServer' panicked at base-db/lib.rs:174:\nUnable to get FileSourceRootInput; this is a bug\nstack backtrace:\nframe 🦀";
+    let message = server_exit_message("Rust", Path::new("C:/project"), "exit code: 101", log);
+    assert_eq!(
+        message.lines().next(),
+        Some("Rust analysis stopped (exit code: 101).")
+    );
+    assert!(
+        message.find("Unable to get FileSourceRootInput").unwrap()
+            < message.find("old WARN").unwrap()
+    );
+    assert!(message.contains("C:/project"));
+    assert!(message.ends_with(log));
+    let empty = server_exit_message("Rust", Path::new("C:/project"), "exit code: 5", "");
+    assert!(empty.contains("exit code: 5"));
+    assert!(empty.contains("Restart language analysis"));
+    assert!(!empty.contains("Install"));
 }
 
 #[cfg(test)]

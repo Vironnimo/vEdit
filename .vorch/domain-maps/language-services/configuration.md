@@ -26,6 +26,16 @@ Rust uses rust-analyzer. Portable server packaging belongs to `development.md`,
 not to the runtime resolver. Keep task interpreter/SDK selection aligned with
 `execution/tasks.md` when changing resolution.
 
+For a Rust configuration using the built-in server or an explicit rust-analyzer
+executable, resolution adds `.tmp` to `files.exclude` in both initialization and
+workspace settings.
+This also covers existing profiles without changing their stored configuration;
+user exclusions remain intact, and initialization-only exclusions seed a missing
+workspace list. Incompatible existing JSON shapes are left untouched rather than
+replaced. Other server executables and non-Rust configurations are unchanged.
+Preserve this at resolution, not only in fresh defaults, so short-lived fixture
+projects stay out of analysis.
+
 Configuration regressions live in `src/language_settings.rs` and
 `src/project_tasks_tests.rs`. `docs/development.md` describes ignored SDK tests:
 rust-analyzer needs Rust's `rust-analyzer` and `rust-src` components; Python tests

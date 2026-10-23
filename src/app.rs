@@ -100,6 +100,8 @@ mod settings_navigation;
 mod sidebar_layout;
 #[path = "split.rs"]
 mod split;
+#[path = "status_messages.rs"]
+mod status_messages;
 #[path = "tab_drag.rs"]
 mod tab_drag;
 #[path = "task_output_ui.rs"]
@@ -985,6 +987,7 @@ pub struct VEditApp {
     receiver: Receiver<WorkerResult>,
     ctx: egui::Context,
     status: Option<(String, bool, Instant)>,
+    status_details: Option<status_messages::Details>,
     palette: Option<Palette>,
     palette_query: String,
     palette_selected: usize,
@@ -1297,6 +1300,7 @@ impl VEditApp {
             receiver,
             ctx,
             status: None,
+            status_details: None,
             palette: None,
             palette_query: String::new(),
             palette_selected: 0,
@@ -3354,6 +3358,7 @@ impl VEditApp {
             })
             && self.palette.is_none()
             && !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.picker.is_none()
             && self.save_as.is_none()
@@ -4056,6 +4061,7 @@ impl VEditApp {
         if self.picker.is_some()
             || self.palette.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -4259,6 +4265,7 @@ impl VEditApp {
             && self.close_action.is_none()
             && self.picker.is_none()
             && !self.navigation_modal_open()
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && let Some(tab) = self.tab().filter(|tab| {
                 tab.agent_view == crate::cli::DocumentView::Source
@@ -4274,6 +4281,7 @@ impl VEditApp {
             && self.close_action.is_none()
             && self.picker.is_none()
             && !self.navigation_modal_open()
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
         {
             self.defer_widget_shortcut_tail();
@@ -4291,6 +4299,7 @@ impl VEditApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -5009,6 +5018,7 @@ impl VEditApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.context_file_dialog.is_some()
@@ -5359,10 +5369,10 @@ impl VEditApp {
                         let hint = jump.state.hint();
                         ui.add(egui::Label::new(RichText::new(&hint).size(11.0).color(ORANGE)).truncate())
                             .on_hover_text("Type 1–3 characters to find visible text, then type its letter label to jump. Home-row letters come first; possible search continuations stay available for typing. Enter locks a shorter query or jumps to the only match. Three characters lock automatically. Backspace corrects a label, unlocks an Enter-confirmed query, or deletes a search character. Esc cancels.");
-                    } else if let Some((message, error, time)) = &self.status
+                    } else if let Some((_, error, time)) = &self.status
                         && (!compact || *error) && (*error || time.elapsed() < Duration::from_secs(6)) {
                         let width = (ui.available_width() - right_budget).clamp(24.0, 440.0);
-                        ui.add_sized([width, 20.0], egui::Label::new(RichText::new(message).size(11.0).color(if *error { RED } else { MUTED })).truncate()).on_hover_text(message);
+                        self.status_message_ui(ui, width);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(t) = self.tab() {
@@ -6154,6 +6164,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()
@@ -7069,6 +7080,7 @@ Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_la
         let find_id = ui.make_persistent_id("find_query");
         let replace_id = ui.make_persistent_id("replace_query");
         let interactive = !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.palette.is_none()
             && self.picker.is_none()
@@ -8578,6 +8590,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
+            && self.status_details.is_none()
             && !self.agent_marks_modal_open()
             && self.close_action.is_none()
             && self.save_as.is_none()
@@ -8598,6 +8611,7 @@ impl VEditApp {
         self.overlays();
         self.agent_marks_dialog();
         self.notifications_dialog();
+        self.status_details_ui();
         self.sync_agent_marks();
         self.navigation_ui();
         self.completion_ui();
@@ -9414,6 +9428,7 @@ impl VEditApp {
         if self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
+            || self.status_details.is_some()
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()

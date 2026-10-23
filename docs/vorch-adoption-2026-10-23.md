@@ -162,7 +162,7 @@ Other final validation passed:
   of its actual documentation-copy block, including portable link substitutions.
 - Local commits through the real hooks, printing the `Commit check` report.
 
-No additional native shared-process full suite was run during adoption. The
+No additional native shared-process full suite was run on the initial baseline. The
 survey does not expose interference between tests in one process. Headless
 rendering does not verify Windows dialogs, Snap or physical DPI transitions.
 The initial survey requested DX12, but existing harness code explicitly selects
@@ -239,6 +239,19 @@ pins GL. The survey and push runner now default to GL and preserve an explicitly
 chosen caller backend; the developer guide retains DX12 as a fallback for GL
 driver failures. No application behavior, test assertion or reference image was
 changed for this repair.
+
+The corrected GL survey passed all 1,772 runnable tests, with 28 ignored, in
+113.574 seconds. Commit `c42b79d` was then integrated without conflicts, preserving
+the concurrent status-details and Rust-exclusion work. Application, control and
+language-service maps were updated and eight new claim groups independently
+verified; two documentation precision fixes were made.
+
+Final verification of the combined source used the normal shared-process command
+`cargo test --all-targets -- --test-threads=8`, scoped to `WGPU_BACKEND=gl`:
+1,780 passed, zero failed and 29 ignored. The three targets took 62.16, 1.07 and
+0.02 seconds respectively, excluding compilation. Formatting and Clippy with
+warnings denied also passed on this integrated source. These integration runs
+supplement the dated adoption survey rather than replacing its earlier failures.
 
 ## Delivery boundary
 

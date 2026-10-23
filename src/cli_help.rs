@@ -67,7 +67,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "status",
         "",
         "Read session, projects, pending work and visible layout.",
-        "Includes a bounded tab page, file jobs, dialogs and task state. Use tabs for further pages.\nTab/pane IDs last for this app process. Each project and Other files keeps its own layout; active_workspace is the visible folder path or null. active_workspace_kind is project or other_files; workspaces lists folder projects.",
+        "Includes a bounded tab page, file jobs, dialogs and task state. status_message contains the latest message (text, error); message_details contains the open detail snapshot. Both are null when absent. dialog:message_details blocks mutations while read-only calls remain available. Use tabs for further pages.\nTab/pane IDs last for this app process. Each project and Other files keeps its own layout; active_workspace is the visible folder path or null. active_workspace_kind is project or other_files; workspaces lists folder projects.",
         []
     ),
     command!(

@@ -18,8 +18,16 @@ waits for wakeups and deadlines; dropping `LanguageServer` requests shutdown and
 wakes it. Event backpressure preserves lifecycle/results/diagnostics, extends
 request/write deadlines, and remains interruptible by shutdown. Read the
 `EventEmitter`, `Protocol` and `ProcessGuard` owners together when changing queues
-or teardown. Current limits/timeouts are named constants near the top of
-`src/lsp.rs`; do not create a second timeout policy in UI code.
+or teardown. Protocol size limits and request/write timeouts are named constants
+near the top of `src/lsp.rs`; do not create a second timeout policy in UI code.
+
+After process exit, the worker waits at most 200 ms for the final stderr read so
+the exit event does not race away the cause. `server_exit_message` retains exit
+status, project and a detected panic ahead of recent stderr (at most 16 KiB),
+without presenting installation advice as the cause of an exited server. This
+output stays in session memory. Language controls open its full text through
+`open_message_details` in `src/status_messages.rs`; the stable, copyable modal and
+its input guards belong to `application.md`, not the LSP transport.
 
 ## Diagnostics
 
@@ -68,6 +76,8 @@ Run targeted filters with `cargo test --bin vedit <filter>` as appropriate:
 
 - `lsp::tests`: framing limits, Unicode/CRLF coordinates, sync capabilities,
   coalescing, request failures, queue pressure and worker shutdown.
+- `server_exit_reports_status_and_panic_before_older_warnings`: exit context,
+  panic prioritization and retained server log text.
 - `language_support::tests` (`src/language_support_tests.rs`): restart isolation,
   stopped/error state, transient error recovery, diagnostic origins, retired paths
   and late definitions from another project or source position.

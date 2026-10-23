@@ -18,6 +18,8 @@ the egui frame without becoming the owner of every feature it displays.
   owners rather than being reimplemented in the settings router.
 - `src/notifications.rs` owns the session inbox and its presentation. Its CLI
   entry point and response contract also cross `control.md`.
+- `src/status_messages.rs` owns copyable status details and their stable modal
+  snapshot. Language-server failures originate in `language-services.md`.
 
 Document lifecycle is in `documents.md`, text/input semantics in `editing.md`,
 pane/project ownership in `projects.md`, and window startup/chrome in
@@ -65,7 +67,8 @@ publication belongs to `documents.md`.
 
 Read these only when the task matches.
 
-- Adding a command, changing shortcuts, settings persistence or notification UI
+- Adding a command, changing shortcuts, settings persistence, notification UI
+  or status-message details
   -> `application/commands-and-settings.md`
 - Reordering input phases, modal handling, source focus or native/Vim history
   -> `editing/input-and-history.md`
