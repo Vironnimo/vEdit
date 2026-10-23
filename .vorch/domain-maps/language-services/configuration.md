@@ -27,8 +27,12 @@ not to the runtime resolver. Keep task interpreter/SDK selection aligned with
 `execution/tasks.md` when changing resolution.
 
 For a Rust configuration using the built-in server or an explicit rust-analyzer
-executable, resolution adds `.tmp` to `files.exclude` in both initialization and
-workspace settings.
+executable, resolution adds `.tmp`, `.worktrees` and `.claude/worktrees` to
+`files.exclude` in both initialization and workspace settings. These paths are
+relative to the opened Project: a worktree opened as its own Project still gets
+analysis, while its nested temporary Projects stay excluded. Rapid creation and
+deletion of Rust files in nested worktrees reproduced rust-analyzer 1.97.1's
+`FileSourceRootInput` panic; excluding their containers prevented it.
 This also covers existing profiles without changing their stored configuration;
 user exclusions remain intact, and initialization-only exclusions seed a missing
 workspace list. Incompatible existing JSON shapes are left untouched rather than

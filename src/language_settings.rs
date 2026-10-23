@@ -222,7 +222,9 @@ impl LanguageServerSettings {
 }
 
 /// Apply to resolved settings as well as fresh defaults, so existing profiles
-/// do not keep watching short-lived test projects. Preserve user exclusions.
+/// do not keep watching short-lived test projects or nested worktrees. Rapid
+/// create/delete events there can panic rust-analyzer's source-root database.
+/// Paths are relative to the opened project, including when it is a worktree.
 fn exclude_temporary_projects(options: &mut Value, initial_excludes: Option<&Value>) {
     if options.is_null() {
         *options = json!({});
@@ -240,10 +242,12 @@ fn exclude_temporary_projects(options: &mut Value, initial_excludes: Option<&Val
             .cloned()
             .unwrap_or_else(|| json!([]))
     });
-    if let Some(exclude) = exclude.as_array_mut()
-        && !exclude.iter().any(|path| path == ".tmp")
-    {
-        exclude.push(json!(".tmp"));
+    if let Some(exclude) = exclude.as_array_mut() {
+        for directory in [".tmp", ".worktrees", ".claude/worktrees"] {
+            if !exclude.iter().any(|path| path == directory) {
+                exclude.push(json!(directory));
+            }
+        }
     }
 }
 
@@ -557,16 +561,23 @@ mod tests {
         let root = Path::new("C:/workspace");
         let mut rust = defaults().remove(0);
         rust.initialization_options = Value::Null;
-        rust.settings = json!({"rust-analyzer":{"files":{"exclude":[".tmp","generated"]}}});
+        rust.settings = json!({"rust-analyzer":{"files":{"exclude":[".tmp","generated",".worktrees",".claude/worktrees"]}}});
         let resolved = rust.resolve(root, "python");
         assert_eq!(
             resolved.initialization_options["files"]["exclude"],
-            json!([".tmp"])
+            json!([".tmp", ".worktrees", ".claude/worktrees"])
         );
         assert_eq!(
             resolved.settings["rust-analyzer"]["files"]["exclude"],
-            json!([".tmp", "generated"])
+            json!([".tmp", "generated", ".worktrees", ".claude/worktrees"])
         );
+        rust.program = "C:/tools/rust-analyzer.exe".into();
+        let explicit = rust.resolve(root, "python");
+        assert_eq!(
+            explicit.initialization_options,
+            resolved.initialization_options
+        );
+        assert_eq!(explicit.settings, resolved.settings);
         let python = defaults().remove(1).resolve(root, "python");
         assert!(python.initialization_options["files"].is_null());
         rust.program = "C:/tools/custom-rust-server.exe".into();
@@ -585,7 +596,7 @@ mod tests {
         let resolved = rust.resolve(Path::new("C:/workspace"), "python");
         assert_eq!(
             resolved.settings["rust-analyzer"]["files"]["exclude"],
-            json!(["generated", ".tmp"])
+            json!(["generated", ".tmp", ".worktrees", ".claude/worktrees"])
         );
         assert_eq!(
             resolved.settings["rust-analyzer"]["files"]["watcher"],
@@ -603,11 +614,11 @@ mod tests {
         let resolved = config.resolve(Path::new("C:/workspace"), "python");
         assert_eq!(
             resolved.initialization_options["files"]["exclude"],
-            json!(["generated", ".tmp"])
+            json!(["generated", ".tmp", ".worktrees", ".claude/worktrees"])
         );
         assert_eq!(
             resolved.settings["rust-analyzer"]["files"]["exclude"],
-            json!(["scratch", ".tmp"])
+            json!(["scratch", ".tmp", ".worktrees", ".claude/worktrees"])
         );
         assert_eq!(resolved.initialization_options["checkOnSave"], false);
         assert_eq!(
