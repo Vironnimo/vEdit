@@ -68,6 +68,10 @@ impl MarkFilterCache {
                 .enumerate()
                 .filter_map(|(index, (mark, row))| {
                     (needle.matches(&row.file)
+                        || mark
+                            .review
+                            .as_ref()
+                            .is_some_and(|review| needle.matches(&review.comparison))
                         || needle.matches(&row.full_path)
                         || needle.matches(&row.workspace)
                         || needle.matches(&mark.note)
@@ -612,6 +616,8 @@ impl VEditApp {
                 if let Err(error) = self.navigate_agent_mark(id) {
                     self.status(error, true);
                 }
+            } else if self.change_review_visible() {
+                self.focus_change_review();
             } else if let Some(tab) = self.tab_mut() {
                 tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
             }
@@ -817,6 +823,11 @@ fn restore_summary(count: usize, origin: crate::agent_marks::RestoreSource) -> S
 }
 
 fn mark_location(mark: &crate::agent_marks::UserMark) -> String {
+    if let Some(review) = &mark.review
+        && let Some(location) = &review.location
+    {
+        return format!("{} · {}", location.lines_label(), review.comparison);
+    }
     // A next-line boundary includes the previous line's ending, not that next line.
     let last_line = if mark.end.column == 1 && mark.end.line > mark.start.line {
         mark.end.line - 1
@@ -840,6 +851,21 @@ fn mark_location(mark: &crate::agent_marks::UserMark) -> String {
 
 fn mark_exact_range(mark: &crate::agent_marks::UserMark) -> String {
     if let Some(review) = &mark.review {
+        if let Some(location) = &review.location {
+            return format!(
+                "Diff excerpt from {}\nRepository: {}\nOld: {} @ {}\nNew: {} @ {}\n{} (inclusive bounds of selected lines)",
+                review.comparison,
+                crate::paths::display(&location.repository),
+                location.old_path.as_deref().unwrap_or("—"),
+                location.old_revision,
+                location.new_path.as_deref().unwrap_or("—"),
+                location
+                    .new_revision
+                    .as_deref()
+                    .unwrap_or("working tree at review load"),
+                location.lines_label(),
+            );
+        }
         return format!("Diff excerpt from {}", review.comparison);
     }
     format!(

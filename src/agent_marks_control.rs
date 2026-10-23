@@ -262,8 +262,8 @@ impl VEditApp {
             "stale":mark.stale,"source_open":live.is_some(),"range_current":current_collection && mark.is_attached() && live.is_some(),
             "tab_id":live.map(|tab|tab.id),"revision":live.map(|tab|tab.revision),"dirty":live.map(|tab|tab.dirty)});
         if let Some(review) = &mark.review {
-            // `text` is then a diff excerpt and `range` names new-side lines.
-            value["review"] = json!({"comparison":review.comparison,"source":review.source});
+            // `range` stays a new-side navigation hint; location captures both sides.
+            value["review"] = json!(review);
         }
         value
     }

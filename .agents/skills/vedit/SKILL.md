@@ -99,7 +99,7 @@ Read the user's marked snippets, retaining highlights:
 & $VEditCli agent-marks
 ```
 
-Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_next_offset`, run `agent-marks text <mark-id> --offset <text-offset>` and follow its `next_offset` to null. Captures can outlive sources or have stale coordinates; read the current buffer before editing. When marks need collecting and clearing, read [references/agent-marks.md](references/agent-marks.md) for take/ack/restore. Marks with a `review` field are the user's comments on change-review diff rows; their text is a diff excerpt. Agent-authored annotations use `review`/`clear-marks` and are separate from user marks.
+Follow `next_offset` with `agent-marks list --offset <offset>`. For each `text_next_offset`, run `agent-marks text <mark-id> --offset <text-offset>` and follow its `next_offset` to null. Captures can outlive sources or have stale coordinates; read the current buffer before editing. For take/ack/restore or comments on deleted diff lines, read [references/agent-marks.md](references/agent-marks.md). Marks with a `review` field are the user's comments on change-review diff rows; their text is a diff excerpt, and `review.location` carries the captured old/new paths, revisions and inclusive line bounds when available. Agent-authored annotations use `review`/`clear-marks` and are separate from user marks.
 
 ## Set up project launch options
 

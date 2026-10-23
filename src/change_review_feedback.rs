@@ -2,13 +2,13 @@
 //! agent, the dialog that writes it, whether the comparison is still fresh,
 //! and the unsaved documents it does not include.
 //!
-//! A comment becomes an agent mark anchored to the file's path and new-side
-//! lines. Its text is the excerpt of the chosen rows in unified form: every
+//! A comment becomes an agent mark with frozen paths, revisions and line bounds
+//! on both sides. Its text is the excerpt of the chosen rows in unified form: every
 //! line starts with `+` (added), `-` (removed) or a space (unchanged), and
 //! hunk headers are left out.
 
 use super::*;
-use crate::agent_marks::{MarkPosition, MarkTarget, ReviewOrigin};
+use crate::agent_marks::{MarkPosition, MarkTarget, ReviewLines, ReviewLocation, ReviewOrigin};
 use std::ops::RangeInclusive;
 
 pub(super) const BANNER_HEIGHT: f32 = 30.0;
@@ -92,6 +92,7 @@ impl Freshness {
 #[derive(Default)]
 pub(super) struct ReviewContext {
     pub(super) stale: bool,
+    pub(super) marked_blocks: usize,
     /// Unsaved documents inside the repository: display path and path.
     pub(super) drafts: Vec<(String, PathBuf)>,
     /// The user swapped `j` and `k`.
@@ -107,6 +108,7 @@ pub(super) struct CommentDraft {
     end: MarkPosition,
     excerpt: String,
     location: String,
+    origin: ReviewOrigin,
     note: String,
     focus: bool,
 }
@@ -116,11 +118,13 @@ impl CommentDraft {
     pub(super) fn new(view: &ChangeReview) -> Option<Self> {
         let selection = view.selection.as_ref()?;
         let entry = view.files.get(selection.file)?;
+        let comparison = view.comparison.as_ref()?;
         let EntryPatch::Parsed(patch) = &entry.patch else {
             return None;
         };
         let mut excerpt = String::new();
-        let mut new_lines = Vec::new();
+        let mut old_lines = None;
+        let mut new_lines = None;
         for row in selection.rows() {
             let Some(line) = patch.diff_line(row) else {
                 continue;
@@ -128,15 +132,16 @@ impl CommentDraft {
             excerpt.push(line.marker);
             excerpt.push_str(line.text);
             excerpt.push('\n');
-            new_lines.extend(line.new_line);
+            ReviewLines::include(&mut old_lines, line.old_line);
+            ReviewLines::include(&mut new_lines, line.new_line);
         }
         if excerpt.is_empty() {
             return None;
         }
         // Removed lines alone sit before the next new-side line.
-        let (first, last) = match (new_lines.first(), new_lines.last()) {
-            (Some(first), Some(last)) => (*first, Some(*last)),
-            _ => (
+        let (first, last) = match new_lines {
+            Some(ReviewLines { start, end }) => (start, Some(end)),
+            None => (
                 patch.new_line_at(*selection.rows().start()).unwrap_or(1),
                 None,
             ),
@@ -150,13 +155,23 @@ impl CommentDraft {
             line: last.map_or(first, |last| last + 1),
             column: 1,
         };
-        let lines = match last {
-            Some(last) if last != first => format!("Lines {first}–{last}"),
-            Some(_) => format!("Line {first}"),
-            None => format!("Removed before line {first}"),
+        let location = ReviewLocation {
+            repository: view.repository.clone(),
+            old_revision: comparison.old.clone(),
+            new_revision: comparison.new.clone(),
+            old_path: (!matches!(entry.status, FileChange::Added | FileChange::Untracked))
+                .then(|| entry.original_path.as_ref().unwrap_or(&entry.path).clone()),
+            new_path: (entry.status != FileChange::Deleted).then(|| entry.path.clone()),
+            old_lines,
+            new_lines,
         };
         Some(Self {
-            location: format!("{} · {lines}", entry.path),
+            location: format!("{} · {}", entry.path, location.lines_label()),
+            origin: ReviewOrigin {
+                comparison: view.title(),
+                source: view.source.kind().to_owned(),
+                location: Some(Box::new(location)),
+            },
             path: entry.path.clone(),
             start,
             end,
@@ -366,7 +381,6 @@ pub(super) fn comment_dialog(
     view: &mut ChangeReview,
     actions: &mut Vec<ReviewAction>,
 ) {
-    let comparison = view.title();
     let Some(draft) = view.comment.as_mut() else {
         return;
     };
@@ -376,7 +390,7 @@ pub(super) fn comment_dialog(
         ui.set_width(520.0);
         design::overlay_title(ui, "Comment for agent");
         ui.label(
-            RichText::new(format!("{} · {comparison}", draft.location))
+            RichText::new(format!("{} · {}", draft.location, draft.origin.comparison))
                 .size(12.0)
                 .color(MUTED),
         );
@@ -483,6 +497,7 @@ impl VEditApp {
         };
         ReviewContext {
             stale,
+            marked_blocks: self.agent_marks.items.len(),
             drafts,
             swap_jk: self.settings.swap_jk,
         }
@@ -500,13 +515,16 @@ impl VEditApp {
         let Some(project) = self.projects.get(index) else {
             return;
         };
-        let Some(view) = project.change_review.view.as_ref() else {
-            return;
-        };
+        let repository = &draft
+            .origin
+            .location
+            .as_ref()
+            .expect("captured review location")
+            .repository;
         let path = draft
             .path
             .split('/')
-            .fold(view.repository.clone(), |path, part| path.join(part));
+            .fold(repository.clone(), |path, part| path.join(part));
         let target = MarkTarget {
             workspace: project.root.clone(),
             title: draft
@@ -517,17 +535,13 @@ impl VEditApp {
                 .to_owned(),
             path: Some(path),
         };
-        let origin = ReviewOrigin {
-            comparison: view.title(),
-            source: view.source.kind().to_owned(),
-        };
         match self.agent_marks.add_review(
             target,
             draft.start,
             draft.end,
             &draft.excerpt,
             &draft.note,
-            origin,
+            draft.origin.clone(),
         ) {
             Ok(_) => {
                 self.session_dirty = true;

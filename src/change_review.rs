@@ -338,6 +338,7 @@ fn review_summary(root: &Path, view: &ChangeReview, seen: &SeenMarks, visible: b
 enum ReviewAction {
     Close,
     Refresh,
+    AgentMarks,
     Open {
         file: usize,
         line: Option<usize>,
@@ -769,6 +770,7 @@ impl VEditApp {
         for action in actions {
             match action {
                 ReviewAction::Close => self.close_change_review(index),
+                ReviewAction::AgentMarks => self.open_agent_marks(),
                 ReviewAction::Refresh => {
                     if let Some(source) = source.clone()
                         && let Err(error) = self.open_change_review(index, source)
@@ -877,7 +879,7 @@ fn review_ui(
 ) {
     ui.painter().rect_filled(rect, 0.0, BG);
     let header = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT));
-    review_header(ui, header, view, seen, context.stale, actions);
+    review_header(ui, header, view, seen, context, actions);
     let mut body = egui::Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max);
     if !context.drafts.is_empty() {
         let banner =
@@ -918,7 +920,7 @@ fn review_header(
     rect: egui::Rect,
     view: &ChangeReview,
     seen: &SeenMarks,
-    stale: bool,
+    context: &feedback::ReviewContext,
     actions: &mut Vec<ReviewAction>,
 ) {
     ui.painter().rect_filled(rect, 0.0, PANEL);
@@ -960,7 +962,18 @@ fn review_header(
     if refresh.clicked() {
         actions.push(ReviewAction::Refresh);
     }
-    if stale && !view.loading {
+    let marks = design::ghost_button(
+        ui,
+        &format!("For agent ({})", context.marked_blocks),
+        "Open marked blocks and review comments across all projects",
+    );
+    marks.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "For agent")
+    });
+    if marks.clicked() {
+        actions.push(ReviewAction::AgentMarks);
+    }
+    if context.stale && !view.loading {
         feedback::stale_indicator(ui);
     }
     if view.comparison.is_some() {

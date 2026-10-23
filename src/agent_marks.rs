@@ -124,8 +124,67 @@ impl UserMark {
 pub struct ReviewOrigin {
     /// The review's title, such as "Working tree" or a commit subject.
     pub comparison: String,
-    /// `working_tree`, `commit` or `branch`.
+    /// `working`, `commit` or `branch`.
     pub source: String,
+    /// Absent on comments saved before comparison locations were captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Box<ReviewLocation>>,
+}
+
+/// Frozen comparison coordinates, independent of the current file or buffer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLocation {
+    pub repository: PathBuf,
+    pub old_revision: String,
+    /// None means the working tree as captured by the review.
+    pub new_revision: Option<String>,
+    /// Repository-relative paths; an absent side has no path.
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    /// Inclusive bounds of selected lines. None means no selected line on that side.
+    /// A selection spanning hunks can have unselected lines between these bounds.
+    pub old_lines: Option<ReviewLines>,
+    pub new_lines: Option<ReviewLines>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLines {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl ReviewLines {
+    pub fn include(bounds: &mut Option<Self>, line: Option<usize>) {
+        if let Some(line) = line {
+            match bounds {
+                Some(bounds) => bounds.end = line,
+                None => {
+                    *bounds = Some(Self {
+                        start: line,
+                        end: line,
+                    })
+                }
+            }
+        }
+    }
+
+    fn label(bounds: Option<Self>) -> String {
+        match bounds {
+            Some(Self { start, end }) if start != end => format!("{start}–{end}"),
+            Some(Self { start, .. }) => start.to_string(),
+            None => "—".into(),
+        }
+    }
+}
+
+impl ReviewLocation {
+    pub fn lines_label(&self) -> String {
+        format!(
+            "Old {} · New {}",
+            ReviewLines::label(self.old_lines),
+            ReviewLines::label(self.new_lines)
+        )
+    }
 }
 
 /// Borrowed buffer identity; obtaining a mark never changes editor selection.

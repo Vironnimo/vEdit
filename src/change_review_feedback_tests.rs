@@ -67,7 +67,7 @@ fn diff_rows_become_a_comment_the_agent_takes_with_file_and_lines() {
     assert!(!screen.state().agent_marks_modal_open());
     assert!(view(screen.state()).selection.is_none());
     let (status, error, _) = screen.state().status.clone().unwrap();
-    assert!(!error && status.starts_with("Comment added for agent · src/app.rs · Lines 12–"));
+    assert!(!error && status.starts_with("Comment added for agent · src/app.rs · Old 12–"));
     assert!(body_focused(&screen), "the keyboard returns to the diff");
 
     // The comment arrives through the agent-marks channel without the file
@@ -84,9 +84,20 @@ fn diff_rows_become_a_comment_the_agent_takes_with_file_and_lines() {
     let path = repository.root.join("src").join("app.rs");
     assert_eq!(item["path"], crate::paths::display(&path));
     assert_eq!(item["note"], "Use the configured admin account");
+    assert_eq!(item["review"]["comparison"], "feature/login vs main");
+    assert_eq!(item["review"]["source"], "branch");
+    let location = &item["review"]["location"];
+    assert_eq!(location["old_lines"]["start"], 12);
+    assert_eq!(location["new_lines"]["start"], 12);
+    assert_eq!(location["old_path"], "src/app.rs");
+    assert_eq!(location["new_path"], "src/app.rs");
     assert_eq!(
-        item["review"],
-        json!({"comparison": "feature/login vs main", "source": "branch"})
+        location["old_revision"],
+        repository.git(&["rev-parse", "main"])
+    );
+    assert_eq!(
+        location["new_revision"],
+        repository.git(&["rev-parse", "HEAD"])
     );
     assert_eq!(item["source_open"], false);
     assert_eq!(item["stale"], false);
@@ -114,6 +125,199 @@ fn diff_rows_become_a_comment_the_agent_takes_with_file_and_lines() {
     let batch = taken["batch_id"].as_u64().unwrap();
     marks(app, AgentMarksAction::Ack { batch_id: batch });
     assert!(app.agent_marks.items.is_empty());
+}
+
+#[test]
+fn deleted_diff_lines_keep_their_old_location_through_collection_and_restart() {
+    let repository = ReviewRepository::new();
+    let mut screen = visual_tests::harness(repository.app());
+    screen
+        .state_mut()
+        .show_change_review(0, ReviewSource::Commit("HEAD".into()));
+    settle(&mut screen);
+    let review = screen.state_mut().projects[0]
+        .change_review
+        .view
+        .as_mut()
+        .unwrap();
+    let file = review
+        .files
+        .iter()
+        .position(|file| file.path == "docs/old.md")
+        .unwrap();
+    let EntryPatch::Parsed(patch) = &review.files[file].patch else {
+        panic!("text diff")
+    };
+    let row = (0..patch.rows())
+        .find(|row| patch.diff_line(*row).is_some())
+        .unwrap();
+    feedback::click_row(
+        review,
+        file,
+        row,
+        feedback::RowClick {
+            position: egui::Pos2::ZERO,
+            extend: false,
+            secondary: false,
+        },
+    );
+    review.comment = feedback::CommentDraft::new(review);
+    screen.run_steps(2);
+    screen.event(egui::Event::Text("Keep these notes · β🦀".into()));
+    screen.run_steps(1);
+    screen.get_by_label("Add for agent").click();
+    screen.run_steps(2);
+    let app = screen.state_mut();
+    let item = marks(
+        app,
+        AgentMarksAction::List {
+            limit: 10,
+            offset: 0,
+        },
+    )["items"][0]
+        .clone();
+    assert_eq!(item["text"], "-Old notes\n");
+    assert_eq!(item["note"], "Keep these notes · β🦀");
+    assert_eq!(
+        item["review"]["location"]["old_lines"],
+        json!({"start":1,"end":1})
+    );
+    assert!(item["review"]["location"]["new_lines"].is_null());
+    assert_eq!(item["review"]["location"]["old_path"], "docs/old.md");
+    assert!(item["review"]["location"]["new_path"].is_null());
+    assert_eq!(item["source_open"], false);
+    let taken = marks(
+        app,
+        AgentMarksAction::Take {
+            request_id: Some("deleted-lines".into()),
+            limit: 10,
+        },
+    );
+    let batch_id = taken["batch_id"].as_u64().unwrap();
+    marks(app, AgentMarksAction::Ack { batch_id });
+    app.agent_marks =
+        serde_json::from_slice(&serde_json::to_vec(&app.agent_marks).unwrap()).unwrap();
+    marks(
+        app,
+        AgentMarksAction::Restore {
+            batch_id: Some(batch_id),
+        },
+    );
+    assert_eq!(
+        marks(
+            app,
+            AgentMarksAction::List {
+                limit: 10,
+                offset: 0
+            }
+        )["items"][0],
+        item
+    );
+    // The collection itself identifies the absent new side, without opening a deleted file.
+    screen.get_by_label("For agent").click();
+    screen.run_steps(3);
+    assert!(
+        screen
+            .query_by_label_contains("Marked block Old 1 · New —")
+            .is_some()
+    );
+    visual_tests::snapshot(&mut screen, "vedit_agent_review_marks");
+    screen.key_press(Key::Escape);
+    screen.run_steps(3);
+    assert!(
+        body_focused(&screen),
+        "closing the collection returns to the diff"
+    );
+}
+
+#[test]
+fn review_locations_keep_renames_additions_and_the_comparison_at_capture() {
+    let repository = ReviewRepository::new();
+    repository.git(&["mv", "src/app.rs", "src/neu β.rs"]);
+    let text = app_source(true)
+        .replace("fn line_2() {}", "fn line_2() { /* β🦀 */ }")
+        .replace("fn line_29() {}", "fn line_29() { /* changed */ }");
+    repository.write("src/neu β.rs", &text);
+    let mut app = repository.app();
+    app.show_change_review(0, ReviewSource::WorkingTree);
+    wait(&mut app);
+    let capture = |app: &mut VEditApp, path: &str| {
+        let review = app.projects[0].change_review.view.as_mut().unwrap();
+        let file = review
+            .files
+            .iter()
+            .position(|file| file.path == path)
+            .unwrap();
+        let EntryPatch::Parsed(patch) = &review.files[file].patch else {
+            panic!("text diff")
+        };
+        let rows: Vec<_> = (0..patch.rows())
+            .filter(|row| patch.diff_line(*row).is_some())
+            .collect();
+        for (row, extend) in [(rows[0], false), (*rows.last().unwrap(), true)] {
+            feedback::click_row(
+                review,
+                file,
+                row,
+                feedback::RowClick {
+                    position: egui::Pos2::ZERO,
+                    extend,
+                    secondary: false,
+                },
+            );
+        }
+        feedback::CommentDraft::new(review).unwrap()
+    };
+    let rename = capture(&mut app, "src/neu β.rs");
+    let addition = capture(&mut app, "todo.txt");
+    // A later comparison cannot silently relabel an already captured comment.
+    app.show_change_review(0, ReviewSource::Branch { base: None });
+    wait(&mut app);
+    app.add_review_comment(0, rename);
+    app.add_review_comment(0, addition);
+    let listed = marks(
+        &mut app,
+        AgentMarksAction::List {
+            limit: 10,
+            offset: 0,
+        },
+    );
+    let renamed = &listed["items"][0];
+    let location = &renamed["review"]["location"];
+    assert_eq!(renamed["review"]["source"], "working");
+    assert_eq!(
+        location["old_revision"],
+        repository.git(&["rev-parse", "HEAD"])
+    );
+    assert!(location["new_revision"].is_null());
+    assert_eq!(location["old_path"], "src/app.rs");
+    assert_eq!(location["new_path"], "src/neu β.rs");
+    assert_eq!(location["old_lines"], json!({"start":1,"end":31}));
+    assert_eq!(location["new_lines"], json!({"start":1,"end":31}));
+    assert!(renamed["text"].as_str().unwrap().contains("β🦀"));
+    let added = &listed["items"][1]["review"]["location"];
+    assert!(added["old_path"].is_null());
+    assert!(added["old_lines"].is_null());
+    assert_eq!(added["new_path"], "todo.txt");
+    assert_eq!(added["new_lines"], json!({"start":1,"end":1}));
+
+    // Older saved comments keep their text and note without inventing old-side data.
+    let mut stored = serde_json::to_value(&app.agent_marks).unwrap();
+    stored["items"][0]["review"]
+        .as_object_mut()
+        .unwrap()
+        .remove("location");
+    app.agent_marks = serde_json::from_value(stored).unwrap();
+    let restored = marks(
+        &mut app,
+        AgentMarksAction::List {
+            limit: 10,
+            offset: 0,
+        },
+    );
+    assert!(restored["items"][0]["review"].get("location").is_none());
+    assert_eq!(restored["items"][0]["text"], renamed["text"]);
+    assert_eq!(restored["items"][1], listed["items"][1]);
 }
 
 #[test]
