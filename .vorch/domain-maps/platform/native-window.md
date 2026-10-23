@@ -9,10 +9,15 @@ Read that document and the touched native source before replacing the dependency
 `vendor/eframe/VEDIT_PATCH.md` owns the Glow startup presentation fix. The native
 window stays hidden until the first successful buffer swap; drawing into the
 back buffer alone does not make pixels available to the visible window.
+`vendor/winit/VEDIT_PATCH.md` separately covers temporary DWM cloaking while
+hidden native state is applied. Maximized restoration otherwise briefly shows
+the window before eframe has created its graphics context; preserve the real
+maximized geometry so the first frame is painted at its final size.
 `cargo test --test startup_window -- --ignored --nocapture` checks the actual
-front-buffer pixels synchronously at the first Windows show notification. It
-uses private storage and closes its own window; it requires a Windows desktop
-and OpenGL. Keep this native check when upgrading eframe.
+front-buffer pixels synchronously at the first Windows show notification and
+rejects uncloaked show requests before app construction, for normal and
+maximized startup. It uses private storage and closes its own window; it requires
+a Windows desktop and OpenGL. Keep this native check when upgrading eframe.
 
 ## Ownership boundaries
 

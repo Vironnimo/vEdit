@@ -1,7 +1,7 @@
 # vEdit's Windows window patches
 
 This is the packaged source of `winit 0.30.13`, copied from crates.io, with
-Windows-only mixed-DPI and custom-titlebar fixes. The original Apache-2.0 license is in `LICENSE`; the
+Windows-only startup, mixed-DPI and custom-titlebar fixes. The original Apache-2.0 license is in `LICENSE`; the
 original source commit is recorded in `.cargo_vcs_info.json`:
 `e9809ef54b18499bb4f2cac945719ecc2a61061b`. vEdit selects this copy through
 `[patch.crates-io]` in its root Cargo manifest. No new dependency is introduced.
@@ -91,3 +91,34 @@ Native Explorer drops and mixed-DPI targeting still need desktop verification.
 The local COM vtable signatures also pass `POINTL` by value, as specified by
 [`IDropTarget::DragOver`](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragover).
 The upstream declarations used a pointer for this previously unused argument.
+
+## Hidden window state
+
+`WindowFlags::apply_diff` uses `ShowWindow(SW_MAXIMIZE/SW_RESTORE)` to apply native
+state, then hides a window whose requested visibility is false. Those calls can
+briefly expose an unpainted window, including during restoration of a maximized
+session before eframe has created its graphics context.
+
+While applying flags to a hidden window, the patch temporarily sets
+`DWMWA_CLOAK`. Windows still calculates the actual maximized geometry, but DWM
+does not composite the intermediate show. The app-owned cloak is cleared only
+after the hidden state has been restored. An existing app-owned cloak is retained;
+shell/inherited cloak flags are not mistaken for an app-owned cloak. A failed
+DWM query or cloak call retains the original backend behavior.
+
+This follows the same compositor approach used by upstream
+[egui-winit's hidden-maximize workaround](https://docs.rs/egui-winit/latest/src/egui_winit/lib.rs.html).
+The underlying visibility issue is tracked by
+[winit #4575](https://github.com/rust-windowing/winit/pull/4575) and
+[winit #4587](https://github.com/rust-windowing/winit/pull/4587).
+
+`cargo test --test startup_window -- --ignored --nocapture` checks normal and
+maximized startup. Its thread-local native hook watches for uncloaked show
+requests before the app constructor, and its window callback checks the rendered
+front-buffer pixels at the first real show. It uses private storage and closes
+only its own fixtures. Keep this check alongside the first-frame presentation
+patch in `vendor/eframe/VEDIT_PATCH.md`; the two cover different startup stages.
+
+Remove this workaround only when the replacement backend prepares hidden native
+geometry without displaying the window and both startup cases pass the native
+regression.

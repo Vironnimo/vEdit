@@ -7,6 +7,9 @@ use bitflags::bitflags;
 use std::io;
 use std::sync::MutexGuard;
 use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED, DWM_CLOAKED_APP,
+};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRgn;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, EnableMenuItem, GetMenu, GetSystemMenu, GetWindowLongW, SendMessageW,
@@ -326,6 +329,30 @@ impl WindowFlags {
             return;
         }
 
+        // ShowWindow(SW_MAXIMIZE/SW_RESTORE) briefly shows hidden windows. Keep
+        // them out of the compositor while applying their native geometry, so
+        // the renderer can paint at the final size before the first real show.
+        let set_cloaked = |value: i32| unsafe {
+            DwmSetWindowAttribute(
+                window,
+                DWMWA_CLOAK as u32,
+                &value as *const _ as _,
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
+        let mut previous_cloak = 0_u32;
+        let temporarily_cloaked = !new.contains(WindowFlags::VISIBLE)
+            && unsafe {
+                DwmGetWindowAttribute(
+                    window,
+                    DWMWA_CLOAKED as u32,
+                    &mut previous_cloak as *mut _ as _,
+                    std::mem::size_of::<u32>() as u32,
+                ) >= 0
+            }
+            && previous_cloak & DWM_CLOAKED_APP == 0
+            && set_cloaked(1) >= 0;
+
         if new.contains(WindowFlags::VISIBLE) {
             let flag = if !self.contains(WindowFlags::MARKER_ACTIVATE) {
                 self.set(WindowFlags::MARKER_ACTIVATE, true);
@@ -424,6 +451,9 @@ impl WindowFlags {
                 SetWindowPos(window, 0, 0, 0, 0, 0, flags);
                 SendMessageW(window, event_loop::SET_RETAIN_STATE_ON_SIZE_MSG_ID.get(), 0, 0);
             }
+        }
+        if temporarily_cloaked {
+            set_cloaked(0);
         }
     }
 

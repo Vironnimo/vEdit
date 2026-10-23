@@ -54,7 +54,7 @@ ordinary minimize/close controls and keyboard/accessibility activation.
   `control.md`. Shared external-open preferences must not silently retarget CLI.
 - `vendor/winit` is selected through Cargo's patch section. Read
   `vendor/winit/VEDIT_PATCH.md` before changing native behavior or upgrading it;
-  the copy includes DPI, titlebar and Explorer-drop changes.
+  the copy includes hidden startup, DPI, titlebar and Explorer-drop changes.
 - `vendor/egui-winit/VEDIT_PATCH.md` owns the keyboard/clipboard event contract.
   Preserve both the original key and adjacent clipboard event when upgrading it.
 - A headless titlebar image cannot verify native Windows Snap Layouts, physical

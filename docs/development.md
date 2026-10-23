@@ -183,8 +183,9 @@ corresponding notes before upgrading these dependencies.
 
 The startup presentation regression opens and closes its own small Windows
 window, using private storage under `.tmp/startup-flash/`. Run it on a Windows
-desktop with OpenGL; it reads the first visible front buffer synchronously,
-which a headless snapshot cannot verify:
+desktop with OpenGL. It checks normal and maximized startup, rejects uncloaked
+native show requests before app construction, and reads the first visible front
+buffer synchronously. A headless snapshot cannot verify these stages:
 
 ```powershell
 cargo test --test startup_window -- --ignored --nocapture

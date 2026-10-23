@@ -19,6 +19,9 @@ behavior; the WGPU path is unchanged.
 storage path. A synchronous Windows subclass callback reads the OpenGL front
 buffer when the window is first shown, before the native show handler runs.
 It expects the painted dark surface, then closes only its own fixture window.
+The test also covers maximized startup and observes native show requests before
+the app constructor; the separate hidden-state fix is documented in
+`vendor/winit/VEDIT_PATCH.md`.
 Asynchronous screenshots can miss the interval this test covers.
 
 Run on a Windows desktop with OpenGL:
