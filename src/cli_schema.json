@@ -229,6 +229,7 @@
         "indent_with_tabs": false,
         "word_wrap": true,
         "smooth_scroll": false,
+        "multicursor": {"modifier": "alt", "spread_paste": true, "match_case": true, "whole_word": true, "limit": 1000},
         "leader_key": " ",
         "search_excludes": ["node_modules", "target", "dist", "build"]
       }
@@ -615,6 +616,14 @@
       "description": "Regular editor font. JetBrains Mono is bundled; unavailable Windows fonts fall back to it. CLI shortcut: settings font jetbrains-mono|consolas|cascadia-mono; equivalent hyphen spellings are accepted in JSON. Omitted/null preserves the current choice."
     },
     "tab_width": "1..8",
+    "multicursor": {
+      "description": "Partial object; omitted/null fields retain their current values. Configures interactive multicursor editing, also available with Vim enabled. Buffer edit commands keep their explicit ranges.",
+      "modifier": "alt (default) or ctrl: click adds/removes a cursor; hold Shift and drag for a rectangular selection",
+      "spread_paste": "true by default: when line count equals cursor count, paste one line per cursor in document order; otherwise repeat the entire text",
+      "match_case": "true by default; case-sensitive occurrence selection",
+      "whole_word": "true by default; occurrence selection matches whole words",
+      "limit": "100..10000; default 1000. An all-occurrences selection exceeding the limit is refused without creating a partial selection."
+    },
     "detect_indentation": "true by default. Bounded existing-file detection takes priority over language and global preferences. Disable to force configured indentation. Changes affect subsequent edits only, never reformat existing text.",
     "indent_with_tabs": "false by default. Global indentation character style; language overrides and detected style take priority.",
     "language_indent_widths": "Map of lowercase language IDs to widths 1..8, e.g. {\"python\":4,\"dart\":2}. Supplied map replaces all width overrides; {} clears them. Omitted/null preserves them. Defaults: Python4; Dart/JavaScript/TypeScript/JSON/YAML/HTML/CSS2; Go4. Other languages inherit tab_width. Up to64 IDs, each1..32 ASCII lowercase letters/digits/underscores.",

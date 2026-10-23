@@ -199,6 +199,7 @@ struct LastVisual {
 struct Snapshot {
     text: String,
     cursor: usize,
+    multi: crate::multicursor::State,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +262,7 @@ struct Line {
 pub struct VimNavigation {
     pub mode: VimMode,
     pub cursor: usize,
+    pub multi: crate::multicursor::State,
     visual_anchor: Option<usize>,
     pending: Option<Pending>,
     count: usize,
@@ -286,6 +288,7 @@ impl VimNavigation {
         let mut navigation = self.clone();
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
+        navigation.multi.remap(&map);
         if let Some(last) = navigation.last_visual.as_mut() {
             last.anchor = map(last.anchor);
             last.cursor = map(last.cursor);
@@ -300,6 +303,7 @@ impl VimNavigation {
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.preferred_column = None;
+        navigation.multi.remap(&map);
         navigation
     }
 }
@@ -307,6 +311,7 @@ impl VimNavigation {
 #[derive(Clone, Debug)]
 pub struct VimState {
     pub mode: VimMode,
+    pub multi: crate::multicursor::State,
     /// Insert mode: insertion boundary. Other modes: current character.
     pub cursor: usize,
     register: Option<Yank>,
@@ -343,6 +348,7 @@ impl Default for VimState {
     fn default() -> Self {
         Self {
             mode: VimMode::Normal,
+            multi: crate::multicursor::State::default(),
             cursor: 0,
             register: None,
             yank_register: None,
@@ -382,6 +388,7 @@ impl VimState {
     pub fn navigation(&self) -> VimNavigation {
         VimNavigation {
             mode: self.mode,
+            multi: self.multi.clone(),
             cursor: self.cursor,
             visual_anchor: self.visual_anchor,
             pending: self.pending,
@@ -402,6 +409,7 @@ impl VimState {
     pub fn restore_navigation(&mut self, text: &str, navigation: &VimNavigation) {
         let len = text.chars().count();
         self.mode = navigation.mode;
+        self.multi = navigation.multi.clone();
         self.cursor = navigation.cursor.min(len);
         self.visual_anchor = navigation.visual_anchor.map(|anchor| anchor.min(len));
         self.pending = navigation.pending;
@@ -436,6 +444,7 @@ impl VimState {
     /// Like `set_selection`, preserving which end of the selection is active.
     /// `anchor` and `cursor` are half-open boundaries, as used by a text widget.
     pub fn set_selection_boundaries(&mut self, text: &str, anchor: usize, cursor: usize) {
+        self.multi.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
         let len = text.chars().count();
@@ -487,6 +496,7 @@ impl VimState {
     }
 
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
+        self.multi.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
         self.cursor = if self.mode == VimMode::Insert {
@@ -1186,7 +1196,7 @@ impl VimState {
     }
 
     fn clamp_cursor(&mut self, text: &str) {
-        self.cursor = if self.mode != VimMode::Normal {
+        self.cursor = if self.mode != VimMode::Normal || self.multi.active() {
             char_boundary(text, self.cursor).0
         } else {
             normal_cursor(text, self.cursor)
@@ -2067,6 +2077,7 @@ impl VimState {
         Snapshot {
             text: text.to_owned(),
             cursor: self.cursor,
+            multi: self.multi.clone(),
         }
     }
     fn record(&mut self, before: Snapshot) {
@@ -3112,6 +3123,7 @@ impl VimState {
         trim_history(target);
         *text = snapshot.text;
         self.cursor = snapshot.cursor;
+        self.multi = snapshot.multi;
         self.insert_origin = None;
         self.clear_command();
         true

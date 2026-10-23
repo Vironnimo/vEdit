@@ -801,6 +801,23 @@ fn ready_for_edit(tab: &EditorTab, revision: u64) -> Option<Response> {
     None
 }
 fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
+    if let Some(patch) = &patch.multicursor {
+        if let Some(value) = patch.modifier {
+            settings.multicursor.modifier = value;
+        }
+        if let Some(value) = patch.spread_paste {
+            settings.multicursor.spread_paste = value;
+        }
+        if let Some(value) = patch.match_case {
+            settings.multicursor.match_case = value;
+        }
+        if let Some(value) = patch.whole_word {
+            settings.multicursor.whole_word = value;
+        }
+        if let Some(value) = patch.limit {
+            settings.multicursor.limit = value;
+        }
+    }
     if let Some(bindings) = &patch.keybindings {
         settings.keybindings = bindings.clone();
     }

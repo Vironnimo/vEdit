@@ -2,7 +2,12 @@ use super::*;
 
 impl VEditApp {
     pub(super) fn main_menu_button(&mut self, ui: &mut egui::Ui) {
-        let response = icon_button(ui, Icon::Menu, false, "File, View and Run actions");
+        let response = icon_button(
+            ui,
+            Icon::Menu,
+            false,
+            "File, Selection, View and Run actions",
+        );
         egui::Popup::menu(&response).show(|ui| {
             ui.set_min_width(230.0);
             self.main_menu_contents(ui);
@@ -145,6 +150,31 @@ impl VEditApp {
                 ui.close();
             }
         });
+        design::menu(
+            ui,
+            "Selection",
+            "Select and edit several places together",
+            |ui| {
+                for action in keybindings::Action::ALL
+                    .iter()
+                    .copied()
+                    .filter(|a| a.multicursor())
+                {
+                    let enabled = self.tab().is_some_and(|t| {
+                        !t.loading
+                            && t.agent_view == crate::cli::DocumentView::Source
+                            && (!matches!(
+                                action,
+                                keybindings::Action::CursorUndo
+                                    | keybindings::Action::ExitMulticursor
+                            ) || t.vim.multi.active())
+                    });
+                    if ui.add_enabled_ui(enabled,|ui| design::menu_item(ui,action.label(),&self.shortcut_label(action),"Standard editing keys apply to every cursor. Esc returns to one cursor.")).inner.clicked() {
+                    self.multicursor_action(action); ui.close();
+                }
+                }
+            },
+        );
         design::menu(ui, "View", "Navigate and arrange your workspace", |ui| {
             if design::menu_item(ui, "For agent", &self.shortcut_label(keybindings::Action::AgentMarks), "Open selected blocks across all projects, add notes, or restore the last collection").clicked() {
                 self.open_agent_marks();

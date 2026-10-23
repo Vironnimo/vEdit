@@ -4,6 +4,73 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 #[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
+fn multicursor_settings_cli_round_trip_in_isolated_editor() {
+    let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
+    let root = std::env::temp_dir().join(format!(
+        "vedit-cli-round-trip-multicursor-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture(root);
+    let endpoint = fixture.0.join("control");
+    let patch = fixture.0.join("multicursor.json");
+    fs::write(
+        &patch,
+        r#"{"multicursor":{"modifier":"ctrl","spread_paste":false}}"#,
+    )
+    .unwrap();
+    let invalid = fixture.0.join("invalid.json");
+    fs::write(&invalid, r#"{"vim":false,"multicursor":{"limit":99}}"#).unwrap();
+    let mut app = VEditApp::empty(egui::Context::default());
+    app.recovery_session_path = fixture.0.join("session.json");
+    app.control = Some(cli::Server::start_test(app.ctx.clone(), endpoint.clone()).unwrap());
+    let mut invoke = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        command.args(args);
+        let output = run(&mut app, command, &endpoint);
+        (
+            output.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        )
+    };
+    let (code, response) = invoke(&["settings", patch.to_str().unwrap()]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(
+        response["result"]["settings"]["multicursor"]["modifier"],
+        "ctrl"
+    );
+    assert_eq!(response["result"]["settings"]["multicursor"]["limit"], 1000);
+    println!(
+        "Applied multicursor preferences: {}",
+        response["result"]["settings"]["multicursor"]
+    );
+    let (code, response) = invoke(&["settings", invalid.to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("100")
+    );
+    println!("Invalid limit: {}", response["error"]);
+    let (code, response) = invoke(&["settings", fixture.0.join("missing.json").to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert!(response["error"].is_object());
+    let (code, response) = invoke(&["settings"]);
+    assert_eq!(code, 0);
+    assert_eq!(response["result"]["settings"]["vim"], true);
+    assert_eq!(
+        response["result"]["settings"]["multicursor"]["spread_paste"],
+        false
+    );
+}
+
+#[test]
+#[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
 fn other_files_cli_round_trip_in_isolated_editor() {
     let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
     let root = std::env::temp_dir().join(format!(

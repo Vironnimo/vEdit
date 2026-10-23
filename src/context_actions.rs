@@ -17,6 +17,7 @@ pub(super) enum EditorAction {
     CommandPalette,
     MarkForAgent,
     AgentMarks,
+    Multicursor(keybindings::Action),
 }
 
 /// Collect the user's choice; apply it only after the editor releases its borrow.
@@ -128,6 +129,13 @@ pub(super) fn editor_menu(
             action = Some(EditorAction::CommandPalette);
             ui.close();
         }
+        ui.menu_button("Multicursor", |ui| {
+            for command in keybindings::Action::ALL.iter().copied().filter(|a| a.multicursor()) {
+                if ui.add_enabled_ui(can_edit,|ui| design::menu_item(ui,command.label(),&shortcut(command),"Edit several selections together")).inner.clicked() {
+                    action = Some(EditorAction::Multicursor(command)); ui.close();
+                }
+            }
+        });
     });
     action
 }
@@ -137,6 +145,8 @@ pub(super) struct PendingPaste {
     revision: u64,
     selection: Range<usize>,
     requested: Instant,
+    multi: crate::multicursor::State,
+    pane: u64,
 }
 
 fn native_history_id(document: u64) -> egui::Id {
@@ -794,7 +804,30 @@ impl VEditApp {
     }
 
     pub(super) fn apply_editor_context_action(&mut self, id: u64, action: EditorAction) {
+        if self
+            .tab()
+            .is_some_and(|t| t.id == id && t.vim.multi.active())
+        {
+            match action {
+                EditorAction::Copy | EditorAction::Cut => {
+                    self.multi_clipboard(action == EditorAction::Cut);
+                    return;
+                }
+                EditorAction::SelectAll => {
+                    let tab = self.tab_mut().unwrap();
+                    tab.vim.multi.checkpoint();
+                    tab.vim.multi.selections = vec![crate::multicursor::Selection::new(
+                        0,
+                        tab.text.chars().count(),
+                    )];
+                    tab.sync_multicursor();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match action {
+            EditorAction::Multicursor(action) => self.multicursor_action(action),
             EditorAction::Find => {
                 self.find_visible = true;
                 self.find_focus = true;
@@ -805,6 +838,7 @@ impl VEditApp {
             }
             EditorAction::AgentMarks => self.open_agent_marks(),
             EditorAction::Paste => {
+                let pane = self.current_pane_id();
                 let widget = self.document_widget_id(id);
                 let vim = self.settings.vim;
                 let Some(tab) = self.tab_by_id_mut(id) else {
@@ -815,6 +849,8 @@ impl VEditApp {
                 }
                 tab.focus = true;
                 let pending = PendingPaste {
+                    multi: tab.vim.multi.clone(),
+                    pane,
                     id,
                     revision: tab.revision,
                     selection: if vim {
@@ -946,6 +982,7 @@ impl VEditApp {
                 tab.pending_selection = Some(tab.selection.clone());
                 tab.focus = true;
                 tab.scroll_to_cursor = true;
+                tab.sync_multicursor();
             }
         }
     }
@@ -964,6 +1001,16 @@ impl VEditApp {
             return;
         };
         native_history_checkpoint(&self.ctx, id, widget, &tab.text, tab.selection.clone());
+        multicursor_ui::record_native(
+            &self.ctx,
+            id,
+            &tab.text,
+            egui::text::CCursorRange::two(
+                egui::text::CCursor::new(tab.selection.start),
+                egui::text::CCursor::new(tab.selection.end),
+            ),
+            &tab.vim.multi,
+        );
     }
 
     pub(super) fn context_native_history(&self, id: u64) -> (bool, bool) {
@@ -1013,6 +1060,8 @@ impl VEditApp {
             tab.pending_selection = Some(tab.selection.clone());
             tab.vim.set_cursor(&tab.text, range.primary.index.0);
             tab.vim.cursor = range.primary.index.0;
+            tab.vim.multi = multicursor_ui::restore_native(&ctx, id, &tab.text, range, redo);
+            tab.sync_multicursor();
             tab.focus = true;
             tab.scroll_to_cursor = true;
             state.cursor.set_char_range(Some(range));
@@ -1040,6 +1089,24 @@ impl VEditApp {
         });
         let Some(text) = text else { return };
         let pending = self.context_paste.take().unwrap();
+        if pending.multi.active() {
+            if self.current_pane_id() == pending.pane
+                && self.tab().is_some_and(|t| {
+                    t.id == pending.id
+                        && t.revision == pending.revision
+                        && t.vim.multi == pending.multi
+                        && !t.loading
+                })
+            {
+                self.multi_replace(&text, true);
+            } else {
+                self.status(
+                    "Paste cancelled because the multicursor selection changed",
+                    true,
+                );
+            }
+            return;
+        }
         self.context_native_undo_checkpoint(pending.id);
         let Some(tab) = self.tab_by_id_mut(pending.id) else {
             return;

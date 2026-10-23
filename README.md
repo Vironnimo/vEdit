@@ -1,6 +1,8 @@
-# vEdit 0.5.6
+# vEdit 0.6.0
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
+
+Version 0.6.0 ergänzt Multicursor: **Alt+Klick**, Rechteckauswahl, Vorkommen und Zeilenenden gemeinsam bearbeiten, mit Undo/Redo für Text und Auswahlen. **MULTI** funktioniert auch bei eingeschaltetem Vim; **Esc** kehrt zum einzelnen Cursor zurück. Mausmodifier, Einfügeverhalten, Trefferauswahl und Cursorlimit stehen unter **Settings → Editing**, alle Kürzel unter **Keyboard**.
 
 Version 0.5.6 vervollständigt Kommentare auf Diffzeilen: **For agent** zeigt die alten und neuen Zeilenbereiche samt Vergleich, auch für gelöschte Dateien. Die gespeicherten Angaben enthalten die damaligen Pfade und Vergleichsstände und bleiben beim Sammeln und Wiederherstellen erhalten. Die Sammlung ist direkt aus der Kopfzeile der Änderungsübersicht erreichbar.
 
@@ -268,7 +270,7 @@ Nach dem dritten Suchzeichen ist die Suche festgelegt; **Enter** legt sie schon 
 | Letzte Auswahl | `gv` wählt den zuletzt markierten Bereich erneut aus |
 | Letzte Änderung wiederholen | `.`; auch Insert-Änderungen werden erfasst |
 | Rückgängig / Wiederholen | `u` / Ctrl+R |
-| Blättern | Ctrl+F / Ctrl+B; Ctrl+D / Ctrl+U für halbe Seiten |
+| Blättern | Ctrl+F / Ctrl+B; Ctrl+U für eine halbe Seite zurück. Ctrl+D aktiviert Multicursor. |
 | Ansicht ausrichten | `zt` / `zz` / `zb` setzen die Cursorzeile oben, mittig beziehungsweise unten; `z Enter`, `z.` und `z-` gehen zusätzlich zum ersten Zeichen |
 | Sprachfunktionen | `gd` springt zur Definition, `gr` findet Referenzen, `K` zeigt die Dokumentation unter dem Cursor |
 | Suchen | `/` sucht vorwärts, `?` rückwärts; `n` wiederholt die Richtung, `N` kehrt sie um. `*` / `#` suchen das Wort unter dem Cursor |
@@ -310,6 +312,29 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
 
 vEdit implementiert einen eigenen Vim-Kern. Visual-Block, Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+
+## Multicursor
+
+Mehrere Stellen lassen sich gemeinsam bearbeiten, auch bei eingeschaltetem Vim. **MULTI** und die Cursoranzahl erscheinen in der Statusleiste; der zuletzt hinzugefügte Cursor ist orange hervorgehoben. In diesem Modus gelten normale Editorbefehle. **Esc** beendet die Mehrfachbearbeitung am Hauptcursor; mit Vim geht es in den Normalmodus. Ein gewöhnlicher Klick beginnt wieder eine einzelne Auswahl.
+
+| Aktion | Standardkürzel |
+| --- | --- |
+| Cursor hinzufügen oder vorhandenen entfernen | **Alt+Klick** |
+| Rechteckauswahl über Bildschirmzeilen | **Alt+Shift+Ziehen** |
+| Cursor in der logischen Zeile darüber / darunter | **Ctrl+Shift+↑ / ↓** |
+| Wort auswählen, danach nächstes Vorkommen hinzufügen | **Ctrl+D** |
+| Alle Vorkommen auswählen | **Ctrl+Shift+L** |
+| Letztes Vorkommen überspringen und nächstes auswählen | **Ctrl+Shift+D** |
+| Letzten Auswahlschritt zurücknehmen | **Ctrl+U** |
+| Cursor an den Enden ausgewählter Zeilen | **Alt+Shift+I** |
+
+Die Aktionen stehen auch unter **Selection**, im Kontextmenü und in der Befehlspalette. **Settings → Keyboard** ändert die Kürzel. Bestehende eigene Belegungen bleiben beim Upgrade erhalten; kollidierende neue Vorgaben starten unbelegt. Im Vim-Normalmodus aktiviert **Ctrl+D** die Mehrfachbearbeitung; **Ctrl+U** behält außerhalb von MULTI seine Vim-Funktion. **Ctrl+Alt+↑/↓** wechselt weiterhin den Fokus zwischen Bereichen.
+
+Tippen, Löschen, Pfeile mit Shift/Ctrl, Home/End, Page Up/Down, Enter, Tab, Ein-/Ausrücken, Kommentare und Zeilenbefehle wirken auf alle Stellen. Überlappende Auswahlen verschmelzen; Zeilen mit mehreren Cursorn werden bei Zeilenbefehlen einmal bearbeitet. **Ctrl+Z/Y** macht die gemeinsame Änderung rückgängig beziehungsweise stellt sie samt Auswahlen wieder her. Cursor und Auswahlen bleiben je Split unabhängig; zusätzliche Cursor werden beim Neustart nicht wiederhergestellt.
+
+**Ctrl+C/X** kopiert beziehungsweise schneidet die Auswahlen in Dokumentreihenfolge aus. Sind alle Cursor leer, gelten die betroffenen ganzen Zeilen. **Ctrl+V** verteilt eingefügten Text zeilenweise, wenn die Zeilenanzahl genau der Cursoranzahl entspricht; andernfalls erhält jeder Cursor den vollständigen Text. Unter **Settings → Editing → Multicursor** lässt sich die Verteilung ausschalten und **Ctrl+Klick** statt Alt wählen. Hinzu kommen Groß-/Kleinschreibung und Wortgrenzen für die Vorkommensauswahl sowie ein Cursorlimit von standardmäßig 1.000, einstellbar von 100 bis 10.000. Das Limit begrenzt die Auswahl, nicht den Dateiinhalt.
+
+Vervollständigungen verwenden den Hauptcursor und werden nur übernommen, wenn der zu ersetzende Text an allen Stellen übereinstimmt; zusätzliche Sprachserver-Änderungen, etwa Imports, werden einmal angewendet. Bei widersprüchlichen Bereichen bleibt der Text unverändert. Eingabemethoden zeigen ihre laufende Komposition am Hauptcursor und übernehmen den bestätigten Text an allen Stellen.
 
 ## Markdown lesen
 

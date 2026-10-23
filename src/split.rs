@@ -800,7 +800,8 @@ impl VEditApp {
                 tab.vim.restore_navigation(&tab.text, &state.navigation);
             }
             tab.agent_view = state.view;
-            let range = if vim_enabled && tab.vim.mode != VimMode::Insert {
+            let range = if vim_enabled && tab.vim.mode != VimMode::Insert && !tab.vim.multi.active()
+            {
                 tab.vim
                     .selection(&tab.text)
                     .unwrap_or(tab.vim.cursor..tab.vim.cursor)
@@ -1534,7 +1535,10 @@ impl VEditApp {
             } else {
                 tab.vim.restore_navigation(&tab.text, &state.navigation);
             }
-            tab.selection = if self.settings.vim && tab.vim.mode != VimMode::Insert {
+            tab.selection = if self.settings.vim
+                && tab.vim.mode != VimMode::Insert
+                && !tab.vim.multi.active()
+            {
                 tab.vim
                     .selection(&tab.text)
                     .unwrap_or(tab.vim.cursor..tab.vim.cursor)

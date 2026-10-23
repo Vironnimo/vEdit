@@ -102,6 +102,14 @@ actions! {
     MoveLineDown, "move_line_down", "Move line / selection down", "Editing", ["Alt+ArrowDown"];
     Undo, "undo", "Undo", "Editing", ["Ctrl+Z"];
     Redo, "redo", "Redo", "Editing", ["Ctrl+Y", "Ctrl+Shift+Z"];
+    AddCursorAbove, "add_cursor_above", "Add cursor above", "Multicursor", ["Ctrl+Shift+ArrowUp"];
+    AddCursorBelow, "add_cursor_below", "Add cursor below", "Multicursor", ["Ctrl+Shift+ArrowDown"];
+    SelectNextOccurrence, "select_next_occurrence", "Add next occurrence", "Multicursor", ["Ctrl+D"];
+    SelectAllOccurrences, "select_all_occurrences", "Select all occurrences", "Multicursor", ["Ctrl+Shift+L"];
+    SkipOccurrence, "skip_occurrence", "Skip current occurrence", "Multicursor", ["Ctrl+Shift+D"];
+    CursorUndo, "cursor_undo", "Undo last cursor selection", "Multicursor", ["Ctrl+U"];
+    CursorsAtLineEnds, "cursors_at_line_ends", "Cursors at selected line ends", "Multicursor", ["Alt+Shift+I"];
+    ExitMulticursor, "exit_multicursor", "Exit multicursor editing", "Multicursor", [];
     ToggleBookmark, "toggle_bookmark", "Toggle bookmark", "Navigation", [];
     Bookmarks, "bookmarks", "Bookmarks", "Navigation", [];
     ScreenJump, "screen_jump", "Jump to visible text", "Navigation", [];
@@ -119,6 +127,19 @@ actions! {
 }
 
 impl Action {
+    pub(super) fn multicursor(self) -> bool {
+        matches!(
+            self,
+            Self::AddCursorAbove
+                | Self::AddCursorBelow
+                | Self::SelectNextOccurrence
+                | Self::SelectAllOccurrences
+                | Self::SkipOccurrence
+                | Self::CursorUndo
+                | Self::CursorsAtLineEnds
+                | Self::ExitMulticursor
+        )
+    }
     pub(super) fn from_id(id: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|action| action.id() == id)
     }
@@ -350,6 +371,8 @@ impl Stroke {
                 Key::Z if !self.shift => action != Action::Undo,
                 Key::Z if self.shift => action != Action::Redo,
                 Key::Y => action != Action::Redo,
+                Key::ArrowUp if self.shift && action == Action::AddCursorAbove => false,
+                Key::ArrowDown if self.shift && action == Action::AddCursorBelow => false,
                 Key::ArrowLeft
                 | Key::ArrowRight
                 | Key::ArrowUp
@@ -403,12 +426,19 @@ fn default_strokes(action: Action) -> &'static [Stroke] {
 
 /// Defaults added after users could assign their keys elsewhere. Saved choices
 /// keep their key; the new command starts without a shortcut instead.
-const LATER_DEFAULTS: [Action; 5] = [
+const LATER_DEFAULTS: [Action; 12] = [
     Action::ReopenTab,
     Action::NavigateBack,
     Action::NavigateForward,
     Action::NextProblem,
     Action::PreviousProblem,
+    Action::AddCursorAbove,
+    Action::AddCursorBelow,
+    Action::SelectNextOccurrence,
+    Action::SelectAllOccurrences,
+    Action::SkipOccurrence,
+    Action::CursorUndo,
+    Action::CursorsAtLineEnds,
 ];
 
 pub(super) fn migrate_later_defaults(bindings: &mut Bindings) {
@@ -649,6 +679,26 @@ impl VEditApp {
         }
     }
     pub(super) fn run_shortcut_action(&mut self, action: Action) {
+        if action.multicursor() {
+            self.multicursor_action(action);
+            return;
+        }
+        if self.tab().is_some_and(|t| t.vim.multi.active()) {
+            let command = match action {
+                Action::ToggleComment => Some(editor_input::Command::Comment),
+                Action::DuplicateLine => Some(editor_input::Command::Duplicate),
+                Action::DeleteLine => Some(editor_input::Command::DeleteLine),
+                Action::InsertLineAbove => Some(editor_input::Command::InsertLine(true)),
+                Action::InsertLineBelow => Some(editor_input::Command::InsertLine(false)),
+                Action::MoveLineUp => Some(editor_input::Command::MoveLine(false)),
+                Action::MoveLineDown => Some(editor_input::Command::MoveLine(true)),
+                _ => None,
+            };
+            if let Some(command) = command {
+                self.multi_command(command);
+                return;
+            }
+        }
         match action {
             Action::CommandPalette => self.open_palette(Palette::Commands),
             Action::QuickOpen => self.open_palette(Palette::Files),
@@ -799,7 +849,9 @@ impl VEditApp {
         });
         (
             source.is_some(),
-            self.settings.vim && source.is_some_and(|tab| tab.vim.mode != VimMode::Insert),
+            self.settings.vim
+                && source
+                    .is_some_and(|tab| tab.vim.mode != VimMode::Insert && !tab.vim.multi.active()),
         )
     }
     pub(super) fn shortcut_boundary(
@@ -809,6 +861,12 @@ impl VEditApp {
         (source, vim_modal): (bool, bool),
     ) -> bool {
         if !self.shortcut_matches(action, event) {
+            return false;
+        }
+        if action.multicursor()
+            && (!source
+                || action == Action::CursorUndo && self.tab().is_none_or(|t| !t.vim.multi.active()))
+        {
             return false;
         }
         if matches!(

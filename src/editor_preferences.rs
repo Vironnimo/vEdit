@@ -15,6 +15,7 @@ impl Settings {
         self.line_height = bounded(self.line_height, 1.0, 2.0, 1.35);
         self.autosave_delay_ms = self.autosave_delay_ms.clamp(300, 5000);
         self.tab_width = self.tab_width.clamp(1, 8);
+        self.multicursor.limit = self.multicursor.limit.clamp(100, 10_000);
         for width in self.language_indent_widths.values_mut() {
             *width = (*width).clamp(1, 8);
         }

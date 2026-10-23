@@ -201,6 +201,7 @@ pub enum LineNumbers {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
+    pub multicursor: Option<MulticursorPatch>,
     /// Complete override map: absent actions retain defaults, null disables, {} resets all.
     pub keybindings: Option<std::collections::BTreeMap<String, Option<String>>>,
     pub vim: Option<bool>,
@@ -225,6 +226,24 @@ pub struct SettingsPatch {
     pub smooth_scroll: Option<bool>,
     pub leader_key: Option<String>,
     pub search_excludes: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MulticursorModifier {
+    #[default]
+    Alt,
+    Ctrl,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MulticursorPatch {
+    pub modifier: Option<MulticursorModifier>,
+    pub spread_paste: Option<bool>,
+    pub match_case: Option<bool>,
+    pub whole_word: Option<bool>,
+    pub limit: Option<usize>,
 }
 
 fn validate_indent_languages<'a>(
@@ -2079,6 +2098,16 @@ pub fn validate(request: &Request) -> Result<(), String> {
             }
         }
         Request::Settings { patch: Some(patch) } => {
+            if patch
+                .multicursor
+                .as_ref()
+                .and_then(|p| p.limit)
+                .is_some_and(|limit| !(100..=10_000).contains(&limit))
+            {
+                return Err(
+                    "multicursor.limit must be 100..10000; no settings were changed".into(),
+                );
+            }
             if let Some(bindings) = &patch.keybindings
                 && (bindings.len() > 128
                     || bindings.iter().any(|(id, binding)| {

@@ -461,7 +461,7 @@ fn menu_hover_explains_actions_and_keyboard_navigation_preserves_the_document() 
     screen.run_steps(35);
     assert!(
         screen
-            .query_by_label("File, View and Run actions")
+            .query_by_label("File, Selection, View and Run actions")
             .is_some()
     );
     screen.get_by_label("Main menu").click();
