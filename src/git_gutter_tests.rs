@@ -77,7 +77,12 @@ fn app_with_markers(base: &str, text: &str, vim: bool) -> (VEditApp, u64, Hunk) 
     let mut app = VEditApp::empty(egui::Context::default());
     app.settings.vim = vim;
     let mut project = Project::new(std::env::temp_dir());
-    let mut tab = EditorTab::new(None, "fixture.rs".into());
+    project.git_root = Some(std::env::temp_dir());
+    project.git_head = Some(git::StatusHead::Commit("0".repeat(40)));
+    let mut tab = EditorTab::new(
+        Some(std::env::temp_dir().join("fixture.rs")),
+        "fixture.rs".into(),
+    );
     tab.text = text.into();
     tab.saved_text = text.into();
     let id = tab.id;
@@ -90,6 +95,13 @@ fn app_with_markers(base: &str, text: &str, vim: bool) -> (VEditApp, u64, Hunk) 
         path: "fixture.rs".into(),
     };
     let base: Arc<str> = base.into();
+    app.git_gutter.bases.insert(
+        key.clone(),
+        BaseEntry::Ready {
+            text: Some(base.clone()),
+            committed: true,
+        },
+    );
     let hunks = changes(&base, text);
     let first = hunks[0].clone();
     app.git_gutter.markers.insert(
@@ -139,6 +151,47 @@ fn revert_refuses_changes_of_an_older_revision() {
     tab.changed();
     assert!(app.revert_git_change(id, 0, &change).is_err());
     assert_eq!(app.tab().unwrap().text, "a\nX\nY\n");
+}
+
+#[test]
+fn markers_from_an_older_head_cannot_revert_the_buffer() {
+    let repository = Repository::new();
+    let (mut app, ids) = repository.app(&[("crlf.txt", "one\nTWO\nthree\n")]);
+    let id = ids[0];
+    let markers = settled_markers(&mut app, id).unwrap();
+    let change = markers.hunks[0].clone();
+
+    // A status refresh has observed another HEAD, but its contents have not
+    // arrived yet. The document itself still has the same revision.
+    app.projects[0].git_head = Some(git::StatusHead::Commit("f".repeat(40)));
+    assert!(!app.previous_git_markers(id).unwrap().current);
+    assert!(
+        app.revert_git_change(id, markers.revision, &change)
+            .is_err()
+    );
+    assert_eq!(app.tab().unwrap().text, "one\nTWO\nthree\n");
+}
+
+#[test]
+fn markers_with_an_invalidated_index_base_cannot_revert_the_buffer() {
+    let repository = Repository::new();
+    repository.run(&["add", "untracked.txt"]);
+    let (mut app, ids) = repository.app(&[("untracked.txt", "new\n")]);
+    let id = ids[0];
+    let markers = settled_markers(&mut app, id).unwrap();
+    let change = markers.hunks[0].clone();
+    let key = app.git_gutter.markers[&id].key.clone();
+
+    repository.run(&["restore", "--staged", "untracked.txt"]);
+    let (_, fingerprint) = git::working_tree_fingerprint(&repository.root).unwrap();
+    app.projects[0].git_fingerprint = Some(fingerprint);
+    app.invalidate_git_gutter(&key, Some(fingerprint));
+    assert!(!app.previous_git_markers(id).unwrap().current);
+    assert!(
+        app.revert_git_change(id, markers.revision, &change)
+            .is_err()
+    );
+    assert_eq!(app.tab().unwrap().text, "new\n");
 }
 
 #[test]

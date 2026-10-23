@@ -1864,14 +1864,14 @@ fn review_files(root: &Path, comparison: &ReviewComparison) -> GitResult<(Vec<Re
             });
         }
     }
-    files.sort_by(|left, right| review_order(&left.path).cmp(&review_order(&right.path)));
+    files.sort_by_cached_key(|file| review_order(&file.path));
     Ok((files, omitted))
 }
 
 /// Folder first, then file name; case-insensitive with a byte-order tiebreak.
-fn review_order(path: &str) -> (String, String, &str) {
+fn review_order(path: &str) -> (String, String, String) {
     let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
-    (folder.to_lowercase(), name.to_lowercase(), path)
+    (folder.to_lowercase(), name.to_lowercase(), path.to_owned())
 }
 
 fn working_file_identity(path: &Path) -> Option<(u64, u128)> {

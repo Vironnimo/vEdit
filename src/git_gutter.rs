@@ -56,7 +56,7 @@ struct DocumentMarkers {
 }
 
 /// Markers to paint for one document. `current` is false while a newer
-/// revision is being compared; such markers are only shown, never reverted.
+/// revision or base is being compared; such markers are only shown, never reverted.
 #[derive(Clone)]
 pub(super) struct GutterMarkers {
     pub(super) base: Arc<str>,
@@ -577,15 +577,25 @@ impl VEditApp {
     /// The latest markers of `document`, current or not.
     fn previous_git_markers(&self, document: u64) -> Option<GutterMarkers> {
         let markers = self.git_gutter.markers.get(&document)?;
-        let revision = self
-            .tab_location(document)
-            .map(|(project, index)| self.projects[project].tabs[index].revision);
         Some(GutterMarkers {
             base: markers.base.clone(),
             hunks: markers.hunks.clone(),
             revision: markers.revision,
-            current: revision == Some(markers.revision),
+            current: self.git_markers_current(document, markers),
         })
+    }
+
+    fn git_markers_current(&self, document: u64, markers: &DocumentMarkers) -> bool {
+        let revision = self
+            .tab_location(document)
+            .map(|(project, index)| self.projects[project].tabs[index].revision);
+        revision == Some(markers.revision)
+            && self.git_gutter_key(document).as_ref() == Some(&markers.key)
+            && matches!(
+                self.git_gutter.bases.get(&markers.key),
+                Some(BaseEntry::Ready { text: Some(base), .. })
+                    if Arc::ptr_eq(base, &markers.base)
+            )
     }
 
     fn request_git_base(&mut self, key: BaseKey) {
@@ -700,7 +710,10 @@ impl VEditApp {
     ) -> Result<(), String> {
         let stale = "The document changed; review the change again before reverting it";
         let markers = self.git_gutter.markers.get(&document).ok_or(stale)?;
-        if markers.revision != revision || !markers.hunks.contains(hunk) {
+        if markers.revision != revision
+            || !markers.hunks.contains(hunk)
+            || !self.git_markers_current(document, markers)
+        {
             return Err(stale.into());
         }
         let base = markers.base.clone();

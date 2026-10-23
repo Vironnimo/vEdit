@@ -106,7 +106,12 @@ impl ExplorerGitMarks {
 
     pub(super) fn get(&self, relative: &Path, is_dir: bool) -> Option<ExplorerGitMark> {
         if is_dir {
-            self.folders.get(relative).copied()
+            // Submodules and collapsed untracked directories have a status
+            // entry of their own instead of individual child-file entries.
+            self.folders
+                .get(relative)
+                .copied()
+                .max(self.files.get(relative).copied())
         } else {
             self.files.get(relative).copied()
         }
@@ -184,6 +189,34 @@ mod tests {
             Some(ExplorerGitMark::Modified)
         );
         assert_eq!(marks.get(Path::new("src"), false), None);
-        assert_eq!(marks.get(Path::new("README.md"), true), None);
+        assert_eq!(marks.get(Path::new("unchanged"), true), None);
+    }
+
+    #[test]
+    fn directory_statuses_mark_collapsed_untracked_folders_and_submodules() {
+        let marks = ExplorerGitMarks::new(&[
+            status(
+                "generated output/",
+                git::FileChange::None,
+                git::FileChange::Untracked,
+            ),
+            status(
+                "vendor/module",
+                git::FileChange::None,
+                git::FileChange::Modified,
+            ),
+        ]);
+        assert_eq!(
+            marks.get(Path::new("generated output"), true),
+            Some(ExplorerGitMark::Untracked)
+        );
+        assert_eq!(
+            marks.get(&Path::new("vendor").join("module"), true),
+            Some(ExplorerGitMark::Modified)
+        );
+        assert_eq!(
+            marks.get(Path::new("vendor"), true),
+            Some(ExplorerGitMark::Modified)
+        );
     }
 }
