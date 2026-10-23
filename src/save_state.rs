@@ -133,13 +133,13 @@ Click to compare them with the saved version."
             };
             match action {
                 Some(kind) => {
-                    if design::status_item(ui, label, color, &hint).clicked() {
+                    if design::status_details(ui, label, color, &hint).clicked() {
                         compare = Some((tab.id, kind));
                     }
                 }
                 None => {
                     ui.label(RichText::new(label).size(11.0).color(color))
-                        .on_hover_text(hint);
+                        .on_hover_details(hint);
                 }
             }
         }

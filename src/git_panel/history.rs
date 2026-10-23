@@ -404,9 +404,8 @@ fn history_hover(
     stats: Option<&Result<git::CommitStats, String>>,
     actions: &mut Vec<GitUiAction>,
 ) {
-    response.clone().on_hover_ui(|ui| {
+    response.clone().on_hover_details_ui(|ui| {
         ui.ctx().request_repaint_after(Duration::from_secs(30));
-        ui.set_max_width(460.0);
         ui.label(RichText::new(&commit.subject).strong());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -504,6 +503,45 @@ fn history_hover(
                 });
             }
         }
+        let mut copy = format!(
+            "{}\n{} · {}\n{}\n{}\n{}",
+            commit.subject,
+            commit.author,
+            relative_time(commit.timestamp, now),
+            commit.date,
+            commit.hash,
+            commit
+                .refs
+                .iter()
+                .map(|r| if r.current {
+                    format!("HEAD → {}", r.name)
+                } else {
+                    r.name.clone()
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        );
+        copy.push_str(if commit.on_remote {
+            "\non remote"
+        } else {
+            "\nlocal only"
+        });
+        match stats {
+            Some(Ok(stats)) => copy.push_str(&format!(
+                "\n{} files changed · +{} −{}{}",
+                stats.files_changed,
+                stats.lines.added,
+                stats.lines.removed,
+                if stats.lines.binary {
+                    " · Includes binary changes"
+                } else {
+                    ""
+                }
+            )),
+            Some(Err(error)) => copy.push_str(&format!("\nChange statistics unavailable: {error}")),
+            None => copy.push_str("\nLoading changes…"),
+        }
+        copy
     });
 }
 

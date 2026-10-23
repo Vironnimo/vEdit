@@ -355,7 +355,7 @@ impl VEditApp {
         let Some(status) = self.rust_analysis_status() else {
             return;
         };
-        if design::status_item(ui, &status.label, status.color, &status.hint).clicked() {
+        if design::status_details(ui, &status.label, status.color, &status.hint).clicked() {
             self.output_visible = true;
             self.problems_visible = true;
         }

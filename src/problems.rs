@@ -459,7 +459,7 @@ impl VEditApp {
                     if response.clicked() {
                         jump = Some((row.path.clone(), row.position));
                     }
-                    response.on_hover_text(tooltip);
+                    response.on_hover_details(tooltip);
                 }
             });
         if let Some((path, position)) = jump {

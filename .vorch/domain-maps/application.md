@@ -49,6 +49,9 @@ checks deliberately do not wake an idle window.
 actions. Event order and focus are behavioral contracts: drawing an overlay late
 in the frame does not by itself prevent earlier source handlers from receiving
 its keys. Read `editing/input-and-history.md` before moving input phases.
+The hover-details frame begins before application/source input and ends after
+language hover rendering, before deferred input owners finish. This preserves
+the selectable details card's input ownership; see `rendering.md`.
 
 Settings and sessions use serde defaults and compatibility aliases in
 `src/app_session.rs` (sidebar aliases remain on `SidebarView` in `app.rs`).

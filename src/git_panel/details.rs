@@ -117,7 +117,7 @@ impl VEditApp {
                         ui.label(RichText::new(format_date(&detail.date)).size(11.5).color(MUTED));
                     });
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(RichText::new(&detail.hash).monospace().size(11.0).color(MUTED)).truncate()).on_hover_text(&detail.hash);
+                        ui.add(egui::Label::new(RichText::new(&detail.hash).monospace().size(11.0).color(MUTED)).truncate()).on_hover_details(&detail.hash);
                         if small_button(ui, "Copy hash", "Copy the full commit identifier").clicked() {
                             ui.ctx().copy_text(detail.hash.clone());
                         }

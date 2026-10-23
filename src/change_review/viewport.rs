@@ -1,5 +1,6 @@
 //! Continuous diff viewport, row navigation and sticky file headers.
 use super::*;
+use crate::design::HoverDetails;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ReviewKey {
@@ -626,7 +627,7 @@ fn file_header(
             );
         }
         ui.add(egui::Label::new(job).truncate())
-            .on_hover_text(match &entry.original_path {
+            .on_hover_details(match &entry.original_path {
                 Some(original) => format!("{}\nRenamed from {original}", entry.path),
                 None => entry.path.clone(),
             });

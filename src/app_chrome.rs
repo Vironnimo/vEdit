@@ -181,7 +181,7 @@ impl VEditApp {
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
                         let budget = (ui.available_width() - right_budget).clamp(30.0, 180.0);
-                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_text(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
+                        if ui.add_sized([width.min(budget), 20.0], egui::Button::new(RichText::new(&branch).size(11.0).color(MUTED)).truncate().frame_when_inactive(false).corner_radius(3.0)).on_hover_details(&hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.show_sidebar(SidebarView::SourceControl); }
                     }
                     if !narrow && let Some(action) = &self.git_action && action.progress_ui(ui, 11.0) {
                         self.cancel_git_action();
@@ -204,12 +204,12 @@ impl VEditApp {
                             if !show_statistics && let Some(statistics) = &statistics {
                                 position_hint.push_str(&format!("\n\n{}", statistics.tooltip()));
                             }
-                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(position_hint);
+                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_details(position_hint);
                             if show_statistics && let Some(statistics) = &statistics {
-                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_text(statistics.tooltip());
+                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_details(statistics.tooltip());
                             }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_details(details); }
                             if !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
                                 ui.label(RichText::new("Plain text: file too large for highlighting").size(11.0).color(MUTED)).on_hover_text(format!(
                                     "Syntax colors are off for files larger than {} KiB so editing stays fast. This file has {} KiB. Editing, search and language analysis work as usual.",

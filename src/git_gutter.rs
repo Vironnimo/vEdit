@@ -306,7 +306,7 @@ pub(super) fn paint_markers(
 }
 
 /// The hover text of one marker: what changed and the committed lines.
-pub(super) fn tooltip_ui(ui: &mut egui::Ui, markers: &GutterMarkers, hunk: &Hunk) {
+pub(super) fn tooltip_ui(ui: &mut egui::Ui, markers: &GutterMarkers, hunk: &Hunk) -> String {
     ui.label(RichText::new(summary(hunk)).size(12.0).color(TEXT));
     let (lines, more) = committed_lines(&markers.base, hunk, TOOLTIP_LINES);
     if !lines.is_empty() {
@@ -333,6 +333,8 @@ pub(super) fn tooltip_ui(ui: &mut egui::Ui, markers: &GutterMarkers, hunk: &Hunk
             .size(11.0)
             .color(MUTED),
     );
+    let (lines, _) = committed_lines(&markers.base, hunk, usize::MAX);
+    format!("{}\n{}", summary(hunk), lines.join("\n"))
 }
 
 pub(super) enum PeekAction {

@@ -220,7 +220,7 @@ impl VEditApp {
                     .size(10.5)
                     .color(ORANGE),
                 )
-                .on_hover_text(results.warnings.join("\n"));
+                .on_hover_details(results.warnings.join("\n"));
             }
             egui::ScrollArea::vertical()
                 .id_salt("search_results")

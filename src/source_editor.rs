@@ -592,7 +592,7 @@ impl VEditApp {
                     let response = ui
                         .interact(target, id.with(("git_change", placement.index)), egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_ui(|ui| git_gutter::tooltip_ui(ui, markers, hunk));
+                        .on_hover_details_ui(|ui| git_gutter::tooltip_ui(ui, markers, hunk));
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Git change")
                     });
@@ -706,7 +706,7 @@ impl VEditApp {
                             .with(("review_mark", tab.id, &annotation.id, row_index)),
                         egui::Sense::hover(),
                     )
-                    .on_hover_text(&annotation.note);
+                    .on_hover_details(&annotation.note);
                 }
             }
             for diagnostic in &diagnostics {
@@ -761,7 +761,7 @@ impl VEditApp {
                                 ui.id().with(("diagnostic", tab.id, start, row_index)),
                                 egui::Sense::hover(),
                             )
-                            .on_hover_text(format!("{}: {}", severity.label(), diagnostic.message));
+                            .on_hover_details(format!("{}: {}", severity.label(), diagnostic.message));
                         }
                     }
                 }
@@ -800,7 +800,7 @@ impl VEditApp {
                             center + Vec2::new(-3.5, -5.0), center + Vec2::new(3.5, -5.0),
                             center + Vec2::new(3.5, 5.0), center + Vec2::new(0.0, 2.5), center + Vec2::new(-3.5, 5.0),
                         ], ORANGE, Stroke::NONE));
-                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_text(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
+                        let response = ui.interact(rect, ui.id().with(("bookmark_gutter", id)), egui::Sense::click()).on_hover_details(format!("{label}\nClick to jump to this bookmark · Space m toggles a bookmark"));
                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Bookmark at line {line}")));
                         if response.clicked() { bookmark_click = Some(id); }
                     }

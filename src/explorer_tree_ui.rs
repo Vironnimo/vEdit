@@ -262,7 +262,7 @@ impl VEditApp {
                     .size(10.5)
                     .color(ORANGE),
                 )
-                .on_hover_text(errors.join("\n"));
+                .on_hover_details(errors.join("\n"));
                 if small_button(ui, "Retry", "Read these folders again").clicked() {
                     self.retry_explorer();
                 }

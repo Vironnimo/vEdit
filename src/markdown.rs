@@ -1,4 +1,5 @@
 //! Cached CommonMark preview. HTML stays inert and images never fetch remotely.
+use crate::design::HoverDetails;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -1590,16 +1591,17 @@ impl Renderer<'_> {
             ),
         );
         let mut hovered_link = None;
+        let mut link_details = String::new();
         if let Some(pointer) = response.hover_pos() {
             let character = galley.cursor_from_pos(pointer - origin).index.0;
             if let Some((_, link)) = links.iter().find(|(range, _)| range.contains(&character)) {
                 hovered_link = Some(link.clone());
                 let action = link_action(link, self.source_path);
-                response = response.on_hover_text(match action {
+                link_details = match action {
                     LinkAction::Blocked => format!("Inactive link: {link}"),
                     LinkAction::File(ref path) => crate::paths::display(path),
                     _ => link.clone(),
-                });
+                };
                 if !matches!(action, LinkAction::Blocked) {
                     response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if response.clicked() {
@@ -1616,7 +1618,7 @@ impl Renderer<'_> {
             }
         }
         self.source_response(&response, source, hovered_link.as_deref());
-        response
+        response.on_hover_details(link_details)
     }
 
     fn source_response(&mut self, response: &egui::Response, byte: usize, link: Option<&str>) {

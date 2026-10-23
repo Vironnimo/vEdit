@@ -5,6 +5,7 @@
 //! file contents. Tree state stays local to the project and survives refreshes.
 
 use super::*;
+use crate::design::HoverDetails;
 use std::collections::VecDeque;
 
 #[path = "git_panel/changes.rs"]

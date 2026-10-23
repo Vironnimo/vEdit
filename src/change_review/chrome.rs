@@ -1,5 +1,6 @@
 //! Review header, empty state and navigable file checklist.
 use super::*;
+use crate::design::HoverDetails;
 
 pub(super) fn review_header(
     ui: &mut egui::Ui,
@@ -101,7 +102,7 @@ pub(super) fn review_header(
         && !view.files.is_empty()
     {
         ui.label(RichText::new("Refresh failed").size(11.5).color(ORANGE))
-            .on_hover_text(error);
+            .on_hover_details(error);
     }
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
         let detail = view
@@ -113,7 +114,7 @@ pub(super) fn review_header(
                 .truncate(),
         );
         if !detail.is_empty() {
-            title.on_hover_text(detail);
+            title.on_hover_details(detail);
         }
     });
 }
@@ -271,7 +272,7 @@ fn folder_row(ui: &mut egui::Ui, folder: &str) {
         MUTED,
     );
     if truncated {
-        response.on_hover_text(folder);
+        response.on_hover_details(folder);
     }
 }
 
@@ -362,7 +363,7 @@ fn file_row(
     let toggled = check.clicked();
     let clicked = row.clicked();
     row.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(match &entry.original_path {
+        .on_hover_details(match &entry.original_path {
             Some(original) => format!("{}\nRenamed from {original}", entry.path),
             None => entry.path.clone(),
         });

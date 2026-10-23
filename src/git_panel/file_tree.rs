@@ -331,7 +331,7 @@ pub(super) fn draw_file_tree(
                 },
                 !busy,
             );
-            response.row.clone().on_hover_text(&path);
+            response.row.clone().on_hover_details(&path);
             if response.row.clicked() {
                 open = !open;
             }
@@ -427,11 +427,10 @@ pub(super) fn draw_file_tree(
                     .row
                     .on_hover_text(file_tooltip(file, context, status_label))
             } else {
-                response.row.on_hover_ui(|ui| {
-                    // Match egui's on_hover_text layout while delaying string
-                    // formatting until this specific tooltip is actually shown.
-                    ui.set_max_width(ui.spacing().tooltip_width);
-                    ui.add(egui::Label::new(file_tooltip(file, context, status_label)));
+                response.row.on_hover_details_ui(|ui| {
+                    let text = file_tooltip(file, context, status_label);
+                    ui.add(egui::Label::new(&text).wrap());
+                    text
                 })
             };
             if row.clicked() {

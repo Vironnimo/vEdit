@@ -8,6 +8,13 @@ use eframe::egui::{
     WidgetInfo, WidgetType,
 };
 
+#[path = "design_hover.rs"]
+mod hover;
+pub(crate) use hover::{
+    HoverDetails, begin_hover_frame, details_body, details_dismissed, details_open,
+    end_hover_frame, register_details,
+};
+
 /// Whether focus came from the keyboard, like CSS `:focus-visible`: a key
 /// press shows focus rings, a pointer press hides them again. Clicking a row
 /// still focuses it for arrow keys without painting a ring around it.
@@ -72,6 +79,15 @@ pub(crate) fn ghost_button(ui: &mut Ui, label: &str, tooltip: &str) -> Response 
 /// A status bar entry: small muted text that is clickable without a frame.
 /// Color is reserved for states that need attention.
 pub(crate) fn status_item(ui: &mut Ui, label: &str, color: Color32, tooltip: &str) -> Response {
+    status_button(ui, label, color).on_hover_text(tooltip)
+}
+
+/// Status information whose full value can be inspected and copied.
+pub(crate) fn status_details(ui: &mut Ui, label: &str, color: Color32, tooltip: &str) -> Response {
+    status_button(ui, label, color).on_hover_details(tooltip)
+}
+
+fn status_button(ui: &mut Ui, label: &str, color: Color32) -> Response {
     ui.add(
         egui::Button::new(RichText::new(label).size(11.0).color(color))
             .frame_when_inactive(false)
@@ -79,7 +95,6 @@ pub(crate) fn status_item(ui: &mut Ui, label: &str, color: Color32, tooltip: &st
             .min_size(Vec2::new(0.0, 20.0)),
     )
     .on_hover_cursor(CursorIcon::PointingHand)
-    .on_hover_text(tooltip)
 }
 
 /// The small muted heading at the top of pickers and overlays.
@@ -408,7 +423,7 @@ pub(crate) fn detail_row(
     }
     response
         .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
+        .on_hover_details(tooltip)
 }
 
 /// Explorer geometry is shared by painting, virtualization and keyboard paging.
@@ -624,17 +639,9 @@ pub(crate) fn explorer_row(ui: &mut Ui, row: ExplorerRow<'_>) -> Response {
             color,
         );
     }
-    let mut tooltip = egui::Tooltip::for_enabled(&response).at_pointer().gap(12.0);
-    // Keep path tooltips beside the pointer so rows below it remain visible.
-    // At the right window edge, prefer the opposite side over dropping below.
-    tooltip.popup = tooltip
-        .popup
-        .align(egui::emath::RectAlign::RIGHT)
-        .align_alternatives(&[egui::emath::RectAlign::LEFT]);
-    tooltip.show(|ui| {
-        ui.label(row.tooltip);
-    });
-    response.on_hover_cursor(CursorIcon::PointingHand)
+    response
+        .on_hover_details_at_pointer(row.tooltip)
+        .on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn paint_explorer_file_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {

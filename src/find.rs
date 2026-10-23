@@ -1395,14 +1395,19 @@ impl VEditApp {
                                 format!("{current}/{}", matches.len())
                             }
                         });
-                    ui.label(RichText::new(label).size(11.0).color(if error.is_some() {
-                        RED
+                    let response =
+                        ui.label(RichText::new(label).size(11.0).color(if error.is_some() {
+                            RED
+                        } else {
+                            MUTED
+                        }));
+                    if let Some(error) = error {
+                        response.on_hover_details(error);
                     } else {
-                        MUTED
-                    }))
-                    .on_hover_text(error.unwrap_or_else(|| {
-                        "Regex search · case sensitive · \\c ignores case, \\C matches case".into()
-                    }));
+                        response.on_hover_text(
+                            "Regex search · case sensitive · \\c ignores case, \\C matches case",
+                        );
+                    }
                     if show_hint {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(

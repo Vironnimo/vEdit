@@ -123,7 +123,7 @@ impl VEditApp {
             if let Some(error) = app.editor_search_error() {
                 let invalid = ui
                     .label(RichText::new("Invalid pattern").size(11.0).color(RED))
-                    .on_hover_text(format!("This regular expression cannot search: {error}"));
+                    .on_hover_details(format!("This regular expression cannot search: {error}"));
                 invalid.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Invalid pattern")
                 });

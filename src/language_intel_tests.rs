@@ -8,7 +8,7 @@ use crate::lsp::{
     Diagnostic, Feature, HoverContents, LanguageServer, LspEvent, Position, Reference, Symbol,
     TestRequest, TestRequests, TextRange,
 };
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 
 struct Fixture(PathBuf);
 
@@ -748,6 +748,7 @@ fn vim_k_and_gr_request_hover_and_references_and_esc_closes_the_hover() {
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
                 app.poll_languages();
+                design::begin_hover_frame(&app.ctx);
                 app.hover_escape();
                 app.shortcuts();
                 app.handle_vim();
@@ -755,6 +756,7 @@ fn vim_k_and_gr_request_hover_and_references_and_esc_closes_the_hover() {
                 app.editor_ui(ui);
                 app.overlays();
                 app.hover_ui();
+                design::end_hover_frame(&app.ctx);
             },
             app,
         );
@@ -782,6 +784,13 @@ fn vim_k_and_gr_request_hover_and_references_and_esc_closes_the_hover() {
         "the popup is drawn at the caret"
     );
     let text = screen.state().tab().unwrap().text.clone();
+    screen.get_by_label("fn name()").click();
+    screen.run_steps(2);
+    screen.event(egui::Event::Text("dd".into()));
+    screen.event(egui::Event::Paste("do not replace the source".into()));
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().text, text);
+    assert!(screen.state().intel.hover_visible());
     screen.key_press(Key::Escape);
     screen.run_steps(2);
     assert!(screen.state().intel.hover.is_none());

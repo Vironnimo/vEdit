@@ -1,3 +1,4 @@
+use crate::design::HoverDetails;
 use crate::{
     design, editor, git, tasks,
     vim::{VimKey, VimMode, VimState, Yank},
@@ -551,6 +552,7 @@ impl VEditApp {
 
 impl VEditApp {
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
+        design::begin_hover_frame(&self.ctx);
         self.prune_empty_other_files();
         self.receive_file_drop();
         design::focus_visible(&self.ctx);
@@ -686,6 +688,7 @@ impl VEditApp {
         self.navigation_ui();
         self.completion_ui();
         self.hover_ui();
+        design::end_hover_frame(&self.ctx);
         self.finish_agent_mark_input_owner();
         self.finish_shortcut_input();
         self.autosave();

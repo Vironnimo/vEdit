@@ -386,7 +386,7 @@ impl VEditApp {
                         }
                         tooltip.push_str("\nDrag to reorder or move to another editor pane");
                         response
-                            .on_hover_text(tooltip)
+                            .on_hover_details(tooltip)
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
                     ui.add_space(7.0);
