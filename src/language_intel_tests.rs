@@ -551,7 +551,7 @@ fn document_symbols_fill_the_at_palette_with_fuzzy_filtering_and_containers() {
     let fixture = Fixture::new("symbols");
     let (mut app, path) = fixture.app("struct Parser;\nimpl Parser {\n    fn parse() {}\n}\n");
     let (events, requests) = connect(&mut app);
-    app.command_action("Go to symbol in file");
+    app.run_shortcut_action(keybindings::Action::DocumentSymbol);
     assert!(app.palette == Some(Palette::Files));
     assert_eq!(app.palette_query, "@");
     assert_eq!(symbol_scope("@ pa"), Some((SymbolScope::Document, "pa")));

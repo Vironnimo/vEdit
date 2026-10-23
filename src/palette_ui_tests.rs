@@ -699,11 +699,11 @@ fn commands_navigation_keeps_query_focus_and_enter_runs_only_the_selection() {
     open(&mut screen, Palette::Commands);
     screen.key_press(Key::End);
     screen.run_steps(3);
-    assert_eq!(screen.state().palette_selected, COMMANDS.len() - 1);
-    let (name, _) = COMMANDS[COMMANDS.len() - 1];
-    let hint = screen
-        .state()
-        .shortcut_label(keybindings::Action::from_label(name).unwrap());
+    let commands = keybindings::Action::ALL;
+    assert_eq!(screen.state().palette_selected, commands.len() - 1);
+    let action = commands[commands.len() - 1];
+    let name = action.label();
+    let hint = screen.state().shortcut_label(action);
     assert_row_visible(&screen, &format!("{name}: {hint}"));
     assert!(!screen.state().settings_open);
     screen.key_press(Key::Home);
@@ -721,6 +721,53 @@ fn commands_navigation_keeps_query_focus_and_enter_runs_only_the_selection() {
     assert_eq!(screen.state().settings.word_wrap, !original);
     assert_eq!(screen.state().tab().unwrap().text, DOCUMENT);
     assert_source_focus(&screen);
+}
+
+#[test]
+fn command_palette_moves_lines_and_undoes_once_in_native_and_vim_modes() {
+    const ORIGINAL: &str = "first\nmiddle\nlast\n";
+    for vim in [false, true] {
+        let (_fixture, mut app) = Fixture::new(1);
+        app.settings.vim = vim;
+        let tab = app.tab_mut().unwrap();
+        tab.text = ORIGINAL.into();
+        tab.saved_text = ORIGINAL.into();
+        tab.set_cursor(6..6);
+        let mut screen = harness(app);
+        for (command, expected) in [
+            ("Move line / selection up", "middle\nfirst\nlast\n"),
+            ("Move line / selection down", "first\nlast\nmiddle\n"),
+        ] {
+            open(&mut screen, Palette::Commands);
+            text(&mut screen, command);
+            screen.key_press(Key::Enter);
+            screen.run_steps(3);
+            assert!(screen.state().palette.is_none());
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                expected,
+                "{command}, vim={vim}"
+            );
+            assert_source_focus(&screen);
+            screen.event(egui::Event::Key {
+                key: Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            });
+            screen.run_steps(3);
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                ORIGINAL,
+                "undo {command}, vim={vim}"
+            );
+        }
+    }
 }
 
 #[test]

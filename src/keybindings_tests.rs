@@ -21,7 +21,14 @@ fn defaults_are_valid_unique_and_use_native_safe_clipboard_keys() {
             stroke.safe(action).unwrap();
         }
         assert_eq!(Action::from_id(action.id()), Some(action));
-        assert_eq!(Action::from_label(action.label()), Some(action));
+        assert!(!action.label().is_empty());
+        assert_eq!(
+            Action::ALL
+                .iter()
+                .filter(|other| other.label() == action.label())
+                .count(),
+            1
+        );
     }
     assert_eq!(
         label(&Bindings::new(), Action::MarkdownPreview),

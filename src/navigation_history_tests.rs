@@ -233,10 +233,10 @@ fn history_shortcuts_and_mouse_buttons_go_back_and_forward() {
     app.open_file(root.join("b.rs"));
     settle(&mut app);
 
-    app.command_action("Go back");
+    app.run_shortcut_action(keybindings::Action::NavigateBack);
     settle(&mut app);
     assert_eq!(location(&app).0, "a.rs");
-    app.command_action("Go forward");
+    app.run_shortcut_action(keybindings::Action::NavigateForward);
     settle(&mut app);
     assert_eq!(location(&app).0, "b.rs");
 

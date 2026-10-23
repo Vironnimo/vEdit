@@ -571,19 +571,19 @@ fn closing_the_last_project_of_a_repository_forgets_its_worktrees() {
 #[test]
 fn git_actions_except_staging_make_the_overview_due() {
     let mut app = VEditApp::empty(egui::Context::default());
-    for (message, refresh) in [
-        ("Stage changes", false),
-        ("Unstage changes", false),
-        ("Create commit", true),
-        ("Fetch", true),
-        ("Switch branch", true),
+    for (kind, refresh) in [
+        (GitActionKind::Stage, false),
+        (GitActionKind::Unstage, false),
+        (GitActionKind::Commit, true),
+        (GitActionKind::Fetch, true),
+        (GitActionKind::SwitchBranch, true),
     ] {
         app.repositories.refresh_requested = None;
         app.sender
             .send(WorkerResult::GitAction {
                 reply: None,
                 root: PathBuf::from("C:/vedit-no-open-project"),
-                message: message.into(),
+                kind,
                 result: Ok(String::new()),
             })
             .unwrap();
@@ -591,7 +591,7 @@ fn git_actions_except_staging_make_the_overview_due() {
         assert_eq!(
             app.repositories.refresh_requested.is_some(),
             refresh,
-            "{message}"
+            "{kind:?}"
         );
     }
 }

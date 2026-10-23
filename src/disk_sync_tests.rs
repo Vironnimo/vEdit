@@ -489,7 +489,9 @@ fn compare_with_saved_ignores_raw_crlf_and_needs_a_saved_version() {
     // CLI edits may contain raw CRLF; only the added line is a change.
     change_tab(&mut app, "a\r\nb\r\nc\r\n");
     let mut screen = harness(app);
-    screen.state_mut().command_action("Compare with saved");
+    screen
+        .state_mut()
+        .run_shortcut_action(keybindings::Action::CompareWithSaved);
     screen.run_steps(2);
     wait_for_diff(&mut screen);
     let (title, patch) = screen.state().diff.clone().expect("comparison open");

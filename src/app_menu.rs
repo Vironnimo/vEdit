@@ -24,7 +24,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.pick_project();
+                self.run_shortcut_action(keybindings::Action::OpenProject);
                 ui.close();
             }
             if design::menu_item(
@@ -35,7 +35,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.pick_file();
+                self.run_shortcut_action(keybindings::Action::OpenFile);
                 ui.close();
             }
             if design::menu_item(
@@ -46,7 +46,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_palette(Palette::Files);
+                self.run_shortcut_action(keybindings::Action::QuickOpen);
                 ui.close();
             }
             if design::menu_item(
@@ -57,7 +57,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_palette(Palette::Recent);
+                self.run_shortcut_action(keybindings::Action::OpenRecent);
                 ui.close();
             }
             if design::menu_item(
@@ -68,7 +68,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.new_file();
+                self.run_shortcut_action(keybindings::Action::NewFile);
                 ui.close();
             }
             if ui.add_enabled_ui(self.can_reopen_closed_tab(), |ui| {
@@ -79,7 +79,7 @@ impl VEditApp {
                     "Reopen the last closed file in this project at its previous cursor position",
                 )
             }).inner.clicked() {
-                self.reopen_closed_tab();
+                self.run_shortcut_action(keybindings::Action::ReopenTab);
                 ui.close();
             }
             ui.separator();
@@ -91,7 +91,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.save_current();
+                self.run_shortcut_action(keybindings::Action::Save);
                 ui.close();
             }
             if design::menu_item(
@@ -102,7 +102,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.save_all();
+                self.run_shortcut_action(keybindings::Action::SaveAll);
                 ui.close();
             }
             if design::menu_item(
@@ -113,9 +113,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                if let Some(id) = self.tab().map(|tab| tab.id) {
-                    self.request_save_as(id);
-                }
+                self.run_shortcut_action(keybindings::Action::SaveAs);
                 ui.close();
             }
             let can_compare = self
@@ -134,7 +132,7 @@ impl VEditApp {
                 .on_disabled_hover_text("New files have no saved version to compare with")
                 .clicked()
             {
-                self.compare_current_with_saved();
+                self.run_shortcut_action(keybindings::Action::CompareWithSaved);
                 ui.close();
             }
             ui.separator();
@@ -146,7 +144,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.settings_open = true;
+                self.run_shortcut_action(keybindings::Action::Settings);
                 ui.close();
             }
         });
@@ -170,14 +168,14 @@ impl VEditApp {
                             ) || t.vim.multi.active())
                     });
                     if ui.add_enabled_ui(enabled,|ui| design::menu_item(ui,action.label(),&self.shortcut_label(action),"Standard editing keys apply to every cursor. Esc returns to one cursor.")).inner.clicked() {
-                    self.multicursor_action(action); ui.close();
+                    self.run_shortcut_action(action); ui.close();
                 }
                 }
             },
         );
         design::menu(ui, "View", "Navigate and arrange your workspace", |ui| {
             if design::menu_item(ui, "For agent", &self.shortcut_label(keybindings::Action::AgentMarks), "Open selected blocks across all projects, add notes, or restore the last collection").clicked() {
-                self.open_agent_marks();
+                self.run_shortcut_action(keybindings::Action::AgentMarks);
                 ui.close();
             }
             if design::menu_item(
@@ -188,7 +186,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_notifications();
+                self.run_shortcut_action(keybindings::Action::AgentNotifications);
                 ui.close();
             }
             if design::menu_item(
@@ -199,7 +197,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_bookmarks();
+                self.run_shortcut_action(keybindings::Action::Bookmarks);
                 ui.close();
             }
             if design::menu_item(
@@ -210,7 +208,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.toggle_bookmark();
+                self.run_shortcut_action(keybindings::Action::ToggleBookmark);
                 ui.close();
             }
             if design::menu_item(
@@ -221,7 +219,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.start_screen_jump();
+                self.run_shortcut_action(keybindings::Action::ScreenJump);
                 ui.close();
             }
             if design::menu_item(
@@ -232,7 +230,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.navigate_history(true);
+                self.run_shortcut_action(keybindings::Action::NavigateBack);
                 ui.close();
             }
             if design::menu_item(
@@ -243,7 +241,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.navigate_history(false);
+                self.run_shortcut_action(keybindings::Action::NavigateForward);
                 ui.close();
             }
             ui.separator();
@@ -266,7 +264,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_project_search();
+                self.run_shortcut_action(keybindings::Action::SearchProject);
                 ui.close();
             }
             if design::menu_item(
@@ -277,7 +275,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.show_sidebar(SidebarView::SourceControl);
+                self.run_shortcut_action(keybindings::Action::SourceControl);
                 ui.close();
             }
             if design::menu_item(
@@ -288,8 +286,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.output_visible = true;
-                self.problems_visible = true;
+                self.run_shortcut_action(keybindings::Action::Problems);
                 ui.close();
             }
             if design::menu_item(
@@ -300,7 +297,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.go_to_problem(false);
+                self.run_shortcut_action(keybindings::Action::NextProblem);
                 ui.close();
             }
             if design::menu_item(
@@ -311,7 +308,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.go_to_problem(true);
+                self.run_shortcut_action(keybindings::Action::PreviousProblem);
                 ui.close();
             }
             if design::menu_item(
@@ -337,15 +334,7 @@ impl VEditApp {
                 )
                 .clicked()
             {
-                let view = if self
-                    .tab()
-                    .is_some_and(|tab| tab.agent_view == crate::cli::DocumentView::Preview)
-                {
-                    crate::cli::DocumentView::Source
-                } else {
-                    crate::cli::DocumentView::Preview
-                };
-                self.set_document_view(view);
+                self.run_shortcut_action(keybindings::Action::MarkdownPreview);
                 ui.close();
             }
             ui.separator();
@@ -387,7 +376,7 @@ impl VEditApp {
                 )
                 .clicked()
                 {
-                    self.command_action(name);
+                    self.run_shortcut_action(action);
                     ui.close();
                 }
             }
@@ -400,7 +389,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.restart_active_language();
+                self.run_shortcut_action(keybindings::Action::RestartLanguage);
                 ui.close();
             }
             ui.separator();
@@ -412,31 +401,15 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_terminal();
+                self.run_shortcut_action(keybindings::Action::Terminal);
                 ui.close();
             }
             ui.separator();
-            for (name, action, command) in [
-                (
-                    "Check",
-                    keybindings::Action::CheckProject,
-                    project_tasks::ProjectTaskAction::Check,
-                ),
-                (
-                    "Test",
-                    keybindings::Action::TestProject,
-                    project_tasks::ProjectTaskAction::Test,
-                ),
-                (
-                    "Build",
-                    keybindings::Action::BuildProject,
-                    project_tasks::ProjectTaskAction::Build,
-                ),
-                (
-                    "Run active file",
-                    keybindings::Action::RunFile,
-                    project_tasks::ProjectTaskAction::RunFile,
-                ),
+            for (name, action) in [
+                ("Check", keybindings::Action::CheckProject),
+                ("Test", keybindings::Action::TestProject),
+                ("Build", keybindings::Action::BuildProject),
+                ("Run active file", keybindings::Action::RunFile),
             ] {
                 if design::menu_item(
                     ui,
@@ -446,7 +419,7 @@ impl VEditApp {
                 )
                 .clicked()
                 {
-                    self.run_project_task(command);
+                    self.run_shortcut_action(action);
                     ui.close();
                 }
             }
@@ -458,7 +431,7 @@ impl VEditApp {
             )
             .clicked()
             {
-                self.open_project_task_settings();
+                self.run_shortcut_action(keybindings::Action::ConfigureTasks);
                 ui.close();
             }
             ui.separator();

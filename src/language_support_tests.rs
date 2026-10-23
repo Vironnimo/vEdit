@@ -49,7 +49,7 @@ fn restarting_analysis_clears_stale_state_and_keeps_unsaved_documents() {
     });
     events.send(LspEvent::Ready).unwrap();
 
-    app.command_action("Restart Rust analysis");
+    app.run_shortcut_action(keybindings::Action::RestartLanguage);
     app.poll_languages();
 
     let project = &app.projects[0];
@@ -152,7 +152,7 @@ fn analysis_error_is_visible_even_without_a_server_handle() {
 fn unsupported_project_has_actionable_feedback_without_starting_analysis() {
     let mut app = rust_app();
     app.projects[0].rust_project = false;
-    app.command_action("Restart Rust analysis");
+    app.run_shortcut_action(keybindings::Action::RestartLanguage);
     assert!(app.projects[0].rust_language_mut().server.is_none());
     assert!(app.status.as_ref().unwrap().0.contains("Cargo.toml"));
     let status = app.rust_analysis_status().unwrap();

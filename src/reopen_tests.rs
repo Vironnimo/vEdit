@@ -69,7 +69,7 @@ fn reopening_reads_current_disk_and_restores_unicode_cursor_and_preview() {
     assert!(app.tab().is_none());
     let path = fixture.0.join("A/plan.md");
     fs::write(&path, "# α🦀\n\nChanged on disk\n").unwrap();
-    app.command_action("Reopen closed tab");
+    app.run_shortcut_action(keybindings::Action::ReopenTab);
     loaded(&mut app);
     let tab = app.tab().unwrap();
     assert_ne!(tab.id, id);
