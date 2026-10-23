@@ -39,7 +39,8 @@ fn exclusive_search_at_column_one_adjusts_to_linewise_or_previous_line_end() {
             action.yanked,
             Some(Yank {
                 text: register.into(),
-                linewise
+                linewise,
+                block_width: None,
             })
         );
         keys(&mut state, &mut text, "u");

@@ -2156,6 +2156,7 @@ impl VEditApp {
         if self.region_focus_blocked() {
             return false;
         }
+        let shortcut_context = self.shortcut_input_context();
         let shortcut = ctx.input(|input| {
             input.events.iter().enumerate().find_map(|(index, event)| {
                 use keybindings::Action;
@@ -2212,7 +2213,8 @@ impl VEditApp {
                     {
                         return None;
                     }
-                    self.shortcut_matches(binding, event).then_some(action)
+                    self.shortcut_matches(binding, event, shortcut_context)
+                        .then_some(action)
                 })?;
                 Some((index, action))
             })

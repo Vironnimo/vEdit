@@ -77,6 +77,7 @@ fn surround_add_change_delete_preserve_registers_and_repeat_as_one_edit() {
         let register = Yank {
             text: "KEEP".into(),
             linewise: false,
+            block_width: None,
         };
         state.set_register(register.clone());
         keys(&mut state, &mut text, command);

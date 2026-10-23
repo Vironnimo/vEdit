@@ -64,6 +64,9 @@ impl VimState {
         count: usize,
         preserve_register: bool,
     ) -> (bool, bool, Option<Yank>) {
+        if self.mode == VimMode::VisualBlock {
+            return self.paste_visual_block(text, count, preserve_register);
+        }
         let Some(register) = self.register.clone() else {
             self.leave_visual();
             return (true, false, None);
@@ -81,6 +84,7 @@ impl VimState {
         let deleted = Yank {
             text: removed,
             linewise,
+            block_width: None,
         };
         let Some(mut pasted) = repeated_text(&register.text, count) else {
             return (true, false, None);
@@ -125,6 +129,13 @@ impl VimState {
     }
 
     pub(super) fn paste(&mut self, text: &mut String, before_cursor: bool, count: usize) -> bool {
+        if self
+            .register
+            .as_ref()
+            .is_some_and(|yank| yank.block_width.is_some())
+        {
+            return self.paste_block(text, before_cursor, count);
+        }
         let Some(yank) = self.register.as_ref() else {
             return false;
         };
@@ -192,6 +203,9 @@ impl VimState {
         count: usize,
         replacement: char,
     ) -> bool {
+        if self.mode == VimMode::VisualBlock {
+            return self.replace_block_characters(text, replacement);
+        }
         let visual = self.selection(text);
         let chars: Vec<char> = text.chars().collect();
         let rows = lines(&chars);

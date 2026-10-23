@@ -6,8 +6,14 @@ impl VimState {
     /// Geometry makes dot reliable for keyboard, mouse and external selections,
     /// even when a pending r/i/g/count or the bounded key history is incomplete.
     pub fn cut_visual(&mut self, text: &mut String) -> Action {
+        if self.mode == VimMode::VisualBlock {
+            return self.cut_block(text);
+        }
         self.yanked_ranges.clear();
-        if !matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+        if !matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) {
             return Action::default();
         }
         let Some(range) = self.selection(text).filter(|range| !range.is_empty()) else {
@@ -396,6 +402,7 @@ impl VimState {
         let yank = Yank {
             text: register,
             linewise: true,
+            block_width: None,
         };
         self.register = Some(yank.clone());
         self.yanked_ranges.clear();
@@ -511,6 +518,7 @@ impl VimState {
             let yank = Yank {
                 text: text[start_byte..end_byte].to_owned(),
                 linewise: false,
+                block_width: None,
             };
             self.register = Some(yank.clone());
             self.yanked_ranges.clear();
@@ -550,6 +558,9 @@ impl VimState {
         key: char,
         count: usize,
     ) -> (bool, bool, Option<Yank>) {
+        if self.mode == VimMode::VisualBlock {
+            return self.apply_block(text, key, count);
+        }
         let Some(range) = self.selection(text) else {
             return (true, false, None);
         };

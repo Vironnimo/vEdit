@@ -509,6 +509,7 @@ fn case_search_operator_dot_replays_its_prefix_and_keeps_registers() {
     let register = Yank {
         text: "keep".into(),
         linewise: false,
+        block_width: None,
     };
     state.set_register(register.clone());
     keys(&mut state, &mut text, "gU");

@@ -35,6 +35,7 @@ fn clipboard_visual_cut_preserves_register_and_geometry_for_undo_and_dot() {
         Some(Yank {
             text: "KEEP🦀".into(),
             linewise: false,
+            block_width: None,
         }),
     ] {
         let mut text = "α🦀βabcdef".to_owned();
@@ -81,7 +82,8 @@ fn native_visual_cut_discards_unfinished_prefixes_and_repeats_completed_area() {
             action.yanked,
             Some(Yank {
                 text: "ä🙂中".into(),
-                linewise: false
+                linewise: false,
+                block_width: None,
             })
         );
         assert!(action.text_changed && action.mode_changed);
@@ -109,7 +111,8 @@ fn native_linewise_cut_ignores_pending_counts_and_dot_counts() {
         action.yanked,
         Some(Yank {
             text: "one\ntwo\n".into(),
-            linewise: true
+            linewise: true,
+            block_width: None,
         })
     );
     keys(&mut state, &mut text, "9.");
@@ -279,6 +282,7 @@ fn paste_blank_line_cursor_and_final_newlines() {
     state.set_register(Yank {
         text: "\n".to_owned(),
         linewise: true,
+        block_width: None,
     });
     keys(&mut state, &mut text, "p");
     assert_eq!(text, "a\n\nb");
@@ -322,6 +326,7 @@ fn visual_paste_and_indent_are_undoable() {
     state.set_register(Yank {
         text: "other\n".to_owned(),
         linewise: true,
+        block_width: None,
     });
     keys(&mut state, &mut text, "Vjp");
     assert_eq!(text, "other\nthree");
@@ -385,6 +390,7 @@ fn multiline_character_paste_starts_at_inserted_text_and_dot_is_undoable() {
         state.set_register(Yank {
             text: "🦀\n中".into(),
             linewise: false,
+            block_width: None,
         });
         keys(&mut state, &mut text, command);
         assert_eq!(text, "a🦀\n中bc", "{command}");
@@ -404,6 +410,7 @@ fn visual_uppercase_p_preserves_register_for_further_pastes_and_dot() {
         state.set_register(Yank {
             text: "XY".into(),
             linewise: false,
+            block_width: None,
         });
         keys(&mut state, &mut text, "v2l");
         let action = state.handle_key(&mut text, VimKey::Char(command.chars().next().unwrap()));
@@ -418,6 +425,7 @@ fn visual_uppercase_p_preserves_register_for_further_pastes_and_dot() {
     state.set_register(Yank {
         text: "XY".into(),
         linewise: false,
+        block_width: None,
     });
     keys(&mut state, &mut text, "v2lPl.");
     assert_eq!(text, "XYXYghi");
@@ -433,6 +441,7 @@ fn oversized_counted_paste_is_rejected_before_allocation() {
     state.set_register(Yank {
         text: "b".repeat(2_000),
         linewise: false,
+        block_width: None,
     });
     keys(&mut state, &mut text, "9999p");
     assert_eq!(text, "a");
@@ -446,6 +455,7 @@ fn visual_character_paste_of_a_line_register_adds_line_boundaries() {
     state.set_register(Yank {
         text: "qux\n".to_owned(),
         linewise: true,
+        block_width: None,
     });
     keys(&mut state, &mut text, "wviwp");
     assert_eq!(text, "foo \nqux\n baz");
@@ -470,6 +480,7 @@ fn case_operators_transform_unicode_motions_objects_and_lines_without_yanking() 
         let register = Yank {
             text: "keep".into(),
             linewise: false,
+            block_width: None,
         };
         state.set_register(register.clone());
         state.set_yank_register(Some(register.clone()));

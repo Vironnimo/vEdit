@@ -175,6 +175,11 @@ the repository vEdit skill, all Markdown documentation under `docs/`, visual
 references and third-party licenses. Repository maps and developer scripts remain
 source-checkout material.
 
+The maintained [window backend patch](../vendor/winit/VEDIT_PATCH.md) and
+[keyboard input patch](../vendor/egui-winit/VEDIT_PATCH.md) retain their upstream
+licenses and patch notes in the bundle's `licenses/` directories. Review the
+corresponding notes before upgrading either dependency.
+
 A running editor is preserved under a process-specific filename if it locks an
 output binary. Its window and documents remain open; it continues using the old
 code until the user closes and starts vEdit again. Do not terminate it to force a

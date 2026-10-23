@@ -42,6 +42,15 @@ ordinary `WM_MOUSEMOVE` cannot replace it reliably.
 
 ## Verification boundary
 
+`vendor/egui-winit/VEDIT_PATCH.md` documents the separate egui-winit 0.36.2
+keyboard patch. Its internal clipboard translator preserves the originating Key
+immediately before Copy/Cut/Paste, including a lone Key when paste is empty.
+Vim forwarding depends on that provenance; an eframe raw-input hook runs too
+late to reconstruct it. `native_clipboard_input_tests` includes the exact
+production helper and covers event order, clipboard alternatives and empty paste.
+Editor input routing remains owned by `editing.md`; desktop key delivery is not
+verified by these pure tests.
+
 `src/main.rs` includes the exact vendored pure helpers in normal tests:
 `cargo test --bin vedit window_dpi_tests` and
 `cargo test --bin vedit window_chrome_native_tests`. They cover negative screen

@@ -6,6 +6,7 @@ impl VEditApp {
         self.resume_editor_input();
         self.validate_vim_search();
         if !self.settings.vim
+            || self.change_review_visible()
             || self.tab().is_some_and(|tab| tab.vim.multi.active())
             || egui::Popup::is_any_open(&self.ctx)
             || self
@@ -81,6 +82,17 @@ impl VEditApp {
             tab.scroll_to_cursor = true;
         }
         fn copy_to_clipboard(tab: &mut EditorTab, system_clipboard: &mut Option<String>) {
+            if tab.vim.mode == VimMode::VisualBlock {
+                if let Some(yank) = tab.vim.block_yank(&tab.text) {
+                    *system_clipboard = Some(yank.text);
+                    tab.flash_yank(tab.vim.block_selection(&tab.text).unwrap());
+                } else {
+                    tab.vim_message =
+                        Some("Block selection exceeds the clipboard size limit".into());
+                }
+                tab.vim.cancel_pending_command();
+                return;
+            }
             let selection = tab
                 .vim
                 .selection(&tab.text)
@@ -113,7 +125,10 @@ impl VEditApp {
             if tab.loading {
                 return;
             }
-            if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
+            if matches!(
+                tab.vim.mode,
+                VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+            ) {
                 let (action, copied) = tab.vim.cut_visual_to_clipboard(&mut tab.text);
                 *system_clipboard = copied;
                 apply_action(tab, action, vim_register);
@@ -139,6 +154,11 @@ impl VEditApp {
         }
         fn paste_system_text(tab: &mut EditorTab, text: &str) {
             if tab.loading || text.is_empty() {
+                return;
+            }
+            if tab.vim.mode == VimMode::VisualBlock {
+                let action = tab.vim.paste_block_clipboard(&mut tab.text, text);
+                apply_action(tab, action, &mut None);
                 return;
             }
             let selection = tab
@@ -177,6 +197,7 @@ impl VEditApp {
         // `[d` / `]d` and Ctrl+O / Ctrl+I: true for previous / back.
         let mut problem = None;
         let mut history = None;
+        let mut completion = None;
         let mut vim_register = None;
         let mut system_clipboard = None;
         let swap_jk = self.settings.swap_jk;
@@ -191,6 +212,7 @@ impl VEditApp {
         let register = self.register.clone();
         let mut yank_register = self.yank_register.clone();
         let keybindings = self.settings.keybindings.clone();
+        let vim_keys = self.settings.vim_keys.clone();
         let indent = self.tab().map(|tab| tab.indentation(&self.settings));
         let page = self.editor_rect.map_or(24, |rect| {
             (rect.height() / (self.settings.font_size * self.settings.line_height))
@@ -209,6 +231,17 @@ impl VEditApp {
             tab.vim.set_yank_register(yank_register.clone());
             let mut events = events.into_iter().peekable();
             while let Some(event) = events.next() {
+                // The backend preserves the chord before its clipboard event.
+                // A bare semantic event belongs to native clipboard handling,
+                // including menus and Ctrl+Insert / Shift+Insert / Shift+Delete.
+                let control_key = keybindings::vim_control_key(&event);
+                let forwarded = control_key.filter(|key| {
+                    vim_keys.target(
+                        *key,
+                        tab.vim.mode,
+                        keybindings::custom_source_binding(&keybindings, &event),
+                    ) == Some(keybindings::vim_keys::Target::Vim)
+                });
                 if tab.vim.multi.active() {
                     tab.sync_multicursor();
                     editor_input::defer(
@@ -219,7 +252,7 @@ impl VEditApp {
                     break;
                 }
                 if tab.vim.mode == VimMode::Insert
-                    && editor_input::vim_barrier(&event, &keybindings)
+                    && (forwarded.is_some() || editor_input::vim_barrier(&event, &keybindings))
                     && native_insert.iter().any(editor_input::native_input)
                 {
                     editor_input::defer(
@@ -290,6 +323,82 @@ impl VEditApp {
                     }
                     continue;
                 }
+                if let Some(key) = forwarded {
+                    if matches!(&event, egui::Event::Key { .. })
+                        && events.peek().is_some_and(|next| {
+                            matches!(
+                                (key, next),
+                                (Key::C, egui::Event::Copy)
+                                    | (Key::X, egui::Event::Cut)
+                                    | (Key::V, egui::Event::Paste(_))
+                            )
+                        })
+                    {
+                        events.next();
+                    }
+                    let translated = match key {
+                        Key::C => Some(VimKey::Escape),
+                        Key::A => Some(VimKey::Increment),
+                        Key::X => Some(VimKey::Decrement),
+                        Key::V | Key::Q => Some(VimKey::VisualBlock),
+                        Key::R => Some(VimKey::Redo),
+                        Key::O | Key::I => {
+                            tab.vim.cancel_pending_command();
+                            history = Some(key == Key::O);
+                            editor_input::defer(&ctx, tab.id, events.collect());
+                            break;
+                        }
+                        Key::N | Key::P => {
+                            completion = Some(key == Key::P);
+                            editor_input::defer(&ctx, tab.id, events.collect());
+                            break;
+                        }
+                        Key::F | Key::B | Key::D | Key::U => {
+                            let amount = if matches!(key, Key::D | Key::U) {
+                                (page / 2).max(1)
+                            } else {
+                                page
+                            };
+                            let action = tab.vim.scroll_lines(
+                                &mut tab.text,
+                                if matches!(key, Key::B | Key::U) {
+                                    -amount
+                                } else {
+                                    amount
+                                },
+                            );
+                            apply_action(tab, action, &mut vim_register);
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(key) = translated {
+                        let action = tab.vim.handle_key(&mut tab.text, key);
+                        apply_action(tab, action, &mut vim_register);
+                    }
+                    continue;
+                }
+                // A mode change earlier in this same batch can hand a chord
+                // back to the editor. Resume it through the normal dispatcher
+                // with the resulting mode instead of dropping it in TextEdit.
+                if keybindings::Action::ALL.iter().any(|&action| {
+                    action.editor_command().is_none()
+                        && keybindings::source_matches(
+                            &keybindings,
+                            action,
+                            &event,
+                            tab.vim.mode != VimMode::Insert,
+                            false,
+                            false,
+                        )
+                }) {
+                    editor_input::defer(
+                        &ctx,
+                        tab.id,
+                        std::iter::once(event).chain(events).collect(),
+                    );
+                    break;
+                }
                 if tab.vim.mode != VimMode::Insert {
                     let command = keybindings::Action::ALL.iter().find_map(|&action| {
                         let command = action.editor_command()?;
@@ -313,10 +422,13 @@ impl VEditApp {
                         {
                             events.next();
                         }
-                        let selection = tab
-                            .vim
-                            .selection(&tab.text)
-                            .unwrap_or_else(|| tab.selection.clone());
+                        let selection = if command == editor_input::Command::Newline {
+                            tab.vim
+                                .selection(&tab.text)
+                                .unwrap_or_else(|| tab.selection.clone())
+                        } else {
+                            tab.vim_editor_selection()
+                        };
                         let edit = editor_input::edit(
                             command,
                             &tab.text,
@@ -571,39 +683,8 @@ impl VEditApp {
                         modifiers,
                         ..
                     } => {
-                        let translated = if modifiers.ctrl
-                            && !modifiers.alt
-                            && !modifiers.shift
-                            && matches!(key, Key::O | Key::I)
-                            && tab.vim.mode == VimMode::Normal
+                        let translated = if !modifiers.command && !modifiers.ctrl && !modifiers.alt
                         {
-                            // Vim's jump list. Ctrl+O stays Open file in
-                            // every other mode and when it is rebound.
-                            tab.vim.cancel_pending_command();
-                            history = Some(key == Key::O);
-                            None
-                        } else if modifiers.ctrl && !modifiers.alt && key == Key::R {
-                            Some(VimKey::Redo)
-                        } else if modifiers.ctrl
-                            && !modifiers.alt
-                            && matches!(key, Key::F | Key::B | Key::D | Key::U)
-                        {
-                            let amount = if matches!(key, Key::D | Key::U) {
-                                (page / 2).max(1)
-                            } else {
-                                page
-                            };
-                            let action = tab.vim.scroll_lines(
-                                &mut tab.text,
-                                if matches!(key, Key::B | Key::U) {
-                                    -amount
-                                } else {
-                                    amount
-                                },
-                            );
-                            apply_action(tab, action, &mut vim_register);
-                            None
-                        } else if !modifiers.command && !modifiers.ctrl && !modifiers.alt {
                             match key {
                                 Key::Escape => Some(VimKey::Escape),
                                 Key::Enter => Some(VimKey::Enter),
@@ -676,6 +757,26 @@ impl VEditApp {
         }
         if let Some(backwards) = history {
             self.navigate_history(backwards);
+        }
+        if let Some(backwards) = completion {
+            if let Some(popup) = self
+                .completions
+                .as_mut()
+                .filter(|popup| !popup.items.is_empty())
+            {
+                popup.selected = if backwards {
+                    popup.selected.saturating_sub(1)
+                } else {
+                    (popup.selected + 1).min(popup.items.len() - 1)
+                };
+                ctx.data_mut(|data| {
+                    data.remove::<(u64, i32, usize, usize)>(egui::Id::new(
+                        "completion_selected_row",
+                    ));
+                });
+            } else {
+                self.request_completion();
+            }
         }
     }
     pub(super) fn ex_ui(&mut self, ui: &mut egui::Ui) {

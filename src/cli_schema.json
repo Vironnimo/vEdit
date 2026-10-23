@@ -609,6 +609,13 @@
     "git_gutter": "true by default; gutter markers for lines added, modified or removed since HEAD in files inside a Git repository, including unsaved edits. Untracked, binary and files over 2 MiB get none. Reverting a marked change only edits the buffer.",
     "autosave_delay_ms": "300..5000; default 850 milliseconds after the last edit. Only applies when autosave is true; recovery copies keep their independent 850 ms delay.",
     "keybindings": "Complete override object from stable action IDs to a shortcut string, an ordered array of 1..8 shortcut strings, or null (disabled); missing IDs use defaults, {} resets all. Example {\"save\":[\"Ctrl+S\",\"F9\"],\"toggle_left_sidebar\":null}. Every shortcut in the array invokes the action. Settings responses include keybinding_actions with IDs, effective shortcuts and defaults. Ctrl/Alt/Shift plus egui key name; duplicate, unknown, typing-only and native clipboard/editing conflicts reject the entire patch before any preference changes. User overrides replace all default aliases. Vim motions and native text/clipboard navigation remain contextual.",
+    "vim_keys": {
+      "description": "Partial Ctrl-key preference map: editor uses the editor shortcut, vim uses the Vim command, and null resets that key to its default. Omitted keys remain unchanged; an empty map does nothing. Omitted/null vim_keys preserves every key preference. Example {\"Ctrl+V\":\"vim\",\"Ctrl+F\":\"editor\"}. Unknown keys or targets reject the entire settings patch.",
+      "keys": ["Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+A", "Ctrl+F", "Ctrl+B", "Ctrl+D", "Ctrl+U", "Ctrl+O", "Ctrl+I", "Ctrl+R", "Ctrl+N", "Ctrl+P", "Ctrl+Q"],
+      "targets": ["editor", "vim", null],
+      "scope": "Source editor with Vim enabled. Text fields and multicursor editing keep their standard keys. Settings responses include vim_key_actions with the default and effective target, applicable modes and editor/Vim effects for each supported key; outside those modes the key goes to the editor.",
+      "defaults": "Ctrl+C, Ctrl+X and Ctrl+V use the editor clipboard. Ctrl+Q enters Visual Block in Normal and Visual modes. Use vim_key_actions for the other mode-dependent defaults."
+    },
     "show_ignored_files": "Deprecated compatibility field; Explorer always lists ignored and generated files. The supplied value has no effect. Explorer lazily lists complete folders independently of the bounded Quick Open index. VCS metadata stays hidden; project-search exclusions are separate.",
     "editor_font": {
       "enum": ["jetbrains_mono", "consolas", "cascadia_mono"],

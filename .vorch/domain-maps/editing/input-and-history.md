@@ -9,7 +9,7 @@ on a later frame, ahead of newly arrived keyboard input. `defer`,
 resulting source owner.
 
 The owner includes pane/document identity, revision, cursor/selection, multicursor
-state, mode, focused widget, bindings and view. External edits, navigation or changed context
+state, mode, focused widget, bindings, Vim-key preferences and view. External edits, navigation or changed context
 cancel stale input rather than replaying it into another document. Vim barriers
 finish native editing before Escape, history or clipboard operations observe the
 buffer. Modifier presses alone are not native text that requires a deferred
@@ -58,6 +58,30 @@ Clipboard payload and Vim register semantics differ. Native Copy/Cut uses the
 selection or current source line; a Vim linewise register can have a synthetic
 final newline with no corresponding source span. Preserve those source spans for
 feedback and selection rather than treating register text length as a range.
+
+## Visual Block
+
+`src/vim/block.rs` is a child of the Vim state owner. Visual Block uses a
+pane-local anchor and virtual columns rather than activating MULTI. Its
+`block_selection` source ranges must never be treated as one contiguous range;
+`selection` intentionally returns none. Matching column ranges let rendering
+clip partial tabs and extend the highlight over short rows. Columns advance by
+grapheme, with tabs reaching indentation stops; edits preserve raw CRLF.
+
+Block register values carry their width. Native clipboard operations preserve
+Vim's registers, while `y`/`d`/`p` retain Vim semantics. Block I/A/c collect a
+first-row Insert transaction and replicate it when insertion ends, as one Undo
+step. Newlines or moving outside that insertion prevent replication. Block
+navigation travels through VimNavigation; text history stays with the Document.
+Context-menu paste captures rectangle, columns, cursor, Pane and revision and
+rejects a result after that owner changes.
+Editor line commands use all logical rows covered by a rectangle. Moving or
+duplicating those rows preserves its virtual columns, including past short rows.
+
+The vendored egui-winit input boundary preserves the originating Key before a
+clipboard semantic event, including empty Ctrl+V. The source router consumes
+both only when the chord is forwarded to Vim; bare semantic clipboard events
+remain native menu/platform operations. See `platform.md` for the patch.
 
 ## Multicursor transactions
 

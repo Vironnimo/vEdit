@@ -220,6 +220,18 @@ pub enum LineNumbers {
 pub const MAX_SHORTCUT_ALIASES: usize = 8;
 pub const MAX_SHORTCUT_BYTES: usize = 100;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VimKeyTarget {
+    Editor,
+    Vim,
+}
+
+pub const VIM_CONTROL_KEYS: &[&str] = &[
+    "Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+A", "Ctrl+F", "Ctrl+B", "Ctrl+D", "Ctrl+U", "Ctrl+O",
+    "Ctrl+I", "Ctrl+R", "Ctrl+N", "Ctrl+P", "Ctrl+Q",
+];
+
 /// A single shortcut retains its original JSON string representation. Multiple
 /// shortcuts are an ordered list of alternatives for the same action.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -280,6 +292,8 @@ pub struct SettingsPatch {
     pub multicursor: Option<MulticursorPatch>,
     /// Complete override map: absent actions retain defaults, null disables, {} resets all.
     pub keybindings: Option<std::collections::BTreeMap<String, Option<ShortcutBinding>>>,
+    /// Partial key preference map: null resets one key, absent keys stay unchanged.
+    pub vim_keys: Option<std::collections::BTreeMap<String, Option<VimKeyTarget>>>,
     pub vim: Option<bool>,
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,

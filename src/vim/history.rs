@@ -45,6 +45,7 @@ impl VimState {
         };
         VisualRepeat {
             linewise: self.mode == VimMode::VisualLine,
+            blockwise: false,
             rows: last.saturating_sub(first) + 1,
             columns: if first == last {
                 range.len()
@@ -57,6 +58,10 @@ impl VimState {
     }
 
     fn select_repeat_visual(&mut self, text: &str, visual: &VisualRepeat) {
+        if visual.blockwise {
+            self.select_repeat_block(text, visual);
+            return;
+        }
         let chars: Vec<_> = text.chars().collect();
         let rows = lines(&chars);
         let first = row_for_cursor(&rows, self.cursor);
@@ -190,11 +195,15 @@ impl VimState {
     ) -> (bool, bool, Option<Yank>) {
         match key {
             VimKey::Escape => {
+                let block_inserting = self.block_insert.is_some();
                 let changed = self.finish_insert_repetitions(text);
                 let chars: Vec<char> = text.chars().collect();
                 let rows = lines(&chars);
                 if self.cursor > rows[row_for_cursor(&rows, self.cursor)].start {
                     self.cursor -= 1;
+                }
+                if block_inserting {
+                    self.snap_block_position(text);
                 }
                 if let Some(before) = self.insert_origin.take()
                     && before.text != *text
@@ -226,14 +235,16 @@ impl VimState {
                 self.cursor -= count;
                 (true, true, None)
             }
-            VimKey::Redo | VimKey::Increment | VimKey::Decrement => (false, false, None),
+            VimKey::Redo | VimKey::Increment | VimKey::Decrement | VimKey::VisualBlock => {
+                (false, false, None)
+            }
         }
     }
 
     /// Finalize a counted insertion once for Escape and Windows history alike.
     /// The repeat delta is captured by callers before this expands the text.
     fn finish_insert_repetitions(&mut self, text: &mut String) -> bool {
-        let mut changed = false;
+        let mut changed = self.finish_block_insert(text);
         let line_prefix = self.insert_line_prefix.take();
         if self.insert_count > 1
             && let Some(replay) = &self.insert_replay

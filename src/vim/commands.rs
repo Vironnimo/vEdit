@@ -170,6 +170,10 @@ impl VimState {
         text: &mut String,
         key: VimKey,
     ) -> (bool, bool, Option<Yank>) {
+        if key == VimKey::VisualBlock {
+            self.toggle_visual_block(text);
+            return (true, false, None);
+        }
         if key == VimKey::Escape {
             self.leave_visual();
             self.clear_command();
@@ -434,7 +438,10 @@ impl VimState {
                     let count = prefix.saturating_mul(count).min(MAX_COUNT);
                     let rows = lines(&chars);
                     if operator.is_none() && ch == 'J' {
-                        let count = if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+                        let count = if matches!(
+                            self.mode,
+                            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+                        ) {
                             let anchor = self.visual_anchor.unwrap_or(self.cursor);
                             let first = row_for_cursor(&rows, self.cursor.min(anchor));
                             let last = row_for_cursor(&rows, self.cursor.max(anchor));
@@ -452,6 +459,9 @@ impl VimState {
                             'U' => Operator::Uppercase,
                             _ => Operator::ToggleCase,
                         };
+                        if self.mode == VimMode::VisualBlock {
+                            return self.apply_block(text, ch, count);
+                        }
                         if self.mode != VimMode::Normal {
                             let range = self.selection(text).unwrap_or(self.cursor..self.cursor);
                             return self.apply_range(text, op, range);
@@ -629,19 +639,32 @@ impl VimState {
             }
         }
 
-        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+        if matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) {
             match ch {
                 'y' | 'd' | 'x' | 'c' | 's' | '>' | '<' | 'u' | 'U' | '~' => {
                     return self.apply_visual(text, ch, count);
                 }
                 'p' | 'P' => return self.paste_visual(text, count, ch == 'P'),
+                'I' | 'A' if self.mode == VimMode::VisualBlock => {
+                    return self.apply_block(text, ch, count);
+                }
                 'S' => {
+                    if self.mode == VimMode::VisualBlock {
+                        self.unsupported("Visual Block S");
+                        return (true, false, None);
+                    }
                     if let Some(range) = self.selection(text) {
                         self.pending = Some(Pending::SurroundAdd(range.start, range.end));
                     }
                     return (true, false, None);
                 }
                 'o' => {
+                    if let Some((anchor, head)) = self.block_columns.as_mut() {
+                        std::mem::swap(anchor, head);
+                    }
                     if let Some(anchor) = self.visual_anchor.as_mut() {
                         std::mem::swap(anchor, &mut self.cursor);
                     }
@@ -713,6 +736,7 @@ impl VimState {
                         self.visual_to_line_end = false;
                     }
                     self.mode = target;
+                    self.block_columns = None;
                 }
                 (true, false, None)
             }

@@ -144,6 +144,7 @@ actions! {
     Terminal, "terminal", "Open terminal", "Run", [];
     ToggleWrap, "toggle_wrap", "Toggle word wrap", "Editing", ["Alt+Z"];
     ToggleVim, "toggle_vim", "Toggle Vim motions", "Editing", [];
+    VisualBlock, "visual_block", "Toggle Vim Visual Block", "Editing", [];
     ToggleComment, "toggle_comment", "Toggle line comment", "Editing", ["Ctrl+Slash", "Ctrl+Shift+Slash"];
     DuplicateLine, "duplicate_line", "Duplicate line / selection", "Editing", ["Alt+Shift+D"];
     DeleteLine, "delete_line", "Delete line / selection", "Editing", ["Ctrl+Shift+K"];
@@ -197,6 +198,7 @@ impl Action {
     }
     pub(super) fn scope(self) -> Scope {
         match self {
+            Self::VisualBlock => Scope::Source,
             Self::InsertNewline => Scope::SourceEditing,
             Self::FinishCursorPlacement => Scope::CursorPlacement,
             Self::ExitMulticursor | Self::CursorUndo => Scope::Multicursor,
@@ -252,13 +254,13 @@ impl Action {
     pub(super) fn context_hint(self) -> &'static str {
         match self {
             Self::Find => {
-                "Default Ctrl+F scrolls a page in Vim Normal mode and opens Find in Insert. A custom binding opens Find in either mode."
+                "Ctrl+F follows the Vim key routing preference in modal source editing. Outside that context it opens Find."
             }
             Self::NewFile => {
-                "Default Ctrl+N requests completions in Vim Insert mode. A custom binding always creates a new file."
+                "Ctrl+N follows the Vim key routing preference in Insert mode: completion or the editor command."
             }
             Self::OpenFile => {
-                "Default Ctrl+O goes back in Vim Normal mode, like Vim's jump list. A custom binding always opens a file."
+                "Ctrl+O follows the Vim key routing preference in Normal mode: navigation history or the editor command."
             }
             Self::NavigateBack | Self::NavigateForward => {
                 "History of this editor pane: other documents, go to definition, search results, bookmarks, problems and jumps of more than 10 lines. The mouse's back and forward buttons and, in Vim Normal mode, Ctrl+O / Ctrl+I work too."
@@ -267,7 +269,7 @@ impl Action {
                 "Errors and warnings of the active file first, then the next file with problems. In Vim Normal mode also ]d / [d."
             }
             Self::ToggleLeftSidebar => {
-                "Custom bindings work in every editor mode. The default Ctrl+B alias remains page-back in Vim Normal mode."
+                "Ctrl+B follows the Vim key routing preference in modal source editing. Ctrl+Alt+E also toggles the sidebar."
             }
             Self::MarkCursor => {
                 "Keep this selection in place and move only the active cursor with arrows, Home/End or Page Up/Down. Invoke again to mark another position. Finish cursor placement starts editing at every position; Exit multicursor editing returns to one cursor."

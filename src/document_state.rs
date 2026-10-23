@@ -185,17 +185,36 @@ impl EditorTab {
             return;
         }
         let navigation = self.vim.navigation();
-        let start = self
-            .vim
-            .selection(&self.text)
-            .unwrap_or_else(|| self.selection.clone())
-            .start;
+        let start = self.vim_editor_selection().start;
         let delta = edit.selection.start as isize - start as isize;
         self.apply(edit);
         self.vim.notify_external_text_change();
         self.vim
             .restore_navigation(&self.text, &navigation.shifted(delta));
         self.scroll_to_cursor = true;
+    }
+
+    /// A rectangular area has no contiguous text selection, but editor line
+    /// commands still operate on every logical row that the rectangle covers.
+    pub(super) fn vim_editor_selection(&self) -> Range<usize> {
+        if let Some(block) = self.vim.block_selection(&self.text)
+            && let Some((first, last)) = block.first().zip(block.last())
+        {
+            let mut start = 0;
+            for (index, ch) in self.text.chars().enumerate() {
+                if ch == '\n' {
+                    if index < first.start {
+                        start = index + 1;
+                    } else if index >= last.start {
+                        return start..index + 1;
+                    }
+                }
+            }
+            return start..self.text.chars().count();
+        }
+        self.vim
+            .selection(&self.text)
+            .unwrap_or_else(|| self.selection.clone())
     }
 }
 

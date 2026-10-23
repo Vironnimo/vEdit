@@ -6,10 +6,10 @@ packaging and installation tooling; product behavior stays with its feature owne
 ## Overview
 
 `Cargo.toml` defines the GUI and control-client binaries, dependency features and
-the `vendor/winit` patch. `Cargo.lock` fixes resolved Rust dependencies;
+the `vendor/winit` and `vendor/egui-winit` patches. `Cargo.lock` fixes dependencies;
 `rust-toolchain.toml` pins the compiler and its formatting/lint components.
 `tools/basedpyright/package-lock.json` pins the bundled Python language server.
-The application backend patch belongs to `platform.md`, not a dependency cleanup.
+The application backend patches belong to `platform.md`, not a dependency cleanup.
 
 Tests mostly live beside their owner or in app child modules named
 `src/<feature>_tests.rs`. `tests/project_temp.rs` checks the Cargo subprocess

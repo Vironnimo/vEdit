@@ -12,8 +12,8 @@ Active profiles live under `%APPDATA%/vEdit/recovery`; isolated fixtures use
 ## Architecture
 
 **Stack:** Rust edition 2024, Rust/Cargo 1.97.1, eframe/egui 0.36.2 with Glow for
-the shipped application. Cargo.lock fixes dependencies; `vendor/winit` is a
-patched dependency, not application code. Python 3.9+ and Git 2.38+ support the
+the shipped application. Cargo.lock fixes dependencies; `vendor/` holds maintained
+backend dependencies, not application code. Python 3.9+ and Git 2.38+ support the
 repository tools; PowerShell and Windows MSVC/SDK tools support native packaging.
 Node/npm package the pinned basedpyright server under `tools/basedpyright`.
 
@@ -25,7 +25,7 @@ src/<owner>/           Private implementation units and tests of a core owner
 src/cli_main.rs        Local control client entry point, shared CLI protocol
 scripts/              Developer checks, packaging, installation, worktrees
 tests/                Integration fixtures and headless visual references
-vendor/winit/         Maintained Windows backend patch
+vendor/               Maintained window and keyboard-input backend patches
 ```
 
 Extend the existing owner. The flat file layout does not imply independent
@@ -64,7 +64,7 @@ loaded only for their stated trigger (`AGENTS.md` -> Load context for the task).
 | language-services.md | `src/lsp.rs`, `src/language_*.rs`, `src/problems.rs` | LSP lifecycle, diagnostics and language intelligence |
 | execution.md | `src/tasks.rs`, `src/project_tasks.rs`, `src/project_launch.rs`, `src/task_output_ui.rs` | Task and launch processes, output and stopping |
 | control.md | `src/cli*.rs`, `src/control*.rs`, `.agents/skills/vedit/` | Agent CLI, transport, receiver and operating skill |
-| platform.md | `src/startup.rs`, `src/profile*.rs`, `src/single_instance.rs`, `src/window_chrome.rs`, `vendor/winit/` | Windows lifecycle, profiles and native backend |
+| platform.md | `src/startup.rs`, `src/profile*.rs`, `src/single_instance.rs`, `src/window_chrome.rs`, `vendor/` | Windows lifecycle, profiles and native backend |
 | development.md | `scripts/`, `.cargo/`, `.githooks/`, `tests/`, manifests | Build, packaging, test infrastructure and repository tooling |
 
 ## Conventions
@@ -130,7 +130,7 @@ configuration in this repository; report local verification as local verificatio
 
 - Windows is the shipped target. Native dialogs, Snap and physical DPI changes
   require desktop checks; headless images do not verify them. Before backend or
-  dependency changes read `vendor/winit/VEDIT_PATCH.md` via `platform.md`.
+  dependency changes read the affected `vendor/*/VEDIT_PATCH.md` via `platform.md`.
 - `docs/development.md` is the human developer guide; maps route agents to owners
   and contracts. Existing reviews remain historical evidence under `docs/`.
 - Live editor control uses the repository vEdit operating skill (`control.md`);

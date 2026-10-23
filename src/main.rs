@@ -145,3 +145,9 @@ fn app_icon() -> eframe::egui::IconData {
         height: SIZE,
     }
 }
+
+#[cfg(test)]
+mod native_clipboard_input_tests {
+    use eframe::egui;
+    include!("../vendor/egui-winit/src/clipboard_input.rs");
+}

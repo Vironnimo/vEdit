@@ -67,6 +67,10 @@ original clip rectangle. Theme/font/wrap changes and changed text at the same
 revision have dedicated regressions because plausible cache keys can still
 display stale text or wrong geometry.
 
+Visual Block painting uses source spans plus virtual columns from the Vim owner.
+Partial tabs and short rows require geometry beyond a contiguous text range;
+selection rectangles stay behind the glyphs and follow wrapped visual rows.
+
 Markdown is a reading surface: HTML remains inert, images are links rather than
 automatic remote downloads, and link handling explicitly classifies allowed
 destinations. Preserve those boundaries when adding rich content. Parsing is

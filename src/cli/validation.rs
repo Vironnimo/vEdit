@@ -273,6 +273,16 @@ pub fn validate(request: &Request) -> Result<(), String> {
             {
                 return Err("keybindings supports at most 128 action IDs (1..80 bytes), each set to null or 1..8 shortcut strings (1..100 bytes each); no settings were changed".into());
             }
+            if let Some(keys) = &patch.vim_keys
+                && let Some(key) = keys
+                    .keys()
+                    .find(|key| !VIM_CONTROL_KEYS.contains(&key.as_str()))
+            {
+                return Err(format!(
+                    "Unknown Vim control key '{key}'. Use {}; no settings were changed",
+                    VIM_CONTROL_KEYS.join(", ")
+                ));
+            }
             if let Some(excludes) = &patch.search_excludes {
                 normalize_search_excludes(excludes)?;
             }

@@ -326,7 +326,7 @@ impl VEditApp {
                 ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
             }
             // Immutable TextBuffer still permits native click/drag selection.
-            if tab.vim.multi.active() { ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT; }
+            if tab.vim.multi.active() || settings.vim && tab.vim.mode == VimMode::VisualBlock { ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT; }
             // Mutable source is exposed only when this editor owns editing.
             let mut readonly_text: &str;
             let editor = if source_editable {
@@ -457,8 +457,9 @@ impl VEditApp {
                 ui,
                 &output.response,
                 !tab.loading,
-                !tab.selection.is_empty() || tab.vim.multi.active(),
+                !tab.selection.is_empty() || tab.vim.multi.active() || settings.vim && tab.vim.mode == VimMode::VisualBlock,
                 &settings,
+                (settings.vim && !tab.vim.multi.active()).then_some(tab.vim.mode),
             );
             let retained_selection_painted = !native_selection_painted
                 && (context_selection.is_some()
@@ -477,6 +478,14 @@ impl VEditApp {
             let mut cursor = egui::text::CCursor::new(tab.vim.cursor);
             if let Some(primary) = tab.vim.multi.primary() { cursor.prefer_next_row = primary.prefer_next_row; }
             multicursor_ui::paint(ui, &output, &tab.vim.multi, focused);
+            if settings.vim
+                && let Some(ranges) = tab.vim.block_selection(&tab.text)
+                && let Some(columns) = tab.vim.block_selection_columns(&tab.text) {
+                let mut visuals = ui.visuals().clone();
+                editor_selection(&mut visuals);
+                crate::render::paint_visual_block_selection(ui, &visuals, &output, &ranges,
+                    &columns, tab.indentation(&settings).width);
+            }
             let local = output.galley.pos_from_cursor(cursor);
             let cursor_rect = local.translate(output.galley_pos.to_vec2());
             caret_rect = Some(cursor_rect);

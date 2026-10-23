@@ -18,6 +18,7 @@ fn fixture(document: &str) -> VEditApp {
     tab.saved_text = document.into();
     let register = Yank {
         text: UNNAMED.into(),
+        block_width: None,
         linewise: false,
     };
     tab.vim.set_register(register.clone());
@@ -450,6 +451,322 @@ fn context_paste_preserves_register_and_replaces_selection_once() {
     assert_unnamed(&app, UNNAMED, false);
 }
 
+fn tap(screen: &mut Harness<'_, VEditApp>, key_code: Key, modifiers: egui::Modifiers) {
+    events(
+        screen,
+        [
+            key(
+                key_code,
+                egui::Modifiers {
+                    command: modifiers.ctrl,
+                    ..modifiers
+                },
+            ),
+            release(key_code),
+        ],
+    );
+    screen.run_steps(3);
+}
+
+#[test]
+fn visual_block_windows_clipboard_and_context_actions_preserve_vim_registers() {
+    for context in [false, true] {
+        let mut screen = harness(fixture("abcd\nefgh\nijkl"));
+        text(&mut screen, "l");
+        tap(&mut screen, Key::Q, egui::Modifiers::CTRL);
+        text(&mut screen, "jl");
+        let tab = screen.state().tab().unwrap();
+        assert_eq!(tab.vim.mode, VimMode::VisualBlock);
+        assert_eq!(tab.vim.block_selection(&tab.text), Some(vec![1..3, 6..8]));
+        assert!(!tab.vim.multi.active());
+        if context {
+            let app = screen.state_mut();
+            let id = app.tab().unwrap().id;
+            let ctx = app.ctx.clone();
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {
+                app.apply_editor_context_action(id, EditorAction::Copy)
+            });
+            assert!(output.platform_output.commands.iter().any(
+                |command| matches!(command, egui::OutputCommand::CopyText(text) if text == "bc\nfg")
+            ));
+            app.apply_editor_context_action(id, EditorAction::Cut);
+        } else {
+            events(
+                &mut screen,
+                [
+                    key(Key::C, egui::Modifiers::CTRL),
+                    egui::Event::Copy,
+                    release(Key::C),
+                ],
+            );
+            assert_system_copy(&screen, "bc\nfg");
+            events(
+                &mut screen,
+                [
+                    key(Key::X, egui::Modifiers::CTRL),
+                    egui::Event::Cut,
+                    release(Key::X),
+                ],
+            );
+        }
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            "ad\neh\nijkl",
+            "context={context}"
+        );
+        assert_unnamed(screen.state(), UNNAMED, false);
+        // A menu action returns focus during the editor's next frame.
+        screen.run_steps(3);
+        tap(&mut screen, Key::Z, egui::Modifiers::CTRL);
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            "abcd\nefgh\nijkl",
+            "context={context}"
+        );
+    }
+}
+
+#[test]
+fn visual_block_editor_line_commands_cover_all_rows_and_keep_virtual_columns() {
+    for palette in [false, true] {
+        for ending in ["\n", "\r\n"] {
+            let original = ["top", "abcde", "x", "bottom"].join(ending);
+            let moved = ["abcde", "x", "top", "bottom"].join(ending);
+            let duplicated = ["abcde", "x", "abcde", "x", "top", "bottom"].join(ending);
+            let mut screen = harness(fixture(&original));
+            text(&mut screen, "jlll");
+            tap(&mut screen, Key::Q, egui::Modifiers::CTRL);
+            text(&mut screen, "jll");
+            assert_eq!(
+                screen
+                    .state()
+                    .tab()
+                    .unwrap()
+                    .vim
+                    .block_selection_columns(&original),
+                Some(vec![3..6, 3..6])
+            );
+            if palette {
+                screen
+                    .state_mut()
+                    .run_shortcut_action(keybindings::Action::MoveLineUp);
+            } else {
+                tap(&mut screen, Key::ArrowUp, egui::Modifiers::ALT);
+            }
+            screen.run_steps(3);
+            let tab = screen.state().tab().unwrap();
+            assert_eq!(tab.text, moved, "palette={palette}, ending={ending:?}");
+            assert_eq!(tab.vim.mode, VimMode::VisualBlock);
+            assert_eq!(
+                tab.vim.block_selection_columns(&tab.text),
+                Some(vec![3..6, 3..6])
+            );
+            if palette {
+                screen
+                    .state_mut()
+                    .run_shortcut_action(keybindings::Action::DuplicateLine);
+            } else {
+                tap(
+                    &mut screen,
+                    Key::D,
+                    egui::Modifiers::ALT.plus(egui::Modifiers::SHIFT),
+                );
+            }
+            screen.run_steps(3);
+            let tab = screen.state().tab().unwrap();
+            assert_eq!(tab.text, duplicated, "palette={palette}, ending={ending:?}");
+            assert_eq!(tab.vim.mode, VimMode::VisualBlock);
+            assert_eq!(
+                tab.vim.block_selection_columns(&tab.text),
+                Some(vec![3..6, 3..6])
+            );
+            for expected in [&moved, &original] {
+                tap(&mut screen, Key::Z, egui::Modifiers::CTRL);
+                assert_eq!(&screen.state().tab().unwrap().text, expected);
+            }
+            // Delete line shares the same line-area contract after rebuilding
+            // the rectangle; an empty range on its last row must still count.
+            {
+                let tab = screen.state_mut().tab_mut().unwrap();
+                tab.vim.set_cursor(
+                    &tab.text,
+                    "top".chars().count() + ending.chars().count() + 3,
+                );
+                tab.vim.handle_key(&mut tab.text, VimKey::VisualBlock);
+                tab.vim.handle_key(&mut tab.text, VimKey::Char('j'));
+            }
+            if palette {
+                screen
+                    .state_mut()
+                    .run_shortcut_action(keybindings::Action::DeleteLine);
+            } else {
+                tap(
+                    &mut screen,
+                    Key::K,
+                    egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+                );
+            }
+            screen.run_steps(3);
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                ["top", "bottom"].join(ending)
+            );
+            tap(&mut screen, Key::Z, egui::Modifiers::CTRL);
+            assert_eq!(screen.state().tab().unwrap().text, original);
+            assert!(!screen.state().tab().unwrap().vim.can_undo());
+        }
+    }
+}
+
+#[test]
+fn vim_forwarding_owns_clipboard_chords_once_and_falls_back_in_insert() {
+    use keybindings::vim_keys::Target;
+    for semantic in [false, true] {
+        let mut app = fixture("abcd\nefgh");
+        app.settings.vim_keys.set(Key::V, Target::Vim);
+        app.settings.vim_keys.set(Key::C, Target::Vim);
+        let mut screen = harness(app);
+        let mut batch = vec![key(Key::V, egui::Modifiers::CTRL)];
+        if semantic {
+            batch.push(egui::Event::Paste("must not paste".into()));
+        }
+        batch.push(release(Key::V));
+        events(&mut screen, batch);
+        assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualBlock);
+        assert_eq!(screen.state().tab().unwrap().text, "abcd\nefgh");
+        text(&mut screen, "jl");
+        events(
+            &mut screen,
+            [
+                key(Key::C, egui::Modifiers::CTRL),
+                egui::Event::Copy,
+                release(Key::C),
+            ],
+        );
+        assert_no_clipboard_write(&screen);
+        assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+        text(&mut screen, "i");
+        events(
+            &mut screen,
+            [
+                key(Key::V, egui::Modifiers::CTRL),
+                egui::Event::Paste("Z".into()),
+                release(Key::V),
+            ],
+        );
+        assert_eq!(screen.state().tab().unwrap().text.matches('Z').count(), 1);
+        assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Insert);
+        assert_unnamed(screen.state(), UNNAMED, false);
+    }
+}
+
+#[test]
+fn vim_control_preferences_override_custom_commands_and_preserve_other_contexts() {
+    use keybindings::vim_keys::Target;
+    for target in [Target::Default, Target::Editor, Target::Vim] {
+        let mut app = fixture("foo foo\nfoo foo");
+        app.settings
+            .keybindings
+            .insert("toggle_wrap".into(), Some("Ctrl+Q".into()));
+        app.settings.vim_keys.set(Key::Q, target);
+        let initial_wrap = app.settings.word_wrap;
+        let mut screen = harness(app);
+        tap(&mut screen, Key::Q, egui::Modifiers::CTRL);
+        assert_eq!(
+            screen.state().tab().unwrap().vim.mode == VimMode::VisualBlock,
+            target == Target::Vim
+        );
+        assert_eq!(
+            screen.state().settings.word_wrap != initial_wrap,
+            target != Target::Vim
+        );
+    }
+    let mut app = fixture("one\ntwo");
+    app.settings
+        .keybindings
+        .insert("visual_block".into(), Some("Ctrl+Shift+Q".into()));
+    let mut screen = harness(app);
+    text(&mut screen, "i");
+    tap(
+        &mut screen,
+        Key::Q,
+        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+    );
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualBlock);
+    let mut app = fixture("foo foo");
+    app.settings.vim_keys.set(Key::F, Target::Editor);
+    let mut screen = harness(app);
+    tap(&mut screen, Key::F, egui::Modifiers::CTRL);
+    assert!(screen.state().find_visible);
+    screen.state_mut().find_visible = false;
+    screen.state_mut().tab_mut().unwrap().focus = true;
+    screen.run_steps(3);
+    tap(&mut screen, Key::D, egui::Modifiers::CTRL);
+    tap(&mut screen, Key::D, egui::Modifiers::CTRL);
+    assert!(screen.state().tab().unwrap().vim.multi.active());
+    screen
+        .state_mut()
+        .settings
+        .vim_keys
+        .set(Key::V, Target::Vim);
+    events(&mut screen, [egui::Event::Paste("bar".into())]);
+    assert_eq!(screen.state().tab().unwrap().text, "bar bar");
+    assert_ne!(screen.state().tab().unwrap().vim.mode, VimMode::VisualBlock);
+}
+
+#[test]
+fn visual_block_context_paste_rejects_changed_selection_and_is_one_undo_step() {
+    for stale in [false, true] {
+        let mut screen = harness(fixture("abcd\nefgh\nijkl"));
+        text(&mut screen, "l");
+        tap(&mut screen, Key::Q, egui::Modifiers::CTRL);
+        text(&mut screen, "jl");
+        let app = screen.state_mut();
+        let id = app.tab().unwrap().id;
+        app.apply_editor_context_action(id, EditorAction::Paste);
+        if stale {
+            let tab = app.tab_mut().unwrap();
+            tab.vim.handle_key(&mut tab.text, VimKey::Char('j'));
+        }
+        let ctx = app.ctx.clone();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Paste("X".into())],
+                ..Default::default()
+            },
+            |_| app.context_paste_poll(),
+        );
+        assert_eq!(
+            app.tab().unwrap().text,
+            if stale {
+                "abcd\nefgh\nijkl"
+            } else {
+                "aXd\neXh\nijkl"
+            }
+        );
+        assert_unnamed(app, UNNAMED, false);
+        if !stale {
+            app.apply_editor_context_action(id, EditorAction::Undo);
+        }
+        assert_eq!(app.tab().unwrap().text, "abcd\nefgh\nijkl");
+    }
+}
+
+#[test]
+fn visual_block_and_vim_key_settings_render() {
+    let mut screen = visual_tests::harness(fixture(
+        "name   count\nalpha  12\nbravo  34\ncharl  56\n\nBlock selections stay rectangular.\n",
+    ));
+    text(&mut screen, "j");
+    tap(&mut screen, Key::Q, egui::Modifiers::CTRL);
+    text(&mut screen, "2j4l");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::VisualBlock);
+    visual_tests::snapshot(&mut screen, "vedit_visual_block");
+    screen.state_mut().open_settings_section("Vim");
+    screen.run_steps(3);
+    visual_tests::snapshot(&mut screen, "vedit_vim_key_settings");
+}
+
 #[test]
 fn double_escape_hides_highlights_and_n_restores_the_retained_query() {
     let mut screen = harness(fixture("a 🦀 b 🦀 c 🦀\n"));
@@ -593,4 +910,129 @@ fn swap_jk_is_persistent_and_defaults_to_standard_vim_directions() {
     let roundtrip: Settings =
         serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
     assert!(roundtrip.swap_jk);
+}
+
+#[test]
+fn clipboard_key_provenance_and_semantic_events_execute_once_in_every_editor_mode() {
+    use keybindings::vim_keys::Target;
+    for mode in [
+        None,
+        Some(VimMode::Normal),
+        Some(VimMode::Insert),
+        Some(VimMode::Visual),
+    ] {
+        for alternatives in [false, true] {
+            let mut app = fixture("abcd");
+            app.settings.vim = mode.is_some();
+            if alternatives {
+                for key in [Key::C, Key::X, Key::V] {
+                    app.settings.vim_keys.set(key, Target::Vim);
+                }
+            }
+            let mut screen = harness(app);
+            select_native(&mut screen, mode.unwrap_or(VimMode::Normal));
+            screen.run_steps(1);
+            // Normal mode has a block cursor, so native clipboard commands
+            // operate on its current line; the other cases retain "bc".
+            let (copied, cut_text, pasted_text) = if mode == Some(VimMode::Normal) {
+                ("abcd", "", "Z")
+            } else {
+                ("bc", "ad", "aZd")
+            };
+            let (copy_key, cut_key, paste_key, cut_modifiers, paste_modifiers) = if alternatives {
+                (
+                    Key::Insert,
+                    Key::Delete,
+                    Key::Insert,
+                    egui::Modifiers::SHIFT,
+                    egui::Modifiers::SHIFT,
+                )
+            } else {
+                (
+                    Key::C,
+                    Key::X,
+                    Key::V,
+                    egui::Modifiers::CTRL,
+                    egui::Modifiers::CTRL,
+                )
+            };
+            events(
+                &mut screen,
+                [
+                    key(copy_key, egui::Modifiers::CTRL),
+                    egui::Event::Copy,
+                    release(copy_key),
+                ],
+            );
+            super::editor_input_tests::settle(&mut screen);
+            let copies: Vec<_> = screen
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|command| {
+                    if let egui::OutputCommand::CopyText(value) = command {
+                        Some(value.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                copies,
+                vec![copied],
+                "copy mode={mode:?}, alternatives={alternatives}"
+            );
+            assert_eq!(screen.state().tab().unwrap().text, "abcd");
+
+            events(
+                &mut screen,
+                [
+                    key(cut_key, cut_modifiers),
+                    egui::Event::Cut,
+                    release(cut_key),
+                ],
+            );
+            super::editor_input_tests::settle(&mut screen);
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                cut_text,
+                "cut mode={mode:?}, alternatives={alternatives}"
+            );
+            let copies: Vec<_> = screen
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|command| {
+                    if let egui::OutputCommand::CopyText(value) = command {
+                        Some(value.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                copies,
+                vec![copied],
+                "cut clipboard mode={mode:?}, alternatives={alternatives}"
+            );
+
+            events(
+                &mut screen,
+                [
+                    key(paste_key, paste_modifiers),
+                    egui::Event::Paste("Z".into()),
+                    release(paste_key),
+                ],
+            );
+            super::editor_input_tests::settle(&mut screen);
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                pasted_text,
+                "paste mode={mode:?}, alternatives={alternatives}"
+            );
+            assert_unnamed(screen.state(), UNNAMED, false);
+        }
+    }
 }

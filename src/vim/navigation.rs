@@ -5,7 +5,14 @@ impl VimNavigation {
     /// Move a view with its source text while keeping its visual selection's
     /// direction and modal state. The delta uses Unicode character indices.
     pub fn shifted(&self, delta: isize) -> Self {
-        self.remapped(|position| position.saturating_add_signed(delta))
+        let mut navigation = self.remapped(|position| position.saturating_add_signed(delta));
+        // Moving or duplicating complete lines preserves their virtual columns,
+        // including block endpoints beyond a short line's physical end.
+        navigation.block_columns = self.block_columns;
+        if let Some(last) = navigation.last_visual.as_mut() {
+            last.block_columns = self.last_visual.and_then(|last| last.block_columns);
+        }
+        navigation
     }
 
     /// Map every stored position of this view, e.g. after another view edited
@@ -15,9 +22,11 @@ impl VimNavigation {
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.multi.remap(&map);
+        navigation.block_columns = None;
         if let Some(last) = navigation.last_visual.as_mut() {
             last.anchor = map(last.anchor);
             last.cursor = map(last.cursor);
+            last.block_columns = None;
         }
         navigation
     }
@@ -30,6 +39,7 @@ impl VimNavigation {
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.preferred_column = None;
         navigation.multi.remap(&map);
+        navigation.block_columns = None;
         navigation
     }
 }
@@ -50,6 +60,7 @@ impl VimState {
             motion_epoch: self.motion_epoch,
             visual_to_line_end: self.visual_to_line_end,
             last_visual: self.last_visual,
+            block_columns: self.block_columns,
         }
     }
 
@@ -71,6 +82,7 @@ impl VimState {
         self.motion_epoch = navigation.motion_epoch;
         self.visual_to_line_end = navigation.visual_to_line_end;
         self.last_visual = navigation.last_visual;
+        self.block_columns = navigation.block_columns;
         if self.mode == VimMode::Insert && self.insert_origin.is_none() {
             self.insert_origin = Some(self.snapshot(text));
             self.insert_count = 1;
@@ -97,6 +109,7 @@ impl VimState {
         self.multi.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
+        self.block_columns = None;
         let len = text.chars().count();
         let anchor = anchor.min(len);
         let cursor = cursor.min(len);
@@ -149,6 +162,7 @@ impl VimState {
         self.multi.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
+        self.block_columns = None;
         self.cursor = if self.mode == VimMode::Insert {
             char_boundary(text, cursor).0
         } else {
@@ -220,11 +234,16 @@ impl VimState {
             return;
         };
         let current = self.visual_anchor.and_then(|anchor| {
-            matches!(self.mode, VimMode::Visual | VimMode::VisualLine).then_some(LastVisual {
+            matches!(
+                self.mode,
+                VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+            )
+            .then_some(LastVisual {
                 mode: self.mode,
                 anchor,
                 cursor: self.cursor,
                 to_line_end: self.visual_to_line_end,
+                block_columns: self.block_columns,
             })
         });
         let len = text.chars().count();
@@ -232,6 +251,7 @@ impl VimState {
         self.visual_anchor = Some(last.anchor.min(len));
         self.cursor = last.cursor.min(len);
         self.visual_to_line_end = last.to_line_end;
+        self.block_columns = last.block_columns;
         self.preferred_column = None;
         if current.is_some() {
             self.last_visual = current;
@@ -239,25 +259,39 @@ impl VimState {
     }
 
     pub(super) fn leave_visual(&mut self) {
-        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine)
-            && let Some(anchor) = self.visual_anchor
+        if matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) && let Some(anchor) = self.visual_anchor
         {
             self.last_visual = Some(LastVisual {
                 mode: self.mode,
                 anchor,
                 cursor: self.cursor,
                 to_line_end: self.visual_to_line_end,
+                block_columns: self.block_columns,
             });
         }
         self.visual_anchor = None;
         self.visual_to_line_end = false;
-        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) {
+        self.block_columns = None;
+        if matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) {
             self.mode = VimMode::Normal;
         }
     }
 
     pub(super) fn move_cursor(&mut self, chars: &[char], key: char, count: usize, explicit: bool) {
-        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine) && !matches!(key, 'j' | 'k') {
+        if self.mode == VimMode::VisualBlock && self.move_block_cursor(chars, key, count) {
+            return;
+        }
+        if matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) && !matches!(key, 'j' | 'k')
+        {
             self.visual_to_line_end = key == '$';
         }
         // Ordinary motions only need the nearby rows, not a new index of every

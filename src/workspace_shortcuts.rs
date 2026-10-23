@@ -31,21 +31,6 @@ impl VEditApp {
         if self.completion_keys() || self.split_shortcuts(&ctx) {
             return;
         }
-        let vim_modal = self.settings.vim
-            && self.tab().is_some_and(|tab| {
-                tab.vim.mode != VimMode::Insert
-                    && !tab.vim.multi.active()
-                    && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
-            });
-        let vim_insert = self.settings.vim
-            && self.tab().is_some_and(|tab| {
-                tab.vim.mode == VimMode::Insert
-                    && ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
-            });
-        let vim_normal = vim_modal
-            && self
-                .tab()
-                .is_some_and(|tab| tab.vim.mode == VimMode::Normal);
         let review_visible = self.change_review_visible();
         let mut ready = Vec::new();
         for &action in Action::ALL {
@@ -115,35 +100,6 @@ impl VEditApp {
             {
                 continue;
             }
-            if action == Action::Find
-                && vim_modal
-                && !self.settings.keybindings.contains_key(action.id())
-            {
-                continue;
-            }
-            // Ctrl+O goes back in Vim Normal mode, like Vim's jump list.
-            if action == Action::OpenFile
-                && vim_normal
-                && !self.settings.keybindings.contains_key(action.id())
-            {
-                continue;
-            }
-            // Ctrl+B keeps its Vim page-back meaning; explicit custom bindings
-            // have no hidden Vim exception, and the safe Ctrl+Alt+E works everywhere.
-            if action == Action::ToggleLeftSidebar
-                && vim_modal
-                && !self.settings.keybindings.contains_key(action.id())
-            {
-                let available = ctx.input(|input| {
-                    input.events.iter().any(|event| {
-                        self.shortcut_matches(action, event)
-                            && matches!(event, egui::Event::Key { modifiers, .. } if modifiers.alt)
-                    })
-                });
-                if !available {
-                    continue;
-                }
-            }
             ready.push(action);
         }
         let shortcut_context = self.shortcut_input_context();
@@ -185,14 +141,7 @@ impl VEditApp {
         let source_owned = self.tab().is_some_and(|tab| {
             ctx.memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
         });
-        if action == Action::NewFile
-            && vim_insert
-            && !self.settings.keybindings.contains_key(action.id())
-        {
-            self.request_completion();
-        } else {
-            self.run_shortcut_action(action);
-        }
+        self.run_shortcut_action(action);
         // Continue the suffix only after the resulting source has rendered.
         // This preserves two commands in one OS event batch in input order.
         if self.find_focus {

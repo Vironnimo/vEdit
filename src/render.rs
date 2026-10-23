@@ -181,6 +181,166 @@ pub fn paint_retained_text_selection(
     replace_text_shape(ui, output, selected)
 }
 
+/// Paint rectangular Vim selections using their virtual columns rather than
+/// rounded scalar ranges. A tab can be partially selected; short source lines
+/// retain the rectangle beyond their end, including completely empty lines.
+pub fn paint_visual_block_selection(
+    ui: &egui::Ui,
+    visuals: &egui::Visuals,
+    output: &egui::text_edit::TextEditOutput,
+    selections: &[std::ops::Range<usize>],
+    columns: &[std::ops::Range<usize>],
+    tab_width: usize,
+) -> bool {
+    let font = output
+        .galley
+        .job
+        .sections
+        .first()
+        .map(|section| &section.format.font_id);
+    let space_width = font.map_or(1.0, |font| {
+        ui.fonts_mut(|fonts| fonts.glyph_width(font, ' '))
+    });
+    let rectangles =
+        visual_block_rectangles(&output.galley, selections, columns, tab_width, space_width);
+    if rectangles.is_empty() {
+        return false;
+    }
+    let mut selected = output.galley.clone();
+    let galley = Arc::make_mut(&mut selected);
+    for (index, rect) in rectangles {
+        let placed = &mut galley.rows[index];
+        let row = Arc::make_mut(&mut placed.row);
+        // Insert behind the original glyphs without recoloring or reshaping them.
+        // Appending vertices preserves each glyph's existing vertex indices.
+        let mesh = &mut row.visuals.mesh;
+        let old_vertices = mesh.vertices.len();
+        mesh.add_colored_rect(rect, visuals.selection.bg_fill);
+        mesh.indices[row.visuals.glyph_index_start..].rotate_right(6);
+        row.visuals.mesh_bounds = mesh.calc_bounds();
+        galley.num_vertices += mesh.vertices.len() - old_vertices;
+        galley.num_indices += 6;
+        galley.mesh_bounds |= rect.translate(placed.pos.to_vec2());
+    }
+    // Replace the original text shape so its clip rectangle and paint order
+    // also apply to virtual cells outside the original glyph bounds.
+    replace_text_shape(ui, output, selected)
+}
+
+/// Row-relative selection rectangles over the existing shaped geometry. The
+/// virtual column model matches Vim: one grapheme per column, tabs to stops.
+fn visual_block_rectangles(
+    galley: &egui::Galley,
+    selections: &[std::ops::Range<usize>],
+    columns: &[std::ops::Range<usize>],
+    tab_width: usize,
+    space_width: f32,
+) -> Vec<(usize, egui::Rect)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let Some(first) = selections.first() else {
+        return Vec::new();
+    };
+    if galley.rows.is_empty() || selections.len() != columns.len() {
+        return Vec::new();
+    }
+    let mut first_row = galley
+        .layout_from_cursor(egui::text::CCursor::new(first.start))
+        .row;
+    while first_row > 0 && !galley.rows[first_row - 1].ends_with_newline {
+        first_row -= 1;
+    }
+    let tab_width = tab_width.max(1);
+    let mut rectangles: Vec<(usize, egui::Rect)> = Vec::new();
+    let mut add = |index: usize, left: f32, right: f32| {
+        if right <= left {
+            return;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(left, 0.0),
+            egui::pos2(right, galley.rows[index].height()),
+        );
+        if let Some((previous_index, previous)) = rectangles.last_mut()
+            && *previous_index == index
+        {
+            *previous |= rect;
+        } else {
+            rectangles.push((index, rect));
+        }
+    };
+    for selected in columns {
+        if first_row >= galley.rows.len() {
+            break;
+        }
+        let last_row = (first_row..galley.rows.len())
+            .find(|index| galley.rows[*index].ends_with_newline)
+            .unwrap_or(galley.rows.len() - 1);
+        let line: String = galley.rows[first_row..=last_row]
+            .iter()
+            .flat_map(|row| row.glyphs.iter().map(|glyph| glyph.chr))
+            .collect();
+        let line = if galley.rows[last_row].ends_with_newline {
+            line.strip_suffix('\r').unwrap_or(&line)
+        } else {
+            &line
+        };
+        let mut scalar = 0;
+        let mut column = 0;
+        let mut visual_row = first_row;
+        let mut row_start = 0;
+        for grapheme in line.graphemes(true) {
+            let end = scalar + grapheme.chars().count();
+            let width = if grapheme == "\t" {
+                tab_width - column % tab_width
+            } else {
+                1
+            };
+            let overlap = selected.start.max(column)..selected.end.min(column + width);
+            if !overlap.is_empty() {
+                let mut at = scalar;
+                while at < end {
+                    while visual_row < last_row
+                        && at >= row_start + galley.rows[visual_row].glyphs.len()
+                    {
+                        row_start += galley.rows[visual_row].glyphs.len();
+                        visual_row += 1;
+                    }
+                    let row = &galley.rows[visual_row];
+                    let fragment_end = end.min(row_start + row.glyphs.len());
+                    let left = row.x_offset((at - row_start).into());
+                    let right = row.x_offset((fragment_end - row_start).into());
+                    if grapheme == "\t" {
+                        let unit = (right - left) / width as f32;
+                        add(
+                            visual_row,
+                            left + (overlap.start - column) as f32 * unit,
+                            left + (overlap.end - column) as f32 * unit,
+                        );
+                    } else {
+                        add(visual_row, left, right);
+                    }
+                    at = fragment_end;
+                }
+            }
+            scalar = end;
+            column += width;
+        }
+        if selected.end > column {
+            let before_last: usize = galley.rows[first_row..last_row]
+                .iter()
+                .map(|row| row.glyphs.len())
+                .sum();
+            let end_x = galley.rows[last_row].x_offset(scalar.saturating_sub(before_last).into());
+            add(
+                last_row,
+                end_x + selected.start.saturating_sub(column) as f32 * space_width,
+                end_x + (selected.end - column) as f32 * space_width,
+            );
+        }
+        first_row = last_row + 1;
+    }
+    rectangles
+}
+
 /// egui recolors selected glyphs with one selection color. Copy the syntax
 /// colors back from the unselected galley; only rows that selection painting
 /// touched are cloned.
@@ -1694,6 +1854,106 @@ mod tests {
         });
         output.drop_without_applying_deltas();
         result.unwrap()
+    }
+
+    #[test]
+    fn visual_block_rectangles_clip_tabs_pad_short_lines_and_follow_wrapping() {
+        let ctx = egui::Context::default();
+        let cache = SyntaxCache::new();
+        for ending in ["\n", "\r\n"] {
+            let lines = ["a\tz", "", "q", "xxe\u{301}yy", "abcdefghij"];
+            let text = lines.join(ending);
+            let mut at = 0;
+            let starts: Vec<_> = lines
+                .iter()
+                .map(|line| {
+                    let start = at;
+                    at += line.chars().count() + ending.chars().count();
+                    start
+                })
+                .collect();
+            let selections = [
+                1..2,
+                starts[1]..starts[1],
+                starts[2] + 1..starts[2] + 1,
+                starts[3] + 2..starts[3] + 4,
+                starts[4] + 2..starts[4] + 7,
+            ];
+            let columns = [2..3, 2..3, 2..3, 2..3, 2..7];
+            for width in [f32::INFINITY, 24.0] {
+                let galley = galley_pass(&ctx, &cache, 1, &text, 14.0, width);
+                let space = galley.rows[0].glyphs[0].advance_width;
+                let actual = visual_block_rectangles(&galley, &selections, &columns, 4, space);
+                let mut expected = Vec::new();
+                let tab = galley.layout_from_cursor(egui::text::CCursor {
+                    index: 1.into(),
+                    prefer_next_row: true,
+                });
+                let row = &galley.rows[tab.row];
+                let left = row.x_offset(tab.column);
+                let tab_width = row.x_offset((tab.column.0 + 1).into()) - left;
+                expected.push((
+                    tab.row,
+                    left + tab_width / 3.0,
+                    left + 2.0 * tab_width / 3.0,
+                ));
+                let mapped: Vec<_> = visual_rows(&galley).collect();
+                for (index, source) in mapped.iter().enumerate() {
+                    let row = &galley.rows[index];
+                    if source.line == 2 {
+                        expected.push((index, 2.0 * space, 3.0 * space));
+                    } else if source.line == 3 {
+                        let end_x = row.x_offset(1.into());
+                        expected.push((index, end_x + space, end_x + 2.0 * space));
+                    } else if let Some(selected) = match source.line {
+                        4 => Some(selections[3].clone()),
+                        5 => Some(selections[4].clone()),
+                        _ => None,
+                    } {
+                        let overlap =
+                            selected.start.max(source.start)..selected.end.min(source.end);
+                        if !overlap.is_empty() {
+                            let left = row.x_offset((overlap.start - source.start).into());
+                            let right = row.x_offset((overlap.end - source.start).into());
+                            // A combining mark may start the next shaped row
+                            // with zero advance. It contributes no background
+                            // area beyond the selected base grapheme's cell.
+                            if right > left {
+                                expected.push((index, left, right));
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "wrap width {width}, line ending {ending:?}; actual {actual:?}; expected {expected:?}"
+                );
+                for ((index, rect), (expected_index, left, right)) in actual.iter().zip(&expected) {
+                    assert_eq!(index, expected_index);
+                    assert!(
+                        (rect.left() - left).abs() < 0.01,
+                        "{rect:?}, expected left {left}"
+                    );
+                    assert!(
+                        (rect.right() - right).abs() < 0.01,
+                        "{rect:?}, expected right {right}"
+                    );
+                    assert_eq!(rect.top(), 0.0);
+                    assert_eq!(rect.height(), galley.rows[*index].height());
+                }
+                if width.is_finite() {
+                    assert!(
+                        actual
+                            .iter()
+                            .filter(|(index, _)| mapped[*index].line == 5)
+                            .count()
+                            > 1,
+                        "selection must continue over wrapped visual rows"
+                    );
+                }
+            }
+        }
     }
 
     fn source_galley_pass(

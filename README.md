@@ -1,4 +1,4 @@
-# vEdit 0.6.1
+# vEdit 0.6.2
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
@@ -176,7 +176,7 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 
 ² Wenn der Vim-Normal- oder Visualmodus im Editor aktiv ist, blättern **Ctrl+F** und **Ctrl+B** eine Seite weiter/zurück. Suche mit `/`, die Befehlspalette oder **View → Explorer** bleiben erreichbar.
 
-³ Im Vim-Normalmodus gehen auch **Ctrl+O** / **Ctrl+I** zurück beziehungsweise vor. **Datei über Dialog öffnen** bleibt dort über das Menü **File**, die Befehlspalette, den Insert- oder Visual-Modus und ohne Vim mit **Ctrl+O** erreichbar. Wer **Open file** selbst belegt, behält diese Belegung auch im Normalmodus.
+³ Im Vim-Normalmodus gehen auch **Ctrl+O** / **Ctrl+I** zurück beziehungsweise vor. **Datei über Dialog öffnen** bleibt dort über das Menü **File**, die Befehlspalette, den Insert- oder Visual-Modus und ohne Vim mit **Ctrl+O** erreichbar. Eigene Belegungen haben Vorrang vor diesen Defaults; **Settings → Vim** kann eine Kombination ausdrücklich Vim zuordnen.
 
 ## Eigene Tastenkürzel und räumlicher Fokus
 
@@ -184,7 +184,7 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 
 Auf ein Kürzel klicken und die neue Kombination drücken; **Esc** bricht die Aufnahme ab. **Add shortcut** ergänzt eine Alternative, **Remove** entfernt nur diese eine Belegung. Pro Befehl sind bis zu acht Kürzel möglich. Bei einer Überschneidung zeigt die Aufnahme die betroffenen Befehle; **Reassign shortcut** übernimmt die Kombination und lässt deren übrige Aliase erhalten. Getrennte Geltungsbereiche dürfen dieselbe Taste verwenden. **Disable**, **Reset** und **Reset all** deaktivieren beziehungsweise restaurieren Belegungen. Auch Aktionen ohne Standardkürzel sind belegbar.
 
-Änderungen gelten sofort und bleiben nach Neustarts erhalten; Menüs, Befehlspalette und Hinweise zeigen die aktuellen Kürzel. Bestehende Einstellungen mit nur einem Kürzel bleiben gültig. Ungültige gespeicherte Belegungen werden mit einem Hinweis ausgesondert, gesunde Belegungen bleiben erhalten. Die hier genannten Kombinationen sind Standardwerte. Auch Zeilenumbruch, Ein-/Ausrücken und Abschluss der Cursorplatzierung lassen sich umbelegen. Normale Textnavigation, Zwischenablage, Dialogbedienung und einzelne Vim-Motions behalten ihre Eingabebedeutung.
+Änderungen gelten sofort und bleiben nach Neustarts erhalten; Menüs, Befehlspalette und Hinweise zeigen die aktuellen Kürzel. Bestehende Einstellungen mit nur einem Kürzel bleiben gültig. Ungültige gespeicherte Belegungen werden mit einem Hinweis ausgesondert, gesunde Belegungen bleiben erhalten. Die hier genannten Kombinationen sind Standardwerte. Auch Zeilenumbruch, Ein-/Ausrücken und Abschluss der Cursorplatzierung lassen sich umbelegen. Normale Textnavigation, Dialogbedienung und einzelne Vim-Motions behalten ihre Eingabebedeutung; die Weitergabe unterstützter Ctrl-Kombinationen an Vim wird unter **Settings → Vim** eingestellt.
 
 Explorer-Aktionen wie Umbenennen und Löschen sowie Dateiwechsel, Gesehen-Markierung, Öffnen und Kommentieren in einer Change review haben eigene Einträge. **Open context menu** ändert gemeinsam das bisherige **Shift+F10** im Explorer, in Git und auf Project tabs; die Aktion wirkt auf das dort fokussierte Element.
 
@@ -198,7 +198,9 @@ Neue und geöffnete Dateien beginnen im **Normalmodus**. `i` wechselt zum Schrei
 
 **Settings → Swap J and K** tauscht die Bewegungsrichtungen von `j` und `k`, einschließlich Anzahl, Operatoren und Visual-Auswahl. Die Einstellung gilt auch für die Navigation im Explorer und das Scrollen der Markdown-Vorschau. Eingetippter Text und Buchstaben als Ziel von `f`, `t` oder `r` bleiben unverändert; Pfeil- und Seitentasten behalten ihre Richtung.
 
-**Ctrl+C**, **Ctrl+X** und **Ctrl+V** bedienen die Windows-Zwischenablage auch im Vim-Modus. Kopieren erhält Modus und Auswahl; ohne Auswahl wird die aktuelle Zeile kopiert. Ausschneiden ist rückgängig machbar. Einfügen im Normalmodus setzt den Text direkt an die Cursorposition und verändert das Vim-Register nicht. `y`, `d`, `p` und `P` verwenden weiterhin die Vim-Bedienung; `p` setzt Registertext hinter, `P` vor den Cursor, bei kopierten Zeilen unterhalb beziehungsweise oberhalb der aktuellen Zeile.
+**Ctrl+C**, **Ctrl+X** und **Ctrl+V** bedienen standardmäßig die Windows-Zwischenablage auch im Vim-Modus. Kopieren erhält Modus und Auswahl; ohne Auswahl wird die aktuelle Zeile kopiert. Ausschneiden ist rückgängig machbar. Einfügen im Normalmodus setzt den Text direkt an die Cursorposition und verändert das Vim-Register nicht. `y`, `d`, `p` und `P` verwenden weiterhin die Vim-Bedienung; `p` setzt Registertext hinter, `P` vor den Cursor, bei kopierten Zeilen unterhalb beziehungsweise oberhalb der aktuellen Zeile.
+
+**Settings → Vim → Control keys** legt für jede unterstützte Ctrl-Kombination **Default**, **Editor** oder **Vim** fest. Jede Zeile zeigt beide Wirkungen und die betroffenen Modi. **Default** erhält die Windows-orientierte Belegung und respektiert eigene Keyboard-Kürzel; **Vim** gibt dieser Taste im angegebenen Modus ausdrücklich Vorrang. Beispielsweise bricht Ctrl+C dann die aktuelle Vim-Eingabe ab, Ctrl+V startet Visual Block und Ctrl+F blättert statt Find zu öffnen. In anderen Modi bleibt die Editorfunktion erhalten: Ctrl+V fügt im Insert-Modus weiterhin ein. Suchfelder, Dialoge, Vorschauen und **MULTI** sind von der Weitergabe ausgenommen. **Reset** und **Reset all Vim keys** stellen die Defaults wieder her. **Ctrl+Insert**, **Shift+Delete**, **Shift+Insert** und das Kontextmenü bleiben für Kopieren, Ausschneiden und Einfügen erreichbar.
 
 **Space** ist die Standard-Leader-Taste. Im Normal- und Visual-Modus öffnet sie eine kurze Hilfe: **Space m** setzt oder entfernt einen Bookmark an der aktuellen Zeile, **Space b** öffnet die durchsuchbare Bookmark-Liste. Bookmarks speichern Datei, Zeile und Cursorposition, bleiben beim Schließen einer Datei und nach Neustarts erhalten und können benannt oder entfernt werden. Im Picker lässt sich zwischen aktuellem Projekt und allen Bookmarks wechseln; die Markierung erscheint auch im Editor-Gutter. Kleine Verschiebungen werden beim Anspringen anhand der gespeicherten Quelltextzeile berücksichtigt. **Settings → Leader key** bietet Space, Komma und Backslash; die CLI erlaubt auch andere einzelne Zeichen. Im Insert-Modus bleibt Space ein normales Leerzeichen.
 
@@ -209,6 +211,8 @@ Nach dem dritten Suchzeichen ist die Suche festgelegt; **Enter** legt sie schon 
 **Backspace** korrigiert zuerst ein angefangenes Label, gibt danach eine mit **Enter** festgelegte Suche wieder frei oder entfernt das letzte Suchzeichen. **Esc** bricht ab. Die Statusleiste zeigt den Suchtext und den nächsten Schritt. Im Visual-Modus erweitert der Sprung die bestehende Auswahl. Die Suche wirkt auf den aktiven Editorbereich und verändert keinen Text. Bookmarks und Bildschirm-Sprung sind auch über das Menü und die Befehlspalette erreichbar.
 
 `v` startet eine Zeichenauswahl; `V` (**Shift+V**) wählt ganze Zeilen. Mit Bewegungen erweitern, dann beispielsweise `y` kopieren, `d` löschen, `c` ändern oder `>` / `<` ein-/ausrücken. **Esc** beendet die Auswahl.
+
+**Ctrl+Q** startet **Visual Block**; die Statusleiste zeigt **V-BLOCK**. Bewegungen wie `h j k l` und Zählwerte erweitern ein Rechteck über logische Zeilen. `y` kopiert, `d`/`x` löscht, `c` ändert den Block; `I` fügt links, `A` rechts ein. Einzeilige Eingabe erscheint zunächst in der ersten Zeile und wird beim Abschluss mit **Esc** auf die übrigen Blockzeilen übertragen. `r` ersetzt, `u`/`U`/`~` ändern die Groß-/Kleinschreibung. `p`/`P` erhalten die rechteckige Form eines Blockregisters; `gv`, Undo/Redo und `.` stehen ebenfalls zur Verfügung. Tabs, kurze Zeilen und zusammengehörige Unicode-Zeichen werden berücksichtigt. Die Aktion **Toggle Vim Visual Block** in der Befehlspalette lässt sich unter Keyboard zusätzlich frei belegen.
 
 | Aufgabe | Beispiele |
 | --- | --- |
@@ -236,7 +240,7 @@ Nach dem dritten Suchzeichen ist die Suche festgelegt; **Enter** legt sie schon 
 
 Wie in Vim beendet ein abschließender Zeilenumbruch die letzte Zeile; dahinter beginnt keine weitere leere Zeile. `G`, `dG`, `2dd`, `J` und `:%s` arbeiten deshalb bis zur letzten Textzeile und lassen den Zeilenumbruch am Dateiende stehen. Das gilt auch für Dateien mit CRLF. Wort-Textobjekte wie `iw` und `aw` bleiben in ihrer Zeile. Stehen die Klammern von `di{` oder `ci{` auf eigenen Zeilen, wirkt der Befehl auf die Zeilen dazwischen. `ip` und `ap` wählen einen Absatz, `ap` mit den folgenden Leerzeilen.
 
-Vim's **Ctrl+A** und **Ctrl+X** bleiben in vEdit **Alles auswählen** und **Ausschneiden**; dafür ändern **Alt+A** und **Alt+X** Zahlen, solange diese Tasten keinem eigenen Kürzel zugewiesen sind. Erkannt werden ganze Dezimalzahlen einschließlich eines vorangestellten Minus; führende Nullen behalten ihre Breite.
+Vim's **Ctrl+A** und **Ctrl+X** bleiben standardmäßig **Alles auswählen** und **Ausschneiden**; unter **Settings → Vim** lassen sie sich im Normalmodus auf Zahlenänderung umstellen. Auch **Alt+A** und **Alt+X** ändern Zahlen, solange diese Tasten keinem eigenen Kürzel zugewiesen sind. Erkannt werden ganze Dezimalzahlen einschließlich eines vorangestellten Minus; führende Nullen behalten ihre Breite.
 
 Nicht unterstützte Normalmodus-Befehle wie `q`, `@`, `m`, `` ` ``, `'` oder `R` ändern keinen Text. Sie verbrauchen ihr Argument, etwa das Register bei `qa`, und die Statusleiste meldet beispielsweise **Not supported in vEdit: q**.
 
@@ -270,7 +274,7 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 
 Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
 
-vEdit implementiert einen eigenen Vim-Kern. Visual-Block, Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+vEdit implementiert einen eigenen Vim-Kern. Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Multicursor
 

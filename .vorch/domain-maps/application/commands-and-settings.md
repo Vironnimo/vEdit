@@ -29,11 +29,14 @@ aliases yield to explicit overrides. Unknown saved IDs remain preserved but cann
 match input or block editing known actions; new CLI patches still reject unknown
 IDs. Never turn an explicit disable into an absent setting during migration.
 
-Default shortcuts can have Vim-specific meaning: the default Find chord scrolls
-in Normal mode, New File can request completion in Insert, and Open File can
-navigate back in Normal. A custom binding chooses the application command.
-Preserve these distinctions through the existing context matching rather than
-adding an unconditional key test to a widget.
+`keybindings::vim_keys` owns per-Ctrl-key Editor/Vim preferences and the supported
+mode catalogue. Windows clipboard defaults stay Editor; Ctrl+Q starts Visual
+Block. Default ownership yields to a custom application binding, while an explicit
+Vim preference wins in its supported source modes. Other widgets, preview and
+MULTI retain their own input. Capture the focused shortcut context before taking
+an egui input lock; matching inside that lock must not read Context again.
+Both input continuation owners include the preference map so a setting change
+invalidates stale input. The Settings patch merges supplied keys; see `control.md`.
 
 AltGr can produce Ctrl+Alt keyboard events plus text. `capture_shortcut_input`
 and matching helpers distinguish that text from a real application chord.

@@ -27,28 +27,38 @@ pub(super) fn editor_menu(
     can_edit: bool,
     can_copy: bool,
     settings: &Settings,
+    vim_mode: Option<VimMode>,
 ) -> Option<EditorAction> {
     let mut action = None;
     let shortcut = |action| keybindings::label(&settings.keybindings, action);
+    let clipboard_shortcut = |key, native, alternative| {
+        if vim_mode.is_some_and(|mode| {
+            settings.vim_keys.target(key, mode, false) == Some(keybindings::vim_keys::Target::Vim)
+        }) {
+            alternative
+        } else {
+            native
+        }
+    };
     response.context_menu(|ui| {
         for (label, shortcut, tooltip, enabled, command) in [
             (
                 "Cut",
-                "Ctrl+X",
+                clipboard_shortcut(Key::X, "Ctrl+X", "Shift+Delete"),
                 "Cut the selected text",
                 can_edit && can_copy,
                 EditorAction::Cut,
             ),
             (
                 "Copy",
-                "Ctrl+C",
+                clipboard_shortcut(Key::C, "Ctrl+C", "Ctrl+Insert"),
                 "Copy the selected text",
                 can_copy,
                 EditorAction::Copy,
             ),
             (
                 "Paste",
-                "Ctrl+V",
+                clipboard_shortcut(Key::V, "Ctrl+V", "Shift+Insert"),
                 "Insert text from the Windows clipboard",
                 can_edit,
                 EditorAction::Paste,
@@ -66,7 +76,7 @@ pub(super) fn editor_menu(
             }
         }
         ui.separator();
-        if ui.add_enabled_ui(can_edit && can_copy, |ui| design::menu_item(ui,
+        if ui.add_enabled_ui(can_edit && can_copy && vim_mode != Some(VimMode::VisualBlock), |ui| design::menu_item(ui,
             "Mark for agent", &shortcut(keybindings::Action::AgentMark), "Keep this selected block for an agent, without changing the selection"))
             .inner.clicked() {
             action = Some(EditorAction::MarkForAgent);
@@ -80,7 +90,7 @@ pub(super) fn editor_menu(
         for (label, shortcut, tooltip, command) in [
             (
                 "Select all",
-                "Ctrl+A".into(),
+                clipboard_shortcut(Key::A, "Ctrl+A", "").into(),
                 "Select the entire document",
                 EditorAction::SelectAll,
             ),
@@ -147,6 +157,9 @@ pub(super) struct PendingPaste {
     requested: Instant,
     multi: crate::multicursor::State,
     pane: u64,
+    block: Option<Vec<Range<usize>>>,
+    block_columns: Option<Vec<Range<usize>>>,
+    cursor: usize,
 }
 
 fn native_history_id(document: u64) -> egui::Id {
@@ -850,6 +863,11 @@ impl VEditApp {
                 }
                 tab.focus = true;
                 let pending = PendingPaste {
+                    block: vim.then(|| tab.vim.block_selection(&tab.text)).flatten(),
+                    block_columns: vim
+                        .then(|| tab.vim.block_selection_columns(&tab.text))
+                        .flatten(),
+                    cursor: tab.vim.cursor,
                     multi: tab.vim.multi.clone(),
                     pane,
                     id,
@@ -877,7 +895,10 @@ impl VEditApp {
                     if tab.loading {
                         return;
                     }
-                    if matches!(tab.vim.mode, VimMode::Visual | VimMode::VisualLine) {
+                    if matches!(
+                        tab.vim.mode,
+                        VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+                    ) {
                         let (result, copied) = tab.vim.cut_visual_to_clipboard(&mut tab.text);
                         if result.text_changed {
                             tab.changed();
@@ -902,6 +923,17 @@ impl VEditApp {
                     return;
                 };
                 if action == EditorAction::Cut && tab.loading {
+                    return;
+                }
+                if vim && tab.vim.mode == VimMode::VisualBlock {
+                    let Some(yank) = tab.vim.block_yank(&tab.text) else {
+                        self.status("Block selection exceeds the clipboard size limit", true);
+                        return;
+                    };
+                    let ranges = tab.vim.block_selection(&tab.text).unwrap_or_default();
+                    tab.flash_yank(ranges);
+                    tab.vim.cancel_pending_command();
+                    self.ctx.copy_text(yank.text);
                     return;
                 }
                 let selection = if vim {
@@ -1090,6 +1122,32 @@ impl VEditApp {
         });
         let Some(text) = text else { return };
         let pending = self.context_paste.take().unwrap();
+        if let Some(block) = &pending.block {
+            let valid = self.settings.vim
+                && self.current_pane_id() == pending.pane
+                && self.tab().is_some_and(|tab| {
+                    tab.id == pending.id
+                        && tab.revision == pending.revision
+                        && !tab.loading
+                        && tab.vim.cursor == pending.cursor
+                        && tab.vim.block_selection(&tab.text).as_ref() == Some(block)
+                        && tab.vim.block_selection_columns(&tab.text) == pending.block_columns
+                });
+            if !valid {
+                self.status("Paste cancelled because the block selection changed", true);
+                return;
+            }
+            let tab = self.tab_mut().unwrap();
+            let action = tab.vim.paste_block_clipboard(&mut tab.text, &text);
+            if action.text_changed {
+                tab.changed();
+            }
+            tab.selection = tab.vim.cursor..tab.vim.cursor;
+            tab.pending_selection = Some(tab.selection.clone());
+            tab.focus = true;
+            tab.scroll_to_cursor = true;
+            return;
+        }
         if pending.multi.active() {
             if self.current_pane_id() == pending.pane
                 && self.tab().is_some_and(|t| {
@@ -2518,6 +2576,7 @@ mod tests {
         let mut app = fixture();
         let preserved = Yank {
             text: "Vim register".into(),
+            block_width: None,
             linewise: false,
         };
         app.register = Some(preserved.clone());

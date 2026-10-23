@@ -21,6 +21,7 @@ fn fixture(document: &str) -> VEditApp {
     tab.saved_text = document.into();
     let register = Yank {
         text: PRESERVED_REGISTER.into(),
+        block_width: None,
         linewise: false,
     };
     tab.vim.set_register(register.clone());

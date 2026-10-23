@@ -383,19 +383,24 @@ fn regex_case_overrides(query: &str, mut insensitive: bool) -> (String, bool) {
 impl VEditApp {
     pub(super) fn begin_ex_command(&mut self, mut command: String) {
         let visual_lines = self.tab().and_then(|tab| {
-            tab.vim.selection(&tab.text).map(|selection| {
+            let endpoints = if let Some(block) = tab.vim.block_selection(&tab.text) {
+                block
+                    .first()
+                    .zip(block.last())
+                    .map(|(first, last)| (first.start, last.start))
+            } else {
+                tab.vim
+                    .selection(&tab.text)
+                    .map(|selection| (selection.start, selection.end.saturating_sub(1)))
+            };
+            endpoints.map(|(first, last)| {
                 let start = tab
                     .text
                     .chars()
-                    .take(selection.start)
+                    .take(first)
                     .filter(|&ch| ch == '\n')
                     .count();
-                let end = tab
-                    .text
-                    .chars()
-                    .take(selection.end.saturating_sub(1))
-                    .filter(|&ch| ch == '\n')
-                    .count();
+                let end = tab.text.chars().take(last).filter(|&ch| ch == '\n').count();
                 start..end + 1
             })
         });
@@ -979,20 +984,35 @@ mod tests {
     #[test]
     fn real_visual_ex_range_and_cancel_do_not_reuse_stale_selection() {
         let document = "x\nx\nx\nx";
-        let mut screen = harness(fixture(document));
-        text(&mut screen, "jVj:s/x/y/");
-        assert_eq!(screen.state().vim_command.as_deref(), Some("'<,'>s/x/y/"));
-        key(&mut screen, Key::Enter);
-        assert_eq!(screen.state().tab().unwrap().text, "x\ny\ny\nx");
-        text(&mut screen, "u");
-        text(&mut screen, ":'<,'>s/x/z/");
-        key(&mut screen, Key::Enter);
-        assert_eq!(screen.state().tab().unwrap().text, document);
-        assert!(screen.state().status.as_ref().unwrap().1);
-        text(&mut screen, ":set nowrap");
-        key(&mut screen, Key::Escape);
-        assert_eq!(screen.state().tab().unwrap().text, document);
-        assert!(screen.state().vim_command.is_none());
+        for block in [false, true] {
+            let mut screen = harness(fixture(document));
+            text(&mut screen, "j");
+            if block {
+                screen.event(egui::Event::Key {
+                    key: Key::Q,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                });
+                screen.run_steps(2);
+            } else {
+                text(&mut screen, "V");
+            }
+            text(&mut screen, "j:s/x/y/");
+            assert_eq!(screen.state().vim_command.as_deref(), Some("'<,'>s/x/y/"));
+            key(&mut screen, Key::Enter);
+            assert_eq!(screen.state().tab().unwrap().text, "x\ny\ny\nx");
+            text(&mut screen, "u");
+            text(&mut screen, ":'<,'>s/x/z/");
+            key(&mut screen, Key::Enter);
+            assert_eq!(screen.state().tab().unwrap().text, document);
+            assert!(screen.state().status.as_ref().unwrap().1);
+            text(&mut screen, ":set nowrap");
+            key(&mut screen, Key::Escape);
+            assert_eq!(screen.state().tab().unwrap().text, document);
+            assert!(screen.state().vim_command.is_none());
+        }
     }
 
     #[test]

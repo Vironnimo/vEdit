@@ -210,11 +210,11 @@ impl VEditApp {
                     self.session_dirty = true;
                     self.persist_session();
                     Response::success(
-                        json!({"applied":true,"settings":self.settings,"keybinding_actions":self.keybindings_catalog(),"persistence":"queued","autosave_paused_tabs":self.projects.iter().flat_map(|p|&p.tabs).filter(|t|t.agent_unsaved).map(|t|t.id).collect::<Vec<_>>()}),
+                        json!({"applied":true,"settings":self.settings,"keybinding_actions":self.keybindings_catalog(),"vim_key_actions":self.settings.vim_keys.catalog(&self.settings.keybindings),"persistence":"queued","autosave_paused_tabs":self.projects.iter().flat_map(|p|&p.tabs).filter(|t|t.agent_unsaved).map(|t|t.id).collect::<Vec<_>>()}),
                     )
                 } else {
                     Response::success(
-                        json!({"settings":self.settings,"keybinding_actions":self.keybindings_catalog()}),
+                        json!({"settings":self.settings,"keybinding_actions":self.keybindings_catalog(),"vim_key_actions":self.settings.vim_keys.catalog(&self.settings.keybindings)}),
                     )
                 }
             }
@@ -820,6 +820,9 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     }
     if let Some(bindings) = &patch.keybindings {
         settings.keybindings = bindings.clone();
+    }
+    if let Some(keys) = &patch.vim_keys {
+        settings.vim_keys.apply_overrides(keys);
     }
     if let Some(value) = patch.vim {
         settings.vim = value;
@@ -1603,6 +1606,10 @@ mod tests {
                 autosave_delay_ms: Some(1500),
                 show_ignored_files: Some(true),
                 search_excludes: Some(vec![" generated ".into(), "src\\cache".into()]),
+                vim_keys: Some(std::collections::BTreeMap::from([
+                    ("Ctrl+V".into(), Some(cli::VimKeyTarget::Vim)),
+                    ("Ctrl+F".into(), Some(cli::VimKeyTarget::Editor)),
+                ])),
                 ..Default::default()
             }),
         });
@@ -1614,10 +1621,36 @@ mod tests {
         assert!(app.settings.smooth_scroll);
         assert!(app.settings.swap_jk);
         assert_eq!(app.settings.search_excludes, ["generated", "src/cache"]);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !app.recovery_session_path.is_file() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            response.result["settings"]["vim_keys"],
+            json!({"Ctrl+V":"vim","Ctrl+F":"editor"})
+        );
+        assert_eq!(
+            response.result["vim_key_actions"].as_array().unwrap().len(),
+            cli::VIM_CONTROL_KEYS.len()
+        );
+        let request = serde_json::from_value(json!({
+            "op":"settings", "patch":{"vim_keys":{"Ctrl+F":null,"Ctrl+C":"vim"}}
+        }))
+        .unwrap();
+        assert!(app.control_request(request).ok);
+        let expected_vim_keys = json!({"Ctrl+V":"vim","Ctrl+C":"vim"});
+        for patch in [json!({}), json!({"vim_keys":null}), json!({"vim_keys":{}})] {
+            let request = serde_json::from_value(json!({"op":"settings","patch":patch})).unwrap();
+            let response = app.control_request(request);
+            assert!(response.ok);
+            assert_eq!(response.result["settings"]["vim_keys"], expected_vim_keys);
         }
+        let observed = app.control_request(Request::Settings { patch: None });
+        assert!(observed.ok);
+        assert_eq!(observed.result["settings"]["vim_keys"], expected_vim_keys);
+        assert_eq!(
+            observed.result["vim_key_actions"],
+            app.settings.vim_keys.catalog(&app.settings.keybindings)
+        );
+        assert_eq!(app.tab().unwrap().text, "64");
+        assert_eq!(app.tab().unwrap().revision, 0);
+        assert!(app.recovery_writer.wait_idle(Duration::from_secs(10)));
         let snapshot: Session =
             serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
         let saved = snapshot.settings.unwrap();
@@ -1630,6 +1663,10 @@ mod tests {
         assert!(saved.show_ignored_files);
         assert!(saved.word_wrap && saved.swap_jk);
         assert_eq!(saved.search_excludes, ["generated", "src/cache"]);
+        assert_eq!(
+            serde_json::to_value(saved.vim_keys).unwrap(),
+            expected_vim_keys
+        );
         drop(app);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1750,6 +1787,13 @@ mod tests {
             },
             SettingsPatch {
                 autosave_delay_ms: Some(5001),
+                ..Default::default()
+            },
+            SettingsPatch {
+                vim_keys: Some(std::collections::BTreeMap::from([
+                    ("Ctrl+C".into(), Some(cli::VimKeyTarget::Vim)),
+                    ("Ctrl+Z".into(), Some(cli::VimKeyTarget::Editor)),
+                ])),
                 ..Default::default()
             },
         ] {

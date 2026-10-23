@@ -163,6 +163,7 @@ impl VEditApp {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
+                            VimMode::VisualBlock => ("V-BLOCK", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))

@@ -81,6 +81,7 @@ try {
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -File -Filter '*.md' | ForEach-Object {
         $packagedDocument = [System.IO.File]::ReadAllText($_.FullName).
             Replace('../vendor/winit/VEDIT_PATCH.md', '../licenses/winit/VEDIT_PATCH.md').
+            Replace('../vendor/egui-winit/VEDIT_PATCH.md', '../licenses/egui-winit/VEDIT_PATCH.md').
             Replace('../.agents/skills/vedit/SKILL.md', '../skills/vedit/SKILL.md').
             Replace('- [Project and domain index](../.vorch/PROJECT.md): source owners and task-specific working context.', '- Project and domain maps are available in the source checkout.')
         [System.IO.File]::WriteAllText((Join-Path $documentationDirectory $_.Name), $packagedDocument, [System.Text.UTF8Encoding]::new($false))
@@ -104,6 +105,11 @@ try {
     New-Item -ItemType Directory -Path $windowLicenseDirectory -Force | Out-Null
     foreach ($windowDocumentation in @('LICENSE', 'VEDIT_PATCH.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/winit/$windowDocumentation") -Destination $windowLicenseDirectory -Force
+    }
+    $inputLicenseDirectory = Join-Path $releaseDirectory 'licenses/egui-winit'
+    New-Item -ItemType Directory -Path $inputLicenseDirectory -Force | Out-Null
+    foreach ($inputDocumentation in @('LICENSE-APACHE', 'LICENSE-MIT', 'VEDIT_PATCH.md')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/egui-winit/$inputDocumentation") -Destination $inputLicenseDirectory -Force
     }
     $packagedScripts = Join-Path $releaseDirectory 'scripts'
     New-Item -ItemType Directory -Path $packagedScripts -Force | Out-Null

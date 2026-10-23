@@ -2,6 +2,9 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[path = "vim_keys.rs"]
+pub(super) mod vim_keys;
+
 pub(super) type Bindings = BTreeMap<String, Option<crate::cli::ShortcutBinding>>;
 
 pub(super) use super::command_registry::{Action, Scope};
@@ -135,7 +138,7 @@ impl Stroke {
             || self.ctrl && matches!(self.key, Key::C | Key::X | Key::V)
         {
             return Err(
-                "Ctrl+C/X/V (with any modifiers) are reserved for the system clipboard.".into(),
+                "Ctrl+C/X/V (with any modifiers) cannot be assigned to application commands. Configure Ctrl+C/X/V under Settings → Vim.".into(),
             );
         }
         let contextual_plain = !self.ctrl
@@ -362,6 +365,31 @@ pub(super) fn matches(bindings: &Bindings, action: Action, event: &egui::Event) 
     }
 }
 
+/// Resolve only exact Ctrl chords, leaving Shift variants and AltGr untouched.
+pub(super) fn vim_control_key(event: &egui::Event) -> Option<Key> {
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } if (modifiers.ctrl || modifiers.command) && !modifiers.alt && !modifiers.shift => {
+            Some(*key)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn custom_source_binding(bindings: &Bindings, event: &egui::Event) -> bool {
+    Action::ALL.iter().any(|action| {
+        matches!(
+            action.scope(),
+            Scope::Global | Scope::Source | Scope::SourceEditing
+        ) && bindings.contains_key(action.id())
+            && matches(bindings, *action, event)
+    })
+}
+
 pub(super) fn source_matches(
     bindings: &Bindings,
     action: Action,
@@ -383,18 +411,14 @@ pub(super) fn source_matches(
     if !in_scope {
         return false;
     }
-    if vim_modal && !bindings.contains_key(action.id()) {
-        if matches!(
+    if vim_modal
+        && !bindings.contains_key(action.id())
+        && matches!(
             action,
-            Action::Find | Action::InsertNewline | Action::Indent | Action::Outdent
-        ) {
-            return false;
-        }
-        if action == Action::ToggleLeftSidebar
-            && matches!(event, egui::Event::Key { modifiers, .. } if !modifiers.alt)
-        {
-            return false;
-        }
+            Action::InsertNewline | Action::Indent | Action::Outdent
+        )
+    {
+        return false;
     }
     true
 }
@@ -611,11 +635,21 @@ struct WidgetOwner {
     document: Option<u64>,
     widget: Option<egui::Id>,
     bindings: Bindings,
+    vim_keys: vim_keys::Preferences,
 }
 struct WidgetContinuation {
     pass: u64,
     events: Vec<egui::Event>,
     owner: Option<WidgetOwner>,
+}
+
+/// Capture focus and modal ownership before entering an egui input closure.
+/// Matching inside that closure must not acquire the Context lock again.
+#[derive(Clone, Copy)]
+pub(super) struct ShortcutContext {
+    source: bool,
+    vim_modal: bool,
+    vim_mode: Option<VimMode>,
 }
 
 impl VEditApp {
@@ -626,6 +660,7 @@ impl VEditApp {
             document: self.tab().map(|tab| tab.id),
             widget: self.ctx.memory(|memory| memory.focused()),
             bindings: self.settings.keybindings.clone(),
+            vim_keys: self.settings.vim_keys.clone(),
         }
     }
     pub(super) fn defer_widget_shortcut_input(&mut self, events: Vec<egui::Event>) {
@@ -702,36 +737,80 @@ impl VEditApp {
             self.defer_widget_shortcut_input(suffix);
         }
     }
-    pub(super) fn shortcut_matches(&self, action: Action, event: &egui::Event) -> bool {
-        matches(&self.settings.keybindings, action, event)
+    pub(super) fn shortcut_matches(
+        &self,
+        action: Action,
+        event: &egui::Event,
+        context: ShortcutContext,
+    ) -> bool {
+        !self.vim_key_forwarded_in(event, context)
+            && matches(&self.settings.keybindings, action, event)
     }
-    pub(super) fn shortcut_input_context(&self) -> (bool, bool) {
+    /// Only the focused source participates in Vim routing. Native fields,
+    /// dialogs, preview, search prompts and MULTI keep their own keyboard owner.
+    pub(super) fn vim_key_forwarded(&self, event: &egui::Event) -> bool {
+        if vim_control_key(event).is_none() {
+            return false;
+        }
+        self.vim_key_forwarded_in(event, self.shortcut_input_context())
+    }
+    fn vim_key_forwarded_in(&self, event: &egui::Event, context: ShortcutContext) -> bool {
+        let Some(key) = vim_control_key(event) else {
+            return false;
+        };
+        let Some(mode) = context.vim_mode else {
+            return false;
+        };
+        self.settings.vim_keys.target(
+            key,
+            mode,
+            custom_source_binding(&self.settings.keybindings, event),
+        ) == Some(vim_keys::Target::Vim)
+    }
+    pub(super) fn shortcut_input_context(&self) -> ShortcutContext {
         let source = self.tab().filter(|tab| {
             tab.agent_view == crate::cli::DocumentView::Source
                 && self
                     .ctx
                     .memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
         });
-        (
-            source.is_some(),
-            self.settings.vim
+        let vim_mode = source
+            .filter(|tab| {
+                self.settings.vim
+                    && !tab.loading
+                    && !tab.vim.multi.active()
+                    && !self.chrome_blocked()
+                    && !self.change_review_visible()
+                    && !self.navigation_pending()
+                    && self.screen_jump.is_none()
+                    && !self.vim_search_active()
+                    && self.vim_command.is_none()
+            })
+            .map(|tab| tab.vim.mode);
+        ShortcutContext {
+            source: source.is_some(),
+            vim_modal: self.settings.vim
                 && source
                     .is_some_and(|tab| tab.vim.mode != VimMode::Insert && !tab.vim.multi.active()),
-        )
+            vim_mode,
+        }
     }
     pub(super) fn shortcut_boundary(
         &self,
         action: Action,
         event: &egui::Event,
-        (source, vim_modal): (bool, bool),
+        context: ShortcutContext,
     ) -> bool {
+        if self.vim_key_forwarded_in(event, context) {
+            return false;
+        }
         if matches!(
             action.scope(),
             Scope::Explorer | Scope::ContextMenu | Scope::Review | Scope::ReviewComment
         ) {
             return false;
         }
-        if action.scope().source() && !source {
+        if action.scope().source() && !context.source {
             return false;
         }
         let multi = self.tab().is_some_and(|tab| tab.vim.multi.active());
@@ -740,19 +819,10 @@ impl VEditApp {
             &self.settings.keybindings,
             action,
             event,
-            vim_modal,
+            context.vim_modal,
             multi,
             placing,
         ) {
-            return false;
-        }
-        if vim_modal
-            && action == Action::OpenFile
-            && !self.settings.keybindings.contains_key(action.id())
-            && self
-                .tab()
-                .is_some_and(|tab| tab.vim.mode == VimMode::Normal)
-        {
             return false;
         }
         true
@@ -868,7 +938,7 @@ impl VEditApp {
             self.keybinding_ui.capture = None;
             self.keybinding_ui.search_capture = false;
             self.keybinding_ui.feedback = Some((
-                "This shortcut is reserved for the system clipboard. Choose another combination."
+                "Clipboard shortcuts cannot be recorded here. Choose another combination, or configure Ctrl+C/X/V under Settings → Vim."
                     .into(),
                 true,
             ));

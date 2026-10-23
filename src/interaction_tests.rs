@@ -867,6 +867,7 @@ fn editor_context_cut_repeats_and_menu_undo_remains_live_during_save_errors() {
     app.projects[0].active_tab = 1;
     let preserved = Yank {
         text: "Vim register 🦀\n".into(),
+        block_width: None,
         linewise: true,
     };
     app.register = Some(preserved.clone());

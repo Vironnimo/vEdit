@@ -59,6 +59,7 @@ struct Owner {
     swap_jk: bool,
     leader: String,
     keybindings: keybindings::Bindings,
+    vim_keys: keybindings::vim_keys::Preferences,
     view: crate::cli::DocumentView,
 }
 
@@ -240,7 +241,9 @@ impl VEditApp {
             return;
         }
         let indentation = tab.indentation(&self.settings);
-        let selection = if self.settings.vim {
+        let selection = if self.settings.vim && command != Command::Newline {
+            tab.vim_editor_selection()
+        } else if self.settings.vim {
             tab.vim
                 .selection(&tab.text)
                 .unwrap_or_else(|| tab.selection.clone())
@@ -264,7 +267,6 @@ impl VEditApp {
         if matches!(command, Command::MoveLine(_) | Command::Duplicate) {
             tab.apply_line_move(edit);
         } else {
-            tab.vim.begin_external_edit(&tab.text);
             tab.apply(edit);
             if matches!(
                 command,
@@ -291,6 +293,7 @@ impl VEditApp {
             swap_jk: self.settings.swap_jk,
             leader: self.settings.leader_key.clone(),
             keybindings: self.settings.keybindings.clone(),
+            vim_keys: self.settings.vim_keys.clone(),
             view: tab.agent_view,
         })
     }

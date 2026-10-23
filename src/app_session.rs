@@ -5,6 +5,7 @@ use super::*;
 #[serde(default)]
 pub(super) struct Settings {
     pub(super) keybindings: keybindings::Bindings,
+    pub(super) vim_keys: keybindings::vim_keys::Preferences,
     pub(super) multicursor: multicursor_ui::Preferences,
     pub(super) vim: bool,
     pub(super) swap_jk: bool,
@@ -37,6 +38,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             keybindings: keybindings::Bindings::new(),
+            vim_keys: keybindings::vim_keys::Preferences::default(),
             multicursor: multicursor_ui::Preferences::default(),
             vim: true,
             swap_jk: false,

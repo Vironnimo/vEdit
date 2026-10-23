@@ -49,10 +49,10 @@ fn status_message_details_cli_round_trip_in_isolated_editor() {
 
 #[test]
 #[ignore = "requires VEDIT_CLI_TEST_BINARY pointing to the built vedit-cli executable"]
-fn multicursor_settings_cli_round_trip_in_isolated_editor() {
+fn editor_key_settings_cli_round_trip_in_isolated_editor() {
     let binary = std::env::var_os("VEDIT_CLI_TEST_BINARY").expect("set VEDIT_CLI_TEST_BINARY");
     let root = std::env::temp_dir().join(format!(
-        "vedit-cli-round-trip-multicursor-{}-{}",
+        "vedit-cli-round-trip-editor-keys-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -62,14 +62,28 @@ fn multicursor_settings_cli_round_trip_in_isolated_editor() {
     fs::create_dir_all(&root).unwrap();
     let fixture = Fixture(root);
     let endpoint = fixture.0.join("control");
-    let patch = fixture.0.join("multicursor.json");
+    let patch = fixture.0.join("editor-keys.json");
     fs::write(
         &patch,
-        r#"{"multicursor":{"modifier":"ctrl","spread_paste":false}}"#,
+        r#"{"multicursor":{"modifier":"ctrl","spread_paste":false},"vim_keys":{"Ctrl+V":"vim","Ctrl+F":"editor"}}"#,
     )
     .unwrap();
     let invalid = fixture.0.join("invalid.json");
     fs::write(&invalid, r#"{"vim":false,"multicursor":{"limit":99}}"#).unwrap();
+    let reset = fixture.0.join("reset-vim-key.json");
+    fs::write(&reset, r#"{"vim_keys":{"Ctrl+V":null}}"#).unwrap();
+    let invalid_key = fixture.0.join("invalid-vim-key.json");
+    fs::write(
+        &invalid_key,
+        r#"{"word_wrap":true,"vim_keys":{"Ctrl+F":null,"Ctrl+Z":"vim"}}"#,
+    )
+    .unwrap();
+    let invalid_target = fixture.0.join("invalid-vim-target.json");
+    fs::write(
+        &invalid_target,
+        r#"{"word_wrap":true,"vim_keys":{"Ctrl+F":null,"Ctrl+V":"default"}}"#,
+    )
+    .unwrap();
     let mut app = VEditApp::empty(egui::Context::default());
     app.recovery_session_path = fixture.0.join("session.json");
     app.control = Some(cli::Server::start_test(app.ctx.clone(), endpoint.clone()).unwrap());
@@ -89,9 +103,63 @@ fn multicursor_settings_cli_round_trip_in_isolated_editor() {
         "ctrl"
     );
     assert_eq!(response["result"]["settings"]["multicursor"]["limit"], 1000);
+    assert_eq!(
+        response["result"]["settings"]["vim_keys"],
+        json!({"Ctrl+V":"vim","Ctrl+F":"editor"})
+    );
+    let catalog = response["result"]["vim_key_actions"].as_array().unwrap();
+    assert_eq!(catalog.len(), cli::VIM_CONTROL_KEYS.len());
+    let paste = catalog
+        .iter()
+        .find(|entry| entry["key"] == "Ctrl+V")
+        .unwrap();
+    assert_eq!(paste["target"], "vim");
+    assert_eq!(paste["default"], "editor");
+    assert_eq!(paste["effective"], "vim");
+    assert_eq!(paste["scope"], "source_editor");
+    assert_eq!(paste["outside_modes"], "editor");
+    assert!(
+        paste["modes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("visualblock"))
+    );
+    assert!(
+        !paste["modes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("insert"))
+    );
+    let find = catalog
+        .iter()
+        .find(|entry| entry["key"] == "Ctrl+F")
+        .unwrap();
+    assert_eq!(find["target"], "editor");
+    assert_eq!(find["default"], "vim");
+    assert_eq!(find["effective"], "editor");
     println!(
-        "Applied multicursor preferences: {}",
-        response["result"]["settings"]["multicursor"]
+        "Applied editor key preferences: multicursor={}, vim_keys={}",
+        response["result"]["settings"]["multicursor"], response["result"]["settings"]["vim_keys"]
+    );
+    let (code, response) = invoke(&["settings", reset.to_str().unwrap()]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(
+        response["result"]["settings"]["vim_keys"],
+        json!({"Ctrl+F":"editor"})
+    );
+    let expected_settings = response["result"]["settings"].clone();
+    let expected_catalog = response["result"]["vim_key_actions"].clone();
+    let paste = expected_catalog
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "Ctrl+V")
+        .unwrap();
+    assert_eq!(paste["target"], "default");
+    assert_eq!(paste["effective"], "editor");
+    println!(
+        "Reset Ctrl+V; retained Vim key overrides: {}",
+        expected_settings["vim_keys"]
     );
     let (code, response) = invoke(&["settings", invalid.to_str().unwrap()]);
     assert_ne!(code, 0);
@@ -102,16 +170,26 @@ fn multicursor_settings_cli_round_trip_in_isolated_editor() {
             .contains("100")
     );
     println!("Invalid limit: {}", response["error"]);
+    for invalid in [&invalid_key, &invalid_target] {
+        let (code, response) = invoke(&["settings", invalid.to_str().unwrap()]);
+        assert_ne!(code, 0, "{response}");
+        assert_eq!(response["ok"], false);
+        assert!(response["error"].is_object());
+        println!("Invalid Vim key preference: {}", response["error"]);
+    }
     let (code, response) = invoke(&["settings", fixture.0.join("missing.json").to_str().unwrap()]);
     assert_ne!(code, 0);
     assert!(response["error"].is_object());
     let (code, response) = invoke(&["settings"]);
     assert_eq!(code, 0);
+    assert_eq!(response["result"]["settings"], expected_settings);
+    assert_eq!(response["result"]["vim_key_actions"], expected_catalog);
     assert_eq!(response["result"]["settings"]["vim"], true);
     assert_eq!(
         response["result"]["settings"]["multicursor"]["spread_paste"],
         false
     );
+    assert!(app.recovery_writer.wait_idle(Duration::from_secs(10)));
 }
 
 #[test]

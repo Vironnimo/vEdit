@@ -217,6 +217,58 @@ fn keybinding_settings_preserve_strings_disable_and_aliases_with_bounded_payload
 }
 
 #[test]
+fn vim_key_settings_accept_known_targets_and_per_key_reset() {
+    for patch in [json!({}), json!({"vim_keys":null})] {
+        let request: Request =
+            serde_json::from_value(json!({"op":"settings","patch":patch})).unwrap();
+        validate(&request).unwrap();
+        assert!(matches!(
+            request,
+            Request::Settings {
+                patch: Some(SettingsPatch { vim_keys: None, .. })
+            }
+        ));
+    }
+    for key in VIM_CONTROL_KEYS {
+        for target in [json!("editor"), json!("vim"), Value::Null] {
+            let keys = json!({(*key):target});
+            let request: Request =
+                serde_json::from_value(json!({"op":"settings","patch":{"vim_keys":keys}})).unwrap();
+            validate(&request).unwrap();
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["patch"]["vim_keys"],
+                keys
+            );
+        }
+    }
+    for key in ["Ctrl+Z", "Ctrl+Shift+C", "ctrl+c", "C", ""] {
+        let request: Request = serde_json::from_value(
+            json!({"op":"settings","patch":{"vim_keys":{key:"vim"},"word_wrap":true}}),
+        )
+        .unwrap();
+        assert!(validate(&request).is_err(), "{key}");
+    }
+    for target in [json!("default"), json!("Editor"), json!(false), json!([])] {
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"op":"settings","patch":{"vim_keys":{"Ctrl+C":target}}})
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        transport::from_unique_json::<Request>(
+            br#"{"op":"settings","patch":{"vim_keys":{"Ctrl+C":"vim","Ctrl+C":null}}}"#
+        )
+        .is_err()
+    );
+    assert_eq!(
+        schema()["settings"]["vim_keys"]["keys"],
+        json!(VIM_CONTROL_KEYS)
+    );
+}
+
+#[test]
 fn swap_jk_cli_is_explicit_boolean_and_leaves_unrelated_settings_omitted() {
     for (input, expected) in [("true", true), ("false", false)] {
         let Parsed::Command {

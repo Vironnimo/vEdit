@@ -217,6 +217,28 @@ impl VEditApp {
                 self.settings.vim = !self.settings.vim;
                 self.session_dirty = true;
             }
+            Action::VisualBlock => {
+                if !self.settings.vim {
+                    self.status("Enable Vim in Settings → Vim to use Visual Block", false);
+                    return;
+                }
+                let Some(tab) = self.tab_mut() else {
+                    return;
+                };
+                if tab.loading || tab.agent_view != crate::cli::DocumentView::Source {
+                    return;
+                }
+                let finished = tab.vim.finish_insert(&mut tab.text);
+                if finished.text_changed {
+                    tab.changed();
+                }
+                tab.vim.multi.clear();
+                tab.vim.handle_key(&mut tab.text, VimKey::VisualBlock);
+                tab.selection = tab.vim.cursor..tab.vim.cursor;
+                tab.pending_selection = Some(tab.selection.clone());
+                tab.scroll_to_cursor = true;
+                tab.focus = true;
+            }
             Action::Reload => self.reload_current(),
             Action::CompareWithSaved => self.compare_current_with_saved(),
             Action::Settings => self.settings_open = true,

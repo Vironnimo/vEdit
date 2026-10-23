@@ -654,8 +654,6 @@ dependencies = [
 [[package]]
 name = "egui-winit"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98466000559d66ba4db786a30448b01483946add4188e7f10f522a27b4fb89cc"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -3081,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "vedit"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "eframe",
  "egui-wgpu",

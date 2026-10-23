@@ -2,6 +2,7 @@
 //! character indices, matching egui's text cursor. Keep a state per document.
 use std::ops::Range;
 
+mod block;
 mod commands;
 mod geometry;
 mod history;
@@ -31,6 +32,7 @@ pub enum VimMode {
     Insert,
     Visual,
     VisualLine,
+    VisualBlock,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub enum VimKey {
     Enter,
     Backspace,
     Tab,
+    /// Toggle a rectangular visual selection.
+    VisualBlock,
     /// Map normal-mode Ctrl+R to this key.
     Redo,
     /// Vim's Ctrl+A: add the count to the number at or after the cursor.
@@ -61,6 +65,8 @@ pub struct Yank {
     /// Linewise register values end in a newline.
     pub text: String,
     pub linewise: bool,
+    /// Width in text columns for a blockwise register; rows are newline-separated.
+    pub block_width: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -210,6 +216,7 @@ struct LastVisual {
     anchor: usize,
     cursor: usize,
     to_line_end: bool,
+    block_columns: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +246,7 @@ struct RepeatChange {
 #[derive(Clone, Debug)]
 struct VisualRepeat {
     linewise: bool,
+    blockwise: bool,
     rows: usize,
     columns: usize,
     includes_newline: bool,
@@ -290,6 +298,7 @@ pub struct VimNavigation {
     motion_epoch: u64,
     visual_to_line_end: bool,
     last_visual: Option<LastVisual>,
+    block_columns: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +329,8 @@ pub struct VimState {
     motion_epoch: u64,
     visual_to_line_end: bool,
     last_visual: Option<LastVisual>,
+    block_columns: Option<(usize, usize)>,
+    block_insert: Option<block::BlockInsert>,
     /// Line break and indentation that separate the copies of a counted `o`.
     insert_line_prefix: Option<String>,
     /// Character range of the lines the view currently shows, for H/M/L.
@@ -356,6 +367,8 @@ impl Default for VimState {
             motion_epoch: 0,
             visual_to_line_end: false,
             last_visual: None,
+            block_columns: None,
+            block_insert: None,
             insert_line_prefix: None,
             visible: None,
             scroll_request: None,
@@ -396,8 +409,10 @@ impl VimState {
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
         self.yanked_ranges.clear();
-        if matches!(self.mode, VimMode::Visual | VimMode::VisualLine)
-            && self.pending.is_none()
+        if matches!(
+            self.mode,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        ) && self.pending.is_none()
             && matches!(key, VimKey::Char('d' | 'x'))
         {
             return self.cut_visual(text);
@@ -405,12 +420,17 @@ impl VimState {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let old_count = self.count;
-        let visual_change = self.selection(text).and_then(|range| {
+        let visual_change = self.visual_change_geometry(text).and_then(|visual| {
             let keys = match (self.pending, key) {
                 (Some(Pending::Replace(_)), VimKey::Char(_) | VimKey::Enter | VimKey::Tab) => {
                     vec![VimKey::Char('r'), key]
                 }
-                (None, VimKey::Char('c' | 's' | '>' | '<' | 'p' | 'P' | 'J' | 'u' | 'U' | '~')) => {
+                (
+                    None,
+                    VimKey::Char(
+                        'c' | 's' | 'I' | 'A' | '>' | '<' | 'p' | 'P' | 'J' | 'u' | 'U' | '~',
+                    ),
+                ) => {
                     let mut keys = Vec::new();
                     if old_count > 0 {
                         keys.extend(old_count.to_string().chars().map(VimKey::Char));
@@ -435,7 +455,7 @@ impl VimState {
                 }
                 _ => return None,
             };
-            Some((self.visual_repeat(text, &range), keys))
+            Some((visual, keys))
         });
         let insert_changed = old_mode == VimMode::Insert
             && self
@@ -462,10 +482,13 @@ impl VimState {
         self.clamp_cursor(text);
         let (consumed, text_changed, yanked) = match self.mode {
             VimMode::Insert => self.handle_insert_key(text, key),
-            VimMode::Normal | VimMode::Visual | VimMode::VisualLine => {
+            VimMode::Normal | VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => {
                 self.handle_normal_key(text, key)
             }
         };
+        if self.mode == VimMode::VisualBlock {
+            self.sync_block_cursor(text, old_cursor);
+        }
         self.clamp_cursor(text);
         if !self.replaying {
             if old_mode != VimMode::Insert && self.mode == VimMode::Insert {

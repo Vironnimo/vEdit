@@ -158,7 +158,7 @@ pub const COMMANDS: &[CommandHelp] = &[
         "settings",
         "[PATCH.json] | leader-key VALUE | swap-jk true|false | font NAME",
         "Read preferences or persist a supplied patch.",
-        "Omit arguments to read settings and the effective keybinding catalog. PATCH.json changes supplied fields; null preserves them.\nleader-key: space, comma, backslash or one printable character. font: jetbrains-mono, consolas, cascadia-mono.\nKeybinding/indentation maps replace their whole override map: merge existing entries when retaining them.\nmulticursor patches merge supplied fields: modifier alt|ctrl, spread_paste/match_case/whole_word booleans, limit 100..10000.\nReturns applied settings; invalid patches change nothing. Full fields: vedit-cli schema settings.",
+        "Omit arguments to read settings and the effective keybinding catalog. PATCH.json changes supplied fields; null preserves them.\nleader-key: space, comma, backslash or one printable character. font: jetbrains-mono, consolas, cascadia-mono.\nKeybinding/indentation maps replace their whole override map: merge existing entries when retaining them.\nvim_keys merges Ctrl-key preferences: editor|vim, null resets one key to its default.\nmulticursor patches merge supplied fields: modifier alt|ctrl, spread_paste/match_case/whole_word booleans, limit 100..10000.\nReturns applied settings; invalid patches change nothing. Full fields: vedit-cli schema settings.",
         []
     ),
     command!(

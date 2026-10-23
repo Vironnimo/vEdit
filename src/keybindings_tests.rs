@@ -451,6 +451,7 @@ fn native_clipboard_event_gives_recording_feedback_without_touching_a_document()
             .as_ref()
             .unwrap()
             .0
+            .to_ascii_lowercase()
             .contains("clipboard")
     );
     assert!(app.ctx.input(|input| input.events.is_empty()));

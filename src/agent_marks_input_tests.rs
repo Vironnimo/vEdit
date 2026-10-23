@@ -40,6 +40,9 @@ fn fixture(mode: VimMode) -> VEditApp {
     tab.set_cursor(0..0);
     match mode {
         VimMode::Normal => {}
+        VimMode::VisualBlock => {
+            tab.vim.handle_key(&mut tab.text, VimKey::VisualBlock);
+        }
         VimMode::Visual | VimMode::VisualLine | VimMode::Insert => {
             let key = match mode {
                 VimMode::Visual => 'v',

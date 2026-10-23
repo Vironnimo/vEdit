@@ -102,7 +102,7 @@ impl VEditApp {
             "Vim" => {
                 editor_preferences::preference_heading(ui, "VIM");
                 changed |= ui.checkbox(&mut self.settings.vim, "Vim motions (default)")
-                    .on_hover_text("Use Normal, Insert, Visual and Visual Line modes. Changes apply immediately.").changed();
+                    .on_hover_text("Use Normal, Insert, Visual, Visual Line and Visual Block modes. Changes apply immediately.").changed();
                 changed |= ui.checkbox(&mut self.settings.swap_jk, "Swap J and K")
                     .on_hover_text("Swap vertical Vim navigation. Inserted text and literal search targets stay unchanged.").changed();
                 changed |= egui::ComboBox::from_label("Leader key")
@@ -141,17 +141,25 @@ impl VEditApp {
                     .color(MUTED),
                 );
                 ui.add_space(12.0);
-                editor_preferences::preference_heading(ui, "VIM REFERENCE");
-                for text in [
-                    "h j k l · w b e · 0 ^ $ · gg G · %",
-                    "i a I A · o O · r · x · dd · cw · cc · D C",
-                    "v V · y d c p · > < · u · Ctrl R",
-                    "Counts: 3w · 2dd · d2w     Find: f F t T ; ,",
-                    "Search: / ? · n N · * #     Pages: Ctrl F B D U",
-                    "Commands: :w :wa :q :wq :e path :42",
-                ] {
-                    ui.label(RichText::new(text).monospace().size(11.5).color(TEXT));
-                }
+                ui.collapsing("Vim reference", |ui| {
+                    for text in [
+                        "h j k l · w b e · 0 ^ $ · gg G · %",
+                        "i a I A · o O · r · x · dd · cw · cc · D C",
+                        "v V · y d c p · > < · u · Ctrl R",
+                        "Visual Block: Ctrl Q by default · I / A insert at block edges",
+                        "Counts: 3w · 2dd · d2w     Find: f F t T ; ,",
+                        "Search: / ? · n N · * #",
+                        "Commands: :w :wa :q :wq :e path :42",
+                    ] {
+                        ui.label(RichText::new(text).monospace().size(11.5).color(TEXT));
+                    }
+                });
+                ui.add_space(12.0);
+                changed |= keybindings::vim_keys::settings_ui(
+                    ui,
+                    &mut self.settings.vim_keys,
+                    &self.settings.keybindings,
+                );
             }
             _ => changed |= self.reading_settings_ui(ui),
         }

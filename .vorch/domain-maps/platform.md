@@ -15,6 +15,8 @@ connects the custom titlebar to the maintained Windows backend.
   in `documents.md`.
 - `src/window_chrome.rs` lays out and paints the titlebar. `src/app.rs` guards
   close requests and publishes its geometry through the patched `vendor/winit`.
+- `vendor/egui-winit` preserves keyboard provenance before clipboard translation;
+  the editor input owner uses it to route configurable Ctrl chords to Vim.
 - Endpoint discovery/forwarding lives in `src/cli_transport.rs`; see `control.md`.
   Packaging, installation, registry integration and embedded executable resources
   belong to `development.md`.
@@ -51,6 +53,8 @@ ordinary minimize/close controls and keyboard/accessibility activation.
 - `vendor/winit` is selected through Cargo's patch section. Read
   `vendor/winit/VEDIT_PATCH.md` before changing native behavior or upgrading it;
   the copy includes DPI, titlebar and Explorer-drop changes.
+- `vendor/egui-winit/VEDIT_PATCH.md` owns the keyboard/clipboard event contract.
+  Preserve both the original key and adjacent clipboard event when upgrading it.
 - A headless titlebar image cannot verify native Windows Snap Layouts, physical
   monitor transitions or Explorer drops. Preserve native checks alongside pure
   geometry tests when replacing backend behavior.
@@ -67,7 +71,7 @@ Read these only when your task matches.
 
 - Changing window startup, profile layout, crash restoration or legacy import
   -> `platform/profiles-and-migration.md`
-- Changing custom chrome, native hit testing, DPI, Explorer drops or winit
+- Changing custom chrome, native hit testing, DPI, Explorer drops or native input
   -> `platform/native-window.md`
 - Changing endpoint/window selection or command help -> `control.md`
 - Changing runtime command wording -> `control/agent-facing-text.md`

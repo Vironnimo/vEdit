@@ -519,15 +519,17 @@ impl VEditApp {
                 remaining.extend(events);
                 break;
             }
+            let forwarded_to_vim = self.vim_key_forwarded(&event);
             let source_matches = |action| {
-                keybindings::source_matches(
-                    &self.settings.keybindings,
-                    action,
-                    &event,
-                    vim_modal,
-                    active,
-                    placing,
-                )
+                !forwarded_to_vim
+                    && keybindings::source_matches(
+                        &self.settings.keybindings,
+                        action,
+                        &event,
+                        vim_modal,
+                        active,
+                        placing,
+                    )
             };
             let action = Action::ALL.iter().copied().find(|a| {
                 a.multicursor() && source_matches(*a) && (*a != Action::CursorUndo || active)

@@ -148,13 +148,26 @@ impl VEditApp {
         {
             return false;
         }
+        let shortcut_context = self.shortcut_input_context();
         let shortcut = self.ctx.input(|input| {
             input.events.iter().enumerate().find_map(|(index, event)| {
-                let action = if self.shortcut_matches(keybindings::Action::SwitchProject, event) {
+                let action = if self.shortcut_matches(
+                    keybindings::Action::SwitchProject,
+                    event,
+                    shortcut_context,
+                ) {
                     WorkspaceAction::TogglePicker
-                } else if self.shortcut_matches(keybindings::Action::NextProject, event) {
+                } else if self.shortcut_matches(
+                    keybindings::Action::NextProject,
+                    event,
+                    shortcut_context,
+                ) {
                     WorkspaceAction::Cycle { next: true }
-                } else if self.shortcut_matches(keybindings::Action::PreviousProject, event) {
+                } else if self.shortcut_matches(
+                    keybindings::Action::PreviousProject,
+                    event,
+                    shortcut_context,
+                ) {
                     WorkspaceAction::Cycle { next: false }
                 } else {
                     return None;
@@ -177,7 +190,7 @@ impl VEditApp {
                             keybindings::Action::PreviousProject,
                         ]
                         .into_iter()
-                        .any(|action| self.shortcut_matches(action, event))
+                        .any(|action| self.shortcut_matches(action, event, shortcut_context))
                     });
                 });
                 self.workspace_discard_trailing_text();

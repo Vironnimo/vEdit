@@ -103,6 +103,7 @@ fn fixture_tab(root: &Path, workspace: &Path, title: &str, text: &str) -> Editor
     tab.recovery_path = root.join("recovery").join(format!("{}.txt", tab.id));
     tab.vim.set_register(Yank {
         text: "private vim register".into(),
+        block_width: None,
         linewise: false,
     });
     tab
@@ -194,6 +195,7 @@ fn marks_across_projects_and_split_views_are_observed_without_touching_editor_st
     tab.annotations_revision = Some(tab.revision);
     fixture.app.register = Some(Yank {
         text: "shared vim value".into(),
+        block_width: None,
         linewise: true,
     });
     // An unrelated insert transaction must survive observing or handing off marks.

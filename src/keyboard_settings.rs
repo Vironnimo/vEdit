@@ -18,6 +18,9 @@ impl VEditApp {
         editor_preferences::preference_heading(ui, "KEYBOARD SHORTCUTS");
         ui.label(RichText::new("Choose a command, then record or add a shortcut. Changes apply immediately and are saved.").size(11.0).color(MUTED));
         ui.label(RichText::new("Context shows where a command works. Separate contexts may share a key. Text navigation, clipboard and Vim motions retain their input meaning.").size(10.5).color(MUTED));
+        if ui.link("Vim key forwarding…").clicked() {
+            self.open_settings_section("Vim");
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add(
