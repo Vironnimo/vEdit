@@ -189,17 +189,11 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
 }
 
 fn pending(app: &VEditApp) -> bool {
-    app.projects.iter().any(|project| {
-        project.tabs.iter().any(|tab| tab.loading)
-            || project.change_review.view.as_ref().is_some_and(|view| {
-                view.loading
-                    || view.lazy_request.is_some()
-                    || view
-                        .files
-                        .iter()
-                        .any(|entry| matches!(entry.patch, EntryPatch::Loading))
-            })
-    })
+    app.change_review_loading()
+        || app
+            .projects
+            .iter()
+            .any(|project| project.tabs.iter().any(|tab| tab.loading))
 }
 
 /// Run frames until review and document workers have delivered.

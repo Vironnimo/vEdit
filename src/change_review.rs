@@ -375,6 +375,21 @@ impl VEditApp {
             .is_some_and(|project| project.change_review.view.is_some())
     }
 
+    /// Whether any project's change review still waits for Git or patch workers.
+    #[cfg(test)]
+    pub(super) fn change_review_loading(&self) -> bool {
+        self.projects.iter().any(|project| {
+            project.change_review.view.as_ref().is_some_and(|view| {
+                view.loading
+                    || view.lazy_request.is_some()
+                    || view
+                        .files
+                        .iter()
+                        .any(|entry| matches!(entry.patch, EntryPatch::Loading))
+            })
+        })
+    }
+
     pub(super) fn review_command(&mut self, action: keybindings::Action) {
         let Some(command) = review_action(action) else {
             return;

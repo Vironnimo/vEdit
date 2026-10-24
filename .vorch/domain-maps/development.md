@@ -46,6 +46,10 @@ it writes per-test logs, counts, durations and the slowest 20 into a unique
 `--report-time` requires nightly. Direct Cargo tests retain their shared-process
 harness and do not acquire this deadline or per-case environment isolation.
 
+`scripts/readme_assets.py` runs the ignored generator `src/readme_assets_tests.rs`
+and writes the README screenshots to `.github/assets/` (procedure in
+`docs/development.md`, README images).
+
 `scripts/worktree.py` owns marked `.worktrees/<name>` checkouts on `codex/<name>`;
 Codex app-managed checkouts have their own lifecycle. The script installs nothing
 at creation and allocates no ports. Cargo builds on demand into that checkout's

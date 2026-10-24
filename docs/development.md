@@ -146,6 +146,17 @@ against the checked-in references, with both variables unset. Custom chrome,
 native dialogs and cross-monitor DPI behavior still require native desktop checks;
 headless images cannot establish those results.
 
+## README images
+
+`python scripts/readme_assets.py` regenerates the screenshots in `.github/assets/`.
+It runs the ignored test `app::readme_assets_tests::readme_assets`, which builds
+demo projects in temporary Git repositories, drives agent state through control
+requests and user state through keys, and renders each scene headlessly at two
+pixels per point. The script then scales the PNGs from `.tmp/readme-assets/png/`
+to WebP. It needs OpenGL, Pillow and, for the `Rust: ready` status, rust-analyzer.
+Review the images before committing them, and rerun the script when a release
+changes what the scenes show.
+
 ## Optional integration checks
 
 The ignored tests document their prerequisites beside `#[ignore]`. Run individual

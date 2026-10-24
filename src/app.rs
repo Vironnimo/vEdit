@@ -825,6 +825,10 @@ mod typography_ui_tests;
 mod visual_tests;
 
 #[cfg(test)]
+#[path = "readme_assets_tests.rs"]
+mod readme_assets_tests;
+
+#[cfg(test)]
 #[path = "git_history_tests.rs"]
 mod git_history_tests;
 #[cfg(test)]
