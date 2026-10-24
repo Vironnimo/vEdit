@@ -67,7 +67,8 @@ python scripts/push.py
 
 The command fetches `origin/main` before validation. If the remote has commits
 local `main` lacks, nothing is checked or pushed; report the divergence instead
-of pulling or force-pushing. It checks the remote again before pushing the exact
+of pulling or force-pushing. A remote without `main`, such as a new empty
+repository, has nothing local `main` lacks; the push creates the branch. It checks the remote again before pushing the exact
 validated hash as a fast-forward. Commits added to local `main` meanwhile remain
 for the next run. A failed transport can leave the remote outcome unknown; inspect
 the remote before retrying.

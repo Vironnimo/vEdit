@@ -173,6 +173,20 @@ class RepositoryFixture(unittest.TestCase):
         runner.assert_not_called()
         self.assertIsNone(result["logs"])
 
+    def test_push_creates_main_on_an_empty_remote_and_then_reports_it_present(self):
+        remote = self.home / "remote.git"
+        self.run_git("init", "-q", "--bare", str(remote))
+        self.run_git("remote", "add", "origin", str(remote))
+        commit = self.run_git("rev-parse", "HEAD").decode().strip()
+        steps = [push.Step("probe", [sys.executable, "-c", "pass"])]
+        with patch.dict(os.environ, self.env, clear=True), patch.object(push, "STEPS", steps):
+            first = push.validate(self.root, False, lambda _: None)
+            again = push.validate(self.root, False, lambda _: None)
+        self.assertTrue(first["pushed"], first)
+        self.assertEqual(self.run_git("--git-dir", str(remote), "rev-parse", "main").decode().strip(), commit)
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["pushed"])
+
     def test_report_survives_checkout_cleanup(self):
         command = [sys.executable, "-c", "from pathlib import Path; "
                    "p = Path('.tmp/test-survey/probe'); p.mkdir(parents=True); "

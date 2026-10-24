@@ -106,8 +106,17 @@ def primary_root() -> Path:
     return Path(common).parent
 
 
-def remote_is_behind(root: Path, commit: str) -> tuple[bool, str]:
-    """Use the fetched commit even when no remote-tracking ref is configured."""
+def remote_is_behind(root: Path, commit: str) -> tuple[bool, str | None]:
+    """Use the fetched commit even when no remote-tracking ref is configured.
+
+    A remote without the branch, such as a new empty repository, contains
+    nothing that local main could lack; the push then creates the branch.
+    """
+    listed = git("ls-remote", "--exit-code", "--heads", REMOTE, f"refs/heads/{PRIMARY_BRANCH}", cwd=root)
+    if listed.returncode == 2:
+        return True, None
+    if listed.returncode:
+        raise RuntimeError(listed.stderr.strip() or listed.stdout.strip())
     git_output("fetch", "-q", REMOTE, PRIMARY_BRANCH, cwd=root)
     remote = git_output("rev-parse", "FETCH_HEAD", cwd=root)
     contained = git("merge-base", "--is-ancestor", remote, commit, cwd=root).returncode == 0
