@@ -129,7 +129,15 @@ try {
     Set-Content -LiteralPath $draft -Value 'recover this separate draft' -Encoding UTF8
     Invoke-EditorCli --window w1 new 'Separate draft' --file $draft | Out-Null
     Wait-For { Test-Path -LiteralPath (Join-Path $profile 'recovery/windows/w1/session.json') } 'secondary recovery manifest'
-    Wait-For { (Get-Content -LiteralPath (Join-Path $profile 'recovery/windows/w1/session.json') -Raw).Contains('Separate draft') } 'secondary draft persistence'
+    # Session metadata may be written before the debounced document snapshot.
+    # Simulate a crash only after the referenced draft has actually been secured.
+    Wait-For {
+        $session = Get-Content -LiteralPath (Join-Path $profile 'recovery/windows/w1/session.json') -Raw | ConvertFrom-Json
+        $savedDraft = @($session.projects | ForEach-Object { $_.tabs } | Where-Object title -eq 'Separate draft')
+        $savedDraft.Count -eq 1 -and $savedDraft[0].recovery_path -and
+            (Test-Path -LiteralPath $savedDraft[0].recovery_path) -and
+            (Get-Content -LiteralPath $savedDraft[0].recovery_path -Raw).Contains('recover this separate draft')
+    } 'secondary draft persistence'
     Wait-For {
         foreach ($id in @('main', 'w1', 'w2', 'w3')) {
             $relative = if ($id -eq 'main') { 'recovery/session.json' } else { "recovery/windows/$id/session.json" }
@@ -161,7 +169,8 @@ try {
 } catch {
     foreach ($id in @('main', 'w1', 'w2', 'w3')) {
         $response = & $cli --window $id status | ConvertFrom-Json
-        Write-Output ("Window {0}: ok={1}, error={2}" -f $id, $response.ok, ($response.error | ConvertTo-Json -Compress))
+        $details = if ($response.ok) { 'null' } else { $response.error | ConvertTo-Json -Compress }
+        Write-Output ("Window {0}: ok={1}, error={2}" -f $id, $response.ok, $details)
     }
     throw
 } finally {
