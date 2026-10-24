@@ -615,7 +615,8 @@ impl VEditApp {
             self.git_peek_escape();
         }
         self.hover_escape();
-        let dragging_tab = self.tab_drag_keys() || self.sidebar_drag_keys();
+        let dragging_tab =
+            self.project_tab_drag_keys() || self.tab_drag_keys() || self.sidebar_drag_keys();
         let switching_project = !dragging_tab && self.workspace_keys();
         if !dragging_tab && !switching_project {
             self.focus_region_shortcuts(&self.ctx.clone());

@@ -237,9 +237,15 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     let (app, expected_groups) = split_fixture();
     let mut screen = harness(app);
     assert_eq!(tab_groups(screen.state()), expected_groups[0]);
-    screen
+    let start = screen
         .get_by_label("Project: vedit-workspace-ui-01")
-        .click();
+        .rect()
+        .center();
+    project_pointer(&mut screen, start, true);
+    screen.event(egui::Event::PointerMoved(start + Vec2::new(1.0, 0.0)));
+    screen.run_steps(1);
+    assert!(screen.state().workspace_ui.dragged_root.is_none());
+    project_pointer(&mut screen, start + Vec2::new(1.0, 0.0), false);
     screen.run_steps(3);
     assert_eq!(screen.state().active_project, 1);
     assert!(!screen.state().workspace_picker_open());
@@ -263,6 +269,206 @@ fn pointer_switch_preserves_visual_draft_and_ordered_split_groups() {
     assert!(screen.state().projects.iter().all(|project| {
         project.index_generation == 0 && project.tabs.iter().all(|tab| !tab.loading)
     }));
+}
+
+fn project_pointer(screen: &mut Harness<'_, VEditApp>, position: egui::Pos2, pressed: bool) {
+    screen.event(egui::Event::PointerMoved(position));
+    screen.event(egui::Event::PointerButton {
+        pos: position,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+    screen.run_steps(1);
+}
+
+fn start_project_drag(screen: &mut Harness<'_, VEditApp>, project: &str, target: egui::Pos2) {
+    let start = screen
+        .get_by_label(&format!("Project: {project}"))
+        .rect()
+        .center();
+    project_pointer(screen, start, true);
+    screen.event(egui::Event::PointerMoved(start + Vec2::new(15.0, 0.0)));
+    screen.run_steps(1);
+    screen.event(egui::Event::PointerMoved(target));
+    screen.run_steps(2);
+    assert!(screen.state().workspace_ui.dragged_root.is_some());
+}
+
+fn project_roots(app: &VEditApp) -> Vec<PathBuf> {
+    app.projects
+        .iter()
+        .map(|project| project.root.clone())
+        .collect()
+}
+
+#[test]
+fn project_tab_drags_preserve_the_active_workspace_and_persist_the_new_order() {
+    let (app, groups) = split_fixture();
+    let original = project_roots(&app);
+    let mut screen = harness(app);
+    for (source, destination, after, expected) in [
+        (2, 0, false, [2, 0, 1]),
+        (0, 1, true, [2, 1, 0]),
+        (2, 0, true, [1, 0, 2]),
+    ] {
+        let before = project_roots(screen.state());
+        let rect = screen
+            .get_by_label(&format!("Project: vedit-workspace-ui-{destination:02}"))
+            .rect();
+        let target = egui::pos2(
+            if after {
+                rect.right() - 3.0
+            } else {
+                rect.left() + 3.0
+            },
+            rect.center().y,
+        );
+        screen.state_mut().session_dirty = false;
+        start_project_drag(
+            &mut screen,
+            &format!("vedit-workspace-ui-{source:02}"),
+            target,
+        );
+        assert_eq!(
+            project_roots(screen.state()),
+            before,
+            "only releasing commits the order"
+        );
+        assert_eq!(screen.state().project().unwrap().root, original[0]);
+        assert_eq!(
+            screen.output().platform_output.cursor_icon,
+            egui::CursorIcon::Grabbing
+        );
+        assert!(
+            !screen.output().viewport_output.values().any(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::StartDrag))
+            }),
+            "project gestures must not drag the window"
+        );
+        project_pointer(&mut screen, target, false);
+        screen.run_steps(3);
+        let app = screen.state();
+        assert!(app.workspace_ui.dragged_root.is_none());
+        assert_eq!(
+            project_roots(app),
+            expected.map(|index| original[index].clone())
+        );
+        assert_eq!(app.project().unwrap().root, original[0]);
+        assert_eq!(tab_groups(app), groups[0]);
+        assert_eq!(app.tab().unwrap().vim.mode, VimMode::Visual);
+        assert_eq!(app.tab().unwrap().selection, 6..12);
+        assert_draft(app, app.active_project);
+        assert!(app.session_dirty);
+        let saved: Session =
+            serde_json::from_slice(&serde_json::to_vec(&app.session()).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .projects
+                .iter()
+                .map(|project| project.root.clone())
+                .collect::<Vec<_>>(),
+            project_roots(app)
+        );
+        assert_eq!(saved.active_project, app.active_project);
+    }
+    project_shortcut(&mut screen, Key::PageDown);
+    assert_eq!(screen.state().project().unwrap().root, original[2]);
+    assert_eq!(tab_groups(screen.state()), groups[2]);
+    project_shortcut(&mut screen, Key::PageUp);
+    assert_eq!(tab_groups(screen.state()), groups[0]);
+    assert_draft(screen.state(), screen.state().active_project);
+
+    let other = screen.state_mut().ensure_other_files();
+    screen.state_mut().projects[other]
+        .tabs
+        .push(EditorTab::new(None, "Untitled".into()));
+    screen.run_steps(3);
+    let rect = screen.get_by_label("Project: vedit-workspace-ui-01").rect();
+    let target = egui::pos2(rect.left() + 3.0, rect.center().y);
+    start_project_drag(&mut screen, "Other files", target);
+    project_pointer(&mut screen, target, false);
+    screen.run_steps(3);
+    assert!(screen.state().projects[0].is_other_files());
+    assert_eq!(screen.state().project().unwrap().root, original[0]);
+    assert!(matches!(
+        screen.state().session().projects[0].kind,
+        WorkspaceKind::OtherFiles
+    ));
+}
+
+#[test]
+fn cancelled_project_drags_preserve_order_selection_and_documents() {
+    for cancel in ["outside", "escape", "focus", "pointer", "modal", "same"] {
+        let (app, _) = split_fixture();
+        let original = project_roots(&app);
+        let mut screen = harness(app);
+        let rect = screen.get_by_label("Project: vedit-workspace-ui-00").rect();
+        let target = if cancel == "same" {
+            screen
+                .get_by_label("Project: vedit-workspace-ui-02")
+                .rect()
+                .center()
+        } else if cancel == "outside" {
+            screen.state().editor_rect.unwrap().center()
+        } else {
+            egui::pos2(rect.left() + 3.0, rect.center().y)
+        };
+        start_project_drag(&mut screen, "vedit-workspace-ui-02", target);
+        match cancel {
+            "escape" => {
+                screen.event(egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                screen.event(egui::Event::Text("must not edit".into()));
+            }
+            "focus" => {
+                screen.input_mut().focused = false;
+                screen.event(egui::Event::WindowFocused(false));
+            }
+            "pointer" => screen.event(egui::Event::PointerGone),
+            "modal" => screen.state_mut().settings_open = true,
+            _ => {}
+        }
+        screen.run_steps(1);
+        project_pointer(&mut screen, target, false);
+        screen.run_steps(3);
+        let app = screen.state();
+        assert!(app.workspace_ui.dragged_root.is_none(), "{cancel}");
+        assert_eq!(project_roots(app), original, "{cancel}");
+        assert_eq!(app.active_project, 0, "{cancel}");
+        assert_eq!(app.tab().unwrap().vim.mode, VimMode::Visual, "{cancel}");
+        assert_eq!(app.tab().unwrap().selection, 6..12, "{cancel}");
+        assert_draft(app, 0);
+    }
+}
+
+#[test]
+fn holding_a_project_drag_at_either_edge_reaches_hidden_projects() {
+    let mut screen = harness_with_size(fixture(9), Vec2::new(800.0, 700.0));
+    let original = project_roots(screen.state());
+    let rect = screen.state().workspace_ui.header_rect.unwrap();
+    let target = egui::pos2(rect.right() - 3.0, rect.center().y);
+    start_project_drag(&mut screen, "vedit-workspace-ui-00", target);
+    screen.run_steps(140);
+    project_pointer(&mut screen, target, false);
+    screen.run_steps(3);
+    assert_eq!(screen.state().projects.last().unwrap().root, original[0]);
+    assert_eq!(screen.state().active_project, 8);
+    let target = egui::pos2(rect.left() + 3.0, rect.center().y);
+    start_project_drag(&mut screen, "vedit-workspace-ui-00", target);
+    screen.run_steps(140);
+    project_pointer(&mut screen, target, false);
+    screen.run_steps(3);
+    assert_eq!(project_roots(screen.state()), original);
+    assert_eq!(screen.state().active_project, 0);
 }
 
 #[test]

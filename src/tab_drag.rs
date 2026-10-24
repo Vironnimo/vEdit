@@ -30,6 +30,7 @@ impl VEditApp {
     }
     pub(super) fn tab_pointer_interaction_active(&self) -> bool {
         self.tab_drag_active()
+            || self.project_tab_pointer_interaction_active()
             || self.ctx.input(|input| {
                 input.pointer.primary_down()
                     && input.pointer.press_origin().is_some_and(|origin| {

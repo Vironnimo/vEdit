@@ -34,7 +34,10 @@ the same document, including its edit history, rather than a copied buffer.
 `VimNavigation` also carries each pane's multicursor selections; transaction and
 selection-history rules belong to `editing/input-and-history.md`.
 Inactive projects park their `EditorLayout`; switching projects restores that
-layout without reopening their documents.
+layout without reopening their documents. Project tab drags reorder the session's
+project list without switching the active workspace or its layout; the picker
+and cycling shortcuts follow that same order. Gesture handling belongs to
+`src/workspace_ui.rs` and its private `src/workspace_ui/project_tab_drag.rs` unit.
 
 The `Other files` workspace uses a synthetic, non-filesystem layout key. Use
 `Project::folder_root` or `VEditApp::active_folder` for folder services; do not

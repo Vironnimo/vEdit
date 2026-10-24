@@ -1,6 +1,9 @@
 //! Fast project navigation without rebuilding or reloading open documents.
 use super::*;
 
+#[path = "workspace_ui/project_tab_drag.rs"]
+mod project_tab_drag;
+
 const PROJECT_ROW_HEIGHT: f32 = 52.0;
 const PROJECT_TAB_HEIGHT: f32 = 28.0;
 const PROJECT_TAB_GAP: f32 = 4.0;
@@ -15,6 +18,9 @@ pub(super) struct WorkspaceUiState {
     header_root: Option<PathBuf>,
     header_width: f32,
     header_count: usize,
+    header_rect: Option<egui::Rect>,
+    header_tabs: Vec<(PathBuf, egui::Rect)>,
+    dragged_root: Option<PathBuf>,
     prefix_focus_policy: Option<egui::SurrenderFocusOn>,
 }
 
@@ -26,6 +32,10 @@ enum WorkspaceAction {
     },
     Select {
         index: usize,
+    },
+    Reorder {
+        root: PathBuf,
+        before: Option<PathBuf>,
     },
     OpenWorktree(PathBuf),
     Project {
@@ -235,6 +245,9 @@ impl VEditApp {
         {
             self.apply_workspace_action(action);
         }
+        if self.ctx.input(|input| input.pointer.primary_released()) {
+            self.workspace_ui.dragged_root = None;
+        }
     }
 
     fn apply_workspace_action(&mut self, action: WorkspaceAction) {
@@ -264,6 +277,43 @@ impl VEditApp {
                 self.switch_project(index);
                 // The source was rendered before this deferred switch.
                 self.ctx.request_repaint();
+            }
+            WorkspaceAction::Reorder { root, before } => {
+                let Some(from) = self
+                    .projects
+                    .iter()
+                    .position(|project| project.root == root)
+                else {
+                    return;
+                };
+                let before = match before {
+                    Some(root) => {
+                        let Some(index) = self
+                            .projects
+                            .iter()
+                            .position(|project| project.root == root)
+                        else {
+                            return;
+                        };
+                        index
+                    }
+                    None => self.projects.len(),
+                };
+                let to = before.saturating_sub(usize::from(from < before));
+                if from != to {
+                    let active = self.project().map(|project| project.root.clone());
+                    let project = self.projects.remove(from);
+                    self.projects.insert(to, project);
+                    // Reordering keeps the same workspace and its live layout;
+                    // switching would unnecessarily reset focus and input state.
+                    self.active_project = self
+                        .projects
+                        .iter()
+                        .position(|project| Some(&project.root) == active.as_ref())
+                        .unwrap_or(0);
+                    self.session_dirty = true;
+                    self.ctx.request_repaint();
+                }
             }
             WorkspaceAction::OpenWorktree(path) => {
                 self.add_project(path);
@@ -298,6 +348,17 @@ impl VEditApp {
     }
 
     pub(super) fn workspace_header_button(&mut self, ui: &mut egui::Ui) {
+        self.workspace_ui.header_rect = None;
+        self.workspace_ui.header_tabs.clear();
+        let drag_allowed = !self.chrome_blocked()
+            && !self.tab_drag_active()
+            && self.screen_jump.is_none()
+            && self.vim_command.is_none()
+            && !self.navigation_pending()
+            && !self.vim_search_active();
+        if !drag_allowed {
+            self.workspace_ui.dragged_root = None;
+        }
         if self.projects.is_empty() {
             self.workspace_ui.header_root = None;
             self.workspace_ui.header_count = 0;
@@ -392,6 +453,7 @@ impl VEditApp {
         self.workspace_ui.header_count = tabs.len();
         let mut chosen = None;
         let mut list = None;
+        let mut tab_strip = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = PROJECT_TAB_GAP;
             ui.allocate_ui_with_layout(
@@ -425,12 +487,20 @@ impl VEditApp {
                             offset.clamp(0.0, (content_width - width).max(0.0)),
                         );
                     }
-                    scroll.show(ui, |ui| {
+                    let output = scroll.show(ui, |ui| {
                         ui.spacing_mut().item_spacing.x = PROJECT_TAB_GAP;
                         ui.horizontal(|ui| {
                             for (index, (tab, width)) in tabs.iter().zip(&widths).enumerate() {
                                 ui.push_id(&tab.root, |ui| {
                                     let response = project_header_tab(ui, tab, *width);
+                                    self.workspace_ui
+                                        .header_tabs
+                                        .push((tab.root.clone(), response.rect));
+                                    if drag_allowed
+                                        && response.drag_started_by(egui::PointerButton::Primary)
+                                    {
+                                        self.workspace_ui.dragged_root = Some(tab.root.clone());
+                                    }
                                     if response.clicked() {
                                         chosen = Some((index, response.rect));
                                     }
@@ -449,6 +519,9 @@ impl VEditApp {
                             }
                         });
                     });
+                    self.workspace_ui.header_rect =
+                        Some(output.inner_rect.intersect(ui.clip_rect()));
+                    tab_strip = Some(output);
                 },
             );
             let response = project_list_button(ui, &tooltip);
@@ -496,6 +569,7 @@ impl VEditApp {
         }
         let response = list.expect("project list button is always drawn");
         self.workspace_header_list(ui, &response);
+        self.finish_project_tab_drag(ui, tab_strip.unwrap(), &tabs);
     }
 
     fn workspace_header_list(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
@@ -951,7 +1025,9 @@ fn project_context_menu(
 fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> egui::Response {
     let response = ui.add_sized(
         Vec2::new(width, PROJECT_TAB_HEIGHT),
-        egui::Button::new("").frame(false),
+        egui::Button::new("")
+            .frame(false)
+            .sense(egui::Sense::click_and_drag()),
     );
     let rect = response.rect;
     response.widget_info(|| {
@@ -973,6 +1049,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
         // Like editor tabs, the current project is marked by its underline.
         if response.hovered()
+            || response.dragged()
             || response.context_menu_opened()
             || crate::design::keyboard_focus(&response)
         {
