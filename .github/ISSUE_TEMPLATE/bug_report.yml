@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in vEdit doesn't work as described.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a project with ...
+        2. Press ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: vEdit version
+      description: The `version` field of `vedit-cli status`, or the version on the start screen.
+      placeholder: "0.6.3"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error messages or CLI output
+      description: Status bar details, Problems → Error details, or the JSON from vedit-cli.
+      render: text
