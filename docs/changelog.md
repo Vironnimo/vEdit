@@ -3,6 +3,8 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht im [Benutzerhandbuch](handbuch.md).
 
+Version 0.6.4 ergänzt Drag-and-drop für die Projekt-Tabs, einschließlich **Other files**. Einfügemarkierung und Rand-Scrolling helfen beim Umsortieren; **Esc** oder Loslassen außerhalb der Leiste bricht ab. Das aktive Projekt bleibt erhalten, und die neue Reihenfolge wird mit der Sitzung gespeichert.
+
 Version 0.6.3 macht Pfad-, Status- und Bedienhinweise wieder passiv. Kopierbare Detailansichten bleiben für ausführliche Inhalte; Git-History-Details stehen neben der jeweiligen Sidebar und verdecken die scrollbare Liste nicht mehr.
 
 Version 0.6.2 ergänzt die einstellbare Weitergabe von Ctrl-Kombinationen an Vim. **Settings → Vim → Control keys** zeigt pro Taste Editor- und Vim-Wirkung samt Modus; **Ctrl+C/X/V** bleiben standardmäßig bei der Windows-Zwischenablage. **Ctrl+Q** startet den neuen Visual-Block-Modus mit rechteckigen Auswahlen, Blockregistern, Einfügen, Undo und Wiederholen. Die Eingabeschicht erhält die ursprüngliche Tastenkombination auch bei leerer Zwischenablage.
