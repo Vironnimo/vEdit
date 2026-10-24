@@ -1,13 +1,13 @@
-# vEdit 0.6.3
+# vEdit 0.6.3 — Benutzerhandbuch
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 
-[Starten](#starten) · [Arbeiten im Editor](#arbeiten-im-editor) · [Tastenkürzel](#tastenkürzel) · [Mit Agenten arbeiten](#mit-agenten-arbeiten) · [Entwicklung](docs/development.md)
+[Starten](#starten) · [Arbeiten im Editor](#arbeiten-im-editor) · [Tastenkürzel](#tastenkürzel) · [Mit Agenten arbeiten](#mit-agenten-arbeiten) · [Entwicklung](development.md)
 
-Versionsnotizen stehen im [Versionsverlauf](docs/changelog.md); technische
-Dokumentation und frühere Prüfberichte im [Dokumentationsindex](docs/README.md).
+Versionsnotizen stehen im [Versionsverlauf](changelog.md); technische
+Dokumentation und frühere Prüfberichte im [Dokumentationsindex](README.md).
 
-![vEdit mit geöffnetem Projekt](tests/snapshots/vedit_workspace.png)
+![vEdit mit geöffnetem Projekt](../tests/snapshots/vedit_workspace.png)
 
 ## Starten
 
@@ -119,7 +119,7 @@ Die Markierung enthält den Text zum Zeitpunkt der Auswahl, einschließlich unge
 
 Die Übersicht zeigt die tatsächlich enthaltenen Zeilen und die Zeichenanzahl. Bei **Restore last** steht sichtbar, wie viele entfernte oder von einem Agenten abgeholte Bereiche zurückkommen. Die letzte Entfernung, **Clear all** oder Abholung bestimmt das Ziel; neue Markierungen und Notizen bleiben beim Wiederherstellen erhalten.
 
-Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](.agents/skills/vedit/SKILL.md), der auch im portablen Paket enthalten ist.
+Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` holen sie die Bereiche ab und entfernen die lila Markierungen; die letzte abgeholte Sammlung bleibt über Neustarts hinweg wiederherstellbar. Große Sammlungen und lange Ausschnitte werden vollständig über Folgeseiten geliefert. Die Anleitung gehört zum [Repository-Skill](../.agents/skills/vedit/SKILL.md), der auch im portablen Paket enthalten ist.
 
 ## Tastenkürzel
 
@@ -408,7 +408,7 @@ Die Seitenleiste **Review** zeigt die Dateien und Hinweise mit ausgeschriebener 
 
 `open` und `review` erhalten ungespeicherten Text. Unveränderte offene Dateien werden dabei im Hintergrund vom Datenträger aktualisiert. `close` lehnt geänderte oder noch speichernde Tabs ab. Öffnen, Laden und Speichern sind getrennte Zustände; eine erfolgreiche Anfrage allein bedeutet nicht, dass eine Datei bereits geladen oder geschrieben wurde. Die Verbindung bleibt lokal und ist pro Sitzung authentifiziert.
 
-Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/vedit/SKILL.md](.agents/skills/vedit/SKILL.md). Die portable Anwendung enthält eine Kopie unter `skills/vedit/`. Er erklärt die Bedienung und wie der Agent prüft, ob die angeforderten Änderungen und Dokumente tatsächlich bereit sind; eine persönliche Installation ist nicht erforderlich.
+Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/vedit/SKILL.md](../.agents/skills/vedit/SKILL.md). Die portable Anwendung enthält eine Kopie unter `skills/vedit/`. Er erklärt die Bedienung und wie der Agent prüft, ob die angeforderten Änderungen und Dokumente tatsächlich bereit sind; eine persönliche Installation ist nicht erforderlich.
 
 ## Speichern und Wiederherstellung
 
@@ -509,7 +509,7 @@ Im Bereich **Output** lassen sich zusätzlich eigene Befehle im aktiven Projekto
 
 Der Ausgabebereich ist ein Befehlsstarter mit Ausgabeanzeige. Interaktive Eingabe, Terminal-Anwendungen und Passwortabfragen sind dort nicht unterstützt. Befehle haben ein Zeitlimit von zehn Minuten; die Ausgabe wird begrenzt. **Run → Open terminal** öffnet für interaktive Arbeit ein separates PowerShell-Fenster im aktiven Projektordner. **Open terminal** ist ebenfalls in der Befehlspalette verfügbar. Im Ausgabebereich selbst stehen dafür **Terminal** und **Configure tasks** rechts in der Kopfzeile.
 
-vEdit bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt, Mehrfachcursor oder vollständigen VS-Code-Funktionsumfang.
+vEdit bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt oder vollständigen VS-Code-Funktionsumfang.
 
 ## Prüfen
 
@@ -523,4 +523,4 @@ Die Tests decken Bearbeitung, Vim, Dateizugriffe, Wiederherstellung, Git, CLI, B
 cargo test live_rust_analyzer_diagnostics_completion_and_definition -- --ignored --nocapture
 ```
 
-Build, gezielte Tests, Bildreferenzen und portable Pakete beschreibt die [Entwicklungsanleitung](docs/development.md). Repository-Agenten beginnen mit [AGENTS.md](AGENTS.md); die Bedienung einer laufenden vEdit-Instanz erklärt der separate [vEdit-Skill](.agents/skills/vedit/SKILL.md).
+Build, gezielte Tests, Bildreferenzen und portable Pakete beschreibt die [Entwicklungsanleitung](development.md). Repository-Agenten beginnen mit [AGENTS.md](../AGENTS.md); die Bedienung einer laufenden vEdit-Instanz erklärt der separate [vEdit-Skill](../.agents/skills/vedit/SKILL.md).

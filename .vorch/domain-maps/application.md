@@ -66,7 +66,7 @@ publication belongs to `documents.md`.
 - The exhaustive action dispatcher serves shortcuts, palette and command menu
   items behind existing input gates. Source-editor input ordering still belongs
   to `editor_input.rs` and `workspace_shortcuts.rs`; registry additions must
-  preserve those gates, menu availability and README behavior.
+  preserve those gates, menu availability and the user manual behavior.
 - Git completion uses `GitActionKind` in `src/git_actions.rs` for follow-up work;
   translated or revised display labels must never select behavior. Snapshot and
   history request/completion guards live in `src/git_refresh.rs`.

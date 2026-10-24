@@ -64,7 +64,11 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/vedit.exe') -Destination $executable -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/vedit-cli.exe') -Destination $releaseDirectory -Force
     & (Join-Path $PSScriptRoot 'package-language-tools.ps1') -ReleaseDirectory $releaseDirectory
-    $packagedReadme = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'README.md')).Replace('(.agents/skills/vedit/SKILL.md)', '(skills/vedit/SKILL.md)')
+    # The package README is the manual moved from docs/ to the package root:
+    # sibling docs gain docs/, parent paths lose ../ and the skill sits in skills/.
+    $packagedReadme = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'docs/handbuch.md'))
+    $packagedReadme = [regex]::Replace($packagedReadme, '\]\((?!https?:|#|\.\./)', '](docs/')
+    $packagedReadme = $packagedReadme.Replace('](../.agents/skills/vedit/', '](skills/vedit/').Replace('](../', '](')
     [System.IO.File]::WriteAllText((Join-Path $releaseDirectory 'README.md'), $packagedReadme, [System.Text.UTF8Encoding]::new($false))
     $previewDirectory = Join-Path $releaseDirectory 'tests/snapshots'
     New-Item -ItemType Directory -Path $previewDirectory -Force | Out-Null

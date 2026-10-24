@@ -5,7 +5,8 @@ Documentation and repository-tooling changes alone do not require a new package.
 
 ## Prepare and validate
 
-1. Keep `Cargo.toml`, `Cargo.lock`, current README behavior and relevant developer
+1. Keep `Cargo.toml`, `Cargo.lock`, the user manual `docs/handbuch.md`, the landing page
+   `README.md` (claims and screenshots) and relevant developer
    documentation consistent. Preserve the historical scope of versioned reports.
    Read `vendor/winit/VEDIT_PATCH.md` before changing the native backend.
 2. Run the affected regressions, then the complete checks required by `AGENTS.md`

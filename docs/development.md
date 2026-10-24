@@ -65,7 +65,8 @@ been configured. Never use the live session for destructive test fixtures.
 
 ## Repository workflow
 
-The user guide is `README.md`; `docs/README.md` indexes current documentation and
+The user guide is `docs/handbuch.md` (German); the root `README.md` is the English
+landing page. `docs/README.md` indexes current documentation and
 historical reports. Coding agents read `AGENTS.md`, `.vorch/PROJECT.md` and the
 relevant domain maps. The live-editor skill remains a separate operating guide.
 
@@ -304,7 +305,8 @@ wait for both syntax and token workers before taking snapshots.
 
 ## Documentation ownership
 
-`README.md` describes current user behavior. `AGENTS.md` provides repository
+`docs/handbuch.md` describes current user behavior; `README.md` summarizes it
+for GitHub visitors. `AGENTS.md` provides repository
 working instructions. `.agents/skills/vedit/` teaches control of a live editor;
 update its references, CLI help and schema together when that interface changes.
 `docs/agent-interface.md` separates the current observable contract from historical

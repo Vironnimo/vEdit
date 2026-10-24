@@ -103,5 +103,5 @@ distinct completeness, publication and resource-bound contracts.
 For a targeted pane run use
 `cargo test --bin vedit app::split::tests -- --test-threads=8`.
 Read `development.md` for validation policy and `docs/development.md` before
-headless visual checks. README sections on projects, loose files and editor
+headless visual checks. User manual sections on projects, loose files and editor
 navigation describe the corresponding user contract.

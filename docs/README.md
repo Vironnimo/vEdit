@@ -2,7 +2,8 @@
 
 ## Current entry points
 
-- [User manual](../README.md): current behavior, installation and shortcuts, in German.
+- [User manual](handbuch.md): current behavior, installation and shortcuts, in German.
+- [Project README](../README.md): the English overview shown on GitHub.
 - [Development](development.md): builds, tests, snapshots, packaging and isolated native checks.
 - [Agent control](agent-interface.md): current observable CLI contracts, followed by explicitly historical evaluations.
 - [vEdit operating skill](../.agents/skills/vedit/SKILL.md): controlling a live editor from an agent.

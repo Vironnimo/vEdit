@@ -81,7 +81,7 @@ Maintain affected documentation as part of the task with small, factual updates:
 - `.vorch/GLOSSARY.md` - shared vocabulary under the Terminology rules below
 - `.vorch/FLAGGED.md` - git-ignored, never commit it; keep only confirmed, concrete, still-open concerns, with the evidence and affected behavior. During implementation, fix confirmed bugs with a clear, bounded, low-risk solution even outside the original task; defer them to this file only with a concrete reason. Investigate a suspicion before adding it; when reviewing an existing suspicion, check it before removing it. Do not add pending evaluations, missing live checks, speculative future failures, or completion notes. Append at the bottom, or fold into a related entry when one fits; delete an entry once its concern is resolved or verified fixed instead of annotating it.
 
-**Write new developer and agent documentation in English.** Keep the user README in German and preserve historical reports in their original language and version context. User-facing chat follows the user's language.
+**Write new developer and agent documentation in English.** Keep the user manual `docs/handbuch.md` in German; the root `README.md` is the English landing page for GitHub. Preserve historical reports in their original language and version context. User-facing chat follows the user's language.
 
 ## Terminology
 
@@ -104,7 +104,7 @@ Maintain terminology as part of relevant work when a missing, stale, or ambiguou
 
 ## Preserve the user's work and deliver
 
-Read the relevant user behavior in `README.md` before changing it. Use the vEdit
+Read the relevant user behavior in `docs/handbuch.md` before changing it. Use the vEdit
 operating skill for live-editor interaction; ordinary repository edits use file
 tools. Never kill or restart the user's editor for tests or packaging. Fixtures
 use isolated profiles and repositories, never the user's current session.
@@ -125,6 +125,6 @@ waiting for another prompt. Name the commits, actual validation and remaining
 limits in the final report; explain any blocked commit and uncommitted changes.
 Pushing and publishing require explicit authorization.
 
-When delivering a runnable update, keep Cargo.toml, Cargo.lock, README, relevant
+When delivering a runnable update, keep Cargo.toml, Cargo.lock, the user manual, README, relevant
 docs and packaged contents consistent. Use `scripts/build-release.ps1`, not a
 single copied binary. Historical reports retain their original results.

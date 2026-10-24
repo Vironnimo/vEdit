@@ -5,7 +5,8 @@
 vEdit is a native Windows code editor for working across projects alongside coding
 agents. The `vedit` GUI and `vedit-cli` local control client share the Rust crate;
 CLI edits operate on open documents and remain drafts until explicitly saved.
-The German `README.md` describes user behavior; the product UI is English.
+The German `docs/handbuch.md` describes user behavior; the English `README.md` is
+the GitHub landing page. The product UI is English.
 Active profiles live under `%APPDATA%/vEdit/recovery`; isolated fixtures use
 `VEDIT_PROFILE_DIR` (see `platform.md`).
 

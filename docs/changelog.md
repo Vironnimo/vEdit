@@ -1,7 +1,7 @@
 # Versionsverlauf
 
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
-steht in der [README](../README.md).
+steht im [Benutzerhandbuch](handbuch.md).
 
 Version 0.6.3 macht Pfad-, Status- und Bedienhinweise wieder passiv. Kopierbare Detailansichten bleiben für ausführliche Inhalte; Git-History-Details stehen neben der jeweiligen Sidebar und verdecken die scrollbare Liste nicht mehr.
 
