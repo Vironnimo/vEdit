@@ -628,6 +628,13 @@ fn repeated_merges_keep_a_clear_mainline_screenshot() {
 
 #[test]
 fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
+    fn frames(screen: &mut egui_kittest::Harness<'_, VEditApp>, count: usize) {
+        for _ in 0..count {
+            screen.input_mut().time = Some(screen.ctx.input(|i| i.time) + 1.0 / 60.0);
+            screen.step();
+        }
+    }
+
     let mut snapshots = egui_kittest::SnapshotResults::default();
     for (side, width) in [
         (sidebar_layout::Side::Left, 1280.0),
@@ -655,14 +662,36 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
         let mut screen = visual_tests::harness(app);
         screen.set_size(Vec2::new(width, 720.0));
         visual_tests::settle_render(&mut screen);
-        screen.ctx.all_styles_mut(|style| {
-            style.interaction.tooltip_delay = 0.0;
-            style.interaction.tooltip_grace_time = 0.0;
-            style.interaction.show_tooltips_only_when_still = false;
-        });
         let source = screen.get_by_label("History entry 0").rect().center();
         screen.hover_at(source);
-        screen.run_steps(4);
+        frames(&mut screen, 20);
+        assert!(screen.query_by_label("Copy all").is_none());
+        frames(&mut screen, 15);
+        // Browse adjacent commits with production hover timing, in both paint orders.
+        // A warm card must follow each row without waiting for the old card to expire.
+        for index in [1, 2, 3, 2, 1, 0] {
+            let label = format!("History entry {index}");
+            let row = screen.get_by_label(&label).rect().center();
+            screen.hover_at(row);
+            frames(&mut screen, 2);
+            assert_eq!(
+                screen.get_all_by_label(&label).count(),
+                2,
+                "row and its details must both be visible: {side:?}, {width}, {index}"
+            );
+            for other in 0..4 {
+                if other != index {
+                    assert_eq!(
+                        screen
+                            .get_all_by_label(&format!("History entry {other}"))
+                            .count(),
+                        1,
+                        "previous commit details must disappear"
+                    );
+                }
+            }
+        }
+        frames(&mut screen, 2);
         let copy = screen.get_by_label("Copy all").rect();
         let card = screen.ctx.memory(|m| {
             m.area_rect(m.layer_id_at(copy.center()).unwrap().id)
@@ -684,8 +713,18 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
                 &egui_kittest::SnapshotOptions::new().output_path(PathBuf::from(directory)),
             );
         }
+        let gap = egui::pos2(
+            match side {
+                sidebar_layout::Side::Left => (sidebar.right() + card.left()) * 0.5,
+                sidebar_layout::Side::Right => (sidebar.left() + card.right()) * 0.5,
+            },
+            source.y,
+        );
+        screen.hover_at(gap);
+        frames(&mut screen, 2);
+        assert!(screen.query_by_label("Copy all").is_some());
         screen.hover_at(copy.center());
-        screen.run_steps(2);
+        frames(&mut screen, 2);
         let mut copied = Vec::new();
         for pressed in [true, false] {
             screen.event(egui::Event::PointerButton {
@@ -694,7 +733,7 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
                 pressed,
                 modifiers: egui::Modifiers::NONE,
             });
-            screen.run_steps(1);
+            frames(&mut screen, 1);
             copied.extend(
                 screen.output().platform_output.commands.iter().filter_map(
                     |command| match command {
@@ -709,14 +748,20 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
                 .iter()
                 .any(|text| text.contains("History entry 0") && text.contains(&"0".repeat(40)))
         );
+        screen.hover_at(egui::pos2(width * 0.5, 700.0));
+        frames(&mut screen, 1);
+        assert!(screen.query_by_label("Copy all").is_none());
         screen.hover_at(source);
+        frames(&mut screen, 35);
+        assert!(screen.query_by_label("Copy all").is_some());
         screen.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: Vec2::new(0.0, -500.0),
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         });
-        screen.run_steps(5);
+        frames(&mut screen, 5);
+        assert!(screen.query_by_label("Copy all").is_none());
         assert!(
             screen.query_by_label("History entry 0").is_none(),
             "wheel over the list must scroll the list"

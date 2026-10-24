@@ -64,6 +64,10 @@ while the pointer is inside the card. Column-anchored details exclude the full
 sidebar rectangle and shrink to the space toward the window center; when that
 space is too narrow, the owning view's click action remains available instead.
 Keep list scrolling outside the card's hit area.
+When browsing adjacent sources, details switch without a new dwell delay. Only
+crossing the gap toward a card retains it briefly; leaving in another direction
+closes it. This lifetime belongs to `design_hover.rs`, including suppression of
+egui's directional reopening of a source the pointer has left.
 
 ## Constraints & Gotchas
 

@@ -56,9 +56,10 @@ fn keyboard(event: &Event) -> bool {
 pub(crate) fn begin_hover_frame(ctx: &Context) {
     let mut state = state(ctx);
     state.input.clear();
-    let (pos, pressed, down, escape, now) = ctx.input(|i| {
+    let (pos, direction, pressed, down, escape, now) = ctx.input(|i| {
         (
             i.pointer.hover_pos(),
+            i.pointer.direction(),
             i.pointer.any_pressed(),
             i.pointer.any_down(),
             i.key_pressed(egui::Key::Escape),
@@ -83,7 +84,24 @@ pub(crate) fn begin_hover_frame(ctx: &Context) {
         }
         let stale = open.pass + 1 < ctx.cumulative_pass_nr();
         let outside_click = pressed && !inside;
-        let left = !open.explicit && now > open.until && !(open.interacting && down);
+        // Only bridge the gap toward the card. Moving along a list must release
+        // the old row immediately, before either row's details are painted.
+        let crossing = now <= open.until
+            && pos.is_some_and(|p| {
+                let gap = if open.rect.left() >= open.anchor.right() {
+                    p.x >= open.anchor.right() && p.x <= open.rect.left()
+                } else if open.rect.right() <= open.anchor.left() {
+                    p.x <= open.anchor.left() && p.x >= open.rect.right()
+                } else if open.rect.top() >= open.anchor.bottom() {
+                    p.y >= open.anchor.bottom() && p.y <= open.rect.top()
+                } else {
+                    p.y <= open.anchor.top() && p.y >= open.rect.bottom()
+                };
+                gap && direction != egui::Vec2::ZERO
+                    && open.rect.intersects_ray(p, direction.normalized())
+            });
+        let left =
+            !open.explicit && !inside && !at_source && !crossing && !(open.interacting && down);
         if escape || outside_click || stale || left {
             if !outside_click && let Some(id) = open.restore_focus {
                 ctx.memory_mut(|memory| memory.request_focus(id));
@@ -151,8 +169,10 @@ pub(crate) fn register_details(ctx: &Context, id: Id, anchor: Rect, rect: Rect, 
     open.anchor = anchor;
     open.rect = rect;
     open.pass = ctx.cumulative_pass_nr();
+    if !open.explicit {
+        ctx.request_repaint_after_secs((open.until - now).max(0.0) as f32);
+    }
     state.open = Some(open);
-    ctx.request_repaint_after_secs(LEAVE_DELAY as f32);
     save(ctx, state);
 }
 
@@ -314,7 +334,24 @@ fn show(
         return response;
     }
     let was_open = details_open(ctx, response.id);
-    if !was_open && !egui::Tooltip::should_show_tooltip(&response, true) {
+    // Our lifetime check already handles entering the card. Do not let egui's
+    // directional tooltip retention reopen a row that the pointer has left.
+    if !was_open && !response.hovered() {
+        return response;
+    }
+    // egui's normal gate rejects another widget's tooltip for one pass. Details
+    // already have a single owner here, so a recently shown card can switch
+    // directly to the hovered row without that gate or another dwell delay.
+    let style = ctx.global_style();
+    let warm = response.hovered()
+        && egui::Tooltip::seconds_since_last_tooltip(ctx) < style.interaction.tooltip_grace_time
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input(|i| {
+            !i.pointer.any_down()
+                && i.time_since_last_scroll() >= style.interaction.tooltip_delay
+                && i.pointer.time_since_last_click() >= style.interaction.tooltip_delay
+        });
+    if !was_open && !warm && !egui::Tooltip::should_show_tooltip(&response, true) {
         return response;
     }
     if !response.enabled() {
