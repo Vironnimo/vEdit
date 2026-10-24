@@ -48,7 +48,17 @@ pub fn project_repository(
             .map_err(|error| GitError::new("repository detection", error.to_string()))
     };
     let repository_path = canonical(&repository)?;
-    if canonical(project)? == repository_path {
+    // Git reports `C:/...`, while project roots and their documents are usually
+    // canonical (`\\?\C:\...`). Spell the repository like the project, so
+    // paths under the project relate to it by prefix.
+    let depth = canonical(project)?
+        .strip_prefix(&repository_path)
+        .map(|inside| inside.components().count())
+        .ok();
+    let repository = depth
+        .and_then(|depth| (0..depth).try_fold(project, |path, _| path.parent()))
+        .map_or(repository, Path::to_path_buf);
+    if depth == Some(0) {
         return Ok(ProjectRepository {
             root: Some(repository),
             parent: None,

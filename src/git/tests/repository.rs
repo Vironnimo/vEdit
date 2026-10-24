@@ -69,8 +69,12 @@ fn project_repository_requires_the_exact_parent_but_accepts_roots_and_worktrees(
     let nested = repository.0.join("examples");
     fs::create_dir(&nested).unwrap();
     assert!(project_repository(&nested, None).unwrap().root.is_none());
+    // Roots are spelled like the opened folder, so its document paths relate
+    // to them by prefix whether or not the folder path is canonical.
     let selected = project_repository(&nested, Some(&repository.0)).unwrap();
-    assert!(selected.root.is_some() && selected.parent.is_some());
+    assert_eq!(selected.root.as_ref(), Some(&repository.0));
+    assert_eq!(selected.parent.as_ref(), Some(&repository.0));
+    let canonical = fs::canonicalize(&repository.0).unwrap();
     let other = TestRepository::new();
     assert!(
         project_repository(&nested, Some(&other.0))
@@ -78,8 +82,15 @@ fn project_repository_requires_the_exact_parent_but_accepts_roots_and_worktrees(
             .root
             .is_none()
     );
-    let own = project_repository(&fs::canonicalize(&repository.0).unwrap(), None).unwrap();
-    assert!(own.root.is_some() && own.parent.is_none());
+    let own = project_repository(&canonical, None).unwrap();
+    assert_eq!(own.root.as_ref(), Some(&canonical));
+    assert!(own.parent.is_none());
+    assert!(
+        canonical
+            .join("src")
+            .strip_prefix(own.root.unwrap())
+            .is_ok()
+    );
     repository.commit_all("Initial");
     let worktree = TestRepository::empty_directory();
     repository.git(&["worktree", "add", "--detach", worktree.0.to_str().unwrap()]);
