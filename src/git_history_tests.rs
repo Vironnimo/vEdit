@@ -542,89 +542,101 @@ fn restoring_the_window_refreshes_immediately_even_after_a_recent_read() {
 
 #[test]
 fn primary_push_button_pushes_to_an_isolated_local_remote() {
-    let repository = HoverRepository::new();
-    let remote = repository.0.join(".git/push-test-remote.git");
-    for args in [
-        vec!["init", "--bare", remote.to_str().unwrap()],
-        vec!["remote", "add", "origin", remote.to_str().unwrap()],
-        vec!["push", "-u", "origin", "HEAD"],
-    ] {
+    for with_upstream in [true, false] {
+        let repository = HoverRepository::new();
+        let remote = repository.0.join(".git/push-test-remote.git");
+        for args in [
+            vec!["init", "--bare", remote.to_str().unwrap()],
+            vec!["remote", "add", "origin", remote.to_str().unwrap()],
+            vec!["push", "-u", "origin", "HEAD"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository.0)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        repository.git(&["config", "push.default", "simple"]);
+        repository.git(&["config", "push.autoSetupRemote", "false"]);
+        if !with_upstream {
+            repository.git(&["branch", "--unset-upstream"]);
+            repository.git(&["remote", "rename", "origin", "publish"]);
+            repository.git(&["config", "remote.pushDefault", "publish"]);
+        }
+        fs::write(repository.0.join("push.txt"), "local test\n").unwrap();
+        git::stage_all(&repository.0).unwrap();
+        git::commit(&repository.0, "Ready to push").unwrap();
+        let mut app = repository.app();
+        history_window_state(&mut app, true, false);
+        app.refresh_git(0, true);
+        wait_for_git_refresh(&mut app, 0);
+        assert_eq!(
+            app.projects[0].git_tracking.as_ref().unwrap().ahead,
+            usize::from(with_upstream)
+        );
+        let head = app.projects[0].recent_commits[0].hash.clone();
+        let branch = app.projects[0].git_branch.clone().unwrap();
+        // Hold an old read across the click and deliver it after the push. The
+        // action must stay available and an obsolete snapshot must not undo it.
+        let stale = read_git_snapshot(&repository.0, None, None, None, false, None, None).unwrap();
+        app.projects[0].git_loading = true;
+        app.projects[0].git_status_request = Some(u64::MAX);
+        let mut screen = history_screen(app);
+        screen.run_steps(3);
+        screen.get_by_label("Push 1 commit").click();
+        screen.run_steps(2);
+        assert!(screen.state().git_busy.is_some());
+        assert!(!screen.state().projects[0].git_loading);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while screen.state().git_busy.is_some() || screen.state().projects[0].git_loading {
+            assert!(Instant::now() < deadline, "local push did not finish");
+            screen.state_mut().poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            screen.state().projects[0]
+                .git_tracking
+                .as_ref()
+                .unwrap()
+                .ahead,
+            0
+        );
         let output = std::process::Command::new("git")
             .arg("-C")
-            .arg(&repository.0)
-            .args(args)
+            .arg(&remote)
+            .args(["rev-parse", &branch])
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    fs::write(repository.0.join("push.txt"), "local test\n").unwrap();
-    git::stage_all(&repository.0).unwrap();
-    git::commit(&repository.0, "Ready to push").unwrap();
-    let mut app = repository.app();
-    history_window_state(&mut app, true, false);
-    app.refresh_git(0, true);
-    wait_for_git_refresh(&mut app, 0);
-    assert_eq!(app.projects[0].git_tracking.as_ref().unwrap().ahead, 1);
-    let head = app.projects[0].recent_commits[0].hash.clone();
-    let branch = app.projects[0].git_branch.clone().unwrap();
-    // Hold an old read across the click and deliver it after the push. The
-    // action must stay available and an obsolete snapshot must not undo it.
-    let stale = read_git_snapshot(&repository.0, None, None, None, false, None, None).unwrap();
-    app.projects[0].git_loading = true;
-    app.projects[0].git_status_request = Some(u64::MAX);
-    let mut screen = history_screen(app);
-    screen.run_steps(3);
-    screen.get_by_label("Push 1 commit").click();
-    screen.run_steps(2);
-    assert!(screen.state().git_busy.is_some());
-    assert!(!screen.state().projects[0].git_loading);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while screen.state().git_busy.is_some() || screen.state().projects[0].git_loading {
-        assert!(Instant::now() < deadline, "local push did not finish");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), head);
+        screen
+            .state()
+            .sender
+            .send(WorkerResult::GitStatus {
+                root: repository.0.clone(),
+                request_id: u64::MAX,
+                result: Ok(Box::new(stale)),
+            })
+            .unwrap();
         screen.state_mut().poll();
-        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            screen.state().projects[0]
+                .git_tracking
+                .as_ref()
+                .unwrap()
+                .ahead,
+            0
+        );
+        screen.run_steps(3);
+        assert!(screen.query_by_label("Push 1 commit").is_none());
+        assert!(screen.query_by_label("Commit staged changes").is_some());
     }
-    assert_eq!(
-        screen.state().projects[0]
-            .git_tracking
-            .as_ref()
-            .unwrap()
-            .ahead,
-        0
-    );
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&remote)
-        .args(["rev-parse", &branch])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), head);
-    screen
-        .state()
-        .sender
-        .send(WorkerResult::GitStatus {
-            root: repository.0.clone(),
-            request_id: u64::MAX,
-            result: Ok(Box::new(stale)),
-        })
-        .unwrap();
-    screen.state_mut().poll();
-    assert_eq!(
-        screen.state().projects[0]
-            .git_tracking
-            .as_ref()
-            .unwrap()
-            .ahead,
-        0
-    );
-    screen.run_steps(3);
-    assert!(screen.query_by_label("Push 1 commit").is_none());
-    assert!(screen.query_by_label("Commit staged changes").is_some());
 }
 
 #[test]
@@ -1380,6 +1392,7 @@ fn unchanged_automatic_refresh_preserves_loaded_pages_and_pending_request() {
     let snapshot = git::HistorySnapshot {
         upstream: None,
         local_only: Default::default(),
+        unpublished_count: None,
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
             hash: commit(0).hash,
@@ -1410,6 +1423,7 @@ fn hidden_history_keeps_a_consistent_pageable_snapshot_until_reloaded() {
     let original = git::HistorySnapshot {
         upstream: None,
         local_only: Default::default(),
+        unpublished_count: None,
         tips: vec![commit(0).hash],
         refs: vec![git::CommitRef {
             hash: commit(0).hash,
@@ -1426,6 +1440,7 @@ fn hidden_history_keeps_a_consistent_pageable_snapshot_until_reloaded() {
     let changed = git::HistorySnapshot {
         upstream: None,
         local_only: Default::default(),
+        unpublished_count: None,
         tips: vec![commit(99).hash],
         refs: vec![git::CommitRef {
             hash: commit(99).hash,
@@ -1473,6 +1488,7 @@ fn replacing_history_invalidates_a_pending_page_even_at_the_same_offset() {
     let snapshot = git::HistorySnapshot {
         upstream: None,
         local_only: Default::default(),
+        unpublished_count: None,
         tips: vec![replacement[0].hash.clone()],
         refs: Vec::new(),
     };

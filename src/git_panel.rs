@@ -229,15 +229,33 @@ impl VEditApp {
         let push_count = project
             .git_tracking
             .as_ref()
-            .filter(|tracking| {
-                project.git_changes.is_empty()
-                    && unsaved_count == 0
-                    && project.git_branch.is_some()
-                    && tracking.upstream.is_some()
-                    && tracking.divergence_known
-                    && tracking.ahead > 0
+            .and_then(|tracking| {
+                if !project.git_changes.is_empty()
+                    || unsaved_count > 0
+                    || project.git_branch.is_none()
+                {
+                    return None;
+                }
+                if tracking.upstream.is_some() {
+                    tracking.divergence_known.then_some(tracking.ahead)
+                } else {
+                    project
+                        .git_history_snapshot
+                        .as_ref()
+                        .filter(|snapshot| {
+                            project.git_history_error.is_none()
+                                && project.git_error.is_none()
+                                && snapshot.refs.iter().any(|reference| {
+                                    reference.current
+                                    && matches!(project.git_head.as_ref(),
+                                        Some(git::StatusHead::Commit(head)) if head == &reference.hash)
+                                        && Some(&reference.name) == project.git_branch.as_ref()
+                                })
+                        })
+                        .and_then(|snapshot| snapshot.unpublished_count)
+                }
             })
-            .map(|tracking| tracking.ahead);
+            .filter(|count| *count > 0);
         let panel = PanelContext {
             project_index,
             root: &root,

@@ -263,6 +263,7 @@ fn assemble_history_snapshot(
         && snapshot.refs == previous.refs
     {
         snapshot.local_only = previous.local_only.clone();
+        snapshot.unpublished_count = previous.unpublished_count;
         return Ok(snapshot);
     }
     let remote_tips: Vec<_> = snapshot
@@ -272,12 +273,11 @@ fn assemble_history_snapshot(
         .map(|reference| reference.hash.as_str())
         .collect();
     if !remote_tips.is_empty() {
-        let mut input = snapshot.tips.join("\n") + "\n";
-        for hash in remote_tips {
-            input.push('^');
-            input.push_str(hash);
-            input.push('\n');
-        }
+        let exclusions: String = remote_tips
+            .iter()
+            .map(|hash| format!("^{hash}\n"))
+            .collect();
+        let input = snapshot.tips.join("\n") + "\n" + &exclusions;
         let output = raw_git_with_input(
             root,
             &string_args(&["rev-list", "--stdin"]),
@@ -293,6 +293,37 @@ fn assemble_history_snapshot(
                 .map(str::to_owned)
                 .collect(),
         ));
+        if let Some(current) = snapshot
+            .refs
+            .iter()
+            .find(|reference| reference.current && reference.kind == RefKind::Local)
+        {
+            snapshot.unpublished_count = Some(
+                if snapshot
+                    .local_only
+                    .as_ref()
+                    .is_some_and(|local_only| local_only.contains(&current.hash))
+                {
+                    let output = raw_git_with_input(
+                        root,
+                        &string_args(&["rev-list", "--count", "--stdin"]),
+                        "count unpublished commits",
+                        Some(format!("{}\n{exclusions}", current.hash).into_bytes()),
+                    )?;
+                    if !output.status.success() {
+                        return Err(command_error("count unpublished commits", &output));
+                    }
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .parse()
+                        .map_err(|_| {
+                            GitError::new("count unpublished commits", "invalid commit count")
+                        })?
+                } else {
+                    0
+                },
+            );
+        }
     }
     Ok(snapshot)
 }

@@ -488,9 +488,10 @@ pub fn commit(root: &Path, message: &str) -> GitResult<String> {
     Ok(output_text(&output))
 }
 
-/// Push the current branch using the repository's configured Git defaults.
+/// Push using Git's configured destination, establishing tracking on a default
+/// push when the current branch has no upstream yet.
 pub fn push(root: &Path) -> GitResult<String> {
-    run_and_capture_change(root, &["push"], "push")
+    run_and_capture_change(root, &["-c", "push.autoSetupRemote=true", "push"], "push")
 }
 
 /// Fetch from the configured remotes.

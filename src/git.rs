@@ -251,6 +251,9 @@ pub struct HistorySnapshot {
     /// Commits unreachable from any frozen remote ref; `None` means no remote
     /// refs existed. Retained independently of visible ref decorations.
     pub local_only: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    /// Commits on the current named branch absent from every fetched remote.
+    /// `None` means there is no named HEAD or no fetched remote to compare.
+    pub unpublished_count: Option<usize>,
 }
 
 impl HistorySnapshot {
@@ -286,6 +289,7 @@ impl HistorySnapshot {
                 .collect(),
             upstream: self.upstream.clone(),
             local_only: self.local_only.clone(),
+            unpublished_count: self.unpublished_count,
         }
     }
 }

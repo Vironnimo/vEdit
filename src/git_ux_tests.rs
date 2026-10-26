@@ -126,55 +126,71 @@ fn clean_repository_has_one_status_line_without_an_empty_changes_section() {
 
 #[test]
 fn clean_ahead_branch_offers_push_and_edits_restore_the_commit_draft() {
-    let mut app = fixture();
-    app.projects[0].commit_message = "Keep my draft".into();
-    app.projects[0].git_view.section = GitSection::Changes;
-    app.projects[0].git_view.keyboard_last_focus =
-        Some(git_row_id(&app.projects[0].root, "commit-message"));
-    app.projects[0].git_tracking = Some(git::BranchInfo {
-        name: Some("main".into()),
-        upstream: Some("origin/main".into()),
-        ahead: 3,
-        behind: 0,
-        divergence_known: true,
-    });
-    let mut screen = harness(app, 360.0, false);
-    screen.run_steps(3);
-    assert!(screen.query_by_label("Push 3 commits").is_some());
-    assert!(
-        screen.get_by_label("Push 3 commits").rect().bottom()
-            < screen.get_by_label("History").rect().top()
-    );
-    assert!(
-        screen
-            .query_by_role(egui::accesskit::Role::MultilineTextInput)
-            .is_none()
-    );
-    assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
+    for with_upstream in [true, false] {
+        let mut app = fixture();
+        app.projects[0].commit_message = "Keep my draft".into();
+        app.projects[0].git_view.section = GitSection::Changes;
+        app.projects[0].git_view.keyboard_last_focus =
+            Some(git_row_id(&app.projects[0].root, "commit-message"));
+        app.projects[0].git_tracking = Some(git::BranchInfo {
+            name: Some("main".into()),
+            upstream: with_upstream.then(|| "origin/main".into()),
+            ahead: if with_upstream { 3 } else { 0 },
+            behind: 0,
+            divergence_known: with_upstream,
+        });
+        let project = &mut app.projects[0];
+        let current = project
+            .recent_commits
+            .iter()
+            .flat_map(|commit| &commit.refs)
+            .find(|reference| reference.current)
+            .unwrap()
+            .clone();
+        project.git_head = Some(git::StatusHead::Commit(current.hash.clone()));
+        project.git_history_snapshot = Some(git::HistorySnapshot {
+            refs: vec![current],
+            unpublished_count: Some(3),
+            ..Default::default()
+        });
+        let mut screen = harness(app, 360.0, false);
+        screen.run_steps(3);
+        assert!(screen.query_by_label("Push 3 commits").is_some());
+        assert!(
+            screen.get_by_label("Push 3 commits").rect().bottom()
+                < screen.get_by_label("History").rect().top()
+        );
+        assert!(
+            screen
+                .query_by_role(egui::accesskit::Role::MultilineTextInput)
+                .is_none()
+        );
+        assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
 
-    screen.state_mut().focus_git_content();
-    screen.run_steps(3);
-    assert!(screen.get_by_label("No changes").is_focused());
+        screen.state_mut().focus_git_content();
+        screen.run_steps(3);
+        assert!(screen.get_by_label("No changes").is_focused());
 
-    let project = &mut screen.state_mut().projects[0];
-    project.git_changes.push(git::FileStatus {
-        path: "file.rs".into(),
-        original_path: None,
-        index: git::FileChange::None,
-        worktree: git::FileChange::Modified,
-    });
-    project
-        .git_view
-        .update_working_cache(&project.git_changes, &project.git_stats);
-    screen.run_steps(3);
-    assert!(screen.query_by_label("Push 3 commits").is_none());
-    assert!(screen.query_by_label("Commit staged changes").is_some());
-    assert!(
-        screen
-            .query_by_role(egui::accesskit::Role::MultilineTextInput)
-            .is_some()
-    );
-    assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
+        let project = &mut screen.state_mut().projects[0];
+        project.git_changes.push(git::FileStatus {
+            path: "file.rs".into(),
+            original_path: None,
+            index: git::FileChange::None,
+            worktree: git::FileChange::Modified,
+        });
+        project
+            .git_view
+            .update_working_cache(&project.git_changes, &project.git_stats);
+        screen.run_steps(3);
+        assert!(screen.query_by_label("Push 3 commits").is_none());
+        assert!(screen.query_by_label("Commit staged changes").is_some());
+        assert!(
+            screen
+                .query_by_role(egui::accesskit::Role::MultilineTextInput)
+                .is_some()
+        );
+        assert_eq!(screen.state().projects[0].commit_message, "Keep my draft");
+    }
 }
 
 #[test]
@@ -185,17 +201,43 @@ fn unsaved_documents_and_unknown_remote_status_keep_the_commit_action() {
         "unknown",
         "up-to-date",
         "detached",
+        "unpublished-unsaved",
+        "unpublished-up-to-date",
+        "unpublished-stale",
     ] {
         let mut app = fixture();
         let project = &mut app.projects[0];
         project.git_tracking = Some(git::BranchInfo {
             name: Some("main".into()),
-            upstream: (case != "no-upstream").then(|| "origin/main".into()),
+            upstream: (case != "no-upstream" && !case.starts_with("unpublished-"))
+                .then(|| "origin/main".into()),
             ahead: if case == "up-to-date" { 0 } else { 3 },
             behind: 0,
             divergence_known: case != "unknown",
         });
-        if case == "unsaved" {
+        if case.starts_with("unpublished-") {
+            project.git_head = Some(git::StatusHead::Commit("a".repeat(40)));
+            project.git_history_snapshot = Some(git::HistorySnapshot {
+                refs: vec![git::CommitRef {
+                    hash: if case == "unpublished-stale" {
+                        "b"
+                    } else {
+                        "a"
+                    }
+                    .repeat(40),
+                    name: "main".into(),
+                    kind: git::RefKind::Local,
+                    current: true,
+                }],
+                unpublished_count: Some(if case == "unpublished-up-to-date" {
+                    0
+                } else {
+                    3
+                }),
+                ..Default::default()
+            });
+        }
+        if case == "unsaved" || case == "unpublished-unsaved" {
             let mut tab = EditorTab::new(None, "Draft".into());
             tab.text = "Unsaved text".into();
             tab.changed();

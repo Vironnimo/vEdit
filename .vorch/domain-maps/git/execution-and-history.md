@@ -24,6 +24,15 @@ App's `src/git_refresh.rs` owns ordinary status refresh and history-page results
 
 Automatic refresh pauses while the window is unfocused or minimized. A visible history refresh can replace changed refs while preserving loaded depth and anchoring the reading position to the prior visible commit. An unchanged refresh preserves loaded pages and pending pagination. Hidden history retains its consistent pageable snapshot until reloaded.
 
+The clean-worktree primary action uses known upstream divergence, or the current
+named branch's unpublished commit count when no upstream is configured. That
+count covers the complete frozen HEAD ancestry against all fetched remote refs,
+not only loaded history pages or other local branches. With no fetched remote
+refs it remains unknown. Unchanged snapshots reuse the count; stale HEAD/branch
+snapshots cannot supply the fallback action. Default pushes enable Git's
+`push.autoSetupRemote` for that invocation, establishing tracking when needed
+while retaining Git's configured push destination and refspec rules.
+
 Evidence: `src/git_history_tests.rs` covers active-branch/upstream scoping, background pauses, external commits, preserved scroll/depth, changed-ref replacement and stale page rejection. `src/git_repositories_tests.rs` covers cached discovery, unopened status, failed-job backoff and stale results.
 
 ## Comparison boundaries

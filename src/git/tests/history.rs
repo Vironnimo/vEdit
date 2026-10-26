@@ -6,7 +6,10 @@ fn unchanged_history_snapshot_uses_two_git_processes() {
     repository.commit_all("Initial");
     let head = repository.head_hash();
     repository.git(&["update-ref", "refs/remotes/origin/main", &head]);
+    repository.write("local.txt", "local");
+    repository.commit_all("Local");
     let previous = history_snapshot(&repository.0).unwrap();
+    assert_eq!(previous.unpublished_count, Some(1));
     GIT_COMMAND_COUNT.with(|count| count.set(0));
     let refreshed = history_snapshot_cached(&repository.0, Some(&previous)).unwrap();
     assert_eq!(refreshed, previous);
@@ -563,6 +566,11 @@ fn remote_reachability_is_frozen_and_includes_ancestors_and_local_merges() {
     repo.commit_all("base");
     let base = repo.head_hash();
     repo.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    repo.git(&["checkout", "-b", "unrelated"]);
+    repo.write("unrelated.txt", "unrelated");
+    repo.commit_all("unrelated");
+    let unrelated = repo.head_hash();
+    repo.git(&["checkout", "main"]);
     repo.git(&["checkout", "-b", "topic"]);
     repo.write("topic.txt", "topic");
     repo.commit_all("topic");
@@ -576,6 +584,7 @@ fn remote_reachability_is_frozen_and_includes_ancestors_and_local_merges() {
     assert!(snapshot.upstream.is_none());
     repo.git(&["update-ref", "refs/remotes/origin/main", &merge]);
     for scope in [snapshot.clone(), snapshot.current_branch()] {
+        assert_eq!(scope.unpublished_count, Some(3));
         let page = history_page(&repo.0, &scope, 0, 50).unwrap();
         assert!(
             page.commits
@@ -603,17 +612,20 @@ fn remote_reachability_is_frozen_and_includes_ancestors_and_local_merges() {
     }
     let refreshed = history_snapshot(&repo.0).unwrap();
     for scope in [refreshed.clone(), refreshed.current_branch()] {
+        assert_eq!(scope.unpublished_count, Some(0));
         assert!(
             history_page(&repo.0, &scope, 0, 50)
                 .unwrap()
                 .commits
                 .iter()
+                .filter(|c| c.hash != unrelated)
                 .all(|c| c.on_remote)
         );
     }
     repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
     let without_remote = history_snapshot(&repo.0).unwrap();
     for scope in [without_remote.clone(), without_remote.current_branch()] {
+        assert_eq!(scope.unpublished_count, None);
         assert!(
             history_page(&repo.0, &scope, 0, 50)
                 .unwrap()
