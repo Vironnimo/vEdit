@@ -287,12 +287,12 @@ fn assemble_history_snapshot(
         if !output.status.success() {
             return Err(command_error("compare local and remote history", &output));
         }
-        snapshot.local_only = std::sync::Arc::new(
+        snapshot.local_only = Some(std::sync::Arc::new(
             String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(str::to_owned)
                 .collect(),
-        );
+        ));
     }
     Ok(snapshot)
 }
@@ -333,8 +333,10 @@ pub fn history_page(
     let has_more = commits.len() > limit;
     commits.truncate(limit);
     for commit in &mut commits {
-        commit.on_remote = snapshot.refs.iter().any(|r| r.kind == RefKind::Remote)
-            && !snapshot.local_only.contains(&commit.hash);
+        commit.on_remote = snapshot
+            .local_only
+            .as_ref()
+            .is_some_and(|local_only| !local_only.contains(&commit.hash));
         commit.refs = snapshot
             .refs
             .iter()

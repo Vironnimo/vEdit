@@ -248,7 +248,9 @@ pub struct HistorySnapshot {
     pub refs: Vec<CommitRef>,
     /// Full ref name of the checked-out branch's configured upstream.
     pub upstream: Option<String>,
-    pub local_only: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Commits unreachable from any frozen remote ref; `None` means no remote
+    /// refs existed. Retained independently of visible ref decorations.
+    pub local_only: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl HistorySnapshot {

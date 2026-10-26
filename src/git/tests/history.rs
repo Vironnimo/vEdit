@@ -11,8 +11,8 @@ fn unchanged_history_snapshot_uses_two_git_processes() {
     let refreshed = history_snapshot_cached(&repository.0, Some(&previous)).unwrap();
     assert_eq!(refreshed, previous);
     assert!(std::sync::Arc::ptr_eq(
-        &refreshed.local_only,
-        &previous.local_only
+        refreshed.local_only.as_ref().unwrap(),
+        previous.local_only.as_ref().unwrap()
     ));
     assert_eq!(GIT_COMMAND_COUNT.with(|count| count.get()), 2);
 }
@@ -573,46 +573,55 @@ fn remote_reachability_is_frozen_and_includes_ancestors_and_local_merges() {
     repo.git(&["merge", "--no-ff", "--no-edit", "topic"]);
     let merge = repo.head_hash();
     let snapshot = history_snapshot(&repo.0).unwrap();
+    assert!(snapshot.upstream.is_none());
     repo.git(&["update-ref", "refs/remotes/origin/main", &merge]);
-    let page = history_page(&repo.0, &snapshot, 0, 50).unwrap();
-    assert!(
-        page.commits
-            .iter()
-            .find(|c| c.hash == base)
-            .unwrap()
-            .on_remote
-    );
-    assert!(
-        !page
-            .commits
-            .iter()
-            .find(|c| c.hash == topic)
-            .unwrap()
-            .on_remote
-    );
-    assert!(
-        !page
-            .commits
-            .iter()
-            .find(|c| c.hash == merge)
-            .unwrap()
-            .on_remote
-    );
+    for scope in [snapshot.clone(), snapshot.current_branch()] {
+        let page = history_page(&repo.0, &scope, 0, 50).unwrap();
+        assert!(
+            page.commits
+                .iter()
+                .find(|c| c.hash == base)
+                .unwrap()
+                .on_remote
+        );
+        assert!(
+            !page
+                .commits
+                .iter()
+                .find(|c| c.hash == topic)
+                .unwrap()
+                .on_remote
+        );
+        assert!(
+            !page
+                .commits
+                .iter()
+                .find(|c| c.hash == merge)
+                .unwrap()
+                .on_remote
+        );
+    }
     let refreshed = history_snapshot(&repo.0).unwrap();
-    assert!(
-        history_page(&repo.0, &refreshed, 0, 50)
-            .unwrap()
-            .commits
-            .iter()
-            .all(|c| c.on_remote)
-    );
+    for scope in [refreshed.clone(), refreshed.current_branch()] {
+        assert!(
+            history_page(&repo.0, &scope, 0, 50)
+                .unwrap()
+                .commits
+                .iter()
+                .all(|c| c.on_remote)
+        );
+    }
     repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
-    assert!(
-        recent_log(&repo.0, 50)
-            .unwrap()
-            .iter()
-            .all(|c| !c.on_remote)
-    );
+    let without_remote = history_snapshot(&repo.0).unwrap();
+    for scope in [without_remote.clone(), without_remote.current_branch()] {
+        assert!(
+            history_page(&repo.0, &scope, 0, 50)
+                .unwrap()
+                .commits
+                .iter()
+                .all(|c| !c.on_remote)
+        );
+    }
 }
 
 #[test]

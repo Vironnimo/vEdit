@@ -737,6 +737,27 @@ fn remote_ref_updates_refresh_history_decorations_without_a_new_local_commit() {
             .iter()
             .any(|reference| reference.name == "origin/main")
     );
+    repository.git(&["branch", "--unset-upstream", "main"]);
+    app.projects[0].last_git_refresh = Instant::now() - Duration::from_secs(4);
+    app.refresh_git(0, false);
+    wait_for_git_refresh(&mut app, 0);
+    let project = &app.projects[0];
+    assert!(project.recent_commits.iter().all(|commit| commit.on_remote));
+    assert!(project.recent_commits.iter().all(|commit| {
+        commit
+            .refs
+            .iter()
+            .all(|reference| reference.kind != git::RefKind::Remote)
+    }));
+    assert!(
+        project
+            .git_view
+            .graph
+            .rows
+            .iter()
+            .any(|row| row.outgoing.iter().any(|edge| edge.head && edge.remote)),
+        "the HEAD line remains remote-colored without an upstream badge"
+    );
 }
 
 #[test]
