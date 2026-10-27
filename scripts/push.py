@@ -136,6 +136,27 @@ def run_step(step: Step, checkout: Path, log: Path) -> bool:
             return False
 
 
+def finish_push(root: Path, result: dict) -> dict:
+    """Complete local tracking only after the remote contains the checked commit."""
+    try:
+        configured = git("config", "--get-regexp",
+                         rf"^branch\.{PRIMARY_BRANCH}\.(remote|merge)$", cwd=root)
+        if configured.returncode == 0:
+            return result
+        if configured.returncode != 1:
+            raise RuntimeError(configured.stderr.strip() or configured.stdout.strip())
+        git_output("branch", f"--set-upstream-to={REMOTE}/{PRIMARY_BRANCH}",
+                   PRIMARY_BRANCH, cwd=root)
+        result["notes"].append(f"{PRIMARY_BRANCH} now tracks {REMOTE}/{PRIMARY_BRANCH}.")
+    except (OSError, RuntimeError) as exc:
+        result["ok"] = False
+        result["errors"].append(
+            f"{REMOTE}/{PRIMARY_BRANCH} contains the checked commit, but local tracking "
+            f"could not be configured: {exc}. Set the upstream with "
+            f"git branch --set-upstream-to={REMOTE}/{PRIMARY_BRANCH} {PRIMARY_BRANCH}.")
+    return result
+
+
 def validate(root: Path, no_push: bool, emit=print) -> dict:
     commit = git_output("rev-parse", "--verify", f"{PRIMARY_BRANCH}^{{commit}}", cwd=root)
     result = {"ok": False, "commit": commit, "pushed": False, "steps": [],
@@ -148,7 +169,7 @@ def validate(root: Path, no_push: bool, emit=print) -> dict:
             return result
         if remote == commit:
             result.update(ok=True, notes=[f"{REMOTE}/{PRIMARY_BRANCH} already has {commit}."])
-            return result
+            return finish_push(root, result)
     run = root / ".tmp" / "push" / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     for path in (root / ".tmp", root / ".tmp" / "push", run):
         if worktree.is_link(path):
@@ -221,7 +242,7 @@ def validate(root: Path, no_push: bool, emit=print) -> dict:
                                 "Inspect the remote before retrying. " + pushed.stderr.strip())
         return result
     result.update(ok=True, pushed=True)
-    return result
+    return finish_push(root, result)
 
 
 class Parser(argparse.ArgumentParser):
@@ -236,6 +257,7 @@ class Parser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     parser = Parser(description=__doc__.splitlines()[0],
         epilog="Exit 0: passed/already pushed; 1: failed; 2: invalid arguments. "
+               "A successful push sets missing main tracking to origin/main; existing tracking is kept. "
                "Requires Windows, installed Rust 1.97.1 (rustfmt/clippy), Git and Python. "
                "Checks can take more than 30 minutes; progress and logs remain available.")
     parser.json_mode = "--json" in (sys.argv[1:] if argv is None else argv)

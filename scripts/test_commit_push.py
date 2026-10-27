@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -144,11 +146,13 @@ class RepositoryFixture(unittest.TestCase):
                    "assert Path('marker.txt').read_text() == 'committed'; "
                    "assert not Path('untracked.txt').exists()"]
         self.write("untracked.txt", "other work")
+        config = (self.root / ".git/config").read_bytes()
         with patch.dict(os.environ, self.env, clear=True), patch.object(push, "STEPS", [push.Step("probe", command)]):
             result = push.validate(self.root, True, lambda _: None)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["commit"], commit)
         self.assertFalse(result["pushed"])
+        self.assertEqual((self.root / ".git/config").read_bytes(), config)
         self.assertEqual((self.root / "marker.txt").read_text(), "unfinished")
         self.assertEqual(len(self.run_git("worktree", "list", "--porcelain").split(b"worktree ")) - 1, 1)
         self.assertTrue(Path(result["logs"]).is_dir())
@@ -180,12 +184,57 @@ class RepositoryFixture(unittest.TestCase):
         commit = self.run_git("rev-parse", "HEAD").decode().strip()
         steps = [push.Step("probe", [sys.executable, "-c", "pass"])]
         with patch.dict(os.environ, self.env, clear=True), patch.object(push, "STEPS", steps):
-            first = push.validate(self.root, False, lambda _: None)
+            with patch.object(push, "primary_root", return_value=self.root), \
+                 redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(push.main(["--json"]), 0)
+            first = json.loads(output.getvalue())
+            self.assertTrue(first["ok"], first)
+            self.assertIn("main now tracks origin/main.", first["notes"])
+            self.assertEqual(self.run_git("rev-parse", "--abbrev-ref", "main@{upstream}").strip(),
+                             b"origin/main")
+            self.run_git("branch", "--unset-upstream", "main")
             again = push.validate(self.root, False, lambda _: None)
+            self.assertEqual(self.run_git("rev-parse", "--abbrev-ref", "main@{upstream}").strip(),
+                             b"origin/main")
+            # Keep explicit tracking, even if its ref is gone or it is incomplete.
+            for merge in ("refs/heads/main", "refs/heads/missing", None):
+                self.run_git("config", "branch.main.remote", ".")
+                if merge is None:
+                    self.run_git("config", "--unset", "branch.main.merge")
+                else:
+                    self.run_git("config", "branch.main.merge", merge)
+                config = (self.root / ".git/config").read_bytes()
+                preserved = push.validate(self.root, False, lambda _: None)
+                self.assertTrue(preserved["ok"], preserved)
+                self.assertEqual((self.root / ".git/config").read_bytes(), config)
         self.assertTrue(first["pushed"], first)
         self.assertEqual(self.run_git("--git-dir", str(remote), "rev-parse", "main").decode().strip(), commit)
         self.assertTrue(again["ok"], again)
         self.assertFalse(again["pushed"])
+
+    def test_tracking_failure_preserves_the_successful_push_outcome(self):
+        remote = self.home / "remote.git"
+        self.run_git("init", "-q", "--bare", str(remote))
+        self.run_git("remote", "add", "origin", str(remote))
+        real_git = push.git
+
+        def locked_config(*args, cwd):
+            if args[0] == "branch":
+                return subprocess.CompletedProcess(args, 1, "", "config is locked")
+            return real_git(*args, cwd=cwd)
+
+        with patch.dict(os.environ, self.env, clear=True), \
+             patch.object(push, "STEPS", [push.Step("probe", [sys.executable, "-c", "pass"])]), \
+             patch.object(push, "git", side_effect=locked_config), \
+             patch.object(push, "primary_root", return_value=self.root), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(push.main(["--json"]), 1)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["pushed"], result)
+        self.assertEqual(self.run_git("--git-dir", str(remote), "rev-parse", "main").decode().strip(),
+                         result["commit"])
+        self.assertIn("git branch --set-upstream-to=origin/main main", result["errors"][0])
 
     def test_report_survives_checkout_cleanup(self):
         command = [sys.executable, "-c", "from pathlib import Path; "

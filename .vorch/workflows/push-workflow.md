@@ -73,6 +73,12 @@ validated hash as a fast-forward. Commits added to local `main` meanwhile remain
 for the next run. A failed transport can leave the remote outcome unknown; inspect
 the remote before retrying.
 
+After a successful push, or when the remote already contains the selected commit,
+the script sets `main` to track `origin/main` if neither tracking setting exists.
+It preserves existing tracking settings, including incomplete ones. `--no-push`
+does not change tracking. A local tracking error reports failure while retaining
+the successful push outcome; repair the local setting instead of repeating the push.
+
 This repository has no hosted CI workflow. Report the actual local checks and
 pushed hash; do not claim a green CI run. If CI is introduced, add its concrete
 monitoring procedure here and keep its checks aligned with `scripts/push.py`.
