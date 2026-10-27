@@ -50,6 +50,8 @@ Multicursor replacements refer to one original text snapshot and commit together
 Normalize selections before editing; do not apply cursor edits successively to
 an already changed buffer. The primary selection is the last entry, not
 necessarily the last one in document order.
+Multicursor word motions and occurrence selection share the Unicode word
+definition used by Find, including combining marks; see `search.md`.
 
 ## Constraints & Gotchas
 

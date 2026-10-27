@@ -326,7 +326,7 @@ fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
     a.start < b.end && b.start < a.end || a == b
 }
 fn word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    crate::search::word_char(c)
 }
 
 #[derive(Clone, Debug)]
@@ -707,5 +707,16 @@ mod tests {
         assert_eq!(s.primary().unwrap().range(), 8..11);
         s.undo_selection();
         assert_eq!(s.primary().unwrap().range(), 4..7);
+
+        // A decomposed accent is part of the word, even when the cursor is
+        // positioned directly on its combining mark.
+        for cursor in [0, 4] {
+            let mut s = state(&[(cursor, cursor)]);
+            let text = "cafe\u{301} cafe\u{301}";
+            s.occurrences(text, false, false, true, true, 100);
+            assert_eq!(s.primary().unwrap().range(), 0..5);
+            s.occurrences(text, false, false, true, true, 100);
+            assert_eq!(s.primary().unwrap().range(), 6..11);
+        }
     }
 }
