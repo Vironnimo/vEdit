@@ -94,9 +94,12 @@ pub fn read_document(path: &Path, max_bytes: u64) -> Result<RecoveredDocument, S
     if text.len() as u64 > max_bytes {
         return Err("Recovery document exceeds the supported size".into());
     }
-    let text = std::str::from_utf8(text)
-        .map_err(|error| format!("Recovery text is not valid UTF-8: {error}"))?
-        .to_owned();
+    let decoded = std::str::from_utf8(text)
+        .map_err(|error| format!("Recovery text is not valid UTF-8: {error}"))?;
+    let mut text = String::new();
+    text.try_reserve_exact(decoded.len())
+        .map_err(|_| "Not enough memory to restore recovery text".to_owned())?;
+    text.push_str(decoded);
     Ok(RecoveredDocument {
         text,
         baseline: metadata.baseline,

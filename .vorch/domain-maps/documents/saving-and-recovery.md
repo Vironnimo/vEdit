@@ -58,6 +58,9 @@ reloaded and saved; a transient success message is not authoritative save state.
 ending and BOM in one record. `read_document` accepts the current record header,
 the legacy product header and older raw-text recovery. Legacy raw text has no
 provable baseline and cannot authorize replacement of a named file.
+Restoration does not apply the ordinary file size limit: a draft can grow beyond
+that limit after opening, and its recovery must remain usable. Saving that draft
+still requires reducing its encoded size to the ordinary file limit.
 
 One cloned `RecoveryWriter` orders document snapshots, removals and session writes
 with stamps. The writer's publication stamp is distinct from a document's text

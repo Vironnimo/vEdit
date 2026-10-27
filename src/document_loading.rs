@@ -170,7 +170,9 @@ impl VEditApp {
                     .unwrap_or_else(|| Err("Untitled".into()));
                 let recovered = recovery
                     .filter(|p| p.is_file())
-                    .map(|p| crate::recovery::read_document(&p, MAX_DOCUMENT));
+                    // Editing can grow a draft beyond the ordinary file limit.
+                    // Recovery must still restore the snapshot we wrote for it.
+                    .map(|p| crate::recovery::read_document(&p, u64::MAX));
                 WorkerResult::Loaded {
                     id,
                     result,

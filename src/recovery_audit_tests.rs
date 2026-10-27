@@ -293,6 +293,27 @@ fn recovery_restore_never_adopts_an_external_edit_as_its_save_baseline() {
 }
 
 #[test]
+fn recovery_restores_drafts_larger_than_the_file_open_limit() {
+    let fixture = RecoveryFixture::new("oversized-draft");
+    let path = fixture.write("notes.txt", "original\n");
+    let mut app = fixture.app();
+    fixture.open(&mut app, path.clone());
+    let draft = "x".repeat(MAX_DOCUMENT as usize + 1);
+    edit(&mut app, &draft);
+    app.flush_recovery();
+    let session = fixture.saved_session();
+    drop(app);
+
+    let restored = fixture.restore(session);
+    let tab = restored.tab().unwrap();
+    assert_eq!(tab.text.len(), draft.len());
+    assert!(tab.text == draft, "recovery must preserve the full draft");
+    assert!(tab.dirty);
+    assert!(tab.error.is_none());
+    assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+}
+
+#[test]
 fn recovery_restore_can_save_again_when_the_original_disk_content_is_unchanged() {
     let fixture = RecoveryFixture::new("unchanged-baseline");
     let path = fixture.write("notes.txt", "\u{feff}Original ü\r\nzweite Zeile\r\n");

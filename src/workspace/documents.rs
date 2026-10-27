@@ -154,7 +154,12 @@ pub(crate) fn read_bytes(path: &Path, max_bytes: u64) -> io::Result<(Vec<u8>, Fi
             format!("file is too large (limit {} MiB)", max_bytes / 1024 / 1024),
         ));
     }
-    let mut bytes = Vec::with_capacity(before.len().min(max_bytes) as usize);
+    let capacity = usize::try_from(before.len().min(max_bytes))
+        .map_err(|_| io::Error::other("file is too large for memory"))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| io::Error::other("not enough memory to read file"))?;
     (&mut file)
         .take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
