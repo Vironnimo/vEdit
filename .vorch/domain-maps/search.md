@@ -1,7 +1,7 @@
 # Search
 
-This domain finds text in live document buffers and on project disk snapshots,
-with separate ownership and freshness rules for the two paths.
+This domain finds text in live document buffers and across projects, combining
+open document snapshots with closed files read from disk.
 
 ## Overview
 
@@ -14,7 +14,7 @@ with separate ownership and freshness rules for the two paths.
   Find/Replace and project search, perform replacements, schedule project workers
   and accept their results. The worker poll in `src/app_workers.rs` routes completions.
 - `src/workspace/search.rs` implements production project search through
-  `workspace::search_with_excludes`. `src/cli.rs` validates/normalizes exclusion settings.
+  `workspace::search_with_buffers`. `src/cli.rs` validates/normalizes exclusion settings.
   Ex substitutions are owned by `src/ex_commands.rs` (see `editing.md`).
 
 Quick Open searches filenames using the workspace index; it is not content
@@ -42,16 +42,25 @@ for the same document. Pending navigation additionally identifies the pane and
 motion epoch, so a valid cached match is not by itself permission to move the
 current cursor. `find.rs` checks the live owner before applying a result.
 
-Project search reads the disk through a fresh bounded walk and uses literal
-matching. It does not search unsaved document buffers or the Quick Open index.
-`SearchMatch` carries a path, one-based line/column, Unicode scalar range and
-display preview. `SearchResults` also reports skipped files, truncation and
+Project search uses literal matching and overlays current Documents owned by the
+selected Project onto a fresh bounded disk walk. Named Documents replace their
+disk content, including when their buffer has no match; exclusions and ignore/link
+guards still apply. Unnamed Documents belong to that Project and have no path
+filters. Missing named drafts use the same path/ignore policy. Loading Documents
+are not captured; completion invalidates the search. Oversized snapshots suppress
+disk fallback and report a skipped file. It does not use the Quick Open index.
+`SearchMatch` carries an optional path, optional Document identity/revision and
+unsaved state, one-based line/column, Unicode scalar range and display preview.
+`SearchResults` also reports skipped files, truncation and
 warnings; a bounded or unreadable search must not look complete.
 
-The project worker result carries root, generation, query and exclusions. The
-receiver in `project_search_ui.rs` accepts only the current combination. Root changes and
-exclusion edits invalidate outstanding searches, including when an earlier
-worker has already produced a result.
+The project worker result carries root, Project instance, Document snapshots,
+generation, query and exclusions. The receiver accepts only the current combination.
+Document edits, loads, saves, path changes and closure clear obsolete UI results
+and use the existing 250 ms debounce to search again. Result clicks validate the
+Document revision and reveal that Document without saving or opening a duplicate.
+CLI search uses the same snapshots and backend; a changed owner returns
+`search_changed` with no results instead of publishing stale coordinates.
 
 ## Constraints & Gotchas
 
@@ -81,7 +90,7 @@ truncating a document's matches; do not import project-search truncation into
 in-buffer navigation.
 
 `workspace/search.rs::search_project` is a private test-only index-based helper. Production calls
-`search_with_excludes`; changing only that helper cannot change shipped project
+`search_with_buffers`; changing only that helper cannot change shipped project
 search behavior.
 
 ## Verification

@@ -16,7 +16,10 @@ pub(crate) use documents::{decode_document, read_bytes};
 pub use explorer::{ExplorerDirectory, ExplorerTree, read_explorer_directory};
 #[cfg(test)]
 pub use search::SearchMatch;
-pub use search::{SearchOptions, SearchResults, default_search_excludes, search_with_excludes};
+pub use search::{
+    SearchBuffer, SearchDocument, SearchOptions, SearchResults, default_search_excludes,
+    search_with_buffers,
+};
 
 use ignore::WalkBuilder;
 use std::cmp::Reverse;

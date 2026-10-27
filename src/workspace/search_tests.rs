@@ -3,6 +3,103 @@ use crate::workspace::test_support::Fixture;
 use crate::workspace::{IndexOptions, build_index};
 
 #[test]
+fn open_documents_replace_disk_without_bypassing_exclusions() {
+    let fixture = Fixture::new("search-open-documents");
+    let open = fixture.write("open.rs", "needle disk\n");
+    let removed = fixture.write("removed.rs", "needle disk\n");
+    fixture.write("closed.rs", "needle closed\n");
+    fixture.write(".gitignore", "ignored.rs\nUpper.rs\nblocked/\n");
+    let ignored = fixture.write("ignored.rs", "needle ignored\n");
+    let excluded = fixture.write("generated/code.rs", "needle excluded\n");
+    fixture.write("nested/.gitignore", "*.tmp\n");
+    fixture.write("blocked/.gitignore", "!new.rs\n");
+    let missing = fixture.0.join("new.rs");
+    let buffer = |id, path, text: &str| SearchBuffer {
+        path,
+        document: SearchDocument {
+            id,
+            revision: 7,
+            title: "Draft".into(),
+            unsaved: true,
+        },
+        text: Some(text.into()),
+    };
+    let buffers = vec![
+        buffer(1, Some(open.clone()), "first\r\n🙂 needle live\r\n"),
+        buffer(2, Some(removed.clone()), "removed in memory"),
+        buffer(3, Some(ignored), "needle hidden"),
+        buffer(4, Some(excluded), "needle hidden"),
+        buffer(5, None, "needle untitled"),
+        buffer(6, Some(missing.clone()), "needle new file"),
+        buffer(
+            7,
+            Some(fixture.0.join("nested/new.tmp")),
+            "needle ignored draft",
+        ),
+        buffer(
+            8,
+            Some(fixture.0.join("generated/new.rs")),
+            "needle excluded draft",
+        ),
+        buffer(9, Some(fixture.0.join("Upper.rs")), "needle ignored case"),
+        buffer(
+            10,
+            Some(fixture.0.join("blocked/new.rs")),
+            "needle ignored parent",
+        ),
+    ];
+    let result = search_with_buffers(
+        &fixture.0,
+        "needle",
+        SearchOptions::default(),
+        &["generated/".into()],
+        buffers.clone(),
+    )
+    .unwrap();
+    assert_eq!(result.matches.len(), 4);
+    assert!(!missing.exists());
+    assert!(
+        result
+            .matches
+            .iter()
+            .any(|found| found.document.as_ref().is_some_and(|doc| doc.id == 6))
+    );
+    let live = result
+        .matches
+        .iter()
+        .find(|found| found.document.as_ref().is_some_and(|doc| doc.id == 1))
+        .unwrap();
+    assert_eq!(
+        (live.line, live.column, live.start_char, live.end_char),
+        (2, 3, 9, 15)
+    );
+    assert!(live.preview.contains("live"));
+    assert_eq!(live.document.as_ref().unwrap().revision, 7);
+    assert!(
+        result
+            .matches
+            .iter()
+            .any(|found| found.path.is_none() && found.document.as_ref().unwrap().id == 5)
+    );
+    assert_eq!(fs::read_to_string(open).unwrap(), "needle disk\n");
+    assert_eq!(fs::read_to_string(removed).unwrap(), "needle disk\n");
+
+    // Oversized or unavailable snapshots suppress the corresponding disk text.
+    let mut buffers = buffers;
+    buffers[0].text = None;
+    let result = search_with_buffers(
+        &fixture.0,
+        "needle",
+        SearchOptions::default(),
+        &["generated/".into()],
+        buffers,
+    )
+    .unwrap();
+    assert_eq!(result.matches.len(), 3);
+    assert_eq!(result.files_skipped, 1);
+}
+
+#[test]
 fn default_search_excludes_keep_source_files_named_after_generated_folders() {
     let fixture = Fixture::new("search-generated-name-files");
     let source = fixture.write("scripts/build", "needle");
@@ -15,7 +112,10 @@ fn default_search_excludes_keep_source_files_named_after_generated_folders() {
     )
     .unwrap();
     assert_eq!(results.matches.len(), 1);
-    assert_eq!(results.matches[0].path, fs::canonicalize(source).unwrap());
+    assert_eq!(
+        results.matches[0].path,
+        Some(fs::canonicalize(source).unwrap())
+    );
 }
 
 #[test]
@@ -38,7 +138,7 @@ fn search_handles_unicode_offsets_literal_queries_and_whole_words() {
     .unwrap();
     assert_eq!(results.matches.len(), 3);
     let first = &results.matches[0];
-    assert_eq!(first.path, path);
+    assert_eq!(first.path, Some(path));
     assert_eq!(
         (first.line, first.column, first.start_char, first.end_char),
         (2, 1, 8, 13)
@@ -76,7 +176,7 @@ fn disk_whole_word_search_keeps_unicode_identifiers_intact() {
     .unwrap();
     assert_eq!(results.matches.len(), 1);
     let found = &results.matches[0];
-    assert_eq!(found.path, fs::canonicalize(path).unwrap());
+    assert_eq!(found.path, Some(fs::canonicalize(path).unwrap()));
     assert_eq!(
         (found.line, found.column, found.start_char, found.end_char),
         (1, 16, 15, 18)
@@ -208,5 +308,8 @@ fn search_never_lists_vcs_metadata_files_or_case_variants() {
     let results =
         search_with_excludes(&fixture.0, "needle", SearchOptions::default(), &[]).unwrap();
     assert_eq!(results.matches.len(), 1);
-    assert_eq!(results.matches[0].path, fs::canonicalize(source).unwrap());
+    assert_eq!(
+        results.matches[0].path,
+        Some(fs::canonicalize(source).unwrap())
+    );
 }

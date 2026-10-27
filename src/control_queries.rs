@@ -210,25 +210,56 @@ impl VEditApp {
             max_duration: Duration::from_secs(2),
             ..Default::default()
         };
+        let owner = project.search_owner();
+        let buffers = project.search_buffers(&options);
+        let sender = self.sender.clone();
+        let ctx = self.ctx.clone();
         let worker_reply = reply.clone();
         let spawn = std::thread::Builder::new()
             .name("vedit-cli-search".into())
             .spawn(move || {
                 let _permit = permit;
-                let mut response =
-                    match workspace::search_with_excludes(&root_path, &query, options, &excludes) {
-                        Ok(results) => {
-                            search_response(root, query, results, excludes, excludes_source)
-                        }
-                        Err(error) => Response::failure("search_failed", error),
-                    };
+                let mut response = match workspace::search_with_buffers(
+                    &root_path, &query, options, &excludes, buffers,
+                ) {
+                    Ok(results) => search_response(root, query, results, excludes, excludes_source),
+                    Err(error) => Response::failure("search_failed", error),
+                };
                 name_workspace(&mut response.result, &root_path, source);
-                let _ = worker_reply.send(response);
+                let _ = sender.send(WorkerResult::ControlSearch {
+                    root: root_path,
+                    owner,
+                    reply: worker_reply,
+                    response,
+                });
+                ctx.request_repaint();
             });
         if let Err(error) = spawn {
             let _ = reply.send(Response::failure("search_failed", error.to_string()));
         }
         true
+    }
+
+    pub(in crate::app) fn finish_control_search(
+        &self,
+        root: PathBuf,
+        owner: project_search_ui::SearchOwner,
+        reply: Sender<Response>,
+        response: Response,
+    ) {
+        let current = self
+            .projects
+            .iter()
+            .any(|project| project.root == root && owner.matches(project));
+        let response = if current {
+            response
+        } else {
+            Response::failure(
+                "search_changed",
+                "The project or its open documents changed during the search. No results were returned; run search again.",
+            )
+        };
+        let _ = reply.send(response);
     }
 
     /// The project a project command acts on: the named workspace, else the
@@ -692,7 +723,11 @@ fn search_response(
     let mut bytes = 0;
     for found in &results.matches {
         let value = json!({
-            "path":crate::paths::display(&found.path),
+            "path":found.path.as_deref().map(crate::paths::display),
+            "tab_id":found.document.as_ref().map(|document| document.id),
+            "revision":found.document.as_ref().map(|document| document.revision),
+            "title":found.document.as_ref().map(|document| &document.title),
+            "unsaved":found.document.as_ref().is_some_and(|document| document.unsaved),
             "location":{"line":found.line,"column":found.column},
             "start_char":found.start_char,"end_char":found.end_char,
             "preview":found.preview
@@ -717,9 +752,9 @@ fn search_response(
         })
         .collect();
     Response::success(json!({
-        "workspace":root,"query":query,"scope":"workspace_files_on_disk",
+        "workspace":root,"query":query,"scope":"workspace_current_documents",
         "excludes":excludes,"excludes_source":excludes_source,
-        "includes_unsaved_buffers":false,"items":items,"truncated":results.truncated||omitted>0,
+        "includes_unsaved_buffers":true,"items":items,"truncated":results.truncated||omitted>0,
         "omitted_matches":omitted,"files_searched":results.files_searched,
         "files_skipped":results.files_skipped,"warnings":warnings,
         "column_encoding":"unicode_scalar"
@@ -813,6 +848,18 @@ mod tests {
         project.tabs.push(tab);
         app.projects.push(project);
         (app, id)
+    }
+
+    fn search_reply(app: &mut VEditApp, receiver: mpsc::Receiver<Response>) -> Response {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll();
+            if let Ok(response) = receiver.try_recv() {
+                return response;
+            }
+            assert!(Instant::now() < deadline, "search did not complete");
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -1174,8 +1221,9 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("code.rs"), "😀 needle\nNeedle\n").unwrap();
-        let (mut app, _) = app_with_tab("unsaved replacement", "old");
+        let (mut app, id) = app_with_tab("first\r\n😀 needle unsaved\r\n", "old");
         app.projects[0].root = directory.clone();
+        app.projects[0].tabs[0].path = Some(directory.join("code.rs"));
         app.projects[0].index = None;
         app.project_query = "user query".into();
         let (reply, receiver) = mpsc::channel();
@@ -1188,16 +1236,29 @@ mod tests {
             limit: 10,
         };
         assert!(app.control_query_async(&request, reply));
-        let response = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let response = search_reply(&mut app, receiver);
         assert!(response.ok, "{:?}", response.error);
         assert_eq!(response.result["items"].as_array().unwrap().len(), 1);
         assert_eq!(
             response.result["items"][0]["location"],
-            json!({"line":1,"column":3})
+            json!({"line":2,"column":3})
         );
-        assert_eq!(response.result["includes_unsaved_buffers"], false);
+        assert_eq!(response.result["includes_unsaved_buffers"], true);
+        assert_eq!(response.result["items"][0]["tab_id"], id);
+        assert_eq!(response.result["items"][0]["unsaved"], true);
+        assert_eq!(
+            fs::read_to_string(directory.join("code.rs")).unwrap(),
+            "😀 needle\nNeedle\n"
+        );
         assert_eq!(app.project_query, "user query");
-        assert_eq!(app.tab().unwrap().text, "unsaved replacement");
+        assert_eq!(app.tab().unwrap().text, "first\r\n😀 needle unsaved\r\n");
+        let (reply, receiver) = mpsc::channel();
+        assert!(app.control_query_async(&request, reply));
+        app.projects[0].tabs[0].text.insert_str(0, "changed\n");
+        app.projects[0].tabs[0].changed();
+        let stale = search_reply(&mut app, receiver);
+        assert!(!stale.ok);
+        assert_eq!(stale.error.unwrap().code, "search_changed");
         drop(app);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1247,7 +1308,7 @@ mod tests {
                 limit: 10,
             };
             assert!(app.control_query_async(&request, reply));
-            let response = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            let response = search_reply(&mut app, receiver);
             assert!(response.ok, "{:?}", response.error);
             assert_eq!(
                 response.result["items"].as_array().unwrap().len(),
@@ -1255,7 +1316,7 @@ mod tests {
             );
             assert_eq!(response.result["excludes"], json!(expected_rules));
             assert_eq!(response.result["excludes_source"], source);
-            assert_eq!(response.result["scope"], "workspace_files_on_disk");
+            assert_eq!(response.result["scope"], "workspace_current_documents");
             assert_eq!(app.settings.search_excludes, ["generated"]);
             assert_eq!(app.active_project, 1);
             assert_eq!(app.layout_status(), active_layout);

@@ -35,7 +35,7 @@ Text/JSON file inputs accept UTF-8 with/without BOM and UTF-16 with BOM. Encoded
 
 List pages use `next_offset`. Buffer read and output use both `next_line` and `next_column` because one line can exceed a byte budget. Byte continuations concatenate directly; complete buffer-read line pages omit their final LF, whereas output retains separators. Keep a single buffer revision across reads. Chunking must not cut a Unicode scalar or CRLF pair.
 
-User-mark delivery has two separate continuations and durable acknowledgments; its canonical contract is `reviews/receipts-and-comments.md`. Project search is bounded but has no next-page contract: truncation means narrowing the query, not incrementing an invented offset.
+User-mark delivery has two separate continuations and durable acknowledgments; its canonical contract is `reviews/receipts-and-comments.md`. Project search includes current open Documents and validates their identities, revisions and state before replying; `search_changed` returns no results and asks the caller to repeat the read. It is bounded but has no next-page contract: truncation means narrowing the query, not incrementing an invented offset.
 
 ## Evidence
 

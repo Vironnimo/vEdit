@@ -463,6 +463,37 @@ fn cli_agent_workflow_round_trip_in_isolated_editor() {
     assert_eq!(code, 0);
     assert_eq!(edit["result"]["tab"]["dirty"], true);
     assert_eq!(edit["result"]["tab"]["autosave_paused"], true);
+    let (code, search) = cli(&["search", "changed", fixture.0.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(search["result"]["includes_unsaved_buffers"], true);
+    let found = search["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["tab_id"] == created["result"]["tab"]["id"])
+        .unwrap();
+    assert!(found["path"].is_null());
+    assert_eq!(found["unsaved"], true);
+    assert_eq!(found["revision"], edit["result"]["tab"]["revision"]);
+    let (code, limited) = cli(&[
+        "search",
+        "東京",
+        fixture.0.to_str().unwrap(),
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(limited["result"]["truncated"], true);
+    let (code, missing_search) = cli(&[
+        "search",
+        "needle",
+        fixture.0.join("missing").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(missing_search["error"]["code"], "unknown_workspace");
+    let (code, invalid_search) = cli(&["search", "needle", "--limit", "zero"]);
+    assert_eq!(code, 1);
+    assert_eq!(invalid_search["error"]["code"], "invalid_arguments");
     let (code, stale) = cli(&[
         "edit",
         &id,

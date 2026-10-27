@@ -221,8 +221,8 @@ pub const COMMANDS: &[CommandHelp] = &[
     command!(
         "search",
         "QUERY [WORKSPACE]",
-        "Search saved workspace files in a bounded background walk.",
-        "Searching never changes the visible project. The result names its workspace.\nOmit filter flags to inherit saved exclusions; --exclude replaces them, --no-excludes clears optional filters.\n.gitignore, VCS directories and symlink guards still apply. Unsaved text is not searched; use find for that.\nReturns actual filters, files searched, warnings and truncation. No continuation page: narrow a truncated query.",
+        "Search current open documents and saved workspace files in the background.",
+        "Searching never changes the visible project. The result names its workspace.\nSearch uses current open documents and saved files for the rest; it never saves.\nOpen-document matches include tab_id, revision and unsaved; untitled matches have path:null.\nOmit filter flags to inherit saved exclusions; --exclude replaces them, --no-excludes clears optional filters.\n.gitignore, VCS directories and symlink guards still apply to named files.\nReturns actual filters, files searched, warnings and truncation. No continuation page: narrow a truncated query.\nOn search_changed, run search again: the project or its open documents changed before completion.",
         [
             "--case-sensitive",
             "--whole-word",

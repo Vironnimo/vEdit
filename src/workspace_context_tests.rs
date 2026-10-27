@@ -29,7 +29,8 @@ fn old_search(app: &mut VEditApp) -> (PathBuf, Arc<AtomicBool>, u64) {
     app.project_query = "needle".into();
     app.project_search = Some(workspace::SearchResults {
         matches: vec![workspace::SearchMatch {
-            path: root.join("only-in-A.txt"),
+            path: Some(root.join("only-in-A.txt")),
+            document: None,
             line: 3,
             column: 2,
             start_char: 4,
@@ -62,6 +63,7 @@ fn assert_search_context_reset(app: &VEditApp, cancel: &AtomicBool, generation: 
 fn stale_result(app: &mut VEditApp, root: PathBuf, generation: u64) {
     app.sender
         .send(WorkerResult::Search {
+            owner: app.project().unwrap().search_owner(),
             root,
             generation,
             query: app.project_query.clone(),

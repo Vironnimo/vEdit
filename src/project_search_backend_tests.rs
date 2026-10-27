@@ -63,6 +63,8 @@ impl Fixture {
             .iter()
             .map(|item| {
                 item.path
+                    .as_ref()
+                    .unwrap()
                     .strip_prefix(&self.root)
                     .unwrap()
                     .to_string_lossy()

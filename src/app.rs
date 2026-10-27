@@ -243,6 +243,7 @@ pub struct VEditApp {
     search_cancel: Arc<AtomicBool>,
     search_last_edit: Instant,
     search_dirty: bool,
+    search_owner: Option<project_search_ui::SearchOwner>,
     picker: Option<Picker>,
     context_file_dialog: Option<context_actions::FileActionDialog>,
     context_paste: Option<context_actions::PendingPaste>,
@@ -453,6 +454,7 @@ impl VEditApp {
             search_cancel: Arc::new(AtomicBool::new(false)),
             search_last_edit: Instant::now(),
             search_dirty: false,
+            search_owner: None,
             picker: None,
             context_file_dialog: None,
             context_paste: None,
@@ -650,6 +652,7 @@ impl VEditApp {
         {
             self.handle_vim();
         }
+        self.track_project_search_documents();
         if self.search_dirty {
             let elapsed = self.search_last_edit.elapsed();
             if elapsed >= Duration::from_millis(250) {

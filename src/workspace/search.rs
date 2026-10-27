@@ -1,4 +1,4 @@
-//! Fresh, bounded project disk searches, independent of Quick Open pruning.
+//! Bounded project searches over current Documents and disk, independent of Quick Open pruning.
 #[cfg(test)]
 use super::WorkspaceIndex;
 use super::{MAX_WARNINGS, cancelled, decode_document, read_bytes};
@@ -9,6 +9,7 @@ use ignore::{
 };
 use regex::RegexBuilder;
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -44,8 +45,25 @@ impl Default for SearchOptions {
 }
 
 #[derive(Clone, Debug)]
+pub struct SearchBuffer {
+    pub path: Option<PathBuf>,
+    pub document: SearchDocument,
+    /// None suppresses disk fallback for a buffer beyond the snapshot budget.
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchDocument {
+    pub id: u64,
+    pub revision: u64,
+    pub title: String,
+    pub unsaved: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct SearchMatch {
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
+    pub document: Option<SearchDocument>,
     pub line: usize,
     pub column: usize,
     pub start_char: usize,
@@ -121,11 +139,22 @@ fn validate_search_excludes(excludes: &[String]) -> Result<(), String> {
 /// Search a fresh, bounded filesystem walk on a background worker. Folder and
 /// glob exclusions are applied before reading files or descending directories.
 /// Git ignore files remain respected even when the optional list is empty.
+#[cfg(test)]
 pub fn search_with_excludes(
     root: &Path,
     query: &str,
     options: SearchOptions,
     excludes: &[String],
+) -> Result<SearchResults, String> {
+    search_with_buffers(root, query, options, excludes, Vec::new())
+}
+
+pub fn search_with_buffers(
+    root: &Path,
+    query: &str,
+    options: SearchOptions,
+    excludes: &[String],
+    buffers: Vec<SearchBuffer>,
 ) -> Result<SearchResults, String> {
     let started = Instant::now();
     let root = fs::canonicalize(root)
@@ -134,6 +163,7 @@ pub fn search_with_excludes(
         return Err("The search project must be a folder.".into());
     }
     let matcher = search_exclusion_matcher(&root, excludes)?;
+    let buffer_matcher = matcher.clone();
     let cancel = options.cancel.clone();
     let duration = options.max_duration;
     let count = Arc::new(AtomicUsize::new(0));
@@ -182,9 +212,152 @@ pub fn search_with_excludes(
         Ok(_) => None,
         Err(error) => Some(Err(error.to_string())),
     });
-    let mut result = search_paths(paths, query, options, started)?;
+    let mut overlays = HashMap::new();
+    let mut unnamed = Vec::new();
+    for buffer in buffers {
+        if cancelled(&options.cancel) || started.elapsed() >= options.max_duration {
+            bounded.store(true, Ordering::Relaxed);
+            break;
+        }
+        if let Some(path) = &buffer.path {
+            if fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                && missing_buffer_allowed(&root, path, &buffer_matcher)
+            {
+                unnamed.push(Ok(SearchInput::Buffer(buffer)));
+            } else {
+                overlays.insert(search_path_key(path), buffer);
+            }
+        } else {
+            unnamed.push(Ok(SearchInput::Buffer(buffer)));
+        }
+    }
+    let inputs = paths
+        .map(|path| {
+            path.map(|path| {
+                overlays
+                    .remove(&search_path_key(&path))
+                    .map_or_else(|| SearchInput::Disk(path), SearchInput::Buffer)
+            })
+        })
+        .chain(unnamed);
+    let mut result = search_inputs(inputs, query, options, started)?;
     result.truncated |= bounded.load(Ordering::Relaxed);
     Ok(result)
+}
+
+/// Missing named drafts have no walk entry. Apply the same path/ignore policy
+/// without creating files or following links to discover their parent folders.
+fn missing_buffer_allowed(root: &Path, path: &Path, excludes: &Gitignore) -> bool {
+    let displayed_root = PathBuf::from(crate::paths::display(root));
+    let displayed_path = PathBuf::from(crate::paths::display(path));
+    let mut components = displayed_path.components();
+    for root_component in displayed_root.components() {
+        let Some(component) = components.next() else {
+            return false;
+        };
+        if search_path_key(Path::new(component.as_os_str()))
+            != search_path_key(Path::new(root_component.as_os_str()))
+        {
+            return false;
+        }
+    }
+    // Preserve filename case for case-sensitive ignore patterns, even on Windows.
+    let relative = components.as_path();
+    if relative.components().count() > 64
+        || relative.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+                || [".git", ".hg", ".svn"].iter().any(|name| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(name)
+                })
+        })
+    {
+        return false;
+    }
+    let path = root.join(relative);
+    if excludes
+        .matched_path_or_any_parents(&path, false)
+        .is_ignore()
+    {
+        return false;
+    }
+    let mut directories: Vec<_> = path
+        .parent()
+        .unwrap()
+        .ancestors()
+        .take_while(|dir| dir.starts_with(root))
+        .collect();
+    directories.reverse();
+    for directory in &directories {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return false,
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return false,
+            _ => {}
+        }
+    }
+    // .ignore takes precedence over Git rules; the nearest matching file wins.
+    let mut rules: Vec<(bool, Gitignore)> = Vec::new();
+    let ignored = |rules: &[(bool, Gitignore)], path: &Path, directory: bool| {
+        let mut git_ignored = false;
+        let mut ignore = None;
+        for (git, matcher) in rules {
+            let matched = matcher.matched_path_or_any_parents(path, directory);
+            if !matched.is_none() {
+                if *git {
+                    git_ignored = matched.is_ignore();
+                } else {
+                    ignore = Some(matched.is_ignore());
+                }
+            }
+        }
+        ignore.unwrap_or(git_ignored)
+    };
+    let mut git_directories = directories.clone();
+    if !cfg!(test) {
+        git_directories.extend(root.ancestors().skip(1));
+        git_directories.sort_by_key(|directory| directory.components().count());
+    }
+    for directory in git_directories {
+        if directory != root && directory.starts_with(root) && ignored(&rules, directory, true) {
+            return false;
+        }
+        for (name, git) in [
+            (".git/info/exclude", true),
+            (".gitignore", true),
+            (".ignore", false),
+        ] {
+            let file = directory.join(name);
+            if !file.is_file() {
+                continue;
+            }
+            let mut builder = GitignoreBuilder::new(directory);
+            if builder.add(file).is_some() {
+                return false;
+            }
+            let Ok(matcher) = builder.build() else {
+                return false;
+            };
+            rules.push((git, matcher));
+        }
+    }
+    !ignored(&rules, &path, false)
+}
+
+fn search_path_key(path: &Path) -> String {
+    let path = crate::paths::display(path).replace('\\', "/");
+    if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path
+    }
+}
+
+enum SearchInput {
+    Disk(PathBuf),
+    Buffer(SearchBuffer),
 }
 
 /// Literal project search; punctuation in a query is never interpreted as a regex.
@@ -204,8 +377,23 @@ fn search_project(
     Ok(results)
 }
 
+#[cfg(test)]
 fn search_paths(
     paths: impl Iterator<Item = Result<PathBuf, String>>,
+    query: &str,
+    options: SearchOptions,
+    started: Instant,
+) -> Result<SearchResults, String> {
+    search_inputs(
+        paths.map(|path| path.map(SearchInput::Disk)),
+        query,
+        options,
+        started,
+    )
+}
+
+fn search_inputs(
+    inputs: impl Iterator<Item = Result<SearchInput, String>>,
     query: &str,
     options: SearchOptions,
     started: Instant,
@@ -222,7 +410,7 @@ fn search_paths(
         .build()
         .map_err(|error| format!("Could not prepare search: {error}"))?;
     let mut bytes_searched = 0u64;
-    'files: for path in paths {
+    'files: for input in inputs {
         if cancelled(&options.cancel)
             || started.elapsed() >= options.max_duration
             || results.matches.len() >= options.max_matches
@@ -231,8 +419,8 @@ fn search_paths(
             results.truncated = true;
             break;
         }
-        let path = match path {
-            Ok(path) => path,
+        let input = match input {
+            Ok(input) => input,
             Err(error) => {
                 if results.warnings.len() < MAX_WARNINGS {
                     results.warnings.push(error);
@@ -242,42 +430,55 @@ fn search_paths(
         };
         let remaining = options.max_total_bytes.saturating_sub(bytes_searched);
         let limit = remaining.min(options.max_file_bytes);
-        let (bytes, fingerprint) = match read_bytes(&path, limit) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                results.files_skipped += 1;
-                if error.kind() != io::ErrorKind::InvalidInput
-                    && results.warnings.len() < MAX_WARNINGS
-                {
-                    results.warnings.push(format!(
-                        "Could not open {}: {error}",
-                        crate::paths::display(&path)
-                    ));
-                }
-                continue;
+        let (path, document, text) = match input {
+            SearchInput::Buffer(buffer) => {
+                let Some(text) = buffer.text.filter(|text| text.len() as u64 <= limit) else {
+                    results.files_skipped += 1;
+                    continue;
+                };
+                bytes_searched += text.len() as u64;
+                (buffer.path, Some(buffer.document), text)
             }
-        };
-        // Reading a binary or malformed text file still consumes the search
-        // budget. Charge the snapshot before decoding it, so repositories full
-        // of assets cannot bypass the advertised bound.
-        bytes_searched += fingerprint.len;
-        let document = match decode_document(&path, bytes, fingerprint) {
-            Ok(document) => document,
-            Err(error) => {
-                results.files_skipped += 1;
-                // Binary files and large assets are expected. Keep errors actionable.
-                if !error.contains("binary")
-                    && !error.contains("UTF-8")
-                    && !error.contains("too large")
-                    && results.warnings.len() < MAX_WARNINGS
-                {
-                    results.warnings.push(error);
-                }
-                continue;
+            SearchInput::Disk(path) => {
+                let (bytes, fingerprint) = match read_bytes(&path, limit) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        results.files_skipped += 1;
+                        if error.kind() != io::ErrorKind::InvalidInput
+                            && results.warnings.len() < MAX_WARNINGS
+                        {
+                            results.warnings.push(format!(
+                                "Could not open {}: {error}",
+                                crate::paths::display(&path)
+                            ));
+                        }
+                        continue;
+                    }
+                };
+                // Reading a binary or malformed text file still consumes the search
+                // budget. Charge the snapshot before decoding it, so repositories full
+                // of assets cannot bypass the advertised bound.
+                bytes_searched += fingerprint.len;
+                let document = match decode_document(&path, bytes, fingerprint) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        results.files_skipped += 1;
+                        // Binary files and large assets are expected. Keep errors actionable.
+                        if !error.contains("binary")
+                            && !error.contains("UTF-8")
+                            && !error.contains("too large")
+                            && results.warnings.len() < MAX_WARNINGS
+                        {
+                            results.warnings.push(error);
+                        }
+                        continue;
+                    }
+                };
+                (Some(path), None, document.text)
             }
         };
         results.files_searched += 1;
-        let text = &document.text;
+        let text = text.as_str();
         let mut last_byte = 0;
         let mut char_offset = 0;
         let mut line = 1;
@@ -320,6 +521,7 @@ fn search_paths(
             let preview = line_preview(&text[line_start..line_end], found.start() - line_start);
             results.matches.push(SearchMatch {
                 path: path.clone(),
+                document: document.clone(),
                 line,
                 column: start_char - line_char_start + 1,
                 start_char,

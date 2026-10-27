@@ -1,9 +1,101 @@
 //! Project search requests, stale-result guards and result presentation.
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SearchOwner {
+    instance: u64,
+    documents: Vec<SearchDocumentState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchDocumentState {
+    document: workspace::SearchDocument,
+    path: Option<PathBuf>,
+    bytes: usize,
+    loading: bool,
+    failed: bool,
+}
+
+impl SearchOwner {
+    pub(super) fn matches(&self, project: &Project) -> bool {
+        self.instance == project.instance_id
+            && self.documents.len() == project.tabs.len()
+            && self
+                .documents
+                .iter()
+                .zip(&project.tabs)
+                .all(|(state, tab)| {
+                    state.document.id == tab.id
+                        && state.document.revision == tab.revision
+                        && state.document.title == tab.title
+                        && state.path == tab.path
+                        && state.bytes == tab.text.len()
+                        && state.loading == tab.loading
+                        && state.failed == tab.error.is_some()
+                        && state.document.unsaved
+                            == (tab.dirty || tab.agent_unsaved || tab.path.is_none())
+                })
+    }
+}
+
+impl Project {
+    pub(super) fn search_owner(&self) -> SearchOwner {
+        SearchOwner {
+            instance: self.instance_id,
+            documents: self
+                .tabs
+                .iter()
+                .map(|tab| SearchDocumentState {
+                    document: workspace::SearchDocument {
+                        id: tab.id,
+                        revision: tab.revision,
+                        title: tab.title.clone(),
+                        unsaved: tab.dirty || tab.agent_unsaved || tab.path.is_none(),
+                    },
+                    path: tab.path.clone(),
+                    bytes: tab.text.len(),
+                    loading: tab.loading,
+                    failed: tab.error.is_some(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn search_buffers(
+        &self,
+        options: &workspace::SearchOptions,
+    ) -> Vec<workspace::SearchBuffer> {
+        let mut remaining = options.max_total_bytes;
+        self.tabs
+            .iter()
+            .filter(|tab| !tab.loading && (tab.error.is_none() || tab.dirty))
+            .map(|tab| {
+                let bytes = tab.text.len() as u64;
+                let text = if bytes <= options.max_file_bytes && bytes <= remaining {
+                    remaining -= bytes;
+                    Some(tab.text.clone())
+                } else {
+                    None
+                };
+                workspace::SearchBuffer {
+                    path: tab.path.clone(),
+                    document: workspace::SearchDocument {
+                        id: tab.id,
+                        revision: tab.revision,
+                        title: tab.title.clone(),
+                        unsaved: tab.dirty || tab.agent_unsaved || tab.path.is_none(),
+                    },
+                    text,
+                }
+            })
+            .collect()
+    }
+}
+
 impl VEditApp {
     pub(super) fn finish_project_search(
         &mut self,
+        owner: SearchOwner,
         root: PathBuf,
         generation: u64,
         query: String,
@@ -15,6 +107,10 @@ impl VEditApp {
             && query == self.project_query
             && excludes == self.settings.search_excludes
         {
+            if self.project().is_none_or(|project| !owner.matches(project)) {
+                self.invalidate_project_search();
+                return;
+            }
             self.search_running = false;
             match result {
                 Ok(results) => {
@@ -47,22 +143,21 @@ impl VEditApp {
             return;
         };
         let root = p.root.clone();
+        let owner = p.search_owner();
+        let options = workspace::SearchOptions {
+            cancel: Some(self.search_cancel.clone()),
+            ..Default::default()
+        };
+        let buffers = p.search_buffers(&options);
+        self.search_owner = Some(owner.clone());
         let query = self.project_query.clone();
         let excludes = self.settings.search_excludes.clone();
         let generation = self.search_generation;
-        let cancel = self.search_cancel.clone();
         self.search_running = true;
         self.worker(move || {
-            let result = workspace::search_with_excludes(
-                &root,
-                &query,
-                workspace::SearchOptions {
-                    cancel: Some(cancel),
-                    ..Default::default()
-                },
-                &excludes,
-            );
+            let result = workspace::search_with_buffers(&root, &query, options, &excludes, buffers);
             WorkerResult::Search {
+                owner,
                 root,
                 generation,
                 query,
@@ -77,9 +172,19 @@ impl VEditApp {
         self.search_running = false;
         self.search_dirty = self.active_folder().is_some() && !self.project_query.trim().is_empty();
         self.search_last_edit = Instant::now();
+        self.search_owner = self.project().map(Project::search_owner);
         self.project_search = None;
         self.project_search_error = None;
         self.ctx.request_repaint();
+    }
+    pub(super) fn track_project_search_documents(&mut self) {
+        if self
+            .search_owner
+            .as_ref()
+            .is_some_and(|owner| self.project().is_none_or(|project| !owner.matches(project)))
+        {
+            self.invalidate_project_search();
+        }
     }
     pub(super) fn open_project_search(&mut self) {
         if self.project().is_some_and(Project::is_other_files) {
@@ -101,6 +206,7 @@ impl VEditApp {
         self.ctx.request_repaint();
     }
     pub(super) fn project_search_ui(&mut self, ui: &mut egui::Ui) {
+        self.track_project_search_documents();
         if self.project().is_some_and(Project::is_other_files) {
             ui.label("Open a project folder to search across files.");
             return;
@@ -227,21 +333,30 @@ impl VEditApp {
                 .show(ui, |ui| {
                     let mut previous = None;
                     for m in &results.matches {
-                        if previous.as_ref() != Some(&m.path) {
+                        let key = (
+                            m.path.clone(),
+                            m.document.as_ref().map(|document| document.id),
+                        );
+                        if previous.as_ref() != Some(&key) {
                             ui.add_space(9.0);
-                            let path = self.project().map_or(m.path.as_path(), |project| {
-                                m.path.strip_prefix(&project.root).unwrap_or(&m.path)
-                            });
-                            ui.label(
-                                RichText::new(crate::paths::display(path))
-                                    .size(12.0)
-                                    .strong()
-                                    .color(TEXT),
-                            );
-                            previous = Some(m.path.clone());
+                            let label = m
+                                .path
+                                .as_deref()
+                                .map(|path| {
+                                    let path = self.project().map_or(path, |project| {
+                                        path.strip_prefix(&project.root).unwrap_or(path)
+                                    });
+                                    crate::paths::display(path)
+                                })
+                                .unwrap_or_else(|| m.document.as_ref().unwrap().title.clone());
+                            ui.label(RichText::new(label).size(12.0).strong().color(TEXT));
+                            if m.document.as_ref().is_some_and(|document| document.unsaved) {
+                                ui.label(RichText::new("Unsaved").size(10.0).color(ORANGE));
+                            }
+                            previous = Some(key.clone());
                         }
                         let response = ui
-                            .push_id((&m.path, m.line, m.column), |ui| {
+                            .push_id((&key, m.line, m.column), |ui| {
                                 design::left_row(
                                     ui,
                                     m.preview.trim(),
@@ -249,7 +364,15 @@ impl VEditApp {
                                     false,
                                     &format!(
                                         "{}:{}:{}",
-                                        crate::paths::display(&m.path),
+                                        m.path
+                                            .as_deref()
+                                            .map(crate::paths::display)
+                                            .unwrap_or_else(|| m
+                                                .document
+                                                .as_ref()
+                                                .unwrap()
+                                                .title
+                                                .clone()),
                                         m.line,
                                         m.column
                                     ),
@@ -257,15 +380,40 @@ impl VEditApp {
                             })
                             .inner;
                         if response.clicked() {
-                            clicked = Some((m.path.clone(), m.line, m.column));
+                            clicked = Some(m.clone());
                         }
                     }
                 });
         } else if !self.search_running {
             ui.add(egui::Label::new(RichText::new("Search text in this project.\nEdit Exclusions to choose which folders and files to skip.").size(12.0).color(MUTED)).wrap());
         }
-        if let Some((path, line, column)) = clicked {
-            self.reveal_search_result(path, line, column);
+        if let Some(found) = clicked {
+            if let Some(document) = found.document {
+                let index = self.project().and_then(|project| {
+                    project
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == document.id && tab.revision == document.revision)
+                });
+                if let Some(index) = index {
+                    self.record_jump();
+                    self.activate_tab(self.active_project, index);
+                    self.set_document_view(crate::cli::DocumentView::Source);
+                    if let Some(tab) = self.tab_mut() {
+                        tab.pending_agent_location = Some(crate::cli::Location {
+                            line: found.line,
+                            column: found.column,
+                        });
+                        tab.pending_navigation_feedback = true;
+                        tab.agent_location_error = None;
+                    }
+                    self.apply_pending_agent_locations();
+                } else {
+                    self.invalidate_project_search();
+                }
+            } else if let Some(path) = found.path {
+                self.reveal_search_result(path, found.line, found.column);
+            }
         }
     }
 }

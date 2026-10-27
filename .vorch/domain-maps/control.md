@@ -28,7 +28,7 @@ Edits to existing document text require the observed revision and validate the w
 - Status observations expose `status_message` and `message_details` as null or `{text,error}`. The first is the latest message, the second the stable open snapshot; `dialog:message_details` blocks mutations while observations and notify remain available. The presentation owner is `src/status_messages.rs`; `src/cli_round_trip_tests.rs` checks the actual CLI boundary.
 - Ordered batches preserve already-applied effects and stop on failure/partial execution by default. They neither roll back nor replay completed actions; invalid batch members are rejected before dispatch.
 - Settings patches validate as a whole. Some supplied maps replace overrides rather than merging them; `vim_keys` merges supplied entries and null resets one key. Retain each map's meaning in UI, CLI and skill guidance. Shared `cli::VimKeyTarget` keeps the standalone CLI independent of the GUI preference owner; that owner supplies the effective Vim-key catalog in settings responses.
-- Cached Git/diagnostic observations expose readiness; empty output alone is not proof of a clean repository or completed analysis. Project search reads saved files, while buffer find reads current text.
+- Cached Git/diagnostic observations expose readiness; empty output alone is not proof of a clean repository or completed analysis. Project search combines current open Documents with saved files for the rest; buffer find searches one current Document. The shared search owner and stale-result rules are in `search.md`.
 - CLI mutations do not offer implicit overwrite or permanent deletion. Save As targets a nonexistent destination; file deletion uses the Recycle Bin and guarded background jobs.
 
 ## Verification pointers

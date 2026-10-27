@@ -2,6 +2,12 @@
 use super::*;
 
 pub(super) enum WorkerResult {
+    ControlSearch {
+        root: PathBuf,
+        owner: project_search_ui::SearchOwner,
+        reply: Sender<crate::cli::Response>,
+        response: crate::cli::Response,
+    },
     ExternalOpenRead {
         revision: u64,
         enabled: bool,
@@ -99,6 +105,7 @@ pub(super) enum WorkerResult {
         result: Result<String, String>,
     },
     Search {
+        owner: project_search_ui::SearchOwner,
         root: PathBuf,
         generation: u64,
         query: String,
@@ -210,6 +217,14 @@ impl VEditApp {
         self.poll_launches();
         while let Ok(result) = self.receiver.try_recv() {
             match result {
+                WorkerResult::ControlSearch {
+                    root,
+                    owner,
+                    reply,
+                    response,
+                } => {
+                    self.finish_control_search(root, owner, reply, response);
+                }
                 WorkerResult::ExternalOpenRead { revision, enabled } => {
                     if revision == self.external_open_revision && !self.external_open_save_pending {
                         self.settings.external_open_new_window = enabled;
@@ -315,12 +330,13 @@ impl VEditApp {
                     result,
                 } => self.finish_git_action(reply, root, kind, result),
                 WorkerResult::Search {
+                    owner,
                     root,
                     generation,
                     query,
                     excludes,
                     result,
-                } => self.finish_project_search(root, generation, query, excludes, result),
+                } => self.finish_project_search(owner, root, generation, query, excludes, result),
                 WorkerResult::NativeDialog { request, result } => {
                     self.finish_native_dialog(request, result);
                 }
