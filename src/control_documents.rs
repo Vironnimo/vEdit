@@ -1728,10 +1728,7 @@ mod tests {
                     expected_settings
                 );
             }
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !app.recovery_session_path.is_file() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            assert!(app.recovery_writer.wait_idle(Duration::from_secs(10)));
             let saved: Session =
                 serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
             assert_eq!(
