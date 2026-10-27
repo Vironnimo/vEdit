@@ -15,7 +15,8 @@ new text. Save notifications include text only when the server requests it.
 
 The client uses bounded command, event and reader/writer channels. Its supervisor
 waits for wakeups and deadlines; dropping `LanguageServer` requests shutdown and
-wakes it. Event backpressure preserves lifecycle/results/diagnostics, extends
+wakes it. Requests evicted from the bounded pre-initialization queue receive a
+cancellation event. Event backpressure preserves lifecycle/results/diagnostics, extends
 request/write deadlines, and remains interruptible by shutdown. Read the
 `EventEmitter`/`ProcessGuard` in `src/lsp/runtime.rs` and `Protocol` operations in
 `src/lsp/protocol.rs` together when changing queues or teardown. Protocol size
@@ -60,7 +61,8 @@ Keep revision updates and cursor repair with that edit transaction.
 `language_intel::Origin` identifies the request and server instance; a restarted
 server invalidates pending origins. Hover checks target tab/revision and keeps at
 most one request in flight, subsequently considering the newest target. A
-reference result can remain useful after moving the cursor, but only takes focus
+stopped server's queued successes cannot settle those origins before cancellation.
+A reference result can remain useful after moving the cursor, but only takes focus
 if the user is still at the original document/revision/cursor. Symbol requests
 keep their document or workspace-query context. Read each feature's result and
 palette/update path before generalizing stale-result behavior.

@@ -205,8 +205,22 @@ impl Protocol {
                 if self.ready {
                     self.request(request)?;
                 } else {
-                    if self.queued_requests.len() >= 64 {
-                        self.queued_requests.pop_front();
+                    if self.queued_requests.len() >= 64
+                        && let Some(evicted) = self.queued_requests.pop_front()
+                    {
+                        let id = match evicted {
+                            ClientCommand::Completion { id, .. }
+                            | ClientCommand::Definition { id, .. }
+                            | ClientCommand::Hover { id, .. }
+                            | ClientCommand::References { id, .. }
+                            | ClientCommand::DocumentSymbols { id, .. }
+                            | ClientCommand::WorkspaceSymbols { id, .. } => id,
+                            _ => unreachable!("only requests enter this queue"),
+                        };
+                        self.failed_requests.push_back(LspEvent::RequestFailed {
+                            request_id: id,
+                            error: None,
+                        });
                     }
                     self.queued_requests.push_back(request);
                 }

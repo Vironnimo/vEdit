@@ -220,23 +220,29 @@ impl VEditApp {
                     request_id,
                     contents,
                 } => {
-                    self.language_response_succeeded(index, &language);
-                    self.hover_result(request_id, contents);
+                    if self.projects[index].languages[&language].active() {
+                        self.language_response_succeeded(index, &language);
+                        self.hover_result(request_id, contents);
+                    }
                 }
                 crate::lsp::LspEvent::References {
                     request_id,
                     references,
                     truncated,
                 } => {
-                    self.language_response_succeeded(index, &language);
-                    self.references_result(request_id, references, truncated);
+                    if self.projects[index].languages[&language].active() {
+                        self.language_response_succeeded(index, &language);
+                        self.references_result(request_id, references, truncated);
+                    }
                 }
                 crate::lsp::LspEvent::Symbols {
                     request_id,
                     symbols,
                 } => {
-                    self.language_response_succeeded(index, &language);
-                    self.symbols_result(request_id, symbols);
+                    if self.projects[index].languages[&language].active() {
+                        self.language_response_succeeded(index, &language);
+                        self.symbols_result(request_id, symbols);
+                    }
                 }
             }
         }

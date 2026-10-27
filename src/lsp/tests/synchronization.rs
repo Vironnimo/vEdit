@@ -199,6 +199,35 @@ fn absent_features_report_unavailable_without_sending_requests_or_fake_success()
 }
 
 #[test]
+fn queued_requests_evicted_before_initialization_are_settled() {
+    let (mut protocol, _) = protocol();
+    let path = protocol.root.join("features.py");
+    protocol
+        .command(ClientCommand::Hover {
+            id: 1,
+            path,
+            position: Position::default(),
+        })
+        .unwrap();
+    for id in 2..=65 {
+        protocol
+            .command(ClientCommand::WorkspaceSymbols {
+                id,
+                query: String::new(),
+            })
+            .unwrap();
+    }
+    assert_eq!(protocol.queued_requests.len(), 64);
+    assert!(matches!(
+        protocol.failed_requests.pop_front(),
+        Some(LspEvent::RequestFailed {
+            request_id: 1,
+            error: None
+        })
+    ));
+}
+
+#[test]
 fn disabled_sync_and_save_capabilities_produce_no_notifications() {
     let (mut protocol, outgoing) = protocol();
     initialize_protocol(

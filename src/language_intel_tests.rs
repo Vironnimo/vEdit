@@ -721,7 +721,7 @@ fn server_errors_stay_in_their_views_and_restarts_cancel_pending_requests() {
     assert!(app.intel.hover_in_flight().is_some());
     // A restarted server is a different instance; its predecessor's
     // requests can never answer.
-    let _ = connect(&mut app);
+    let (stopped_events, stopped_requests) = connect(&mut app);
     app.poll_languages();
     assert!(matches!(
         &app.intel.references.as_ref().unwrap().state,
@@ -733,6 +733,26 @@ fn server_errors_stay_in_their_views_and_restarts_cancel_pending_requests() {
         SymbolState::Failed(message) if message.contains("cancelled")
     ));
     assert!(app.projects[0].languages["rust"].error.is_none());
+
+    // A result already queued when the server exits must not defeat the same
+    // cancellation check during the next poll.
+    app.find_references();
+    let Some(TestRequest::References { id, .. }) = stopped_requests.next_request() else {
+        panic!("expected references");
+    };
+    stopped_events
+        .send(LspEvent::References {
+            request_id: id,
+            references: vec![reference(&fixture.0.join("source.rs"), 0, 0)],
+            truncated: false,
+        })
+        .unwrap();
+    server(&app).shutdown();
+    app.poll_languages();
+    assert!(matches!(
+        &app.intel.references.as_ref().unwrap().state,
+        ReferencesState::Failed(message) if message.contains("cancelled")
+    ));
 }
 
 #[test]
