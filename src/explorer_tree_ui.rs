@@ -160,6 +160,7 @@ impl VEditApp {
         project.index_in_flight = true;
         project.index_cancel = Arc::new(AtomicBool::new(false));
         let root = project.root.clone();
+        let instance = project.instance_id;
         let generation = project.index_generation;
         let request = project.index_request;
         let cancel = project.index_cancel.clone();
@@ -172,6 +173,7 @@ impl VEditApp {
                 },
             ),
             root,
+            instance,
             generation,
             request,
         });

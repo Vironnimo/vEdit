@@ -191,7 +191,10 @@ impl super::VEditApp {
     /// start at the project root, then at the command's working directory;
     /// checking them on disk happens in the background.
     pub(super) fn open_output_link(&mut self, link: Link, cwd: Option<PathBuf>) {
-        let Some(root) = self.project().map(|project| project.root.clone()) else {
+        let Some((root, instance)) = self
+            .project()
+            .map(|project| (project.root.clone(), project.instance_id))
+        else {
             return;
         };
         self.output_link_request += 1;
@@ -203,6 +206,7 @@ impl super::VEditApp {
             let path = output_links::resolve(&link.path, &root, &bases);
             super::WorkerResult::OutputLink {
                 root,
+                instance,
                 request,
                 link,
                 path,
@@ -213,11 +217,14 @@ impl super::VEditApp {
     pub(super) fn output_link_resolved(
         &mut self,
         root: PathBuf,
+        instance: u64,
         request: u64,
         link: Link,
         path: Option<PathBuf>,
     ) {
-        let same_project = self.project().is_some_and(|project| project.root == root);
+        let same_project = self
+            .project()
+            .is_some_and(|project| project.root == root && project.instance_id == instance);
         if request != self.output_link_request || !same_project {
             return;
         }

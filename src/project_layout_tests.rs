@@ -96,6 +96,51 @@ fn fixture(files: &WorkspaceFiles) -> VEditApp {
     app
 }
 
+#[test]
+fn old_index_completion_cannot_publish_into_a_reopened_project() {
+    let files = WorkspaceFiles::new();
+    let root = files.project("A");
+    let mut app = VEditApp::empty(egui::Context::default());
+    let mut original = Project::new(root.clone());
+    original.index_generation = 1;
+    original.index_request = 1;
+    let generation = original.index_generation;
+    let request = original.index_request;
+    let instance = original.instance_id;
+    app.projects.push(original);
+
+    // A new Project for the same folder can have the same local counters.
+    let mut reopened = Project::new(root.clone());
+    reopened.index_generation = 1;
+    reopened.index_request = 1;
+    reopened.indexing = true;
+    reopened.index_in_flight = true;
+    app.projects[0] = reopened;
+    app.finish_project_index(
+        root.clone(),
+        instance,
+        generation,
+        request,
+        Ok(workspace::WorkspaceIndex::empty(root.clone())),
+    );
+
+    assert!(app.projects[0].index.is_none());
+    assert!(app.projects[0].indexing);
+    assert!(app.projects[0].index_in_flight);
+
+    let instance = app.projects[0].instance_id;
+    app.finish_project_index(
+        root.clone(),
+        instance,
+        generation,
+        request,
+        Ok(workspace::WorkspaceIndex::empty(root)),
+    );
+    assert!(app.projects[0].index.is_some());
+    assert!(!app.projects[0].indexing);
+    assert!(!app.projects[0].index_in_flight);
+}
+
 fn layout(app: &VEditApp) -> Value {
     serde_json::to_value(app.editor_session_layout()).unwrap()
 }

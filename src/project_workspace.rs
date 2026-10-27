@@ -5,12 +5,16 @@ impl VEditApp {
     pub(super) fn finish_project_index(
         &mut self,
         root: PathBuf,
+        instance: u64,
         generation: u64,
         request: u64,
         result: Result<workspace::WorkspaceIndex, String>,
     ) {
         if let Some(index) = self.projects.iter().position(|p| {
-            p.root == root && p.index_generation == generation && p.index_request == request
+            p.root == root
+                && p.instance_id == instance
+                && p.index_generation == generation
+                && p.index_request == request
         }) {
             let p = &mut self.projects[index];
             p.indexing = false;
@@ -242,6 +246,7 @@ impl VEditApp {
             p.explorer = Some(workspace::ExplorerTree::new(p.root.clone()));
         }
         let root = p.root.clone();
+        let instance = p.instance_id;
         let explorer_root = root.clone();
         let generation = p.index_generation;
         let request = p.index_request;
@@ -255,6 +260,7 @@ impl VEditApp {
                 },
             ),
             root,
+            instance,
             generation,
             request,
         });

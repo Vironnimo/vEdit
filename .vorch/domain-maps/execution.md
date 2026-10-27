@@ -60,8 +60,8 @@ response or a stop request alone does not prove a running/terminated process.
 - Output-pane stdin is closed. `open_terminal` intentionally creates a visible,
   independent PowerShell window whose lifetime is separate from task handles.
 - Output links resolve on a worker, trying project root before command working
-  directory. Applying a result checks project root and request ID; clicking an old
-  link must not navigate a newly selected project.
+  directory. Applying a result checks project identity and request ID; clicking an
+  old link must not navigate a newly selected or reopened project.
 
 ## Agent-facing text
 

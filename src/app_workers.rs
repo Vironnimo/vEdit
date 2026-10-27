@@ -20,6 +20,7 @@ pub(super) enum WorkerResult {
     },
     Index {
         root: PathBuf,
+        instance: u64,
         generation: u64,
         request: u64,
         result: Result<workspace::WorkspaceIndex, String>,
@@ -31,6 +32,7 @@ pub(super) enum WorkerResult {
     },
     OutputLink {
         root: PathBuf,
+        instance: u64,
         request: u64,
         link: crate::output_links::Link,
         path: Option<PathBuf>,
@@ -234,10 +236,11 @@ impl VEditApp {
                 } => self.finish_explorer_directory(root, path, generation, result),
                 WorkerResult::Index {
                     root,
+                    instance,
                     generation,
                     request,
                     result,
-                } => self.finish_project_index(root, generation, request, result),
+                } => self.finish_project_index(root, instance, generation, request, result),
                 WorkerResult::FileWatcher {
                     root,
                     instance,
@@ -245,10 +248,11 @@ impl VEditApp {
                 } => self.file_watcher_started(root, instance, result),
                 WorkerResult::OutputLink {
                     root,
+                    instance,
                     request,
                     link,
                     path,
-                } => self.output_link_resolved(root, request, link, path),
+                } => self.output_link_resolved(root, instance, request, link, path),
                 WorkerResult::Loaded {
                     id,
                     result,

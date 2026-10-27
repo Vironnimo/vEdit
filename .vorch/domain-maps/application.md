@@ -37,7 +37,7 @@ pane/project ownership in `projects.md`, and window startup/chrome in
 `WorkerResult` and `poll` are the integration boundary for many background jobs.
 Dispatch captures the owning identity; completion checks the identity that can
 have become stale before publishing. Use the existing feature's keys: for
-example index root/generation/request, search root/generation/query/excludes,
+example index project instance/generation/request, search root/generation/query/excludes,
 or document ID and its load/save state. A surviving project path alone does not
 prove a result belongs to a reopened project.
 

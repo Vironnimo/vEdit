@@ -349,6 +349,26 @@ fn output_link(path: &str, line: usize, column: Option<usize>) -> crate::output_
 }
 
 #[test]
+fn output_link_from_closed_project_does_not_open_in_reopened_project() {
+    let fixture = Fixture::new();
+    let root = fixture.0.clone();
+    let mut app = app(&root);
+    app.output_link_request = 1;
+    let instance = app.projects[0].instance_id;
+    app.projects[0] = Project::new(root.clone());
+
+    app.output_link_resolved(
+        root.clone(),
+        instance,
+        1,
+        output_link("a.rs", 12, Some(3)),
+        Some(root.join("a.rs")),
+    );
+
+    assert!(app.projects[0].tabs.is_empty());
+}
+
+#[test]
 fn output_locations_open_from_the_root_then_the_working_directory() {
     let fixture = Fixture::new();
     let root = fixture.0.clone();
