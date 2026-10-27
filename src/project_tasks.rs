@@ -123,14 +123,14 @@ impl ProjectRun {
             };
             match event {
                 tasks::TaskEvent::Started => {}
-                tasks::TaskEvent::Output(text) => {
-                    if self.output.len() < 1024 * 1024 {
-                        self.output.push_str(&text);
-                    }
-                }
+                // The worker already bounds captured task output, including its
+                // truncation notice. The project header is outside that budget.
+                tasks::TaskEvent::Output(text) => self.output.push_str(&text),
                 tasks::TaskEvent::Finished { code, cancelled } => {
                     self.status = if cancelled {
                         "Cancelled".into()
+                    } else if self.status == "Failed" {
+                        "Failed".into()
                     } else if code == Some(0) {
                         "Completed".into()
                     } else {

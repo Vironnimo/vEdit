@@ -40,7 +40,9 @@ request process-tree termination on its worker.
 
 `Started` means an application process spawned, not that a service is ready.
 `Error` is diagnostic and is followed by `Finished`; retain the latter as the
-completion boundary after process exit and output draining. A successful start
+completion boundary after process exit and output draining, preserving a task's
+failed status. The worker owns the task output limit and its truncation notice;
+the project header is separate. A successful start
 response or a stop request alone does not prove a running/terminated process.
 
 ## Constraints & Gotchas

@@ -31,6 +31,58 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn failed_task_remains_failed_after_completion() {
+    let fixture = Fixture::new();
+    let mut run = ProjectRun {
+        status: "Running".into(),
+        task: Some(tasks::spawn_configured(
+            fixture.0.clone(),
+            tasks::CommandSpec::Program {
+                program: fixture.0.join("missing-executable").into_os_string(),
+                args: Vec::new(),
+            },
+            Vec::new(),
+        )),
+        ..Default::default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !run.poll() {
+        assert!(Instant::now() < deadline, "task did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(run.status, "Failed");
+    assert!(!run.output.is_empty());
+}
+
+#[test]
+fn task_output_keeps_worker_truncation_notice() {
+    #[cfg(windows)]
+    let command = "[Console]::Out.Write('x' * 1100000)";
+    #[cfg(not(windows))]
+    let command = "head -c 1100000 /dev/zero | tr '\\0' x";
+    let mut run = ProjectRun {
+        output: format!("> {command}\n{}\n\n", "header".repeat(30)),
+        status: "Running".into(),
+        task: Some(tasks::spawn_configured(
+            std::env::current_dir().unwrap(),
+            tasks::CommandSpec::Shell(command.into()),
+            Vec::new(),
+        )),
+        ..Default::default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !run.poll() {
+        assert!(Instant::now() < deadline, "task did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(run.status, "Completed");
+    assert!(
+        run.output
+            .contains("[Output limit reached; further output omitted.]")
+    );
+}
+
+#[test]
 fn active_python_file_overrides_rust_manifest_and_keeps_path_one_argument() {
     let fixture = Fixture::new();
     fixture.write("Cargo.toml");
