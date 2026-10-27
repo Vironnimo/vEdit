@@ -72,6 +72,7 @@ fn deliver_refresh(
                 stats_error: None,
                 head: None,
                 fingerprint: 0,
+                branch_review: None,
                 history: Ok(GitHistoryRefresh { snapshot, page }),
             })),
         })
@@ -1233,6 +1234,7 @@ fn repository_relocation_releases_hover_slots_and_discards_old_repository_result
                 stats_error: None,
                 head: None,
                 fingerprint: 0,
+                branch_review: None,
                 history: Ok(GitHistoryRefresh {
                     snapshot: app.projects[0].git_history_snapshot.clone().unwrap(),
                     page: None,

@@ -14,6 +14,7 @@ const REVIEW_UNTRACKED_LIMIT: usize = 2_000;
 const REVIEW_CHUNK_FILES: usize = 48;
 const REVIEW_CHUNK_PATH_BYTES: usize = 12 * 1024;
 const REVIEW_REVISION_BYTES: usize = 256;
+const REVIEW_FILE_CHANGED: &str = "File changed or could not be checked; refresh the review";
 
 /// What a change review compares. New sources (for example "since last seen")
 /// can be added as variants; consumers only rely on the resolved comparison.
@@ -298,6 +299,12 @@ fn classify_untracked(
     budget: &mut u64,
 ) {
     let path = Path::new(&file.path);
+    let identity =
+        || review_content_key(&(b'?', &file.path, working_file_identity(&root.join(path))));
+    if identity() != file.content_key {
+        file.patch = ReviewPatch::Unavailable(REVIEW_FILE_CHANGED.into());
+        return;
+    }
     let metadata = std::fs::symlink_metadata(root.join(path));
     file.patch = match metadata {
         Err(error) => ReviewPatch::Unavailable(error.to_string()),
@@ -327,6 +334,9 @@ fn classify_untracked(
             }
         },
     };
+    if identity() != file.content_key {
+        file.patch = ReviewPatch::Unavailable(REVIEW_FILE_CHANGED.into());
+    }
 }
 
 /// Load the patches of already listed files, one result per requested file.
@@ -336,6 +346,15 @@ pub fn review_patches(
     comparison: &ReviewComparison,
     files: &[ReviewFile],
 ) -> Vec<ReviewPatch> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    // A working-tree comparison has no immutable new object. Check the whole
+    // batch on both sides of the read so later bytes cannot acquire its old key.
+    let before = comparison
+        .new
+        .is_none()
+        .then(|| review_keys(root, comparison));
     let mut patches: Vec<Option<ReviewPatch>> = vec![None; files.len()];
     let mut tracked = Vec::new();
     for (index, file) in files.iter().enumerate() {
@@ -388,10 +407,35 @@ pub fn review_patches(
         }
         start = end;
     }
+    let after = comparison
+        .new
+        .is_none()
+        .then(|| review_keys(root, comparison));
     patches
         .into_iter()
-        .map(|patch| patch.unwrap_or_else(|| ReviewPatch::Unavailable("No patch".into())))
+        .zip(files)
+        .map(|(patch, file)| {
+            let valid = |keys: &Option<GitResult<HashMap<String, u64>>>| {
+                keys.as_ref().is_none_or(|keys| {
+                    keys.as_ref().ok().and_then(|keys| keys.get(&file.path))
+                        == Some(&file.content_key)
+                })
+            };
+            if !valid(&before) || !valid(&after) {
+                ReviewPatch::Unavailable(REVIEW_FILE_CHANGED.into())
+            } else {
+                patch.unwrap_or_else(|| ReviewPatch::Unavailable("No patch".into()))
+            }
+        })
         .collect()
+}
+
+fn review_keys(root: &Path, comparison: &ReviewComparison) -> GitResult<HashMap<String, u64>> {
+    Ok(review_files(root, comparison)?
+        .0
+        .into_iter()
+        .map(|file| (file.path, file.content_key))
+        .collect())
 }
 
 /// One Git command for several files. Blocks are matched to files by their

@@ -59,6 +59,46 @@ pub(super) struct ChangeReviewState {
     seen: SeenMarks,
 }
 
+impl ChangeReviewState {
+    /// Resolve a loaded branch review during the existing Git status refresh.
+    pub(super) fn branch_check(&self) -> Option<(u64, PathBuf, ReviewSource)> {
+        let view = self.view.as_ref()?;
+        if view.loading
+            || view.comparison.is_none()
+            || !matches!(view.source, ReviewSource::Branch { .. })
+        {
+            return None;
+        }
+        Some((
+            view.generation,
+            view.repository.clone(),
+            view.source.clone(),
+        ))
+    }
+
+    pub(super) fn apply_branch_check(
+        &mut self,
+        generation: u64,
+        repository: &Path,
+        result: Result<ReviewComparison, String>,
+    ) {
+        let Some(view) = self.view.as_mut().filter(|view| {
+            view.generation == generation
+                && view.repository.as_path() == repository
+                && !view.loading
+        }) else {
+            return;
+        };
+        let (Some(comparison), Some(freshness)) = (&view.comparison, &mut view.freshness) else {
+            return;
+        };
+        freshness.branch_outdated = match result {
+            Ok(current) => current.old != comparison.old || current.new != comparison.new,
+            Err(_) => true,
+        };
+    }
+}
+
 struct ChangeReview {
     source: ReviewSource,
     repository: PathBuf,
@@ -632,6 +672,7 @@ impl VEditApp {
             fingerprint,
             arrived_head: current_status.0,
             arrived_fingerprint: current_status.1,
+            branch_outdated: false,
         });
         // Unchanged files keep their parsed patch and wrapped geometry.
         let mut previous: HashMap<(String, u64), ReviewEntry> = view

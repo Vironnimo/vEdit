@@ -65,6 +65,8 @@ pub(super) struct Freshness {
     pub(super) fingerprint: u64,
     pub(super) arrived_head: Option<git::StatusHead>,
     pub(super) arrived_fingerprint: Option<u64>,
+    /// The last completed branch comparison check differed or failed.
+    pub(super) branch_outdated: bool,
 }
 
 impl Freshness {
@@ -81,9 +83,12 @@ impl Freshness {
             ReviewSource::WorkingTree => fingerprint.is_some_and(|fingerprint| {
                 fingerprint != self.fingerprint && Some(fingerprint) != self.arrived_fingerprint
             }),
-            ReviewSource::Branch { .. } => head.is_some_and(|head| {
-                Some(head) != self.head.as_ref() && Some(head) != self.arrived_head.as_ref()
-            }),
+            ReviewSource::Branch { .. } => {
+                self.branch_outdated
+                    || head.is_some_and(|head| {
+                        Some(head) != self.head.as_ref() && Some(head) != self.arrived_head.as_ref()
+                    })
+            }
         }
     }
 }

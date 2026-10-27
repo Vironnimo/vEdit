@@ -51,6 +51,10 @@ impl VEditApp {
                     p.git_untracked_collapsed = s.untracked_collapsed;
                     p.git_stats = s.stats;
                     p.git_stats_error = s.stats_error;
+                    if let Some((generation, repository, result)) = s.branch_review {
+                        p.change_review
+                            .apply_branch_check(generation, &repository, result);
+                    }
                     match s.history {
                         Ok(history) => {
                             p.git_branches = history.snapshot.refs.clone();
@@ -205,6 +209,8 @@ pub(super) struct GitSnapshot {
     pub(super) head: Option<git::StatusHead>,
     /// [`git::status_fingerprint`] of this read.
     pub(super) fingerprint: u64,
+    /// A resolved branch review from this same worker, guarded by generation.
+    pub(super) branch_review: Option<(u64, PathBuf, Result<git::ReviewComparison, String>)>,
     pub(super) history: Result<GitHistoryRefresh, String>,
 }
 
@@ -237,6 +243,7 @@ pub(super) fn read_git_snapshot(
             stats_error: None,
             head: None,
             fingerprint: 0,
+            branch_review: None,
             history: Ok(GitHistoryRefresh {
                 snapshot: git::HistorySnapshot::default(),
                 page: Some(git::HistoryPage::default()),
@@ -302,6 +309,7 @@ pub(super) fn read_git_snapshot(
         stats_error,
         head,
         fingerprint,
+        branch_review: None,
         history,
     })
 }
@@ -398,6 +406,7 @@ impl VEditApp {
         let refresh_history = std::mem::take(&mut p.git_history_refresh_requested)
             || (automatic_history_limit.is_some() && p.git_history_error.is_some());
         let previous_history_error = p.git_history_error.clone().filter(|_| !refresh_history);
+        let branch_check = p.change_review.branch_check();
         self.worker(move || {
             let result = read_git_snapshot(
                 &root,
@@ -407,7 +416,17 @@ impl VEditApp {
                 refresh_history,
                 previous_history_error,
                 automatic_history_limit,
-            );
+            )
+            .map(|mut snapshot| {
+                if let Some((generation, repository, source)) = branch_check
+                    && snapshot.root.as_ref() == Some(&repository)
+                {
+                    let comparison = git::resolve_review(&repository, &source)
+                        .map_err(|error| error.to_string());
+                    snapshot.branch_review = Some((generation, repository, comparison));
+                }
+                snapshot
+            });
             WorkerResult::GitStatus {
                 root,
                 request_id,

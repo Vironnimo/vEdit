@@ -555,6 +555,53 @@ fn changes_after_loading_show_a_calm_refresh_hint_that_keeps_the_position() {
 }
 
 #[test]
+fn branch_review_warns_when_the_base_moves_without_head_moving() {
+    for base in [None, Some("main~0".to_owned())] {
+        let repository = ReviewRepository::new();
+        let source = ReviewSource::Branch { base };
+        let before = git::change_set(&repository.root, &source).unwrap();
+        assert!(!before.files.is_empty());
+        let mut screen = harness(repository.app());
+        let refresh = |screen: &mut Harness<'_, VEditApp>| {
+            screen.state_mut().refresh_git(0, true);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while screen.state().projects[0].git_loading {
+                assert!(Instant::now() < deadline, "Git status worker timed out");
+                std::thread::sleep(Duration::from_millis(5));
+                screen.state_mut().poll();
+            }
+            screen.run_steps(2);
+        };
+        refresh(&mut screen);
+        screen.state_mut().show_change_review(0, source.clone());
+        settle(&mut screen);
+        let hint = "Changes since this review was loaded";
+        assert!(screen.query_by_label(hint).is_none());
+        let generation = view(screen.state()).generation;
+        let state = &mut screen.state_mut().projects[0].change_review;
+        state.apply_branch_check(generation - 1, &repository.root, Err("old review".into()));
+        state.apply_branch_check(generation, Path::new("wrong-root"), Err("old root".into()));
+        screen.run_steps(2);
+        assert!(screen.query_by_label(hint).is_none());
+
+        let head = repository.git(&["rev-parse", "HEAD"]);
+        repository.git(&["update-ref", "refs/heads/main", &head]);
+        let after = git::change_set(&repository.root, &source).unwrap();
+        assert_eq!(before.comparison.new, after.comparison.new);
+        assert_ne!(before.comparison.old, after.comparison.old);
+        assert!(after.files.is_empty());
+        refresh(&mut screen);
+        assert!(screen.query_by_label(hint).is_some());
+        screen.get_by_label("Refresh").click();
+        settle(&mut screen);
+        assert!(screen.query_by_label(hint).is_none());
+        repository.git(&["update-ref", "-d", "refs/heads/main"]);
+        refresh(&mut screen);
+        assert!(screen.query_by_label(hint).is_some());
+    }
+}
+
+#[test]
 fn unsaved_documents_in_the_repository_are_named_and_shown_on_request() {
     let repository = ReviewRepository::new();
     let mut app = repository.app();

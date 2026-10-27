@@ -838,6 +838,7 @@ fn git_keyboard_tab_reaches_stage_action_and_preserves_next_row_after_refresh() 
         stats_error: None,
         head: None,
         fingerprint: 0,
+        branch_review: None,
         history: Ok(GitHistoryRefresh {
             snapshot: project.git_history_snapshot.clone().unwrap_or_default(),
             page: None,

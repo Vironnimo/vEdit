@@ -244,12 +244,14 @@ fn review_patches_classify_large_and_binary_files_and_match_chunks() {
         .map(|line| format!("line {line}\n"))
         .collect();
     repository.write("große Datei.txt", &large);
+    repository.write("new large.txt", &large);
     repository.write("binary.bin", "\0\u{2}changed");
 
     let set = change_set(&repository.0, &ReviewSource::WorkingTree).unwrap();
     let find = |path: &str| set.files.iter().find(|file| file.path == path).unwrap();
     assert_eq!(find("binary.bin").patch, ReviewPatch::Binary);
     assert_eq!(find("große Datei.txt").patch, ReviewPatch::Large);
+    assert_eq!(find("new large.txt").patch, ReviewPatch::Large);
     let moved = find("moved [x].txt");
     assert_eq!(moved.status, FileChange::Renamed);
     assert_eq!(moved.original_path.as_deref(), Some("old name.txt"));
@@ -273,6 +275,35 @@ fn review_patches_classify_large_and_binary_files_and_match_chunks() {
     };
     assert!(text.starts_with("diff --git a/große Datei.txt b/große Datei.txt\n"));
     assert!(text.contains(&format!("+line {REVIEW_LARGE_FILE_LINES}\n")));
+
+    // A deferred patch must not silently replace the listed file version.
+    let replace_same_size = |path: &str| {
+        let path_on_disk = repository.0.join(path);
+        let modified = fs::metadata(&path_on_disk).unwrap().modified().unwrap();
+        repository.write(path, &large.replacen("line 0\n", "LINE 0\n", 1));
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path_on_disk)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+    };
+    replace_same_size("große Datei.txt");
+    let patches = review_patches(
+        &repository.0,
+        &set.comparison,
+        &[find("große Datei.txt").clone()],
+    );
+    assert!(matches!(patches[0], ReviewPatch::Unavailable(_)));
+    replace_same_size("new large.txt");
+    let patches = review_patches(
+        &repository.0,
+        &set.comparison,
+        &[find("new large.txt").clone()],
+    );
+    assert!(matches!(patches[0], ReviewPatch::Unavailable(_)));
 }
 
 #[test]
