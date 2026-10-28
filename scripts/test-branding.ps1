@@ -28,26 +28,39 @@ function Assert($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
     $script:checks++
 }
-function Assert-BrandIcon([string]$Path) {
+function Get-ShellBitmap([string]$Path) {
     $info = New-Object VEditShellIconTest+FileInfo
     $result = [VEditShellIconTest]::SHGetFileInfo($Path, 0, [ref]$info, [Runtime.InteropServices.Marshal]::SizeOf($info), 0x100)
     Assert ($result -ne [IntPtr]::Zero -and $info.Icon -ne [IntPtr]::Zero) "Windows could not resolve the icon: $Path"
     try {
         $icon = [Drawing.Icon]::FromHandle($info.Icon)
-        $bitmap = $icon.ToBitmap()
-        try {
-            $accent = 0
-            for ($y = 0; $y -lt $bitmap.Height; $y++) {
-                for ($x = 0; $x -lt $bitmap.Width; $x++) {
-                    $pixel = $bitmap.GetPixel($x, $y)
-                    if ($pixel.R -gt 180 -and $pixel.G -gt 75 -and $pixel.G -lt 175 -and $pixel.B -lt 60) { $accent++ }
-                }
-            }
-            Assert ($accent -gt 10) "Windows returned a generic or incorrect icon: $Path"
-        } finally { $bitmap.Dispose(); $icon.Dispose() }
+        try { return $icon.ToBitmap() } finally { $icon.Dispose() }
     } finally { [VEditShellIconTest]::DestroyIcon($info.Icon) | Out-Null }
 }
+function Assert-BrandIcon([string]$Path, [Drawing.Bitmap]$Expected) {
+    $bitmap = Get-ShellBitmap $Path
+    try {
+        Assert ($bitmap.Size -eq $Expected.Size) "Shell icon dimensions differ from the artwork: $Path"
+        $different = 0
+        $compared = 0
+        for ($y = 0; $y -lt $bitmap.Height; $y++) {
+            for ($x = 0; $x -lt $bitmap.Width; $x++) {
+                # Windows may place its shortcut arrow over the lower-left corner.
+                if ($Path.EndsWith('.lnk') -and $x -lt $bitmap.Width / 2 -and $y -ge $bitmap.Height / 2) { continue }
+                $pixel = $bitmap.GetPixel($x, $y)
+                $reference = $Expected.GetPixel($x, $y)
+                if ([Math]::Abs([int]$pixel.R - $reference.R) -gt 8 -or
+                    [Math]::Abs([int]$pixel.G - $reference.G) -gt 8 -or
+                    [Math]::Abs([int]$pixel.B - $reference.B) -gt 8 -or
+                    [Math]::Abs([int]$pixel.A - $reference.A) -gt 8) { $different++ }
+                $compared++
+            }
+        }
+        Assert ($different -le $compared * 0.02) "Windows returned an icon that differs from the bundled artwork: $Path ($different/$compared pixels)"
+    } finally { $bitmap.Dispose() }
+}
 $temporaryShortcut = $null
+$expected = Get-ShellBitmap ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../assets/vedit.ico')))
 try {
     foreach ($name in @('vedit.exe', 'vedit-cli.exe')) {
         $path = [IO.Path]::GetFullPath((Join-Path $ExecutableDirectory $name))
@@ -56,7 +69,7 @@ try {
         Assert ($version.FileDescription -eq 'vEdit text and code editor') "Missing file description: $name"
         Assert ($version.FileVersion -match '^\d+\.\d+\.\d+') "Missing file version: $name"
         Assert ([VEditShellIconTest]::ExtractIconEx($path, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0) -gt 0) "Missing embedded icon: $name"
-        Assert-BrandIcon $path
+        Assert-BrandIcon $path $expected
     }
     if (-not $ShortcutPath) {
         $temporaryShortcut = Join-Path $projectTemp.Root ('vedit-icon-test-' + [Guid]::NewGuid().ToString('N') + '.lnk')
@@ -68,9 +81,10 @@ try {
     }
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
     Assert ($shortcut.IconLocation -eq ($shortcut.TargetPath + ',0')) 'The shortcut stores quotes or an external icon dependency.'
-    Assert-BrandIcon $ShortcutPath
+    Assert-BrandIcon $ShortcutPath $expected
     Write-Output "$checks Windows resource and Shell icon checks passed."
 } finally {
+    $expected.Dispose()
     if ($temporaryShortcut) { Remove-Item -LiteralPath $temporaryShortcut -ErrorAction SilentlyContinue }
 }
 } finally {

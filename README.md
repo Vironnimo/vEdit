@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/vedit.png" alt="vEdit icon" width="96" height="96">
+
 # vEdit
 
 **A native Windows code editor for working across projects alongside coding agents.**

@@ -125,6 +125,9 @@ try {
     New-Item -ItemType Directory -Path $packagedScripts -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') -Destination $packagedScripts -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'assets/vedit.ico') -Destination $releaseDirectory -Force
+    foreach ($iconAsset in @('vedit.png', 'README.md')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "assets/$iconAsset") -Destination (Join-Path $releaseDirectory 'assets') -Force
+    }
     $packageVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'Cargo.toml') | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
     Write-PackageManifest $releaseDirectory $packageVersion
     if ($env:OS -eq 'Windows_NT') {

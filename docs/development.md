@@ -229,7 +229,7 @@ inherited environment. Windows owns the actual default-app choice.
 `-OpenDefaultApps` opens `ms-settings:defaultapps?registeredAppUser=vEdit`.
 Registration follows Microsoft's [Default Programs](https://learn.microsoft.com/en-us/windows/win32/shell/default-programs)
 and [Open With](https://learn.microsoft.com/en-us/windows/win32/shell/how-to-include-an-application-on-the-open-with-dialog-box)
-documentation. The bundled icon uses the same geometry/colors as the window icon.
+documentation. The bundled icon uses the same artwork as the window icon.
 
 Replacement files are staged alongside their destinations. Renamed running
 executables remain alive; failed file replacement rolls earlier replacements
@@ -293,8 +293,10 @@ Historical review/evaluation results retain their original product names and ver
 `build.rs` embeds `assets/vedit.ico` plus product/version metadata in both Windows
 executables using `winresource` and the Windows SDK resource compiler. Shell
 shortcuts use the unquoted executable path followed by `,0`; registry icon
-locations retain their normal quoted path syntax. The running window uses the
-same design. Validate resources and actual Shell icon resolution (including a
+locations retain their normal quoted path syntax. `assets/vedit.png` embeds the
+matching Discover artwork in the running window and custom titlebar; the titlebar
+caches its texture per egui context. See `assets/README.md` for asset provenance.
+Validate resources and actual Shell icon resolution (including a
 shortcut) with `powershell.exe -NoProfile -File scripts/test-branding.ps1`.
 Pass `-ExecutableDirectory` and `-ShortcutPath` to check the installed files.
 Profile migration regressions run with `cargo test profile_migration`.

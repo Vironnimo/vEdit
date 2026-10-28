@@ -25,6 +25,8 @@ Unter **Windows-Einstellungen → Apps → Standard-Apps → vEdit** lassen sich
 
 Alternativ bleibt das Paket `dist/vEdit/` portabel. **vEdit.lnk** im Projektordner startet dieses Paket; der Startmenüeintrag startet die eigenständige Installation.
 
+Das vEdit-Icon zeigt ein silber-oranges V mit Kompass auf dunklem Grund. Es erscheint in der Titelleiste, der Taskleiste sowie bei Programmdateien und Verknüpfungen.
+
 Ein externer Dateiaufruf öffnet im zuletzt aktiven Fenster: bereits geöffnete Dokumente werden wiederverwendet, Dateien innerhalb eines offenen Projekts bleiben dort, andere landen in **Other files**. Ordner werden als Projekte geöffnet. **Settings → Layout → Open external files in a new window** ändert externe Dateiaufrufe auf ein neues Fenster; Dateidialoge, Drag-and-drop und `vedit-cli` bleiben im jeweiligen Fenster. Für einen einzelnen Aufruf:
 
 ```powershell

@@ -115,35 +115,8 @@ fn show_startup_error(error: String) {
 }
 
 fn app_icon() -> eframe::egui::IconData {
-    const SIZE: u32 = 128;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let mut color = [0.0_f32; 4];
-            for (sx, sy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
-                let dx = (x as f32 + sx - 64.0).abs();
-                let dy = (y as f32 + sy - 64.0).abs();
-                let rounded = (dx - 38.0).max(0.0).hypot((dy - 38.0).max(0.0));
-                let diamond = dx + dy;
-                let sample = if rounded > 24.0 {
-                    [0.0, 0.0, 0.0, 0.0]
-                } else if (diamond - 44.0).abs() < 2.5 || diamond < 12.0 {
-                    palette::ACCENT.to_array().map(f32::from)
-                } else {
-                    palette::BG.to_array().map(f32::from)
-                };
-                for i in 0..4 {
-                    color[i] += sample[i] * 0.25;
-                }
-            }
-            rgba.extend(color.map(|c| c.round() as u8));
-        }
-    }
-    eframe::egui::IconData {
-        rgba,
-        width: SIZE,
-        height: SIZE,
-    }
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/vedit.png"))
+        .expect("the bundled vEdit icon must be a valid PNG")
 }
 
 #[cfg(test)]

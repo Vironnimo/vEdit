@@ -231,25 +231,30 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         return;
     }
     let center = egui::pos2(rect.left() + 23.0, rect.center().y);
-    let accent = ui.visuals().selection.stroke.color;
-    let diamond = |radius: f32| {
-        vec![
-            center + Vec2::new(0.0, -radius),
-            center + Vec2::new(radius, 0.0),
-            center + Vec2::new(0.0, radius),
-            center + Vec2::new(-radius, 0.0),
-        ]
-    };
-    ui.painter().add(egui::Shape::convex_polygon(
-        diamond(9.0),
-        Color32::TRANSPARENT,
-        Stroke::new(1.4, accent),
-    ));
-    ui.painter().add(egui::Shape::convex_polygon(
-        diamond(2.6),
-        accent,
-        Stroke::NONE,
-    ));
+    let texture_key = egui::Id::new("vedit_brand_icon");
+    let texture = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(texture_key))
+        .unwrap_or_else(|| {
+            let icon = crate::app_icon();
+            let texture = ui.ctx().load_texture(
+                "vEdit icon",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(texture_key, texture.clone()));
+            texture
+        });
+    ui.painter().image(
+        texture.id(),
+        Rect::from_center_size(center, Vec2::splat(28.0)),
+        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
     if text {
         ui.painter().text(
             egui::pos2(rect.left() + 43.0, rect.center().y),

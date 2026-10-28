@@ -21,6 +21,11 @@ a Windows desktop and OpenGL. Keep this native check when upgrading eframe.
 
 ## Ownership boundaries
 
+`src/main.rs::app_icon` decodes the embedded `assets/vedit.png` for the native
+window and the custom titlebar. The titlebar caches its texture per egui context.
+Windows executable resources use the matching `assets/vedit.ico`; asset provenance
+is recorded in `assets/README.md` and packaging belongs to `development.md`.
+
 `window_chrome::draw_top_bar` reserves distinct project controls, drag areas and
 window buttons. Geometry remains in logical client coordinates. It checks popup
 state after drawing project widgets so a popup opened in that frame immediately
