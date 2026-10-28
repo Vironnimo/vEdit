@@ -26,6 +26,11 @@ not install one. `cargo fetch --locked` prepares the pinned Cargo dependencies.
 Every private checkout builds into its own `target/`; no cache is redirected or
 linked to another checkout.
 
+Windows PowerShell check steps start without an inherited `PSModulePath`, allowing
+that edition to construct its native module paths. This prevents a push launched
+through Python from PowerShell 7 from loading incompatible built-in modules.
+Other commands and the parent process keep their module environment.
+
 The configured checks are Rust formatting, the complete default Rust test suite
 through `test_survey.py` (8 workers, ignored tests excluded), Clippy with warnings
 denied, the hook's source checks over every index blob, Python syntax and tooling

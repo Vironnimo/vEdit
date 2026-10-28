@@ -124,10 +124,15 @@ def remote_is_behind(root: Path, commit: str) -> tuple[bool, str | None]:
 
 
 def run_step(step: Step, checkout: Path, log: Path) -> bool:
+    env = environment(checkout)
+    if Path(step.command[0]).name.lower() == "powershell.exe":
+        # Python can pass PowerShell 7's module path unchanged to Windows
+        # PowerShell, shadowing its built-in modules with incompatible versions.
+        env = {key: value for key, value in env.items() if key.upper() != "PSMODULEPATH"}
     with log.open("w", encoding="utf-8", errors="replace") as handle:
         try:
             result = subprocess.run(
-                step.command, cwd=checkout, env=environment(checkout),
+                step.command, cwd=checkout, env=env,
                 stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, check=False,
             )
             return result.returncode == 0

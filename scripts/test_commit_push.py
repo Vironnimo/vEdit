@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -276,6 +277,26 @@ class RepositoryFixture(unittest.TestCase):
         with patch.dict(os.environ, injected, clear=True):
             resolved = push.git_output("rev-parse", "--show-toplevel", cwd=self.root)
         self.assertEqual(Path(resolved).resolve(), self.root.resolve())
+
+    @unittest.skipUnless(shutil.which("powershell.exe"), "requires Windows PowerShell")
+    def test_windows_powershell_loads_its_own_modules_when_parent_uses_another_edition(self):
+        self.write("payload.txt", "release payload")
+        modules = self.root / ".tmp" / "foreign-modules"
+        module = ".tmp/foreign-modules/Microsoft.PowerShell.Utility/"
+        self.write(module + "Microsoft.PowerShell.Utility.psd1",
+                   "@{ ModuleVersion = '7.0'; PowerShellVersion = '3.0'; "
+                   "RootModule = 'Utility.psm1'; FunctionsToExport = @('Get-FileHash') }")
+        self.write(module + "Utility.psm1", "function Get-FileHash { throw 'Wrong edition' }")
+        command = ["powershell.exe", "-NoProfile", "-Command",
+                   "$ErrorActionPreference = 'Stop'; (Get-FileHash -LiteralPath payload.txt).Hash"]
+        log = self.root / ".tmp" / "powershell.log"
+        module_path = str(modules) + os.pathsep + str(Path(shutil.which("powershell.exe")).parent / "Modules")
+        with patch.dict(os.environ, {**self.env, "PSModulePath": module_path}, clear=True):
+            passed = push.run_step(push.Step("powershell", command), self.root, log)
+            self.assertEqual(os.environ["PSModulePath"], module_path)
+        output = log.read_text(encoding="utf-8")
+        self.assertTrue(passed, output)
+        self.assertIn(hashlib.sha256(b"release payload").hexdigest().upper(), output)
 
     def test_successful_worktree_tool_fixtures_allow_private_checkout_cleanup(self):
         for name in ("test_worktree_tools.py", "commit_authorship.py"):
