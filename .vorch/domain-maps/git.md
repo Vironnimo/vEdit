@@ -39,6 +39,9 @@ Paths passed to path-based Git helpers are repository-relative. Invocation uses 
 - Read-only queries and user mutations have different deadlines. Cancellation can leave a partially updated repository or an index lock; vEdit reports it and never deletes the lock automatically.
 - Remote reachability and ahead/behind data reflect fetched refs. Reading status/history does not fetch.
 - Gutter markers are keyed by repository, HEAD, path and document revision. Stale markers may remain visible while recomputing, but cannot be reverted. Base reads and larger comparisons run in workers; binary/oversized bases do not produce ordinary text markers.
+- Patch paths preserve spaces and Unicode, including quoted unified headers with
+  trailing tab separators. Binary-only patches must resolve equal old/new paths
+  from the diff header even when the path itself contains ` b/`.
 
 ## Verification pointers
 

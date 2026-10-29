@@ -1254,7 +1254,13 @@ fn diff_paths(value: &str) -> Option<(String, String)> {
         }
         return None;
     }
-    if let Some(index) = value.rfind(" b/") {
+    // Unquoted paths may themselves contain " b/". Binary changes have no
+    // ---/+++ headers to correct this, so prefer the split with equal paths.
+    let matching = value.match_indices(" b/").find_map(|(index, _)| {
+        (value[..index].strip_prefix("a/") == value[index + 1..].strip_prefix("b/"))
+            .then_some(index)
+    });
+    if let Some(index) = matching.or_else(|| value.rfind(" b/")) {
         return Some((value[..index].into(), value[index + 1..].into()));
     }
     value
@@ -1263,11 +1269,14 @@ fn diff_paths(value: &str) -> Option<(String, String)> {
 }
 
 fn decode_git_path(value: &str) -> String {
+    // Unified headers may append a tab (and optionally a timestamp) after a
+    // quoted path. Literal tabs in Git paths are escaped inside the quotes.
+    let value = value.split('\t').next().unwrap_or(value);
     let Some(quoted) = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
     else {
-        return value.split('\t').next().unwrap_or(value).to_owned();
+        return value.to_owned();
     };
     let bytes = quoted.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -1649,6 +1658,18 @@ mod tests {
 
     #[test]
     fn binary_patch_is_marked_without_counting_encoded_lines() {
+        for path in ["image.png", "folder b/name.bin", "folder b/one b/two.bin"] {
+            let patch = ParsedPatch::parse(&format!(
+                "diff --git a/{path} b/{path}\nBinary files a/{path} and b/{path} differ\n"
+            ));
+            assert_eq!(patch.file_at(0).unwrap().path, path);
+            assert!(
+                !patch
+                    .details
+                    .iter()
+                    .any(|line| line.starts_with("Previous path:"))
+            );
+        }
         let patch = ParsedPatch::parse(
             "diff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n",
         );
@@ -2525,6 +2546,18 @@ mod tests {
 
     #[test]
     fn git_c_quoted_and_rust_debug_paths_decode_without_losing_spaces_or_unicode() {
+        for header in ["\"b/über plan.md\"\t", "\"b/\\303\\274ber plan.md\"\t"] {
+            let patch = ParsedPatch::parse(&format!(
+                "diff --git \"a/über plan.md\" \"b/über plan.md\"\n--- \"a/über plan.md\"\t\n+++ {header}\n@@ -1 +1 @@\n-old\n+new\n"
+            ));
+            assert_eq!(patch.file_at(0).unwrap().path, "über plan.md");
+            assert!(
+                !patch
+                    .details
+                    .iter()
+                    .any(|line| line.starts_with("Previous path:"))
+            );
+        }
         assert_eq!(
             decode_git_path(r#""docs/\303\234ber Plan.md""#),
             "docs/Über Plan.md"
