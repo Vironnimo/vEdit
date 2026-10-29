@@ -117,12 +117,14 @@ impl ProblemList {
 }
 
 /// Identifies the diagnostics and open-document revisions a list was built
-/// from. Replacing a file's diagnostics allocates a new vector, and the
-/// previous one is still alive at that moment, so consecutive states differ.
+/// from. Publication revisions remain distinct even when several updates arrive
+/// between frames and the allocator reuses storage from an older publication.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ProblemKey {
     root: PathBuf,
-    files: Vec<(PathBuf, usize, usize, Option<u64>)>,
+    instance: u64,
+    diagnostics_revision: u64,
+    files: Vec<(PathBuf, Option<u64>)>,
 }
 
 #[derive(Default)]
@@ -133,12 +135,10 @@ pub(super) struct ProblemCache {
 fn problem_key(project: &Project) -> ProblemKey {
     let mut files: Vec<_> = project
         .diagnostics
-        .iter()
-        .map(|(path, diagnostics)| {
+        .keys()
+        .map(|path| {
             (
                 path.clone(),
-                diagnostics.as_ptr() as usize,
-                diagnostics.len(),
                 project
                     .tabs
                     .iter()
@@ -150,6 +150,8 @@ fn problem_key(project: &Project) -> ProblemKey {
     files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     ProblemKey {
         root: project.root.clone(),
+        instance: project.instance_id,
+        diagnostics_revision: project.diagnostics_revision,
         files,
     }
 }

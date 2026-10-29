@@ -145,6 +145,7 @@ impl VEditApp {
                             .cloned()
                             .collect();
                         project.diagnostics.insert(path, combined);
+                        project.diagnostics_revision = project.diagnostics_revision.wrapping_add(1);
                     }
                 }
                 crate::lsp::LspEvent::Completions {

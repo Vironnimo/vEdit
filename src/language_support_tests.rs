@@ -24,6 +24,37 @@ fn diagnostic() -> Diagnostic {
 }
 
 #[test]
+fn problems_cache_tracks_publications_even_when_vector_storage_is_reused() {
+    let mut app = rust_app();
+    let (server, events) = LanguageServer::test_channel();
+    app.projects[0].rust_language_mut().server = Some(server);
+    app.projects[0].rust_language_mut().ready = true;
+    let path = app.projects[0].tabs[0].path.clone().unwrap();
+    let publish = |app: &mut VEditApp, message: &str| {
+        let mut diagnostic = diagnostic();
+        diagnostic.message = message.into();
+        events
+            .send(LspEvent::Diagnostics {
+                path: path.clone(),
+                version: None,
+                diagnostics: vec![diagnostic],
+            })
+            .unwrap();
+        app.poll_languages();
+    };
+    publish(&mut app, "first");
+    assert_eq!(app.problem_list().rows[0].message, "first");
+    let mut recycled = app.projects[0].diagnostics.remove(&path).unwrap();
+    publish(&mut app, "second");
+    publish(&mut app, "third");
+    // Reuse the first allocation deterministically instead of depending on
+    // the allocator's choice after two publications in one frame.
+    recycled[0] = app.projects[0].diagnostics[&path][0].clone();
+    app.projects[0].diagnostics.insert(path.clone(), recycled);
+    assert_eq!(app.problem_list().rows[0].message, "third");
+}
+
+#[test]
 fn restarting_analysis_clears_stale_state_and_keeps_unsaved_documents() {
     let mut app = rust_app();
     let (server, events) = LanguageServer::test_channel();

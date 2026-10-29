@@ -93,6 +93,7 @@ impl Project {
             }
         }
         self.diagnostics.extend(remaining);
+        self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
     }
     pub(super) fn language_for(&self, path: &Path) -> Option<&LanguageSession> {
         self.languages
@@ -175,6 +176,7 @@ impl Project {
                 session.diagnostics.remove(&path);
                 session.diagnostic_origins.remove(&path);
                 self.diagnostics.remove(&path);
+                self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
                 session.retired_paths.insert(path);
             }
         }
@@ -220,6 +222,7 @@ impl VEditApp {
             session.diagnostic_origins.clear();
         }
         project.diagnostics.clear();
+        project.diagnostics_revision = project.diagnostics_revision.wrapping_add(1);
         if project_index == self.active_project {
             self.completions = None;
             self.completion_request = None;

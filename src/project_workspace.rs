@@ -130,6 +130,7 @@ pub(super) struct Project {
     pub(super) commit_message: String,
     pub(super) languages: HashMap<String, language_support::LanguageSession>,
     pub(super) diagnostics: HashMap<PathBuf, Vec<crate::lsp::Diagnostic>>,
+    pub(super) diagnostics_revision: u64,
 }
 
 impl Project {
@@ -197,6 +198,7 @@ impl Project {
                 language_support::LanguageSession::new(language_settings::defaults().remove(0)),
             )]),
             diagnostics: HashMap::new(),
+            diagnostics_revision: 0,
         }
     }
 }
