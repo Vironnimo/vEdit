@@ -196,25 +196,31 @@ impl State {
         let chars: Vec<_> = text.chars().collect();
         let rows = lines(&chars);
         let row = row_at(&rows, primary.head);
-        let target = if down { row + 1 } else { row.saturating_sub(1) };
-        if target >= rows.len() || target == row {
-            return true;
-        }
-        if self.selections.len() >= limit {
-            return false;
-        }
         let column = primary.column.unwrap_or(primary.head - rows[row].start);
         let boundaries = grapheme_boundaries(text);
-        let at = grapheme_at_or_after(
-            &boundaries,
-            (rows[target].start + column).min(rows[target].end),
-        );
-        if self
-            .selections
-            .iter()
-            .any(|s| s.head == at && s.anchor == at)
-        {
-            return true;
+        let mut target = row;
+        let at = loop {
+            target = if down {
+                target + 1
+            } else if target > 0 {
+                target - 1
+            } else {
+                return true;
+            };
+            let Some(line) = rows.get(target) else {
+                return true;
+            };
+            let at = grapheme_at_or_after(&boundaries, (line.start + column).min(line.end));
+            if !self
+                .selections
+                .iter()
+                .any(|s| s.range().contains(&at) || s.head == at)
+            {
+                break at;
+            }
+        };
+        if self.selections.len() >= limit {
+            return false;
         }
         self.checkpoint();
         self.selections.push(Selection {
@@ -652,6 +658,20 @@ mod tests {
         s.add_vertical("abcdef\nx\nabcdef", true, 100);
         s.add_vertical("abcdef\nx\nabcdef", true, 100);
         assert_eq!(s.primary().unwrap().head, 13);
+        let mut both = state(&[(6, 6)]);
+        assert!(both.add_vertical("aaaa\nbbbb\ncccc", false, 3));
+        assert!(both.add_vertical("aaaa\nbbbb\ncccc", true, 3));
+        assert_eq!(
+            both.selections.iter().map(|s| s.head).collect::<Vec<_>>(),
+            vec![6, 1, 11]
+        );
+        assert!(both.add_vertical("aaaa\nbbbb\ncccc", false, 3));
+        assert_eq!(both.selections.len(), 3);
+        both.undo_selection();
+        assert_eq!(
+            both.selections.iter().map(|s| s.head).collect::<Vec<_>>(),
+            vec![6, 1]
+        );
         for ending in ["\n", "\r\n"] {
             for grapheme in ["👩‍💻", "e\u{301}"] {
                 let text = ["ab", &format!("{grapheme}x"), "cd"].join(ending);

@@ -1,6 +1,35 @@
 //! Pane-local navigation, selections and modal cursor motions.
 use super::*;
 
+pub(super) fn direct_motion(ch: char) -> bool {
+    matches!(
+        ch,
+        'h' | 'j'
+            | 'k'
+            | 'l'
+            | 'w'
+            | 'W'
+            | 'b'
+            | 'B'
+            | 'e'
+            | 'E'
+            | '0'
+            | '^'
+            | '$'
+            | 'G'
+            | '%'
+            | '{'
+            | '}'
+            | '+'
+            | '-'
+            | '_'
+            | '|'
+            | 'H'
+            | 'M'
+            | 'L'
+    )
+}
+
 impl VimNavigation {
     /// Move a view with its source text while keeping its visual selection's
     /// direction and modal state. The delta uses Unicode character indices.
@@ -22,6 +51,9 @@ impl VimNavigation {
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.multi.remap(&map);
+        for cursor in &mut navigation.multi_cursors {
+            cursor.remap(&map);
+        }
         navigation.block_columns = None;
         if let Some(last) = navigation.last_visual.as_mut() {
             last.anchor = map(last.anchor);
@@ -39,6 +71,9 @@ impl VimNavigation {
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.preferred_column = None;
         navigation.multi.remap(&map);
+        for cursor in &mut navigation.multi_cursors {
+            cursor.remap(&map);
+        }
         navigation.block_columns = None;
         navigation
     }
@@ -49,6 +84,7 @@ impl VimState {
         VimNavigation {
             mode: self.mode,
             multi: self.multi.clone(),
+            multi_cursors: self.multi_cursors.clone(),
             cursor: self.cursor,
             visual_anchor: self.visual_anchor,
             pending: self.pending,
@@ -71,6 +107,7 @@ impl VimState {
         let len = text.chars().count();
         self.mode = navigation.mode;
         self.multi = navigation.multi.clone();
+        self.multi_cursors = navigation.multi_cursors.clone();
         self.cursor = navigation.cursor.min(len);
         self.visual_anchor = navigation.visual_anchor.map(|anchor| anchor.min(len));
         self.pending = navigation.pending;
@@ -107,6 +144,7 @@ impl VimState {
     /// `anchor` and `cursor` are half-open boundaries, as used by a text widget.
     pub fn set_selection_boundaries(&mut self, text: &str, anchor: usize, cursor: usize) {
         self.multi.clear();
+        self.multi_cursors.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
         self.block_columns = None;
@@ -160,6 +198,7 @@ impl VimState {
 
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
         self.multi.clear();
+        self.multi_cursors.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         self.visual_to_line_end = false;
         self.block_columns = None;
@@ -209,6 +248,9 @@ impl VimState {
 
     /// Move by visible-page rows supplied by the UI, preserving visual mode.
     pub fn scroll_lines(&mut self, text: &mut String, delta: isize) -> Action {
+        if self.multi.active() {
+            return self.multi_scroll_lines(text, delta);
+        }
         let prefix = self.take_count();
         self.pending = None;
         let count = delta

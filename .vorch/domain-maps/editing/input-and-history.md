@@ -22,7 +22,7 @@ the queues based only on their similar shape.
 
 Ordinary Vim Normal and Visual source modes must reject native editing/IME
 commits while still allowing real mouse selection. Active multicursor input uses
-its own handler and permits text/IME editing independently of Vim mode. Dialogs
+its own handler; with Vim enabled, text/IME editing requires Insert mode. Dialogs
 and popups own their input before source editing runs. In Insert/native mode, an
 asynchronous save does not freeze typing; save completion compares against the
 snapshot that was actually written.
@@ -114,11 +114,30 @@ new unique selection would exceed it.
 
 `multicursor_keys` consumes the ordered source prefix before global shortcut
 dispatch. While active, TextEdit supplies layout and pointer selection without
-also mutating text, and ordinary Vim handling yields. Activation after native
-typing uses the existing continuation, whose owner includes the complete
+also mutating text, and ordinary Vim input routing yields to this handler.
+With Vim enabled, the handler sends modal commands to `VimState::handle_key`.
+The Vim owner's private multicursor adapter retains each cursor's navigation and
+repeat state, using one shared document history. Operators compute their edits
+against the original text; identical edits apply once, overlapping deletions merge,
+and conflicting replacements reject the whole command. Normal motions share one
+scalar buffer and the single-cursor motion classification/implementation rather
+than indexing the whole text for each cursor. Insert sessions remain one
+Undo step; local insert deltas support counted insertion and dot repeat without
+retaining a complete document/history per cursor. Native Undo/Redo finishes those
+same insert/count/replay transactions while retaining insertion boundaries.
+Escape first returns Insert or
+Visual to Normal with every cursor, then exits MULTI from idle Normal. Explicitly
+remapped exit commands still exit directly. Visual Block, Vim search/Ex and jump
+history remain single-cursor operations; Ctrl+U defaults to Cursor Undo in MULTI,
+while explicit Vim Ctrl-key preferences retain precedence.
+Activation after native typing uses the existing continuation, whose owner includes the complete
 multicursor state. Pointer placement and wrapped-row movement wait for geometry
 at the current text revision. A pending context-menu paste additionally checks
 pane, document, revision and multicursor state before insertion.
+Vertical cursor creation skips occupied positions in either direction while
+retaining the requested column through short lines. Keyboard placement still
+moves only the active cursor; Vim motions can also place it, and an Insert/change
+command finishes placement before editing all marked positions.
 
 With spread-paste enabled, one clipboard line per selection is distributed in
 document order; otherwise each selection receives the full text. Copy/Cut uses

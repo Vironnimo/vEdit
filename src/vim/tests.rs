@@ -3,6 +3,7 @@ use super::*;
 mod clipboard;
 mod history;
 mod motions;
+mod multicursor;
 mod navigation;
 mod operators;
 

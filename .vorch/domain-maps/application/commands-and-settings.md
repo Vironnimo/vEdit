@@ -32,9 +32,11 @@ IDs. Never turn an explicit disable into an absent setting during migration.
 `keybindings::vim_keys` owns per-Ctrl-key Editor/Vim preferences and the supported
 mode catalogue. Windows clipboard defaults stay Editor; Ctrl+Q starts Visual
 Block. Default ownership yields to a custom application binding, while an explicit
-Vim preference wins in its supported source modes. Other widgets, preview and
-MULTI retain their own input. Capture the focused shortcut context before taking
-an egui input lock; matching inside that lock must not read Context again.
+Vim preference wins in its supported source modes, including MULTI's modal
+handler. Other widgets and preview retain their own input. MULTI's Ctrl+U default
+remains Cursor Undo; an explicit Vim preference overrides it. Capture the focused
+shortcut context before taking an egui input lock; matching inside that lock must
+not read Context again.
 Both input continuation owners include the preference map so a setting change
 invalidates stale input. The Settings patch merges supplied keys; see `control.md`.
 

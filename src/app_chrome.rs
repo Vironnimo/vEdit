@@ -179,6 +179,9 @@ impl VEditApp {
                             VimMode::VisualBlock => ("V-BLOCK", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
+                    let mode = if mode == "MULTI" && self.settings.vim {
+                        match self.tab().unwrap().vim.mode { VimMode::Normal => "MULTI NORMAL", VimMode::Insert => "MULTI INSERT", VimMode::Visual => "MULTI VISUAL", VimMode::VisualLine => "MULTI V-LINE", VimMode::VisualBlock => "MULTI V-BLOCK" }
+                    } else { mode };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
                         .on_hover_text(format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)));
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {

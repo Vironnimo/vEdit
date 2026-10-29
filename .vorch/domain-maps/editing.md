@@ -13,8 +13,9 @@ preserving the document's edit history and each pane's navigation.
   The public owner remains `vim`; it does not own pane placement or app commands.
 - `src/multicursor.rs` owns directed selection sets and simultaneous text edits;
   `src/multicursor_ui.rs` owns their input, pointer/layout integration, preferences
-  and application transactions. Active multicursor editing is a separate input
-  context even when Vim is enabled.
+  and application transactions. `src/vim/multicursor.rs` runs modal commands
+  through the existing Vim decoder at each cursor and merges their edits against
+  one original snapshot. Multicursor keeps Vim's modes rather than bypassing them.
 - `src/editor_input.rs` orders native TextEdit input around application editing
   commands. App's `src/vim_input.rs` and `src/source_editor.rs` integrate `handle_vim`, the source widget and
   global command routing. `src/ex_commands.rs` handles Vim command-line actions.

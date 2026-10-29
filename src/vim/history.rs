@@ -17,10 +17,15 @@ impl VimState {
         if self.mode == VimMode::Insert {
             if self.insert_origin.is_none() {
                 self.insert_origin = Some(self.snapshot(text));
+            } else if let Some(origin) = &mut self.insert_origin
+                && origin.text == text
+            {
+                origin.multi = self.multi.clone();
             }
             return;
         }
         let before = self.snapshot(text);
+        self.multi_cursors.clear();
         self.leave_visual();
         self.cancel_pending_command();
         self.insert_origin = None;
@@ -116,13 +121,14 @@ impl VimState {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let inserting = old_mode == VimMode::Insert;
-        let mut insert_expanded = false;
+        let mut insert_expanded =
+            inserting && self.multi.active() && self.finish_multi_insert_history(text).text_changed;
         if inserting {
             let inserted_delta = self
                 .insert_replay
                 .as_ref()
                 .map(|replay| insert_delta(&replay.baseline, text, replay.cursor));
-            insert_expanded = self.finish_insert_repetitions(text);
+            insert_expanded |= self.finish_insert_repetitions(text);
             let changed = self
                 .insert_origin
                 .as_ref()
@@ -343,6 +349,7 @@ impl VimState {
         *text = snapshot.text;
         self.cursor = snapshot.cursor;
         self.multi = snapshot.multi;
+        self.multi_cursors.clear();
         self.insert_origin = None;
         self.clear_command();
         true

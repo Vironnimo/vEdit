@@ -6,6 +6,7 @@ mod block;
 mod commands;
 mod geometry;
 mod history;
+mod multicursor;
 mod navigation;
 mod operators;
 mod paste;
@@ -288,6 +289,7 @@ pub struct VimNavigation {
     pub mode: VimMode,
     pub cursor: usize,
     pub multi: crate::multicursor::State,
+    multi_cursors: Vec<multicursor::Cursor>,
     visual_anchor: Option<usize>,
     pending: Option<Pending>,
     count: usize,
@@ -305,6 +307,7 @@ pub struct VimNavigation {
 pub struct VimState {
     pub mode: VimMode,
     pub multi: crate::multicursor::State,
+    multi_cursors: Vec<multicursor::Cursor>,
     /// Insert mode: insertion boundary. Other modes: current character.
     pub cursor: usize,
     register: Option<Yank>,
@@ -344,6 +347,7 @@ impl Default for VimState {
         Self {
             mode: VimMode::Normal,
             multi: crate::multicursor::State::default(),
+            multi_cursors: Vec::new(),
             cursor: 0,
             register: None,
             yank_register: None,
@@ -408,6 +412,9 @@ impl VimState {
     pub fn notify_external_text_change(&mut self) {}
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        if self.multi.active() {
+            return self.handle_multi_key(text, key);
+        }
         self.yanked_ranges.clear();
         if matches!(
             self.mode,

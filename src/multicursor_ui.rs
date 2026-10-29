@@ -71,7 +71,7 @@ fn visual_move(state: &mut State, galley: &egui::Galley, down: bool, extend: boo
 impl EditorTab {
     pub(super) fn sync_multicursor(&mut self) {
         if let Some(primary) = self.vim.multi.primary() {
-            self.vim.cursor = primary.head;
+            self.vim.cursor = self.vim.multicursor_head(primary);
             self.selection = primary.range();
             self.pending_selection = Some(self.selection.clone());
         }
@@ -80,16 +80,26 @@ impl EditorTab {
         if self.vim.multi.active() {
             return;
         }
+        let mode = self.vim.mode;
         if self.vim.finish_insert(&mut self.text).text_changed {
             self.changed();
         }
         self.vim
             .set_selection(&self.text, selection.head..selection.head);
-        self.vim.mode = VimMode::Normal;
+        self.vim.mode = mode;
         self.vim.multi.start(selection);
+        if mode == VimMode::Insert {
+            self.vim.begin_external_edit(&self.text);
+        }
         self.sync_multicursor();
     }
     pub(super) fn exit_multicursor(&mut self) {
+        if !self.vim.multi.active() {
+            return;
+        }
+        if self.vim.finish_insert(&mut self.text).text_changed {
+            self.changed();
+        }
         let Some(primary) = self.vim.multi.primary() else {
             return;
         };
@@ -183,6 +193,9 @@ pub(super) fn restore_native(
 impl VEditApp {
     fn multi_selection(&self) -> Option<Selection> {
         let tab = self.tab()?;
+        if let Some(primary) = tab.vim.multi.primary() {
+            return Some(primary);
+        }
         if self.settings.vim && tab.vim.mode != VimMode::Insert {
             let range = tab
                 .vim
@@ -221,6 +234,7 @@ impl VEditApp {
             return;
         };
         let preferences = self.settings.multicursor.clone();
+        let vim = self.settings.vim;
         if action == MarkCursor {
             self.completions = None;
             self.completion_request = None;
@@ -266,6 +280,16 @@ impl VEditApp {
                 _ => true,
             }
         };
+        if vim
+            && matches!(
+                action,
+                SelectNextOccurrence | SelectAllOccurrences | SkipOccurrence
+            )
+            && !tab.vim.multi.primary().unwrap().range().is_empty()
+            && tab.vim.mode == VimMode::Normal
+        {
+            tab.vim.mode = VimMode::Visual;
+        }
         tab.sync_multicursor();
         tab.focus = true;
         tab.scroll_to_cursor = true;
@@ -288,6 +312,9 @@ impl VEditApp {
     }
 
     pub(super) fn commit_multi(&mut self, text: String, state: State) {
+        self.commit_multi_edit(text, state, None);
+    }
+    fn commit_multi_edit(&mut self, text: String, state: State, edits: Option<Vec<Replacement>>) {
         let Some(id) = self.tab().map(|t| t.id) else {
             return;
         };
@@ -296,6 +323,9 @@ impl VEditApp {
         let vim = self.settings.vim;
         let tab = self.tab_mut().unwrap();
         if text != tab.text {
+            if vim {
+                tab.vim.track_multi_insert(&tab.text, &text, &state, edits);
+            }
             if !vim {
                 let range = cursor_range(tab.vim.multi.primary().unwrap());
                 record_native(&ctx, id, &tab.text, range, &tab.vim.multi);
@@ -348,8 +378,27 @@ impl VEditApp {
         } else {
             vec![text.to_owned()]
         };
+        let mut ranges: Vec<_> = state
+            .selections
+            .iter()
+            .map(|selection| selection.range())
+            .collect();
+        ranges.sort_by_key(|range| range.start);
+        let edits: Vec<_> = ranges
+            .into_iter()
+            .enumerate()
+            .map(|(index, range)| Replacement {
+                range,
+                text: values[if values.len() == state.selections.len() {
+                    index
+                } else {
+                    0
+                }]
+                .clone(),
+            })
+            .collect();
         let output = multi::replace(&tab.text, &mut state, &values);
-        self.commit_multi(output, state);
+        self.commit_multi_edit(output, state, Some(edits));
     }
     pub(super) fn multi_clipboard(&mut self, cut: bool) {
         if !self.finish_cursor_placement() {
@@ -406,6 +455,40 @@ impl VEditApp {
             crate::file_kind::comment_language(tab.path.as_deref()),
         );
         self.commit_multi(output, state);
+    }
+    fn multi_vim_key(&mut self, key: VimKey) {
+        self.multi_vim_action(|vim, text| vim.handle_key(text, key));
+    }
+    fn multi_vim_action(
+        &mut self,
+        operation: impl FnOnce(&mut crate::vim::VimState, &mut String) -> crate::vim::Action,
+    ) {
+        let register = self.register.clone();
+        let yank_register = self.yank_register.clone();
+        let indent = self.tab().unwrap().indentation(&self.settings);
+        let tab = self.tab_mut().unwrap();
+        tab.vim.set_indentation(indent.width, indent.tabs);
+        if let Some(register) = register {
+            tab.vim.set_register(register);
+        }
+        tab.vim.set_yank_register(yank_register);
+        let action = operation(&mut tab.vim, &mut tab.text);
+        if action.text_changed {
+            tab.changed();
+        }
+        if let Some(scroll) = action.scroll {
+            tab.scroll_align = Some(scroll);
+        }
+        tab.sync_multicursor();
+        tab.scroll_to_cursor = true;
+        let yank_register = tab.vim.yank_register().cloned();
+        if let Some(yank) = action.yanked {
+            self.register = Some(yank);
+        }
+        self.yank_register = yank_register;
+        if let Some(message) = action.message {
+            self.status(message, true);
+        }
     }
     /// Called before global shortcuts. Consume only the ordered source prefix;
     /// native input before activation finishes on the existing continuation path.
@@ -499,8 +582,7 @@ impl VEditApp {
             let vim_modal = self.settings.vim
                 && self
                     .tab()
-                    .is_some_and(|tab| tab.vim.mode != VimMode::Insert)
-                && !active;
+                    .is_some_and(|tab| tab.vim.mode != VimMode::Insert);
             // Popup navigation has first claim on its ordinary control keys.
             // Remapped source commands continue through the normal registry.
             if active
@@ -520,6 +602,60 @@ impl VEditApp {
                 break;
             }
             let forwarded_to_vim = self.vim_key_forwarded(&event);
+            if active
+                && self.settings.vim
+                && let Some(key) = keybindings::vim_control_key(&event)
+                && !(key == Key::U
+                    && self.settings.vim_keys.preference(key)
+                        == keybindings::vim_keys::Target::Default)
+                && self.settings.vim_keys.target(
+                    key,
+                    self.tab().unwrap().vim.mode,
+                    keybindings::custom_source_binding(&self.settings.keybindings, &event),
+                ) == Some(keybindings::vim_keys::Target::Vim)
+            {
+                if events.peek().is_some_and(|next| {
+                    matches!(
+                        (key, next),
+                        (Key::C, egui::Event::Copy)
+                            | (Key::X, egui::Event::Cut)
+                            | (Key::V, egui::Event::Paste(_))
+                    )
+                }) {
+                    events.next();
+                }
+                match key {
+                    Key::C => self.multi_vim_key(VimKey::Escape),
+                    Key::A => self.multi_vim_key(VimKey::Increment),
+                    Key::X => self.multi_vim_key(VimKey::Decrement),
+                    Key::R => self.multi_vim_key(VimKey::Redo),
+                    Key::V | Key::Q => self.multi_vim_key(VimKey::VisualBlock),
+                    Key::F | Key::B | Key::D | Key::U => {
+                        let page = self.editor_rect.map_or(24, |rect| {
+                            (rect.height() / (self.settings.font_size * self.settings.line_height))
+                                .floor()
+                                .max(1.0) as isize
+                        });
+                        let amount = if matches!(key, Key::D | Key::U) {
+                            (page / 2).max(1)
+                        } else {
+                            page
+                        };
+                        let delta = if matches!(key, Key::B | Key::U) {
+                            -amount
+                        } else {
+                            amount
+                        };
+                        self.multi_vim_action(|vim, text| vim.scroll_lines(text, delta));
+                    }
+                    Key::N | Key::P => self.request_completion(),
+                    _ => self.status(
+                        "Finish multicursor editing before navigating the jump history",
+                        true,
+                    ),
+                }
+                continue;
+            }
             let source_matches = |action| {
                 !forwarded_to_vim
                     && keybindings::source_matches(
@@ -532,7 +668,15 @@ impl VEditApp {
                     )
             };
             let action = Action::ALL.iter().copied().find(|a| {
-                a.multicursor() && source_matches(*a) && (*a != Action::CursorUndo || active)
+                a.multicursor()
+                    && source_matches(*a)
+                    && (*a != Action::CursorUndo || active)
+                    && !(*a == Action::ExitMulticursor
+                        && self.settings.vim
+                        && !self.settings.keybindings.contains_key(a.id())
+                        && self.tab().is_some_and(|tab| {
+                            tab.vim.mode != VimMode::Normal || !tab.vim.pending_command().is_empty()
+                        }))
             });
             if let Some(action) = action {
                 if remaining.iter().any(editor_input::native_input) {
@@ -559,6 +703,83 @@ impl VEditApp {
             if !active {
                 remaining.push(event);
                 continue;
+            }
+            if self.settings.vim {
+                if let egui::Event::Text(text) = &event {
+                    let mut characters = text.chars();
+                    while let Some(ch) = characters.next() {
+                        if self.tab().unwrap().vim.mode == VimMode::Insert {
+                            self.multi_replace(
+                                &std::iter::once(ch).chain(characters).collect::<String>(),
+                                false,
+                            );
+                            break;
+                        }
+                        let ch = if self.tab().unwrap().vim.expects_literal_character() {
+                            ch
+                        } else {
+                            crate::vim::map_jk(ch, self.settings.swap_jk)
+                        };
+                        if self.tab().unwrap().vim.multi.placing()
+                            && !self.tab().unwrap().vim.expects_literal_character()
+                            && matches!(ch, 'i' | 'I' | 'a' | 'A' | 'o' | 'O' | 'c' | 's')
+                            && !self.finish_cursor_placement()
+                        {
+                            break;
+                        }
+                        self.multi_vim_key(VimKey::Char(ch));
+                    }
+                    continue;
+                }
+                if matches!(
+                    &event,
+                    egui::Event::Key {
+                        key: Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                ) {
+                    self.multi_vim_key(VimKey::Escape);
+                    continue;
+                }
+                if vim_modal
+                    && !placing
+                    && !keybindings::custom_source_binding(&self.settings.keybindings, &event)
+                    && let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } = &event
+                    && !modifiers.ctrl
+                    && !modifiers.command
+                    && !modifiers.alt
+                {
+                    let translated = match key {
+                        Key::Tab if self.tab().unwrap().vim.expects_literal_character() => {
+                            Some(VimKey::Tab)
+                        }
+                        Key::Backspace if self.tab().unwrap().vim.expects_literal_character() => {
+                            Some(VimKey::Backspace)
+                        }
+                        Key::ArrowLeft | Key::Backspace => Some(VimKey::Char('h')),
+                        Key::ArrowRight => Some(VimKey::Char('l')),
+                        Key::ArrowUp => Some(VimKey::Char('k')),
+                        Key::ArrowDown => Some(VimKey::Char('j')),
+                        Key::Home => Some(VimKey::Char('0')),
+                        Key::End => Some(VimKey::Char('$')),
+                        Key::Delete => Some(VimKey::Char('x')),
+                        Key::Enter => Some(VimKey::Enter),
+                        _ => None,
+                    };
+                    if let Some(translated) = translated {
+                        self.multi_vim_key(translated);
+                        continue;
+                    }
+                }
+                if vim_modal && matches!(&event, egui::Event::Ime(_)) {
+                    continue;
+                }
             }
             if let Some(command) = Action::ALL.iter().find_map(|&action| {
                 let command = action.editor_command()?;
@@ -728,6 +949,7 @@ impl VEditApp {
                                 );
                             }
                         }
+                        tab.vim.track_multi_motion();
                         tab.sync_multicursor();
                         tab.scroll_to_cursor = true;
                     }
@@ -1080,6 +1302,7 @@ pub(super) fn paint(
     output: &egui::text_edit::TextEditOutput,
     state: &State,
     focused: bool,
+    vim: Option<&crate::vim::VimState>,
 ) {
     if !state.active() {
         ui.ctx()
@@ -1114,21 +1337,41 @@ pub(super) fn paint(
     crate::render::keep_glyph_colors(&mut galley, &output.galley);
     crate::render::replace_text_shape(ui, output, galley);
     for (index, selection) in state.selections.iter().enumerate() {
+        let head = vim.map_or_else(
+            || head_cursor(*selection),
+            |vim| egui::text::CCursor::new(vim.multicursor_head(*selection)),
+        );
         let rect = output
             .galley
-            .pos_from_cursor(head_cursor(*selection))
+            .pos_from_cursor(head)
             .translate(output.galley_pos.to_vec2());
         if ui.clip_rect().intersects(rect.expand(1.0)) {
             let primary = index + 1 == state.selections.len();
             let color = if primary { ACCENT } else { TEXT };
-            ui.painter().line_segment(
-                [rect.left_top(), rect.left_bottom()],
-                Stroke::new(
-                    if primary { 2.0 } else { 1.4 },
-                    color.linear_multiply(if focused { 1.0 } else { 0.5 }),
-                ),
-            );
-            if primary && focused {
+            if vim.is_some_and(|vim| vim.mode != VimMode::Insert) {
+                let next = output
+                    .galley
+                    .pos_from_cursor(egui::text::CCursor::new(head.index.0 + 1));
+                let width = if (next.top() + output.galley_pos.y - rect.top()).abs() < 1.0 {
+                    (next.left() + output.galley_pos.x - rect.left()).max(rect.height() * 0.45)
+                } else {
+                    rect.height() * 0.45
+                };
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(width, rect.height())),
+                    1.0,
+                    color.linear_multiply(if focused { 0.65 } else { 0.3 }),
+                );
+            } else {
+                ui.painter().line_segment(
+                    [rect.left_top(), rect.left_bottom()],
+                    Stroke::new(
+                        if primary { 2.0 } else { 1.4 },
+                        color.linear_multiply(if focused { 1.0 } else { 0.5 }),
+                    ),
+                );
+            }
+            if primary && focused && vim.is_none_or(|vim| vim.mode == VimMode::Insert) {
                 let ime_rect = ui.clip_rect();
                 ui.output_mut(|output| {
                     output.ime = Some(egui::output::IMEOutput {

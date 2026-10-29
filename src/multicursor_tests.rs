@@ -50,6 +50,13 @@ fn key(key: Key, modifiers: egui::Modifiers) -> egui::Event {
         },
     }
 }
+fn insert_harness(text: &str, vim: bool) -> Harness<'static, VEditApp> {
+    let mut screen = harness(text, vim);
+    if vim {
+        events(&mut screen, [egui::Event::Text("i".into())]);
+    }
+    screen
+}
 fn events(screen: &mut Harness<'_, VEditApp>, events: impl IntoIterator<Item = egui::Event>) {
     screen.input_mut().events.extend(events);
     screen.run_steps(1);
@@ -75,9 +82,134 @@ fn selections(screen: &Harness<'_, VEditApp>) -> Vec<Range<usize>> {
 }
 
 #[test]
+fn multicursor_vim_keeps_mode_and_moves_each_cursor_independently() {
+    let mut screen = harness("a long word\nother x end\nlast text", true);
+    screen.state_mut().tab_mut().unwrap().set_cursor(12..12);
+    events(
+        &mut screen,
+        [
+            key(Key::ArrowUp, egui::Modifiers::ALT | egui::Modifiers::SHIFT),
+            key(
+                Key::ArrowDown,
+                egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+            ),
+        ],
+    );
+    assert_eq!(selections(&screen), vec![12..12, 0..0, 24..24]);
+    events(
+        &mut screen,
+        [
+            egui::Event::Ime(egui::ImeEvent::Commit("ignored".into())),
+            egui::Event::Text("w".into()),
+        ],
+    );
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "a long word\nother x end\nlast text"
+    );
+    assert_eq!(selections(&screen), vec![18..18, 2..2, 29..29]);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("iXY".into()),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "a XYlong word\nother XYx end\nlast XYtext"
+    );
+    assert!(screen.state().tab().unwrap().vim.multi.active());
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(
+        screen.state().tab().unwrap().text,
+        "a long word\nother x end\nlast text"
+    );
+}
+
+#[test]
+fn multicursor_vim_insert_counts_and_dot_repeat_each_local_edit() {
+    for windows_history in [false, true] {
+        for command in ["iXY", "3iX", "cwnew"] {
+            let mut screen = harness("one tail\ntwo tail", true);
+            let input = std::iter::once(key(
+                Key::ArrowDown,
+                egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+            ))
+            .chain(command.chars().map(|ch| egui::Event::Text(ch.to_string())))
+            .chain(if windows_history {
+                vec![
+                    key(Key::Z, egui::Modifiers::CTRL),
+                    key(Key::Y, egui::Modifiers::CTRL),
+                ]
+            } else {
+                Vec::new()
+            })
+            .chain([key(Key::Escape, egui::Modifiers::NONE)]);
+            events(&mut screen, input);
+            let expected = match command {
+                "iXY" => "XYone tail\nXYtwo tail",
+                "3iX" => "XXXone tail\nXXXtwo tail",
+                _ => "new tail\nnew tail",
+            };
+            assert_eq!(screen.state().tab().unwrap().text, expected, "{command}");
+            events(&mut screen, [egui::Event::Text("w.".into())]);
+            let expected = match command {
+                "iXY" => "XYone XYtail\nXYtwo XYtail",
+                "3iX" => "XXXone XXXtail\nXXXtwo XXXtail",
+                _ => "new new\nnew new",
+            };
+            assert_eq!(
+                screen.state().tab().unwrap().text,
+                expected,
+                "dot {command}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multicursor_vim_control_preferences_keep_clipboard_and_remappings_ordered() {
+    let mut screen = harness("1 foo\n2 bar", true);
+    events(
+        &mut screen,
+        [key(
+            Key::ArrowDown,
+            egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+        )],
+    );
+    screen
+        .state_mut()
+        .settings
+        .vim_keys
+        .set(Key::X, keybindings::vim_keys::Target::Vim);
+    events(
+        &mut screen,
+        [key(Key::X, egui::Modifiers::CTRL), egui::Event::Cut],
+    );
+    assert_eq!(screen.state().tab().unwrap().text, "0 foo\n1 bar");
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(screen.state().tab().unwrap().text, "1 foo\n2 bar");
+    screen
+        .state_mut()
+        .settings
+        .vim_keys
+        .set(Key::R, keybindings::vim_keys::Target::Editor);
+    screen
+        .state_mut()
+        .settings
+        .keybindings
+        .insert(keybindings::Action::Redo.id().into(), Some("Ctrl+R".into()));
+    events(&mut screen, [key(Key::R, egui::Modifiers::CTRL)]);
+    assert_eq!(screen.state().tab().unwrap().text, "0 foo\n1 bar");
+}
+
+#[test]
 fn multicursor_typing_undo_redo_restores_all_ranges_in_both_modes() {
     for vim in [false, true] {
-        let mut screen = harness("foo foo\nfoo", vim);
+        let mut screen = insert_harness("foo foo\nfoo", vim);
         all(&mut screen);
         assert_eq!(selections(&screen), vec![0..3, 4..7, 8..11], "vim={vim}");
         events(&mut screen, [egui::Event::Text("🦀".into())]);
@@ -115,7 +247,7 @@ fn multicursor_native_prefix_and_same_frame_commands_keep_order() {
 #[test]
 fn multicursor_escape_and_later_undo_recovers_mode() {
     for vim in [false, true] {
-        let mut screen = harness("foo foo", vim);
+        let mut screen = insert_harness("foo foo", vim);
         all(&mut screen);
         events(
             &mut screen,
@@ -124,6 +256,9 @@ fn multicursor_escape_and_later_undo_recovers_mode() {
                 key(Key::Escape, egui::Modifiers::NONE),
             ],
         );
+        if vim {
+            events(&mut screen, [key(Key::Escape, egui::Modifiers::NONE)]);
+        }
         assert!(!screen.state().tab().unwrap().vim.multi.active());
         events(&mut screen, [key(Key::Z, egui::Modifiers::CTRL)]);
         assert_eq!(screen.state().tab().unwrap().text, "foo foo");
@@ -153,7 +288,7 @@ fn multicursor_paste_settings_and_context_cut_share_transaction() {
 
 #[test]
 fn multicursor_arrows_selection_and_deletion() {
-    let mut screen = harness("foo foo", true);
+    let mut screen = insert_harness("foo foo", true);
     all(&mut screen);
     events(
         &mut screen,
@@ -170,7 +305,7 @@ fn multicursor_arrows_selection_and_deletion() {
 
 #[test]
 fn multicursor_line_commands_do_not_apply_twice_to_same_line() {
-    let mut screen = harness("foo foo\nfoo", true);
+    let mut screen = insert_harness("foo foo\nfoo", true);
     all(&mut screen);
     events(&mut screen, [key(Key::Slash, egui::Modifiers::CTRL)]);
     assert_eq!(screen.state().tab().unwrap().text, "// foo foo\n// foo");
@@ -235,6 +370,10 @@ fn multicursor_render_selections_and_primary_cursor() {
     screen.run_steps(2);
     assert!(screen.state().tab().unwrap().vim.multi.active());
     visual_tests::snapshot(&mut screen, "vedit_multicursor");
+    events(&mut screen, [key(Key::Escape, egui::Modifiers::NONE)]);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    assert!(screen.state().tab().unwrap().vim.multi.active());
+    visual_tests::snapshot(&mut screen, "vedit_multicursor_normal");
 }
 
 #[test]
@@ -272,7 +411,7 @@ fn multicursor_line_ends_and_vertical_creation() {
 
 #[test]
 fn multicursor_smart_newline_places_carets_inside_each_pair() {
-    let mut screen = harness("{}\n{}", true);
+    let mut screen = insert_harness("{}\n{}", true);
     let tab = screen.state_mut().tab_mut().unwrap();
     tab.vim.multi.selections = vec![Selection::new(1, 1), Selection::new(4, 4)];
     tab.sync_multicursor();
@@ -364,7 +503,7 @@ fn click_event(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> eg
 #[test]
 fn multicursor_alt_click_then_text_in_one_frame_and_toggle() {
     for vim in [false, true] {
-        let mut screen = harness("abc\nabc", vim);
+        let mut screen = insert_harness("abc\nabc", vim);
         let pos = position(&screen, 4);
         events(
             &mut screen,
@@ -439,7 +578,7 @@ fn multicursor_box_drag_selects_each_visible_row() {
 
 #[test]
 fn multicursor_ime_commit_inserts_once_at_each_selection() {
-    let mut screen = harness("foo foo", true);
+    let mut screen = insert_harness("foo foo", true);
     all(&mut screen);
     events(
         &mut screen,
@@ -503,7 +642,7 @@ fn multicursor_settings_patch_is_partial_and_invalid_limit_is_atomic() {
 
 #[test]
 fn multicursor_tabs_in_identical_whitespace_keep_their_positions() {
-    let mut screen = harness("    ", true);
+    let mut screen = insert_harness("    ", true);
     let tab = screen.state_mut().tab_mut().unwrap();
     tab.vim.multi.selections = vec![Selection::new(1, 1), Selection::new(3, 3)];
     tab.sync_multicursor();
@@ -514,7 +653,7 @@ fn multicursor_tabs_in_identical_whitespace_keep_their_positions() {
 
 #[test]
 fn multicursor_newlines_between_delimiters_do_not_overlap() {
-    let mut screen = harness("{  }", true);
+    let mut screen = insert_harness("{  }", true);
     let tab = screen.state_mut().tab_mut().unwrap();
     tab.vim.multi.selections = vec![Selection::new(1, 1), Selection::new(2, 2)];
     tab.sync_multicursor();
@@ -651,7 +790,7 @@ fn keyboard_alt_moves_lines_and_shift_alt_adds_cursors_in_both_modes() {
 #[test]
 fn keyboard_marks_arbitrary_positions_and_enter_starts_editing_without_a_newline() {
     for vim in [false, true] {
-        let mut screen = harness("abcd\nefgh\nijkl", vim);
+        let mut screen = insert_harness("abcd\nefgh\nijkl", vim);
         let mark = || key(Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::ALT);
         events(
             &mut screen,
@@ -678,7 +817,7 @@ fn keyboard_marks_arbitrary_positions_and_enter_starts_editing_without_a_newline
 #[test]
 fn keyboard_placement_keeps_marked_ranges_and_merges_coincident_cursors() {
     for vim in [false, true] {
-        let mut screen = harness("abcd\nefgh\nijkl", vim);
+        let mut screen = insert_harness("abcd\nefgh\nijkl", vim);
         let mark = || key(Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::ALT);
         events(&mut screen, [mark(), mark(), egui::Event::Text("X".into())]);
         assert_eq!(screen.state().tab().unwrap().text, "Xabcd\nefgh\nijkl");
@@ -714,7 +853,11 @@ fn keyboard_placement_keeps_marked_ranges_and_merges_coincident_cursors() {
             .unwrap()
             .head;
         events(&mut screen, [key(Key::Escape, egui::Modifiers::NONE)]);
+        if vim {
+            events(&mut screen, [key(Key::Escape, egui::Modifiers::NONE)]);
+        }
         assert!(!screen.state().tab().unwrap().vim.multi.active());
+        let position = position - usize::from(vim);
         assert_eq!(screen.state().tab().unwrap().selection, position..position);
     }
 }
@@ -779,7 +922,7 @@ fn keyboard_placement_finish_and_exit_follow_custom_shortcuts() {
         events(
             &mut screen,
             [
-                egui::Event::Text("X".into()),
+                egui::Event::Text(if vim { "iX" } else { "X" }.into()),
                 key(Key::Escape, egui::Modifiers::NONE),
             ],
         );

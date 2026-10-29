@@ -705,8 +705,7 @@ impl VimState {
                 (true, false, None)
             }
             '.' if self.mode == VimMode::Normal => self.repeat_change(text, count, explicit),
-            'h' | 'j' | 'k' | 'l' | 'w' | 'W' | 'b' | 'B' | 'e' | 'E' | '0' | '^' | '$' | 'G'
-            | '%' | '{' | '}' | '+' | '-' | '_' | '|' | 'H' | 'M' | 'L' => {
+            ch if super::navigation::direct_motion(ch) => {
                 self.move_cursor(&chars, ch, count, explicit);
                 (true, false, None)
             }

@@ -477,7 +477,7 @@ impl VEditApp {
                 );
             let mut cursor = egui::text::CCursor::new(tab.vim.cursor);
             if let Some(primary) = tab.vim.multi.primary() { cursor.prefer_next_row = primary.prefer_next_row; }
-            multicursor_ui::paint(ui, &output, &tab.vim.multi, focused);
+            multicursor_ui::paint(ui, &output, &tab.vim.multi, focused, settings.vim.then_some(&tab.vim));
             if settings.vim
                 && let Some(ranges) = tab.vim.block_selection(&tab.text)
                 && let Some(columns) = tab.vim.block_selection_columns(&tab.text) {
