@@ -805,6 +805,14 @@ fn project_cycle_shortcuts_wrap_without_reloading_or_losing_selection() {
     let (app, expected_groups) = split_fixture();
     let mut screen = harness(app);
     assert_eq!(tab_groups(screen.state()), expected_groups[0]);
+    screen.state_mut().palette = Some(Palette::Commands);
+    for key in [Key::P, Key::PageDown, Key::PageUp] {
+        project_shortcut(&mut screen, key);
+        assert_eq!(screen.state().active_project, 0);
+        assert!(screen.state().palette == Some(Palette::Commands));
+        assert!(!screen.state().workspace_picker_open());
+    }
+    screen.state_mut().palette = None;
     for expected in [1, 2, 0] {
         project_shortcut(&mut screen, Key::PageDown);
         assert_eq!(screen.state().active_project, expected);
@@ -823,6 +831,35 @@ fn project_cycle_shortcuts_wrap_without_reloading_or_losing_selection() {
     assert!(screen.state().projects.iter().all(|project| {
         project.index_generation == 0 && project.tabs.iter().all(|tab| !tab.loading)
     }));
+}
+
+#[test]
+fn notification_inbox_owns_global_and_region_shortcuts() {
+    let mut app = fixture(2);
+    app.open_notifications();
+    let mut screen = harness(app);
+    let focus = screen.ctx.memory(|memory| memory.focused());
+    for (key, modifiers) in [
+        (Key::F, egui::Modifiers::CTRL),
+        (Key::W, egui::Modifiers::CTRL),
+        (Key::O, egui::Modifiers::CTRL.plus(egui::Modifiers::ALT)),
+        (Key::F6, egui::Modifiers::NONE),
+        (
+            Key::PageDown,
+            egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+        ),
+    ] {
+        shortcut(&mut screen, key, modifiers);
+        assert!(screen.state().notifications.is_open());
+        assert!(!screen.state().find_visible, "{key:?}");
+        assert_eq!(screen.state().projects[0].tabs.len(), 1, "{key:?}");
+        assert_eq!(screen.state().active_project, 0, "{key:?}");
+        assert_eq!(
+            screen.ctx.memory(|memory| memory.focused()),
+            focus,
+            "{key:?}"
+        );
+    }
 }
 
 #[test]

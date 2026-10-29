@@ -144,6 +144,8 @@ impl VEditApp {
     /// query owns text events and editor commands wait for the next frame.
     pub(super) fn workspace_keys(&mut self) -> bool {
         if self.picker.is_some()
+            || self.palette.is_some()
+            || self.notifications.is_open()
             || self.settings_open
             || self.status_details.is_some()
             || self.agent_marks_modal_open()
@@ -230,6 +232,8 @@ impl VEditApp {
         }
         if let Some(action) = self.workspace_ui.pending.take()
             && self.picker.is_none()
+            && self.palette.is_none()
+            && !self.notifications.is_open()
             && !self.settings_open
             && self.status_details.is_none()
             && !self.agent_marks_modal_open()
