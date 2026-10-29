@@ -96,7 +96,8 @@ pub(super) fn word_end(chars: &[char], cursor: usize, big: bool) -> usize {
         }
     }
     if at == chars.len() {
-        return chars.len() - 1;
+        let line = last_line(chars);
+        return line.end.saturating_sub(1).max(line.start);
     }
     let class = word_class(chars[at], big);
     while at + 1 < chars.len() && word_class(chars[at + 1], big) == class {

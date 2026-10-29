@@ -68,6 +68,10 @@ definition used by Find, including combining marks; see `search.md`.
 - Vim's private units share the document's `VimState`; moving navigation logic
   does not give panes separate histories or registers. `handle_key` keeps the
   before/after transaction and repeat bookkeeping in the owner.
+- Normal-mode word motions stop on the last real line, while explicit external
+  selections may retain an EOF boundary. Word-end operators preserve a final
+  LF or CRLF; word yanks retain separators within the target line and apply
+  Vim's special trimming only when their motion crosses its line ending.
 - `src/multicursor_ui.rs` remains a review hotspot; preserve its boundary with
   the pure simultaneous-edit operations in `src/multicursor.rs`.
 

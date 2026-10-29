@@ -22,11 +22,38 @@ fn operator_inclusivity_and_empty_lines() {
         ("abc", "d$", ""),
         ("abc", "$dl", "ab"),
         ("\nabc", "x", "\nabc"),
+        ("foo bar\n", "$de", "foo ba\n"),
+        ("foo bar\r\n", "$dE", "foo ba\r\n"),
+        ("foo bar\n", "d9e", "\n"),
+        ("foo bar\r\n", "d9E", "\r\n"),
     ] {
         let mut state = VimState::new();
         let mut text = initial.to_owned();
         keys(&mut state, &mut text, command);
         assert_eq!(text, expected, "{command}");
+    }
+}
+
+#[test]
+fn word_yanks_preserve_endings_and_cross_line_separators() {
+    for (initial, command, expected) in [
+        ("foo bar\n", "$ye", "r"),
+        ("foo bar\r\n", "$yE", "r"),
+        ("one\ntwo three", "y2w", "one\ntwo "),
+        ("one\r\ntwo three", "y2W", "one\r\ntwo "),
+        ("one\ntwo\nthree", "y2w", "one\ntwo"),
+        ("one\ntwo\n  three four", "y2w", "one\ntwo"),
+        ("one\ntwo", "yw", "one"),
+    ] {
+        let mut state = VimState::new();
+        let mut text = initial.to_owned();
+        keys(&mut state, &mut text, command);
+        assert_eq!(text, initial);
+        assert_eq!(
+            state.register().unwrap().text,
+            expected,
+            "{command} in {initial:?}"
+        );
     }
 }
 

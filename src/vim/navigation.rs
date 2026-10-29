@@ -321,7 +321,12 @@ impl VimState {
             _ => None,
         };
         if let Some(target) = word_target {
-            self.cursor = target;
+            self.cursor = if self.mode == VimMode::Normal && target == chars.len() {
+                let line = last_line(chars);
+                line.end.saturating_sub(1).max(line.start)
+            } else {
+                target
+            };
             self.preferred_column = None;
             return;
         }

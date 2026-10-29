@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn word_motions_stop_on_the_last_real_line() {
+    for (initial, command, expected) in [
+        ("foo bar\n", "9w", 6),
+        ("foo bar\r\n", "9W", 6),
+        ("foo bar", "9w", 6),
+        ("foo\n\n", "9w", 4),
+        ("foo\r\n\r\n", "9w", 5),
+        ("\n", "w", 0),
+        ("", "w", 0),
+    ] {
+        let mut state = VimState::new();
+        let mut text = initial.to_owned();
+        keys(&mut state, &mut text, command);
+        assert_eq!(state.cursor, expected, "{command} in {initial:?}");
+        keys(&mut state, &mut text, "dd");
+        assert_eq!(
+            text,
+            if initial.starts_with("foo\n\n") {
+                "foo\n"
+            } else if initial.starts_with("foo\r\n\r\n") {
+                "foo\r\n"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+#[test]
 fn cursor_clamping_handles_unicode_crlf_empty_lines_and_stale_positions() {
     for (text, expected) in [
         ("", vec![0]),
