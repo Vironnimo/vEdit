@@ -29,6 +29,10 @@ document.
 
 ## Completion and external changes
 
+Closing a last document view, Project or Window cannot discard an in-flight
+save. The close owner blocks the operation and disables Discard until the write
+finishes; Cancel remains available. A shared view can still close independently.
+
 `document_loading.rs::finish_document_load` accepts a load only while the document is loading, not saving and
 has no new edits. A successful save updates saved text and fingerprint from the
 written snapshot, then recomputes dirty state against the current buffer. If

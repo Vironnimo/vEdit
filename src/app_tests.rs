@@ -819,6 +819,27 @@ fn a_dirty_tab_cannot_close_before_the_user_chooses_what_to_do() {
     assert_eq!(app.projects[0].tabs.len(), 1);
     assert_eq!(app.tab().unwrap().text, "unsaved text");
     assert!(matches!(app.close_action, Some(CloseAction::Tab(tab_id)) if tab_id == id));
+    app.tab_mut().unwrap().saving = true;
+    for action in [
+        CloseAction::Tab(id),
+        CloseAction::PaneTab {
+            pane_id: app.current_pane_id(),
+            id,
+        },
+        CloseAction::Project(0),
+        CloseAction::Exit,
+    ] {
+        app.perform_close(action);
+        assert!(
+            app.tab().is_some(),
+            "closing must wait for an in-flight write"
+        );
+        assert!(app.close_action.is_some());
+        assert!(!app.exit_ready);
+    }
+    app.tab_mut().unwrap().saving = false;
+    app.perform_close(CloseAction::Tab(id));
+    assert!(app.tab().is_none());
 }
 
 #[test]

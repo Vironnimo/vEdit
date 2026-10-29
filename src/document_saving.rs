@@ -345,7 +345,26 @@ impl VEditApp {
                 .any(|p| p.tabs.iter().any(|t| t.dirty || t.saving)),
         }
     }
+    pub(super) fn close_has_saving(&self, action: CloseAction) -> bool {
+        self.projects.iter().enumerate().any(|(index, project)| {
+            project.tabs.iter().any(|tab| {
+                tab.saving
+                    && match action {
+                        CloseAction::Tab(id) => tab.id == id,
+                        CloseAction::PaneTab { pane_id, id } => {
+                            tab.id == id && !self.pane_tab_is_shared(pane_id, id)
+                        }
+                        CloseAction::Project(target) => index == target,
+                        CloseAction::Exit => true,
+                    }
+            })
+        })
+    }
     pub(super) fn perform_close(&mut self, action: CloseAction) {
+        if self.close_has_saving(action) {
+            self.close_action = Some(action);
+            return;
+        }
         self.sync_agent_marks();
         self.capture_pane_navigation();
         let closed_tab = self.closed_tab_for_action(action);

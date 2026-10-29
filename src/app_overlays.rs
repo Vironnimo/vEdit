@@ -82,6 +82,7 @@ impl VEditApp {
         if let Some(action) = self.close_action
             && self.save_as.is_none()
         {
+            let saving = self.close_has_saving(action);
             let documents: Vec<_> = self
                 .projects
                 .iter()
@@ -151,7 +152,7 @@ impl VEditApp {
                                 .on_hover_text(path);
                         }
                     });
-                if self.close_after_save {
+                if self.close_after_save || saving {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Saving…");
@@ -163,7 +164,10 @@ impl VEditApp {
                         cancel = true;
                     }
                     if ui
-                        .add_enabled(!self.close_after_save, egui::Button::new("Discard"))
+                        .add_enabled(
+                            !self.close_after_save && !saving,
+                            egui::Button::new("Discard"),
+                        )
                         .clicked()
                     {
                         discard = true;

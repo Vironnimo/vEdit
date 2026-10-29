@@ -1,6 +1,9 @@
 //! Workspace feedback and dialogs at the native minimum window size.
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 
 fn fixture(count: usize) -> VEditApp {
     let mut app = VEditApp::empty(egui::Context::default());
@@ -98,7 +101,7 @@ fn many_unsaved_documents_keep_dialog_actions_inside_the_minimum_window() {
         .collect();
     app.bind_current_pane();
     app.request_close(CloseAction::Exit);
-    let screen = harness(app);
+    let mut screen = harness(app);
     assert!(
         screen
             .query_by_label("64 files with unsaved changes.")
@@ -111,6 +114,23 @@ fn many_unsaved_documents_keep_dialog_actions_inside_the_minimum_window() {
             "{label}: {rect:?}"
         );
     }
+    screen.state_mut().projects[0].tabs[0].saving = true;
+    screen.run_steps(1);
+    assert!(
+        screen
+            .get_by_label("Discard")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(!screen.get_by_label("Cancel").accesskit_node().is_disabled());
+    screen.state_mut().projects[0].tabs[0].saving = false;
+    screen.run_steps(1);
+    assert!(
+        !screen
+            .get_by_label("Discard")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 
 #[test]
