@@ -219,6 +219,16 @@ fn timeout_stops_a_running_command_and_reports_the_reason() {
             .iter()
             .any(|event| matches!(event, TaskEvent::Error(text) if text.contains("timed out")))
     );
+    let failure = events
+        .iter()
+        .position(|event| matches!(event, TaskEvent::Error(_)))
+        .unwrap();
+    assert!(
+        !events[failure + 1..]
+            .iter()
+            .any(|event| matches!(event, TaskEvent::Output(_))),
+        "{events:?}"
+    );
     assert_eq!(
         events.last(),
         Some(&TaskEvent::Finished {

@@ -310,10 +310,6 @@ fn run_task(
     // pipes. End those descendants before waiting for the readers to drain.
     process.terminate();
     let _ = process.child.wait();
-    if let Some(failure) = failure {
-        // Never let a full output queue delay terminating the process.
-        let _ = sender.send(TaskEvent::Error(failure));
-    }
     for reader in readers.into_iter().flatten() {
         match reader {
             Ok(reader) => {
@@ -329,6 +325,11 @@ fn run_task(
                 )));
             }
         }
+    }
+    // Termination has already completed. Drain captured output before the
+    // final diagnostic so readers cannot append text after the reason for exit.
+    if let Some(failure) = failure {
+        let _ = sender.send(TaskEvent::Error(failure));
     }
     finish(code, cancelled);
 }
