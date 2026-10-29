@@ -108,7 +108,7 @@ pub(crate) fn draw_top_bar(
     paint_brand(ui, brand_rect, width >= 480.0);
 
     // Let project tabs use the available width while preserving a dedicated drag
-    // target beside them. At high UI zoom, keep room for a project-list button
+    // target beside them. At high UI zoom, keep room for the add-project button
     // before reserving free space; the brand also remains a native drag target.
     // Unused project space stays draggable, excluding all occupied widgets.
     let available_project_width = controls_left - brand_right;

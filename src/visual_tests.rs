@@ -267,7 +267,7 @@ fn project_switcher_screenshot() {
         app.projects.push(project);
     }
     let mut screen = harness(app);
-    screen.get_by_label("Switch project").click();
+    screen.key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::P);
     screen.run_steps(3);
     assert!(screen.state().workspace_picker_open());
     snapshot(&mut screen, "vedit_project_picker");

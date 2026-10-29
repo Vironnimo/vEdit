@@ -8,6 +8,8 @@ trees and navigation without taking ownership of document text or disk saves.
 - `src/project_workspace.rs`, private to App, owns `Project`, file opening,
   project activation and index-result integration. `src/workspace_ui.rs` owns the project tabs, picker and deferred
   worktree selection; Git discovers worktrees (see `git.md`).
+  The titlebar's plus button opens the native folder dialog directly; the
+  searchable project/worktree picker remains a keyboard and palette action.
 - `src/split.rs` owns pane layouts, document views, pane-local navigation and
   focus routing. `src/tab_drag.rs` handles tab gestures;
   `src/spatial_navigation.rs` selects visible regions geometrically.

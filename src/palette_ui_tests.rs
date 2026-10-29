@@ -295,14 +295,15 @@ fn dismissal_over_main_menu_does_not_open_the_menu() {
 }
 
 #[test]
-fn dismissal_over_project_header_does_not_open_the_project_picker() {
+fn dismissal_over_project_header_does_not_open_the_folder_dialog() {
     let (_fixture, app) = Fixture::new(2);
     let mut screen = harness(app);
-    let point = screen.get_by_label("Switch project").rect().center();
+    let point = screen.get_by_label("Add project").rect().center();
     open(&mut screen, Palette::Files);
     click(&mut screen, point, egui::PointerButton::Primary);
     assert!(screen.state().palette.is_none());
     assert!(!screen.state().workspace_picker_open());
+    assert!(screen.state().picker.is_none());
     assert_eq!(screen.state().active_project, 0);
     assert_source_focus(&screen);
 }

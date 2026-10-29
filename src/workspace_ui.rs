@@ -7,7 +7,7 @@ mod project_tab_drag;
 const PROJECT_ROW_HEIGHT: f32 = 52.0;
 const PROJECT_TAB_HEIGHT: f32 = 28.0;
 const PROJECT_TAB_GAP: f32 = 4.0;
-const PROJECT_LIST_WIDTH: f32 = 28.0;
+const PROJECT_ADD_WIDTH: f32 = 28.0;
 
 #[derive(Default)]
 pub(super) struct WorkspaceUiState {
@@ -377,14 +377,13 @@ impl VEditApp {
             return;
         }
         let tooltip = format!(
-            "Projects · {}\nAdd project folders · {}",
-            self.shortcut_label(keybindings::Action::SwitchProject),
+            "Open a project folder · {}",
             self.shortcut_label(keybindings::Action::OpenProject),
         );
         if ui.available_width() < 80.0 {
             self.workspace_ui.header_width = 0.0;
-            let response = project_list_button(ui, &tooltip);
-            self.workspace_header_list(ui, &response);
+            let response = project_add_button(ui, &tooltip);
+            self.workspace_header_add(ui, &response);
             return;
         }
         let source_owner = self.tab().and_then(|tab| {
@@ -424,7 +423,7 @@ impl VEditApp {
                     .map(notifications::level_color),
             })
             .collect();
-        let available_tabs = (ui.available_width() - PROJECT_LIST_WIDTH - PROJECT_TAB_GAP).max(1.0);
+        let available_tabs = (ui.available_width() - PROJECT_ADD_WIDTH - PROJECT_TAB_GAP).max(1.0);
         let max_tab_width = available_tabs.min(220.0);
         let min_tab_width = 88.0_f32.min(max_tab_width);
         let widths: Vec<_> = tabs
@@ -452,7 +451,7 @@ impl VEditApp {
         self.workspace_ui.header_width = width;
         self.workspace_ui.header_count = tabs.len();
         let mut chosen = None;
-        let mut list = None;
+        let mut add = None;
         let mut tab_strip = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = PROJECT_TAB_GAP;
@@ -524,8 +523,8 @@ impl VEditApp {
                     tab_strip = Some(output);
                 },
             );
-            let response = project_list_button(ui, &tooltip);
-            list = Some(response);
+            let response = project_add_button(ui, &tooltip);
+            add = Some(response);
         });
         if let Some((index, clicked_rect)) = chosen {
             // Source input earlier in this frame still belongs to the old
@@ -567,18 +566,17 @@ impl VEditApp {
                 }));
             }
         }
-        let response = list.expect("project list button is always drawn");
-        self.workspace_header_list(ui, &response);
+        let response = add.expect("add project button is always drawn");
+        self.workspace_header_add(ui, &response);
         self.finish_project_tab_drag(ui, tab_strip.unwrap(), &tabs);
     }
 
-    fn workspace_header_list(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
+    fn workspace_header_add(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         if response.clicked() {
             if self.workspace_picker_open() {
                 self.close_workspace_picker();
-            } else {
-                self.open_workspace_picker();
             }
+            self.pick_project();
         }
         self.workspace_popup(ui, response);
     }
@@ -1138,7 +1136,6 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
                     format!("{description} in {}", tab.label),
                 )
             });
-            status.on_hover_text(description);
         }
         if let Some(color) = tab.unread_color {
             // Apart from the Git dot, in the corner, like a badge.
@@ -1164,9 +1161,7 @@ fn project_header_tab(ui: &mut egui::Ui, tab: &ProjectHeaderTab, width: f32) -> 
             if tab.unread == 1 { "" } else { "s" }
         ));
     }
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
+    design::instant_hint(response, tooltip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn compact_project_action(
@@ -1182,14 +1177,14 @@ fn compact_project_action(
     response
 }
 
-fn project_list_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
+fn project_add_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
     let response = ui.add_sized(
-        Vec2::new(PROJECT_LIST_WIDTH, PROJECT_TAB_HEIGHT),
+        Vec2::new(PROJECT_ADD_WIDTH, PROJECT_TAB_HEIGHT),
         egui::Button::new("").frame(false),
     );
     let rect = response.rect;
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Switch project")
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Add project")
     });
     if response.hovered() || crate::design::keyboard_focus(&response) {
         ui.painter().rect_filled(rect, 5.0, HOVER);
@@ -1203,7 +1198,7 @@ fn project_list_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
         );
     }
     let color = if response.hovered() { TEXT } else { MUTED };
-    let center = rect.center() + Vec2::new(-3.0, 0.0);
+    let center = rect.center();
     let stroke = Stroke::new(1.25, color);
     ui.painter().line_segment(
         [center + Vec2::new(-3.5, 0.0), center + Vec2::new(3.5, 0.0)],
@@ -1213,15 +1208,6 @@ fn project_list_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
         [center + Vec2::new(0.0, -3.5), center + Vec2::new(0.0, 3.5)],
         stroke,
     );
-    let arrow = rect.center() + Vec2::new(7.0, 0.0);
-    ui.painter().add(egui::Shape::line(
-        vec![
-            arrow + Vec2::new(-2.0, -1.0),
-            arrow + Vec2::new(0.0, 1.0),
-            arrow + Vec2::new(2.0, -1.0),
-        ],
-        stroke,
-    ));
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip)

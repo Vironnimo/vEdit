@@ -278,8 +278,11 @@ fn selecting_an_empty_project_keeps_it_active_and_preserves_the_other_buffer() {
     let root = app.projects[1].root.clone();
     let existing = app.projects[0].tabs[0].id;
     let mut screen = harness(app);
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
+    shortcut(
+        &mut screen,
+        Key::P,
+        egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+    );
     screen
         .get_by_label_contains("vedit-project-context-B · 0 open")
         .click();
@@ -291,8 +294,11 @@ fn selecting_an_empty_project_keeps_it_active_and_preserves_the_other_buffer() {
     assert_eq!(screen.state().projects[0].tabs[0].id, existing);
     assert_eq!(screen.state().projects[0].tabs[0].text, DOCUMENT);
     assert!(!screen.state().projects[0].tabs[0].dirty);
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
+    shortcut(
+        &mut screen,
+        Key::P,
+        egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+    );
     screen
         .get_by_label_contains("vedit-project-context-A · 1 open")
         .click();

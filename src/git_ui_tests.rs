@@ -662,13 +662,15 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
         let mut screen = visual_tests::harness(app);
         screen.set_size(Vec2::new(width, 720.0));
         visual_tests::settle_render(&mut screen);
+        screen
+            .ctx
+            .all_styles_mut(|style| style.animation_time = 1.0);
         let source = screen.get_by_label("History entry 0").rect().center();
         screen.hover_at(source);
-        frames(&mut screen, 20);
-        assert!(screen.query_by_label("Copy all").is_none());
-        frames(&mut screen, 15);
-        // Browse adjacent commits with production hover timing, in both paint orders.
-        // A warm card must follow each row without waiting for the old card to expire.
+        frames(&mut screen, 2);
+        assert!(screen.query_by_label("Copy all").is_some());
+        // Browse adjacent commits in both paint orders while other UI animations
+        // remain enabled. Each card must appear immediately at full opacity.
         for index in [1, 2, 3, 2, 1, 0] {
             let label = format!("History entry {index}");
             let row = screen.get_by_label(&label).rect().center();
@@ -678,6 +680,30 @@ fn history_details_leave_both_sidebar_lists_free_and_remain_copyable() {
                 screen.get_all_by_label(&label).count(),
                 2,
                 "row and its details must both be visible: {side:?}, {width}, {index}"
+            );
+            let detail_text = screen
+                .output()
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.text() == label
+                        && !screen
+                            .state()
+                            .sidebar_region_rect(side)
+                            .unwrap()
+                            .contains(text.pos)
+                    {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .expect("commit detail text must be painted beside the sidebar");
+            assert_eq!(
+                detail_text.fallback_color.a(),
+                255,
+                "details must appear fully opaque"
             );
             for other in 0..4 {
                 if other != index {

@@ -12,7 +12,7 @@ use eframe::egui::{
 mod hover;
 pub(crate) use hover::{
     HoverDetails, begin_hover_frame, details_body, details_dismissed, details_open,
-    end_hover_frame, register_details,
+    end_hover_frame, instant_hint, register_details,
 };
 
 /// Whether focus came from the keyboard, like CSS `:focus-visible`: a key

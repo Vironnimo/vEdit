@@ -164,12 +164,12 @@ fn assert_groups_belong_to_project(app: &VEditApp, project: usize) {
 }
 
 #[test]
-fn project_tabs_and_the_compact_project_list_stay_in_the_titlebar() {
-    let screen = harness(fixture(3));
+fn project_tabs_and_the_add_button_stay_in_the_titlebar() {
+    let mut screen = harness(fixture(3));
     let project = screen.get_by_label("Project: vedit-workspace-ui-00").rect();
     let second = screen.get_by_label("Project: vedit-workspace-ui-01").rect();
     let third = screen.get_by_label("Project: vedit-workspace-ui-02").rect();
-    let list = screen.get_by_label("Switch project").rect();
+    let list = screen.get_by_label("Add project").rect();
     let menu = screen.get_by_label("Main menu").rect();
     assert!(project.top() < menu.top());
     assert!(project.left() < 300.0);
@@ -188,6 +188,40 @@ fn project_tabs_and_the_compact_project_list_stay_in_the_titlebar() {
     for title in ["File", "View", "Run"] {
         assert!(screen.query_by_label(title).is_none());
     }
+    screen.ctx.all_styles_mut(|style| {
+        style.animation_time = 1.0;
+        style.interaction.tooltip_delay = 10.0;
+    });
+    for index in [0, 1, 2, 1, 0] {
+        let tooltip = format!(
+            "{}\n1 open files · 0 unsaved",
+            screen.state().projects[index].display_location()
+        );
+        screen
+            .get_by_label(&format!("Project: vedit-workspace-ui-{index:02}"))
+            .hover();
+        screen.run_steps(2);
+        assert!(screen.query_by_label(&tooltip).is_some());
+        let text = screen
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.text() == tooltip
+                {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .expect("project hint must be painted immediately");
+        assert_eq!(
+            text.fallback_color.a(),
+            255,
+            "project hints must not fade in"
+        );
+    }
 }
 
 #[test]
@@ -195,8 +229,7 @@ fn opening_project_picker_reveals_the_current_project_beyond_the_first_page() {
     let mut app = fixture(25);
     app.switch_project(22);
     let mut screen = harness(app);
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
+    project_shortcut(&mut screen, Key::P);
     assert!(screen.state().workspace_picker_open());
     assert!(
         screen
@@ -496,15 +529,15 @@ fn project_tabs_support_keyboard_and_accesskit_activation() {
             .iter()
             .all(|project| project.tabs[0].text == DOCUMENT)
     );
-    screen.get_by_label("Switch project").focus();
+    screen.get_by_label("Add project").focus();
     screen.run_steps(1);
     screen.key_press(Key::Space);
     screen.run_steps(3);
-    assert!(screen.state().workspace_picker_open());
     assert_eq!(
-        screen.ctx.memory(|memory| memory.focused()),
-        Some(query_id())
+        screen.state().picker.unwrap().purpose,
+        DialogPurpose::Projects
     );
+    assert!(!screen.state().workspace_picker_open());
 }
 
 #[test]
@@ -619,6 +652,14 @@ fn cached_git_changes_have_a_dot_while_clean_unknown_and_unsaved_only_do_not() {
         matches!(&shape.shape, egui::Shape::Circle(circle)
             if marker.contains(circle.center) && circle.radius < 4.0 && circle.fill == ORANGE.gamma_multiply(0.85))
     }));
+    screen.hover_at(marker.center());
+    screen.run_steps(2);
+    let tooltip = format!(
+        "{}\n1 open files · 0 unsaved\n3 uncommitted changes",
+        screen.state().projects[1].display_location()
+    );
+    assert!(screen.query_by_label(&tooltip).is_some());
+    assert!(screen.query_by_label("3 uncommitted changes").is_none());
     screen.state_mut().projects[1].git_indicator_count = Some(0);
     screen.state_mut().projects[0].git_indicator_count = Some(1);
     screen.run_steps(3);
@@ -648,7 +689,7 @@ fn cycling_many_projects_and_resizing_reveal_the_active_header_tab() {
         let tab = screen
             .get_by_label(&format!("Project: vedit-workspace-ui-{selected:02}"))
             .rect();
-        let list = screen.get_by_label("Switch project").rect();
+        let list = screen.get_by_label("Add project").rect();
         assert!(
             tab.left() >= 122.0 - 1.0,
             "selected tab must be revealed after cycling: {tab:?}"
@@ -660,7 +701,7 @@ fn cycling_many_projects_and_resizing_reveal_the_active_header_tab() {
     screen.set_size(Vec2::new(500.0, 360.0));
     screen.run_steps(3);
     let active = screen.get_by_label("Project: vedit-workspace-ui-23").rect();
-    let list = screen.get_by_label("Switch project").rect();
+    let list = screen.get_by_label("Add project").rect();
     assert!(active.left() >= 122.0 - 1.0);
     assert!(active.right() <= list.left() - PROJECT_TAB_GAP + 1.0);
     assert!(list.right() < screen.get_by_label("Minimize window").rect().left());
@@ -687,7 +728,7 @@ fn long_colliding_project_names_keep_the_distinguishing_parent_visible() {
 }
 
 #[test]
-fn narrow_zoom_keeps_project_list_keyboard_search_and_footer_inside_the_viewport() {
+fn narrow_zoom_keeps_project_add_keyboard_search_and_footer_inside_the_viewport() {
     let mut app = fixture(3);
     app.settings.ui_scale = 2.0;
     // Begin with the native minimum at 100% native DPI. egui applies the
@@ -698,7 +739,7 @@ fn narrow_zoom_keeps_project_list_keyboard_search_and_footer_inside_the_viewport
     let viewport = screen.ctx.content_rect();
     assert_eq!(viewport.size(), Vec2::new(250.0, 180.0));
     assert_eq!(screen.ctx.pixels_per_point(), 2.0);
-    let list = screen.get_by_label("Switch project").rect();
+    let list = screen.get_by_label("Add project").rect();
     assert!(viewport.contains_rect(list));
     for label in [
         "Minimize window",
@@ -1080,31 +1121,22 @@ fn many_projects_keep_a_bounded_picker_and_keyboard_reveal_the_last_row() {
 
 #[test]
 fn add_project_uses_the_native_folder_picker_without_closing_open_projects() {
-    let mut screen = harness(fixture(2));
-    screen.get_by_label("Switch project").click();
-    screen.run_steps(3);
-    screen.get_by_label("Add project…").click();
-    screen.run_steps(3);
-    assert_eq!(
-        screen.state().picker.unwrap().purpose,
-        DialogPurpose::Projects
-    );
-    assert_eq!(screen.state().projects.len(), 2);
-    assert!(screen.state().native_dialog_builder.is_none());
-    assert!(!screen.state().workspace_picker_open());
-}
-
-#[test]
-fn empty_header_add_project_uses_the_native_folder_picker() {
-    let mut screen = harness(fixture(0));
-    screen.get_by_label("Add project").click();
-    screen.run_steps(3);
-    assert_eq!(
-        screen.state().picker.unwrap().purpose,
-        DialogPurpose::Projects
-    );
-    assert!(screen.state().projects.is_empty());
-    assert!(screen.state().native_dialog_builder.is_none());
+    for (count, size) in [
+        (0, Vec2::new(1360.0, 900.0)),
+        (2, Vec2::new(1360.0, 900.0)),
+        (2, Vec2::new(250.0, 360.0)),
+    ] {
+        let mut screen = harness_with_size(fixture(count), size);
+        screen.get_by_label("Add project").click();
+        screen.run_steps(3);
+        assert_eq!(
+            screen.state().picker.unwrap().purpose,
+            DialogPurpose::Projects
+        );
+        assert_eq!(screen.state().projects.len(), count);
+        assert!(screen.state().native_dialog_builder.is_none());
+        assert!(!screen.state().workspace_picker_open());
+    }
 }
 
 #[test]

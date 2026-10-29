@@ -245,7 +245,7 @@ pub(crate) fn details_body(ui: &mut Ui, id: Id, contents: impl FnOnce(&mut Ui) -
 pub(crate) trait HoverDetails: Sized {
     fn on_hover_details(self, text: impl AsRef<str>) -> Self;
     fn on_hover_details_ui(self, contents: impl FnOnce(&mut Ui) -> String) -> Self;
-    /// Place inspectable content outside a scrolling column, toward the window center.
+    /// Instantly show details outside a scrolling column, without a fade animation.
     fn on_hover_details_beside_ui(
         self,
         column: Rect,
@@ -262,10 +262,10 @@ impl HoverDetails for Response {
         column: Rect,
         contents: impl FnOnce(&mut Ui) -> String,
     ) -> Self {
-        show(self, Some(column), contents)
+        show(self, Some(column), true, contents)
     }
     fn on_hover_details_ui(self, contents: impl FnOnce(&mut Ui) -> String) -> Self {
-        show(self, None, contents)
+        show(self, None, false, contents)
     }
 }
 
@@ -286,7 +286,7 @@ fn show_text(response: Response, text: &str) -> Response {
         save(&ctx, current);
         return response;
     }
-    show(response, None, |ui| {
+    show(response, None, false, |ui| {
         let mut state = state(&ctx);
         let text = if let Some(open) = state.open.as_mut().filter(|open| open.id == id) {
             if !open.interacting
@@ -310,6 +310,7 @@ fn show_text(response: Response, text: &str) -> Response {
 fn show(
     response: Response,
     column: Option<Rect>,
+    instant: bool,
     contents: impl FnOnce(&mut Ui) -> String,
 ) -> Response {
     let ctx = &response.ctx;
@@ -351,7 +352,12 @@ fn show(
                 && i.time_since_last_scroll() >= style.interaction.tooltip_delay
                 && i.pointer.time_since_last_click() >= style.interaction.tooltip_delay
         });
-    if !was_open && !warm && !egui::Tooltip::should_show_tooltip(&response, true) {
+    let ready = if instant {
+        instant_hover(&response)
+    } else {
+        warm || egui::Tooltip::should_show_tooltip(&response, true)
+    };
+    if !was_open && !ready {
         return response;
     }
     if !response.enabled() {
@@ -392,11 +398,52 @@ fn show(
             .align_alternatives(&[]);
     }
     tooltip = tooltip.width(width);
-    if let Some(shown) = tooltip.show(|ui| {
+    let body = |ui: &mut Ui| {
         ui.set_max_width(width);
         details_body(ui, response.id, contents);
-    }) {
+    };
+    let shown = if instant {
+        instant_tooltip(tooltip, body)
+    } else {
+        tooltip.show(body)
+    };
+    if let Some(shown) = shown {
         register_details(ctx, response.id, response.rect, shown.response.rect, false);
+    }
+    response
+}
+
+fn instant_hover(response: &Response) -> bool {
+    response.enabled()
+        && response.hovered()
+        && !egui::Popup::is_any_open(&response.ctx)
+        && response.ctx.input(|input| {
+            !input.pointer.any_down()
+                && !input.is_scrolling()
+                && input.pointer.time_since_last_click()
+                    >= input.pointer.time_since_last_movement() + 0.1
+        })
+}
+
+fn instant_tooltip<R>(
+    mut tooltip: egui::Tooltip<'_>,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<egui::InnerResponse<R>> {
+    // egui fades the Area before painting the popup frame. Draw both the frame
+    // and its contents after resetting opacity, without changing global style.
+    tooltip.popup = tooltip.popup.frame(egui::Frame::NONE);
+    tooltip.show(|ui| {
+        ui.set_opacity(1.0);
+        egui::Frame::popup(ui.style()).show(ui, contents).inner
+    })
+}
+
+/// Passive information for scanning adjacent entries: no dwell delay or fade.
+pub(crate) fn instant_hint(response: Response, text: impl AsRef<str>) -> Response {
+    if instant_hover(&response) && !text.as_ref().is_empty() {
+        instant_tooltip(egui::Tooltip::for_widget(&response), |ui| {
+            ui.label(text.as_ref());
+        });
     }
     response
 }

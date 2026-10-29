@@ -222,7 +222,7 @@ fn same_named_projects_have_distinct_visible_header_labels_after_switching() {
     screen.state_mut().activate_project_layout(1);
     screen.run_steps(3);
     assert!(painted_text(&screen, "project — server").is_some());
-    assert!(screen.query_by_label("Switch project").is_some());
+    assert!(screen.query_by_label("Add project").is_some());
 }
 
 #[test]

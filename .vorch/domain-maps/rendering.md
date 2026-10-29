@@ -68,6 +68,9 @@ When browsing adjacent sources, details switch without a new dwell delay. Only
 crossing the gap toward a card retains it briefly; leaving in another direction
 closes it. This lifetime belongs to `design_hover.rs`, including suppression of
 egui's directional reopening of a source the pointer has left.
+Column-anchored details and project-tab hints appear immediately at full opacity,
+using the shared instant hover path. Other hints and details retain their normal
+delay and animation; instant hints remain passive.
 
 ## Constraints & Gotchas
 
