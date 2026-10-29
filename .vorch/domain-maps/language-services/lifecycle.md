@@ -22,6 +22,8 @@ request/write deadlines, and remains interruptible by shutdown. Read the
 `src/lsp/protocol.rs` together when changing queues or teardown. Protocol size
 limits and request/write timeouts are named constants
 near the top of `src/lsp.rs`; do not create a second timeout policy in UI code.
+On Windows, process teardown falls back to terminating the child tree with
+`taskkill /T /F` when Job assignment was unavailable.
 
 After process exit, the worker waits at most 200 ms for the final stderr read so
 the exit event does not race away the cause. `server_exit_message` retains exit
@@ -44,6 +46,9 @@ edit but cannot be declared fresh merely because they just arrived. Combined
 freshness is false if any contribution is stale, otherwise unknown if any
 contribution is unknown. `close_language_paths` removes cached diagnostics and
 retires affected paths so late events cannot restore them.
+The combined diagnostics carry a publication revision. Problems caches use that
+revision and the Project instance, rather than allocator addresses, so multiple
+publications between frames cannot restore an older cached list.
 
 `problems::build_problem_list` orders by severity, file and position. Open text
 allows Unicode scalar columns; unopened text retains explicitly marked UTF-16

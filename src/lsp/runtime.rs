@@ -430,7 +430,20 @@ impl ProcessGuard {
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         #[cfg(windows)]
-        drop(self.job.take());
+        {
+            if let Some(job) = self.job.take() {
+                drop(job);
+            } else if matches!(self.child.try_wait(), Ok(None)) {
+                use std::os::windows::process::CommandExt;
+                let _ = Command::new("taskkill.exe")
+                    .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
+                    .creation_flags(0x08000000)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
         #[cfg(unix)]
         {
             unsafe extern "C" {
@@ -447,6 +460,58 @@ impl Drop for ProcessGuard {
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod process_tests {
+    use super::*;
+    use std::ffi::c_void;
+    use std::os::windows::process::CommandExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, id: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    #[test]
+    fn dropping_unassigned_guard_stops_descendants() {
+        // Job assignment can fail in a nested Job. Exercise that fallback
+        // directly; a real child handle proves that descendants have exited.
+        let child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$info = [Diagnostics.ProcessStartInfo]::new('powershell.exe'); $info.Arguments = '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 20'; $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $child = [Diagnostics.Process]::Start($info); [Console]::Out.WriteLine($child.Id); Start-Sleep -Seconds 20"])
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().unwrap();
+        let mut process = ProcessGuard { child, job: None };
+        let stdout = process.child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            let _ = sender.send(line.trim().parse::<u32>().unwrap());
+        });
+        let id = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        reader.join().unwrap();
+        let handle = unsafe { OpenProcess(0x0010_0000, 0, id) };
+        assert!(!handle.is_null());
+        drop(process);
+        let stopped = unsafe { WaitForSingleObject(handle, 5_000) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if stopped != 0 {
+            let _ = Command::new("taskkill.exe")
+                .args(["/PID", &id.to_string(), "/T", "/F"])
+                .creation_flags(0x08000000)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        assert_eq!(stopped, 0, "language-server descendant survived shutdown");
     }
 }
 
