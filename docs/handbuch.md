@@ -277,6 +277,8 @@ Die Suche unterscheidet standardmäßig Groß- und Kleinschreibung. `\c` im Must
 - `:s/alt/neu/` ersetzt den ersten Treffer der aktuellen Zeile; `:%s/alt/neu/g` ersetzt alle Treffer im Dokument. Bereiche wie `:2,8s/alt/neu/g` und die Visual-Auswahl sind möglich. `i` ignoriert Groß-/Kleinschreibung, `I` erzwingt sie, `n` zählt ohne Änderung, `e` erlaubt null Treffer. Muster verwenden wie die Vim-Suche Rust-Regex-Syntax; `&` und `\1` bis `\9` setzen Treffer und Gruppen in der Ersetzung ein. `\r` erzeugt einen Zeilenumbruch, `\t` einen Tab. Anders als in Vim, wo `\n` ein Nullzeichen einfügt, erzeugt auch `\n` einen Zeilenumbruch. `\u` / `\l` schreiben das nächste Zeichen groß beziehungsweise klein, `\U` / `\L` den folgenden Text bis `\E` oder `\e`; so beginnt nach `:s/\w+/\u&/g` jedes Wort mit einem Großbuchstaben. `~` steht wörtlich für eine Tilde, nicht für die vorherige Ersetzung. Die Änderung bildet einen Undo-Schritt; ungültige Muster oder nicht unterstützte Flags verändern keinen Text. Interaktive Bestätigung mit `c` ist nicht enthalten.
 
 Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die aktuelle Eingabe beim Zurückkehren erhält.
+Bei einer Visual-Auswahl setzt `:` den Bereich `'<,'>` voran. Eine folgende Zahl
+wie `3` springt wie in Vim um drei Zeilen ab dem Auswahlende weiter.
 
 vEdit implementiert einen eigenen Vim-Kern. Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
@@ -417,6 +419,9 @@ Der Agenten-Skill gehört zum Repository und liegt unter [.agents/skills/vedit/S
 ## Speichern und Wiederherstellung
 
 **Ctrl+S** speichert die aktive Datei, **Ctrl+Shift+S** alle geänderten Dateien. Neue Dateien und **File → Save as…** öffnen den Windows-Speicherdialog, auch außerhalb des Projekts. Eine vorhandene Zieldatei wird erst nach der Windows-Bestätigung ersetzt; spätere Änderungen auf dem Datenträger bleiben durch die Konfliktprüfung geschützt. Eine Datei, die bereits in einem anderen Tab offen ist, lässt sich nicht als Ziel überschreiben. Abbrechen erhält den ungespeicherten Text.
+Solange eine betroffene Datei gerade gespeichert wird, wartet das Schließen auf
+den Schreibvorgang; **Discard** bleibt bis dahin deaktiviert. **Cancel** ist
+weiterhin verfügbar.
 
 Automatisches Speichern schreibt benannte Dateien standardmäßig nach **850 ms Schreibpause**. In Settings lässt sich die Verzögerung auf **300–5000 ms** ändern oder Autosave ausschalten. Wiederherstellungskopien werden unabhängig davon weiterhin nach 850 ms für geänderte Dateien und neue Tabs geschrieben, auch für neu angelegte Agent-Entwürfe ohne weitere Eingabe. Sie liegen unter `%APPDATA%\vEdit\recovery` und werden beim nächsten Start eingelesen. Text, ursprünglicher Dateistand und Zeilenumbruchformat werden zusammen gesichert. Externe Änderungen nach einem Absturz werden durch die wiederhergestellten Edits nicht überschrieben; bei einem Konflikt erhält **Save as…** beide Fassungen. Ältere Wiederherstellungskopien ohne verlässlichen Vergleichsstand bleiben lesbar und schützen die ursprüngliche Datei ebenfalls. Vorübergehend nicht verfügbare Projekte behalten ihre wiederherstellbaren Entwürfe. Beim regulären Schließen fragt vEdit nach ungespeicherten Änderungen.
 
