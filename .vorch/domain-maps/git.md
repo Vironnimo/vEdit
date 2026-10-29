@@ -27,6 +27,8 @@ The opened project root and Git repository root are distinct. `project_repositor
 Git helpers return `GitResult<T>`; absence is explicit where valid, such as no repository or detached HEAD. A malformed/corrupt repository is an error, not an empty clean state. Status keeps index and worktree changes separate, including both paths of renames.
 
 Paths passed to path-based Git helpers are repository-relative. Invocation uses direct arguments, literal pathspecs and `-C`; do not route these through a shell. Preview diffs disable external diff and textconv helpers. Keep process execution in this owner so bounds, cancellation and deterministic parsing remain shared.
+Unmerged status entries compare the working file with our index side in two-way
+format; the patch renderer does not consume combined merge hunks.
 
 `HistorySnapshot` freezes object IDs and ref decorations for subsequent pages. UI history is scoped to the current branch and its configured upstream; tags decorate reachable commits without adding unrelated history. A changed snapshot replaces the graph; accepted pages extend it. See `git/execution-and-history.md` for refresh ownership.
 

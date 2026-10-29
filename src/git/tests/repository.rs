@@ -178,6 +178,10 @@ fn combined_status_preserves_merge_conflicts() {
     assert_eq!(combined, status(&repository.0).unwrap());
     assert_eq!(combined.files.len(), 1);
     assert!(combined.files[0].is_conflicted());
+    let patch = status_diff(&repository.0, &combined.files[0], false).unwrap();
+    assert!(patch.contains("diff --git "), "{patch}");
+    assert!(patch.contains("@@ "), "{patch}");
+    assert!(patch.contains("+<<<<<<<"), "{patch}");
 }
 
 #[test]

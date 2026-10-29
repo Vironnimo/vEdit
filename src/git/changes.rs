@@ -11,6 +11,7 @@ pub fn diff(root: &Path, path: &Path, staged: bool) -> GitResult<String> {
 
 /// Preview a status entry with both rename paths, or an untracked addition.
 pub fn status_diff(root: &Path, file: &FileStatus, staged: bool) -> GitResult<String> {
+    let staged = staged && !file.is_conflicted();
     if !staged && file.is_untracked() {
         return untracked_diff(root, Path::new(&file.path));
     }
@@ -45,6 +46,10 @@ fn tracked_diff(
     ]);
     if staged {
         args.push(OsString::from("--cached"));
+    } else {
+        // Unmerged index entries otherwise produce combined hunks. Compare
+        // their working text with our side, using the ordinary two-way format.
+        args.push(OsString::from("--ours"));
     }
     args.push(OsString::from("--"));
     args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
