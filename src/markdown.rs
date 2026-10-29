@@ -101,6 +101,10 @@ enum BlockKind {
         text: String,
     },
     Quote(Vec<Block>),
+    Footnote {
+        anchor: String,
+        children: Vec<Block>,
+    },
     List {
         start: Option<u64>,
         items: Vec<Vec<Block>>,
@@ -637,7 +641,10 @@ impl Blocks {
                             }]),
                         },
                     );
-                    Some(BlockKind::Quote(children))
+                    Some(BlockKind::Footnote {
+                        anchor: format!("fn-{label}"),
+                        children,
+                    })
                 }
                 Event::Rule => {
                     self.cursor += 1;
@@ -802,7 +809,9 @@ fn assign_anchors(blocks: &mut [Block], seen: &mut std::collections::HashMap<Str
                 seen.entry(candidate.clone()).or_insert(1);
                 *anchor = candidate;
             }
-            BlockKind::Quote(children) => assign_anchors(children, seen),
+            BlockKind::Quote(children) | BlockKind::Footnote { children, .. } => {
+                assign_anchors(children, seen)
+            }
             BlockKind::List { items, .. } => {
                 for item in items {
                     assign_anchors(item, seen);
@@ -816,6 +825,12 @@ fn assign_anchors(blocks: &mut [Block], seen: &mut std::collections::HashMap<Str
 fn block_has_anchor(block: &Block, fragment: &str) -> bool {
     match &block.kind {
         BlockKind::Heading { anchor, .. } => anchor == fragment,
+        BlockKind::Footnote { anchor, children } => {
+            anchor == fragment
+                || children
+                    .iter()
+                    .any(|block| block_has_anchor(block, fragment))
+        }
         BlockKind::Quote(children) => children
             .iter()
             .any(|block| block_has_anchor(block, fragment)),
@@ -829,7 +844,7 @@ fn block_has_anchor(block: &Block, fragment: &str) -> bool {
 
 fn innermost_source(block: &Block, byte: usize) -> usize {
     let child = match &block.kind {
-        BlockKind::Quote(children) => children
+        BlockKind::Quote(children) | BlockKind::Footnote { children, .. } => children
             .iter()
             .find(|child| byte < child.source.end)
             .or_else(|| children.last()),
@@ -1276,7 +1291,9 @@ impl Renderer<'_> {
     }
 
     fn block(&mut self, ui: &mut egui::Ui, block: &Block, compact: bool) {
-        if self.reveal_source == Some(block.source.start) {
+        let footnote_target = matches!(&block.kind, BlockKind::Footnote { anchor, .. }
+            if self.pending_fragment == Some(anchor.as_str()));
+        if self.reveal_source == Some(block.source.start) || footnote_target {
             let rendered = ui.scope(|ui| self.block_contents(ui, block, compact));
             rendered.response.scroll_to_me(Some(Align::TOP));
         } else {
@@ -1344,7 +1361,7 @@ impl Renderer<'_> {
                 code_copy_button(ui, frame.response.rect, block.source.start, text);
                 ui.add_space(16.0);
             }
-            BlockKind::Quote(children) => {
+            BlockKind::Quote(children) | BlockKind::Footnote { children, .. } => {
                 let frame = egui::Frame::new()
                     .fill(SURFACE)
                     .corner_radius(5.0)
@@ -1617,7 +1634,11 @@ impl Renderer<'_> {
             }
         }
         self.source_response(&response, source, hovered_link.as_deref());
-        response.on_hover_text(link_details)
+        if link_details.is_empty() {
+            response
+        } else {
+            response.on_hover_text(link_details)
+        }
     }
 
     fn source_response(&mut self, response: &egui::Response, byte: usize, link: Option<&str>) {
@@ -2166,6 +2187,31 @@ mod tests {
         assert!(cache.reveal.is_none());
     }
 
+    #[test]
+    fn footnote_references_reveal_definitions_below_the_fold() {
+        let context = egui::Context::default();
+        let mut cache = MarkdownCache::default();
+        let text = format!(
+            "Reference[^note].\n\n{}\n[^note]: Footnote content.\n",
+            "Another paragraph.\n\n".repeat(50)
+        );
+        preview_pass(&context, &mut cache, &text, 0.0, vec![]);
+        let entry = &mut cache.documents[0];
+        assert!(
+            entry
+                .document
+                .blocks
+                .iter()
+                .any(|block| block_has_anchor(block, "fn-note"))
+        );
+        entry.fragment = Some("fn-note".into());
+        for pass in 1..=8 {
+            preview_pass(&context, &mut cache, &text, pass as f64 * 0.1, vec![]);
+        }
+        assert!(cache.documents[0].scroll_y > 1000.0);
+        assert!(cache.documents[0].fragment.is_none());
+    }
+
     fn text_bounds(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
         fn collect(shape: &egui::Shape, output: &mut Vec<(String, egui::Rect)>) {
             match shape {
@@ -2218,6 +2264,32 @@ mod tests {
             style.scroll_animation = egui::style::ScrollAnimation::none();
         });
         screen
+    }
+
+    #[test]
+    fn prose_has_no_tooltip_and_links_show_their_destination() {
+        for (text, tooltip) in [("Ordinary prose", false), ("[Link](target.md)", true)] {
+            let mut screen = reading_harness([700.0, 500.0], text);
+            screen.run();
+            let bounds = text_bounds(&screen.output().shapes)
+                .into_iter()
+                .find(|(painted, _)| painted == if tooltip { "Link" } else { text })
+                .unwrap()
+                .1;
+            screen.hover_at(bounds.center());
+            screen
+                .ctx
+                .all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
+            screen.run();
+            let has_tooltip = screen.ctx.memory(|memory| {
+                memory
+                    .areas()
+                    .visible_layer_ids()
+                    .iter()
+                    .any(|layer| layer.order == egui::Order::Tooltip)
+            });
+            assert_eq!(has_tooltip, tooltip, "{text}");
+        }
     }
 
     #[test]
