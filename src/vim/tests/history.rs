@@ -115,6 +115,15 @@ fn unicode_offsets_and_redo() {
 
 #[test]
 fn crlf_insert_and_character_replacement_use_complete_line_breaks() {
+    for ending in ["\n", "\r\n"] {
+        let initial = format!("hello world{ending}tail");
+        let (text, cursor, mut state) = run(&initial, 0, "2r\n");
+        assert_eq!(text, format!("{ending}llo world{ending}tail"));
+        assert_eq!(cursor, ending.chars().count());
+        let mut text = text;
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, initial);
+    }
     let mut state = VimState::new();
     let mut text = "αβ\r\nγ".to_owned();
     keys(&mut state, &mut text, "i");

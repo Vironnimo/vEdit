@@ -72,6 +72,80 @@ fn text<'a>(screen: &'a Harness<'_, VEditApp>) -> &'a str {
 }
 
 #[test]
+fn bound_line_edits_preserve_vim_positions_and_visual_direction() {
+    for direct in [false, true] {
+        for visual in [false, true] {
+            for (action, command_key, modifiers, original, expected_cursor) in [
+                (
+                    keybindings::Action::Indent,
+                    Key::Tab,
+                    egui::Modifiers::NONE,
+                    "head\nx\ny",
+                    9,
+                ),
+                (
+                    keybindings::Action::Outdent,
+                    Key::Tab,
+                    egui::Modifiers::SHIFT,
+                    "head\n    x\ny",
+                    5,
+                ),
+                (
+                    keybindings::Action::ToggleComment,
+                    Key::Slash,
+                    egui::Modifiers::CTRL,
+                    "head\nx\ny",
+                    8,
+                ),
+            ] {
+                let mut screen = harness(original, true);
+                screen.state_mut().settings.keybindings.insert(
+                    action.id().into(),
+                    Some(
+                        match action {
+                            keybindings::Action::Indent => "Tab",
+                            keybindings::Action::Outdent => "Shift+Tab",
+                            _ => "Ctrl+Slash",
+                        }
+                        .into(),
+                    ),
+                );
+                let cursor = original.find('x').unwrap();
+                screen
+                    .state_mut()
+                    .tab_mut()
+                    .unwrap()
+                    .set_cursor(cursor..cursor);
+                screen.run_steps(1);
+                if visual {
+                    events(&mut screen, [egui::Event::Text("v".into())]);
+                }
+                if direct {
+                    screen.state_mut().run_shortcut_action(action);
+                    screen.run_steps(1);
+                } else {
+                    events(&mut screen, [key(command_key, modifiers)]);
+                }
+                let tab = screen.state().tab().unwrap();
+                assert_eq!(
+                    tab.vim.cursor, expected_cursor,
+                    "{action:?}, direct={direct}, visual={visual}, text={:?}, selection={:?}",
+                    tab.text, tab.selection
+                );
+                assert_eq!(tab.text.chars().nth(tab.vim.cursor), Some('x'));
+                if visual {
+                    assert_eq!(tab.vim.mode, VimMode::Visual);
+                    assert_eq!(
+                        tab.vim.selection(&tab.text),
+                        Some(expected_cursor..expected_cursor + 1)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn native_text_undo_text_preserves_order_and_appends_new_keyboard_input() {
     let mut screen = harness("tail", false);
     screen.input_mut().events.extend([

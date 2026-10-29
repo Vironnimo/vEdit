@@ -442,6 +442,13 @@ impl VEditApp {
                             editor_input::Command::MoveLine(_) | editor_input::Command::Duplicate
                         ) {
                             tab.apply_line_move(edit);
+                        } else if edit.text != tab.text
+                            && matches!(
+                                command,
+                                editor_input::Command::Comment | editor_input::Command::Indent(_)
+                            )
+                        {
+                            tab.apply_line_edit(edit);
                         } else if edit.text != tab.text {
                             tab.apply(edit);
                             if matches!(

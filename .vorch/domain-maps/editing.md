@@ -34,11 +34,14 @@ egui's character cursor. Selection ends are exclusive; user-facing line/column
 numbers are one-based. Convert to byte offsets before slicing UTF-8, and use the
 language-service conversion boundary for UTF-16 positions.
 
-`EditResult` carries replacement text and the resulting selection. Applying it
+`EditResult` carries replacement text, the resulting selection and a private
+position mapping for its replacements. Applying it
 through `EditorTab::apply` checkpoints Vim history, sets pending selection and
 calls `changed`. `changed` updates the revision, dirty comparison, edit timing
 and preview/draft state. Native history needs its own existing integration;
 assigning `text` alone is not a complete edit transaction.
+Bound Comment and Indent/Outdent commands use `EditorTab::apply_line_edit` to
+carry Vim navigation through that mapping, including Visual anchors.
 
 The document owns content and edit history. `VimNavigation` is the transferable
 pane navigation snapshot, including multicursor selections; `restore_navigation`

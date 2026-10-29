@@ -68,8 +68,15 @@ fn address<'a>(
         }
         (value - 1, &input[digits..])
     };
-    while let Some(sign) = rest.chars().next().filter(|ch| matches!(ch, '+' | '-')) {
-        rest = &rest[1..];
+    loop {
+        let sign = match rest.chars().next() {
+            Some(sign @ ('+' | '-')) => {
+                rest = &rest[1..];
+                sign
+            }
+            Some(ch) if ch.is_ascii_digit() => '+',
+            _ => break,
+        };
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         let offset = if digits == 0 {
             1
@@ -349,10 +356,7 @@ fn substitute_with_search(
         caret = cursor;
     }
     Ok(Some(Substitution {
-        edit: editor::EditResult {
-            text: result,
-            selection: caret..caret,
-        },
+        edit: editor::EditResult::new(result, caret..caret),
         count,
         lines: changed_lines,
         spec,
@@ -525,13 +529,41 @@ impl VEditApp {
             }
             "set" => self.ex_set(argument),
             _ => {
-                let line = command.parse::<usize>().ok().or_else(|| {
-                    (command == "$")
-                        .then(|| self.tab().map_or(1, |tab| last_line_number(&tab.text)))
-                });
+                let line = command
+                    .parse::<usize>()
+                    .ok()
+                    .or_else(|| {
+                        (command == "$")
+                            .then(|| self.tab().map_or(1, |tab| last_line_number(&tab.text)))
+                    })
+                    .or_else(|| {
+                        let tab = self.tab()?;
+                        let state = self.ctx.data_mut(|data| {
+                            data.get_temp_mut_or_default::<CommandState>(state_id())
+                                .clone()
+                        });
+                        let visual = state
+                            .visual_lines
+                            .as_ref()
+                            .filter(|_| state.visual_document == Some((tab.id, tab.revision)));
+                        let total = last_line_number(&tab.text);
+                        let current = tab
+                            .text
+                            .chars()
+                            .take(tab.vim.cursor)
+                            .filter(|ch| *ch == '\n')
+                            .count();
+                        let (mut line, mut rest) = address(command, current, total, visual).ok()?;
+                        while let Some(next) = rest.trim_start().strip_prefix(',') {
+                            (line, rest) =
+                                address(next.trim_start(), current, total, visual).ok()?;
+                        }
+                        rest.trim().is_empty().then_some(line + 1)
+                    });
                 if let Some(line) = line {
                     if let Some(tab) = self.tab_mut() {
                         let cursor = editor::go_to_line(&tab.text, line);
+                        tab.vim.set_selection(&tab.text, cursor..cursor);
                         tab.set_cursor(cursor..cursor);
                     }
                     return;
@@ -983,6 +1015,15 @@ mod tests {
 
     #[test]
     fn real_visual_ex_range_and_cancel_do_not_reuse_stale_selection() {
+        {
+            let mut screen = harness(fixture("one\ntwo\nthree\nfour\nfive\nsix\n"));
+            text(&mut screen, "Vj:");
+            text(&mut screen, "3");
+            key(&mut screen, Key::Enter);
+            let tab = screen.state().tab().unwrap();
+            assert_eq!(tab.vim.mode, VimMode::Normal);
+            assert_eq!(tab.vim.cursor, 19);
+        }
         let document = "x\nx\nx\nx";
         for block in [false, true] {
             let mut screen = harness(fixture(document));

@@ -266,6 +266,8 @@ impl VEditApp {
         let tab = self.tab_mut().unwrap();
         if matches!(command, Command::MoveLine(_) | Command::Duplicate) {
             tab.apply_line_move(edit);
+        } else if matches!(command, Command::Comment | Command::Indent(_)) {
+            tab.apply_line_edit(edit);
         } else {
             tab.apply(edit);
             if matches!(

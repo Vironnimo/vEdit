@@ -10,6 +10,32 @@ use std::ops::Range;
 pub struct EditResult {
     pub text: String,
     pub selection: Range<usize>,
+    positions: Vec<(Range<usize>, usize)>,
+}
+
+impl EditResult {
+    pub fn new(text: String, selection: Range<usize>) -> Self {
+        Self {
+            text,
+            selection,
+            positions: Vec::new(),
+        }
+    }
+
+    /// Carry a Unicode scalar position through the original replacements.
+    pub fn map_position(&self, position: usize) -> usize {
+        let mut delta = 0isize;
+        for (range, inserted) in &self.positions {
+            if position < range.start {
+                break;
+            }
+            if position <= range.end {
+                return range.start.saturating_add_signed(delta) + inserted;
+            }
+            delta += *inserted as isize - range.len() as isize;
+        }
+        position.saturating_add_signed(delta)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,6 +98,10 @@ fn replace_bytes(text: &str, range: Range<usize>, replacement: &str, cursor: usi
     EditResult {
         text: output,
         selection: cursor..cursor,
+        positions: vec![(
+            text[..range.start].chars().count()..text[..range.end].chars().count(),
+            replacement.chars().count(),
+        )],
     }
 }
 
@@ -126,24 +156,16 @@ fn apply_edits(chars: &[char], selection: Range<usize>, edits: Vec<Edit>) -> Edi
         previous_end = edit.range.end;
     }
     text.extend(chars[previous_end..].iter());
-    let map = |position: usize| {
-        let mut delta = 0isize;
-        for edit in &edits {
-            if position < edit.range.start {
-                break;
-            }
-            let inserted = edit.replacement.chars().count();
-            if position <= edit.range.end {
-                return (edit.range.start as isize + delta) as usize + inserted;
-            }
-            delta += inserted as isize - edit.range.len() as isize;
-        }
-        (position as isize + delta) as usize
-    };
-    EditResult {
+    let mut result = EditResult {
         text,
-        selection: map(selection.start)..map(selection.end),
-    }
+        selection: selection.clone(),
+        positions: edits
+            .into_iter()
+            .map(|edit| (edit.range, edit.replacement.chars().count()))
+            .collect(),
+    };
+    result.selection = result.map_position(selection.start)..result.map_position(selection.end);
+    result
 }
 
 fn horizontal_space(ch: char) -> bool {
@@ -457,10 +479,7 @@ pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> EditResult
     let chosen = selected_rows(&rows, &selection);
     let first = rows[chosen.start];
     let last = rows[chosen.end - 1];
-    let unchanged = || EditResult {
-        text: text.to_owned(),
-        selection: selection.clone(),
-    };
+    let unchanged = || EditResult::new(text.to_owned(), selection.clone());
     // A trailing newline terminates the last complete row; its synthetic empty
     // row should not turn a line move into removal of that terminator.
     let complete_rows =

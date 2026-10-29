@@ -143,6 +143,21 @@ impl EditorTab {
         self.changed();
         self.focus = true;
     }
+    pub(super) fn apply_line_edit(&mut self, edit: editor::EditResult) {
+        let navigation = self
+            .vim
+            .navigation()
+            .remapped(|position| edit.map_position(position));
+        self.apply(edit);
+        self.vim.notify_external_text_change();
+        self.vim.restore_navigation(&self.text, &navigation);
+        if let Some(selection) = self.vim.selection(&self.text) {
+            self.selection = selection.clone();
+            self.pending_selection = Some(selection);
+        }
+        self.scroll_to_cursor = true;
+    }
+
     /// The bracket at the caret and its partner. The search looks at most
     /// `BRACKET_SCAN` characters either way and skips very large documents.
     pub(super) fn bracket_pair(&mut self, vim: bool) -> Option<(usize, usize)> {
