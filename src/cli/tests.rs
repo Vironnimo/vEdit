@@ -267,8 +267,14 @@ fn edits_require_revision_preserve_payload_and_reject_conflicting_shapes() {
         panic!()
     };
     assert_eq!(set_text.unwrap(), payload);
-    let request:Request=serde_json::from_value(json!({"op":"edit","tab_id":1,"expected_revision":0,"set_text":"","edits":[{"range":{"start":{"line":1},"end":{"line":1}},"text":"x"}]})).unwrap();
-    assert!(validate(&request).is_err());
+    for value in [
+        json!({"op":"edit","tab_id":1,"expected_revision":0}),
+        json!({"op":"edit","tab_id":1,"expected_revision":0,"edits":[]}),
+        json!({"op":"edit","tab_id":1,"expected_revision":0,"set_text":"","edits":[{"range":{"start":{"line":1},"end":{"line":1}},"text":"x"}]}),
+    ] {
+        let request: Request = serde_json::from_value(value).unwrap();
+        assert!(validate(&request).is_err());
+    }
     for value in [
         json!({"op":"edit","tab_id":1,"expected_revision":0,"set_text":"x","force":true}),
         json!({"op":"settings","patch":{"word_wrap":true,"word_wrap_width":80}}),

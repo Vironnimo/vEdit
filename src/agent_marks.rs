@@ -1275,17 +1275,23 @@ mod tests {
             store.get(id, None).unwrap().target.path.as_deref(),
             document(1).path
         );
+        let mut store: AgentMarks =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert!(store.synchronize_document(document(9), "hello", 1));
         let renamed = MarkDocument {
             path: Some(Path::new("C:/project/renamed.md")),
             title: "renamed.md",
-            ..document(1)
+            ..document(9)
         };
         assert!(store.synchronize_document(renamed, "hello", 1));
         assert_eq!(
             store.get(id, None).unwrap().target.path.as_deref(),
             renamed.path
         );
-        assert_eq!(store.visible_marks(1).count(), 1);
+        assert_eq!(store.visible_marks(9).count(), 1);
+        store.synchronize_document(renamed, "new hello", 2);
+        assert_eq!(store.get(id, None).unwrap().range.start, 4);
+        assert!(!store.get(id, None).unwrap().stale);
     }
 
     #[test]
