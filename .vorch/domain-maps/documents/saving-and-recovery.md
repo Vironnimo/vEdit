@@ -73,6 +73,9 @@ completion for the old baseline must not mark that text secured. Recovery and
 autosave timers are separate: recovery still runs for dirty drafts when autosave
 is disabled or held for an agent. Dirty session metadata schedules its own delayed
 frame, so it is saved even without open projects or another source of repaints.
+An ordinary save error delays autosave retries until five seconds without an edit
+or failed save. Retries use the normal fingerprint guard; disk conflicts, agent
+drafts, pending Save As and Git checkout guards still suspend autosave.
 
 On restore, a fresh disk read is an observation. Dirty recovered text receives
 its recorded baseline; differing disk content becomes a conflict, and missing

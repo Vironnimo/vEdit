@@ -886,6 +886,23 @@ fn a_panicking_worker_reports_the_error_and_releases_its_document() {
     assert!(error.contains("injected save failure"), "{error}");
     assert_eq!(fs::read_to_string(&path).unwrap(), "Gespeichert\n");
 
+    app.settings.autosave = true;
+    app.autosave();
+    assert!(
+        !app.tab().unwrap().saving,
+        "failed saves must wait before retrying"
+    );
+    app.tab_mut().unwrap().last_edit = Instant::now() - Duration::from_secs(10);
+    app.autosave();
+    assert!(
+        app.tab().unwrap().saving,
+        "a failed save must not disable autosave"
+    );
+    wait_for(&mut app, |app| !app.tab().unwrap().saving);
+    assert!(!app.tab().unwrap().dirty);
+    assert!(app.tab().unwrap().error.is_none());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Entwurf\n");
+
     app.status = None;
     app.worker(|| panic!("injected search failure"));
     wait_for(&mut app, |app| {

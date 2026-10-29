@@ -119,11 +119,18 @@ impl VEditApp {
                             .is_none_or(|root| !context_actions::path_contains(root, path))
                     })
                     && !t.saving
-                    && t.error.is_none()
                     && t.disk_conflict.is_none()
                 {
-                    let remaining = Duration::from_millis(self.settings.autosave_delay_ms)
-                        .saturating_sub(t.last_edit.elapsed());
+                    // An I/O failure can clear without changing file metadata,
+                    // e.g. when another process releases a lock. Keep retrying
+                    // through the ordinary fingerprint guard, at a lower rate.
+                    let save_delay = Duration::from_millis(self.settings.autosave_delay_ms);
+                    let save_delay = if t.error.is_some() {
+                        save_delay.max(Duration::from_secs(5))
+                    } else {
+                        save_delay
+                    };
+                    let remaining = save_delay.saturating_sub(t.last_edit.elapsed());
                     if remaining.is_zero() {
                         saves.push(t.id);
                     } else {
