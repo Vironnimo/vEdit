@@ -733,7 +733,11 @@ impl Blocks {
                     links.pop();
                 }
                 Event::Start(Tag::Image { dest_url, .. }) => {
-                    links.push(dest_url.into_string());
+                    let destination = links
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| dest_url.into_string());
+                    links.push(destination);
                     image = true;
                     spans.push(Span {
                         text: "Image: ".into(),
@@ -1934,6 +1938,16 @@ mod tests {
 
     #[test]
     fn image_is_a_link_and_never_silently_downloaded() {
+        let linked = parse("[![Build](badge.png)](ci.html)");
+        let BlockKind::Paragraph(spans) = &linked.blocks[0].kind else {
+            panic!()
+        };
+        assert!(
+            spans
+                .iter()
+                .filter(|span| span.image)
+                .all(|span| span.link.as_deref() == Some("ci.html"))
+        );
         let document = parse("![Architecture](https://example.com/diagram.png)");
         assert!(
             matches!(&document.blocks[0].kind, BlockKind::Paragraph(spans) if spans.iter().any(|span| span.image && span.link.as_deref() == Some("https://example.com/diagram.png")))

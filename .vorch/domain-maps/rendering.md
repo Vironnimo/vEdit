@@ -92,6 +92,8 @@ geometry caches must account for width/font/text changes without reusing a
 previous link destination.
 Footnote references reveal their definition through the same fragment navigation
 as heading links. Prose only creates a hover hint when a link is under the pointer.
+Linked image placeholders follow their surrounding link destination; standalone
+image placeholders follow the image URL without downloading it automatically.
 
 Font choices keep code and proportional UI faces independent. The bundled code
 face is the fallback when a selected Windows font is unavailable; symbol and CJK
