@@ -100,7 +100,8 @@ Maintain terminology as part of relevant work when a missing, stale, or ambiguou
 - Conventional format: `<type>(<scope>): <what>` - lowercase, <=72 chars, no trailing period. Types: `feat` `fix` `docs` `refactor` `perf` `test` `chore`. Breaking change -> `!`.
 - One logical unit per commit; never batch unrelated changes; commit once the tests covering your change pass.
 - **The commit hook checks every commit.** It checks the staged Rust formatting, Python syntax, structured files and domain maps without rewriting the working tree or index (PROJECT.md -> Testing). Review and stage only task-owned changes. When it blocks, fix the reported problems, stage, and commit again; never bypass it with `--no-verify`. It reads staged content; leave another session's unstaged work alone. If a commit of source files prints no `Commit check` report, the hook is not enabled: enable it (PROJECT.md -> Development).
-- **Push only through `python scripts/push.py`**, when the user asks to push, following `.vorch/workflows/push-workflow.md`; never a plain `git push`.
+- **Push only through `python scripts/push.py`**, when the user asks to push or release, following `.vorch/workflows/push-workflow.md`; never a plain `git push`.
+- **A release request includes publication.** Finish and commit the release changes, push `main`, and publish a GitHub Release with its version tag, complete Windows package and checksum. Follow `.vorch/workflows/release-workflow.md`; a local Release build alone does not complete a release. Install that same package when installation is requested. The release request authorizes these push and publication steps; do not ask for them again.
 
 ## Preserve the user's work and deliver
 
@@ -123,7 +124,7 @@ Before staging, inspect the diff and separate this task from existing or
 concurrent work. Finish validated work with focused local commits, without
 waiting for another prompt. Name the commits, actual validation and remaining
 limits in the final report; explain any blocked commit and uncommitted changes.
-Pushing and publishing require explicit authorization.
+Pushing and publishing require authorization; an explicit release request provides it.
 
 When delivering a runnable update, keep Cargo.toml, Cargo.lock, the user manual, README, relevant
 docs and packaged contents consistent. Use `scripts/build-release.ps1`, not a

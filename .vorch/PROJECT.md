@@ -99,8 +99,10 @@ isolated test instance. Do not stop or restart the user's editor for validation.
 
 For repository worktree operations read `.vorch/workflows/worktree-workflow.md`.
 For an authorized push read `.vorch/workflows/push-workflow.md`; creating local
-commits is not authorization to push. For a runnable package or installation read
-`.vorch/workflows/release-workflow.md` and use the existing release script.
+commits is not authorization to push. A release request includes pushing the
+completed changes and publishing the versioned GitHub Release and package.
+For a release, runnable package or installation read
+`.vorch/workflows/release-workflow.md`.
 
 ## Testing
 

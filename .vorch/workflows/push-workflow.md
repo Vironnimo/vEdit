@@ -1,7 +1,8 @@
 # Push Workflow
 
-Use this workflow when the user authorizes a push. Local commits do not authorize
-publication. `python scripts/push.py` checks committed `main` in a private Git
+Use this workflow when the user requests a push or a release. A release request
+authorizes the push and publication described in `release-workflow.md`; ordinary
+local commits do not. `python scripts/push.py` checks committed `main` in a private Git
 checkout and pushes exactly that commit only after every configured check passes.
 
 ## Check locally

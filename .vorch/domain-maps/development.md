@@ -65,9 +65,13 @@ asserts this exact path. The survey preserves it while adding private per-test
 home directories and vEdit profiles. These are environment boundaries, not an OS
 sandbox; see `development/testing.md` for the precise guarantees and omissions.
 
-`scripts/build-release.ps1` owns the complete portable package and running-binary
-preservation. `scripts/package-manifest.ps1` hashes its payload into the root
-`package.json`; `scripts/install.ps1` verifies and installs that payload. Do not
+`.vorch/workflows/release-workflow.md` owns the complete release procedure:
+committed and checked source on GitHub, a version tag, a published Release with
+the Windows ZIP and checksum, and installation when requested.
+`scripts/build-release.ps1` owns the local portable build and running-binary
+preservation; it does not push or publish. `scripts/package-manifest.ps1` hashes
+its payload into the root `package.json`; `scripts/install.ps1` verifies and
+installs that payload. Do not
 replace these procedures with one copied executable. Installer regression tests
 redirect their files and registry writes; installation itself changes the user's
 registration and application files.

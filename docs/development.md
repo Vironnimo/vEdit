@@ -173,6 +173,16 @@ pinned `tools/basedpyright` package; the virtual-environment test also needs Pyt
 The Dart test reads `VEDIT_TEST_DART_SERVER`. Other ignored tests include task
 execution, hidden process-start helpers and manual performance measurements.
 
+## Publish a release
+
+A release includes committed source on GitHub, a version tag and a published
+GitHub Release containing the complete Windows ZIP and `SHA256SUMS.txt`.
+Follow `.vorch/workflows/release-workflow.md` in the source checkout through
+remote verification and, when requested, install that same package.
+The workflow covers versioning, full checks through `scripts/push.py`, native
+package checks, release notes, archive verification and publication with `gh`.
+A request to release authorizes the push and publication as part of that work.
+
 ## Portable Windows build
 
 ```powershell
@@ -180,7 +190,8 @@ execution, hidden process-start helpers and manual performance measurements.
 ```
 
 The script builds both release binaries and prepares `dist/vEdit/` plus
-`vEdit.lnk`. Packaging needs Node and npm on PATH. It installs the pinned Python
+`vEdit.lnk`. It does not push commits or publish a GitHub Release. Packaging needs
+Node and npm on PATH. It installs the pinned Python
 language server with `npm ci` when needed, and obtains the license for the bundled
 Node version if it is not cached. The bundle includes user/developer documentation,
 the repository vEdit skill, all Markdown documentation under `docs/`, visual
