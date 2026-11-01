@@ -42,9 +42,6 @@ impl IntelFixture {
             assert!(Instant::now() < deadline, "fixture did not finish loading");
             std::thread::sleep(Duration::from_millis(5));
         }
-        // Workers request their wakeup right after delivering a result; let
-        // those requests land before a test starts counting wakeups.
-        std::thread::sleep(Duration::from_millis(50));
         app.tab_mut().unwrap().recovery_path = self.0.join("recovery/source.txt");
         (app, path)
     }
@@ -353,6 +350,9 @@ fn unchanged_disk_checks_wait_for_the_next_frame_and_changes_wake_the_window() {
     use std::sync::atomic::AtomicUsize;
     let fixture = IntelFixture::new("quiet-disk-check");
     let (mut app, path) = fixture.app("original\n");
+    // Workers request their wakeup right after delivering a result; let
+    // those requests land before this test starts counting wakeups.
+    std::thread::sleep(Duration::from_millis(50));
     let ctx = app.ctx.clone();
     // Settle pending repaints so only new immediate requests are counted.
     for _ in 0..3 {
