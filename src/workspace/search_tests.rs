@@ -1,6 +1,5 @@
 use super::*;
 use crate::workspace::test_support::Fixture;
-use crate::workspace::{IndexOptions, build_index};
 
 #[test]
 fn open_documents_replace_disk_without_bypassing_exclusions() {
@@ -126,35 +125,37 @@ fn search_handles_unicode_offsets_literal_queries_and_whole_words() {
         "ü Grüße\nHELLO hello_world hello.\n[hello]\n",
     );
     fixture.write("binary.bin", [0, 1, 2, 3]);
-    let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
-    let results = search_project(
-        &index,
+    let results = search_with_excludes(
+        &fixture.0,
         "hello",
         SearchOptions {
             whole_word: true,
             ..Default::default()
         },
+        &[],
     )
     .unwrap();
     assert_eq!(results.matches.len(), 3);
     let first = &results.matches[0];
-    assert_eq!(first.path, Some(path));
+    assert_eq!(first.path, Some(fs::canonicalize(path).unwrap()));
     assert_eq!(
         (first.line, first.column, first.start_char, first.end_char),
         (2, 1, 8, 13)
     );
     assert_eq!(results.matches[1].column, 19);
     assert_eq!(results.files_skipped, 1);
-    let literal = search_project(&index, "[hello]", SearchOptions::default()).unwrap();
+    let literal =
+        search_with_excludes(&fixture.0, "[hello]", SearchOptions::default(), &[]).unwrap();
     assert_eq!(literal.matches.len(), 1);
     assert_eq!(literal.matches[0].line, 3);
-    let sensitive = search_project(
-        &index,
+    let sensitive = search_with_excludes(
+        &fixture.0,
         "HELLO",
         SearchOptions {
             case_sensitive: true,
             ..Default::default()
         },
+        &[],
     )
     .unwrap();
     assert_eq!(sensitive.matches.len(), 1);
@@ -187,20 +188,21 @@ fn disk_whole_word_search_keeps_unicode_identifiers_intact() {
 fn search_counts_multiline_matches_and_limits_results() {
     let fixture = Fixture::new("search-limits");
     fixture.write("notes.txt", "aa\nbb\naa\nbb\n");
-    let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
-    let multiline = search_project(&index, "aa\nbb", SearchOptions::default()).unwrap();
+    let multiline =
+        search_with_excludes(&fixture.0, "aa\nbb", SearchOptions::default(), &[]).unwrap();
     assert_eq!(multiline.matches.len(), 2);
     assert_eq!(
         (multiline.matches[1].line, multiline.matches[1].start_char),
         (3, 6)
     );
-    let limited = search_project(
-        &index,
+    let limited = search_with_excludes(
+        &fixture.0,
         "a",
         SearchOptions {
             max_matches: 1,
             ..Default::default()
         },
+        &[],
     )
     .unwrap();
     assert_eq!(limited.matches.len(), 1);
@@ -213,10 +215,10 @@ fn benchmark_search_many_matches_in_long_unicode_line() {
     let fixture = Fixture::new("search-long-line-benchmark");
     let text = ("ö".repeat(1024) + "needle ").repeat(900);
     fixture.write("minified.txt", &text);
-    let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
     let started = Instant::now();
     for _ in 0..10 {
-        let result = search_project(&index, "needle", SearchOptions::default()).unwrap();
+        let result =
+            search_with_excludes(&fixture.0, "needle", SearchOptions::default(), &[]).unwrap();
         assert_eq!(result.matches.len(), 900);
         assert_eq!(result.matches[899].column, 899 * 1031 + 1025);
         std::hint::black_box(result);
@@ -234,8 +236,8 @@ fn search_previews_and_columns_keep_unicode_boundaries_on_long_lines() {
     let prefix = "ö🦀x".repeat(200);
     let line = format!("{prefix}needle {}needle", "ß".repeat(400));
     fixture.write("long.txt", format!("{line}\r\n{line}\r\n"));
-    let index = build_index(&fixture.0, IndexOptions::default()).unwrap();
-    let results = search_project(&index, "needle", SearchOptions::default()).unwrap();
+    let results =
+        search_with_excludes(&fixture.0, "needle", SearchOptions::default(), &[]).unwrap();
     assert_eq!(results.matches.len(), 4);
     for (number, found) in results.matches.iter().enumerate() {
         let column = if number % 2 == 0 { 601 } else { 1008 };

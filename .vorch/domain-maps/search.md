@@ -89,10 +89,6 @@ toward the read budget. Buffer match caching evicts retained results rather than
 truncating a document's matches; do not import project-search truncation into
 in-buffer navigation.
 
-`workspace/search.rs::search_project` is a private test-only index-based helper. Production calls
-`search_with_buffers`; changing only that helper cannot change shipped project
-search behavior.
-
 ## Verification
 
 Start with `cargo test --bin vedit search::tests -- --test-threads=8` for matcher
@@ -102,5 +98,6 @@ The worker and match cache also have inline cancellation and eviction tests.
 
 `src/project_search_backend_tests.rs` covers exclusions and resource bounds;
 `src/project_search_ui_tests.rs` covers settings and stale worker integration.
-`src/workspace/search_tests.rs` contains disk-search decoding and coordinate regressions.
+`src/workspace/search_tests.rs` exercises decoding and coordinates through the
+production disk-search entry point, independently of the Quick Open index.
 See `development.md` for application-level checks after behavior changes.

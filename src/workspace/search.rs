@@ -1,6 +1,4 @@
 //! Bounded project searches over current Documents and disk, independent of Quick Open pruning.
-#[cfg(test)]
-use super::WorkspaceIndex;
 use super::{MAX_WARNINGS, cancelled, decode_document, read_bytes};
 use crate::cli::normalize_search_excludes;
 use ignore::{
@@ -358,23 +356,6 @@ fn search_path_key(path: &Path) -> String {
 enum SearchInput {
     Disk(PathBuf),
     Buffer(SearchBuffer),
-}
-
-/// Literal project search; punctuation in a query is never interpreted as a regex.
-#[cfg(test)]
-fn search_project(
-    index: &WorkspaceIndex,
-    query: &str,
-    options: SearchOptions,
-) -> Result<SearchResults, String> {
-    let mut results = search_paths(
-        index.files.iter().cloned().map(Ok),
-        query,
-        options,
-        Instant::now(),
-    )?;
-    results.truncated |= index.truncated;
-    Ok(results)
 }
 
 #[cfg(test)]
