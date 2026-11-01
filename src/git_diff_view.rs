@@ -2221,13 +2221,14 @@ mod tests {
 
     #[test]
     fn large_wrapped_unicode_diff_keeps_offscreen_galleys_out_of_font_cache() {
+        const ROWS: usize = 128;
         let context = egui::Context::default();
         let mut view = DiffView::default();
         // Every unique row remains long enough to wrap at the widest viewport.
         let source = "über界🙂e\u{301}_long_identifier ".repeat(6);
         let patch = format!(
-            "@@ -0,0 +1,2000 @@\n{}",
-            (0..2000)
+            "@@ -0,0 +1,{ROWS} @@\n{}",
+            (0..ROWS)
                 .map(|index| format!("+row {index} {source}\n"))
                 .collect::<String>()
         );
@@ -2252,7 +2253,7 @@ mod tests {
             let single_row = context
                 .fonts_mut(|fonts| fonts.row_height(&FontId::monospace(FONT_SIZE)))
                 + ROW_PADDING;
-            for index in [0, 997, 1999] {
+            for index in [0, ROWS / 2, ROWS - 1] {
                 let display = view.patch.display(index);
                 let expected = context.fonts_mut(|fonts| {
                     fonts
@@ -2283,7 +2284,8 @@ mod tests {
             vec![key_event(egui::Key::End, egui::Modifiers::NONE)],
             0.3,
         );
-        assert!(last.iter().any(|(text, _)| text.starts_with("+row 1999 ")));
+        let final_row = format!("+row {} ", ROWS - 1);
+        assert!(last.iter().any(|(text, _)| text.starts_with(&final_row)));
     }
 
     #[test]

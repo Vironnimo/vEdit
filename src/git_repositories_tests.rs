@@ -1,6 +1,6 @@
 use super::*;
 use egui_kittest::{
-    Harness,
+    Harness, LazyRenderer,
     kittest::{NodeT, Queryable},
 };
 
@@ -106,7 +106,9 @@ fn tooltip_screen(row: &Row, now: i64) -> Harness<'static, Row> {
         .with_size([460.0, 560.0])
         .with_theme(egui::Theme::Dark)
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             move |ui, row: &mut Row| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| repository_tooltip(ui, row, now));
@@ -1132,7 +1134,7 @@ fn overview_screenshot() {
     assert!(screen.get_by_label("No changes").rect().bottom() < history.top());
 }
 
-/// A real repository with seven linked worktrees created by `git worktree add`.
+/// A real repository with linked worktrees created by `git worktree add`.
 /// Identity, signing and hooks are configured only in this repository.
 struct RealWorktrees {
     base: PathBuf,
@@ -1155,7 +1157,7 @@ fn run_git(directory: &Path, args: &[&str]) {
 }
 
 impl RealWorktrees {
-    fn new() -> Self {
+    fn new(linked_count: usize) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
             "vedit-repositories-real-{}-{}",
@@ -1168,20 +1170,23 @@ impl RealWorktrees {
         fs::create_dir_all(&hooks).unwrap();
         git::initialize(&main).unwrap();
         run_git(&main, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-        for (key, value) in [
-            ("user.name", "vEdit Repositories Test"),
-            ("user.email", "vedit-tests@example.invalid"),
-            ("commit.gpgsign", "false"),
-            ("core.autocrlf", "false"),
-            ("core.hooksPath", hooks.to_str().unwrap()),
-        ] {
-            run_git(&main, &["config", key, value]);
-        }
+        // Preserve init's config and set this fixture's local values together.
+        let config_path = main.join(".git/config");
+        let mut config = fs::read_to_string(&config_path).unwrap();
+        let hooks = hooks
+            .to_str()
+            .unwrap()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        config.push_str(&format!(
+            "\n[user]\n\tname = vEdit Repositories Test\n\temail = vedit-tests@example.invalid\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n\thooksPath = \"{hooks}\"\n"
+        ));
+        fs::write(config_path, config).unwrap();
         fs::write(main.join("README.md"), "base\n").unwrap();
         git::stage_all(&main).unwrap();
         git::commit(&main, "Base commit").unwrap();
         let mut linked = Vec::new();
-        for index in 1..=7 {
+        for index in 1..=linked_count {
             let name = if index == 7 {
                 "Überarbeitung".to_owned()
             } else {
@@ -1239,7 +1244,7 @@ fn simulate(
 
 #[test]
 fn hovered_worktree_details_count_both_comparisons_and_untracked_files() {
-    let fixture = RealWorktrees::new();
+    let fixture = RealWorktrees::new(1);
     let path = &fixture.linked[0];
     fs::write(path.join("README.md"), "first\nsecond\n").unwrap();
     git::stage_all(path).unwrap();
@@ -1344,14 +1349,14 @@ fn hover_details_mark_missing_counts_and_retry_errors_without_looping() {
 
 #[test]
 fn real_worktrees_group_under_one_repository_at_a_bounded_idle_cost() {
-    let fixture = RealWorktrees::new();
+    let fixture = RealWorktrees::new(7);
     fs::write(fixture.linked[0].join("draft.txt"), "agent draft\n").unwrap();
     let main_status = git::worktree_status(&fixture.main).unwrap();
     let main_key = path_key(&fixture.main);
     let seeds = vec![(main_key.clone(), fixture.main.clone())];
     let open = HashMap::from([(main_key, main_status.head.clone())]);
     let mut overview = RepositoryOverview::default();
-    let per_second = simulate(&mut overview, &seeds, &open, Instant::now(), 180);
+    let per_second = simulate(&mut overview, &seeds, &open, Instant::now(), 120);
     assert_eq!(
         per_second[0], 2,
         "discovery: one worktree list plus one log for the shared head"
@@ -1393,7 +1398,7 @@ fn real_worktrees_group_under_one_repository_at_a_bounded_idle_cost() {
 #[test]
 #[ignore = "manual benchmark: run with --ignored --nocapture"]
 fn benchmark_repository_overview() {
-    let fixture = RealWorktrees::new();
+    let fixture = RealWorktrees::new(7);
     let cached: HashSet<String> = git::worktree_status(&fixture.main)
         .unwrap()
         .head

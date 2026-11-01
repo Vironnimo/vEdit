@@ -249,16 +249,18 @@ impl Repository {
         repository.run(&["init", "--quiet"]);
         let hooks = repository.root.join(".git").join("vedit-no-hooks");
         fs::create_dir_all(&hooks).unwrap();
-        // Repository-local configuration only.
-        for (key, value) in [
-            ("user.name", "Gutter Author"),
-            ("user.email", "gutter@example.invalid"),
-            ("core.autocrlf", "false"),
-            ("commit.gpgsign", "false"),
-            ("core.hooksPath", hooks.to_str().unwrap()),
-        ] {
-            repository.run(&["config", key, value]);
-        }
+        // Preserve init's config and set this fixture's local values together.
+        let config_path = repository.root.join(".git/config");
+        let mut config = fs::read_to_string(&config_path).unwrap();
+        let hooks = hooks
+            .to_str()
+            .unwrap()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        config.push_str(&format!(
+            "\n[user]\n\tname = Gutter Author\n\temail = gutter@example.invalid\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n\thooksPath = \"{hooks}\"\n"
+        ));
+        fs::write(config_path, config).unwrap();
         fs::write(repository.root.join("crlf.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
         fs::write(repository.root.join("same.txt"), "same\n").unwrap();
         repository.run(&["add", "--all"]);
