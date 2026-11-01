@@ -27,6 +27,10 @@ only the local build; its successful exit is not a published release.
    Preserve historical reports. Describe the user-visible changes since the
    previous published tag in the release notes; include install/update commands,
    prerequisites and the running-session restart behavior.
+   The welcome screen displays the package version, including behind Open recent.
+   Run the affected visual tests after a version bump, inspect their differences,
+   and update only the references changed by that version display. Keep the final
+   verification free of snapshot-update flags.
 4. Commit the version and documentation changes through the normal hooks, and
    land them on `main`. Build from clean `main`; record its full commit hash.
    The checked, built, pushed and tagged commit must be the same. If source changes
