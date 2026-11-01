@@ -56,6 +56,27 @@ between tests sharing one native test process. Keep direct Cargo verification
 when that interaction matters. Rust 1.97.1 rejects `--report-time` without nightly
 unstable options, so the runner does not rely on that flag or unstable JSON events.
 
+## Audit coverage
+
+The test-audit workflow compares each affected owner's coverage before and after
+changing its tests. Use `-C instrument-coverage` and the toolchain's matching
+`llvm-profdata`/`llvm-cov` from `llvm-tools-preview`, or `cargo-llvm-cov` when
+available. `cargo rustc --locked --bin vedit --profile test` selects the GUI test
+target; pass instrumentation arguments after `--`. Keep builds in this checkout's
+`target/` and raw profiles/reports below `.tmp/<task>/` via `LLVM_PROFILE_FILE`.
+Run explicit domain filters with normal ignored-test selection, merge their raw
+profiles, and export the owner's coverage from that instrumented test executable.
+
+Branch mapping is a separate compiler capability (`-Z coverage-options=branch`
+with a compatible compiler); ordinary stable line instrumentation alone is not
+a branch report. Record any measurement-only unstable opt-in and remove it from
+normal validation. Preserve compiler/LLVM versions, exact flags and filters,
+line/branch exports and uninstrumented per-test timing separately. Compare covered
+locations after mapping unchanged source lines across the diff; exclude test
+bodies and explicitly removed dead test-only adapters. Investigate every lost
+owner location, restoring contract coverage rather than hiding a loss behind an
+aggregate percentage. Final native tests and the survey use ordinary build flags.
+
 ## Assertions and timing
 
 Assert stable protocol fields, persisted bytes, document revisions, selections,
@@ -151,7 +172,9 @@ durability contract tests before it can suppress a sync anywhere.
 
 The shared `src/visual_tests.rs::harness` creates its explicitly selected OpenGL
 renderer on the first snapshot/render call. UI-only assertions keep the renderer
-lazy; real renders still receive accumulated texture updates. The survey defaults
+lazy; real renders still receive accumulated texture updates. Explicit-GL UI-only
+harnesses use the same lazy pattern, including tab drags, Explorer interaction,
+Agent marks and worktree tooltip labels. The survey defaults
 to `WGPU_BACKEND=gl` on Windows unless a value is already set. The multicursor
 harness honors the environment choice; on this host its DX12 device creation
 failed while GL passed against the unchanged snapshot. An environment preference

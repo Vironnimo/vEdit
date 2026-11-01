@@ -18,6 +18,7 @@ requirements or test counts.
 
 ## Historical reviews and investigations
 
+- [Test suite audit — 2026-11-01](test-audit-2026-11-01.md)
 - [CLI and operating-skill audit — 0.4.19](cli-audit-0.4.19.md)
 - [Morrow 0.4.10: drei unabhängige Code-Reviews](code-review-0.4.10.md)
 - [Idle CPU investigation](idle-performance-0.4.19.md)
