@@ -247,13 +247,23 @@ fn command_help_and_skill_index_cover_the_parser_catalog() {
 
 #[test]
 fn schema_topics_keep_examples_typed_and_default_read_wire_compatible() {
-    for example in schema()["commands"].as_array().unwrap() {
-        let topic = example["op"].as_str().unwrap();
+    let catalog = schema();
+    let examples = catalog["commands"].as_array().unwrap();
+    let mut topics = std::collections::BTreeSet::new();
+    for example in examples {
+        let request: Request = serde_json::from_value(example.clone())
+            .unwrap_or_else(|error| panic!("{example}: {error}"));
+        validate(&request).unwrap_or_else(|error| panic!("{example}: {error}"));
+        topics.insert(example["op"].as_str().unwrap());
+    }
+    for topic in topics {
         let selected = schema_topic(Some(topic)).unwrap();
-        for request in selected["commands"].as_array().unwrap() {
-            assert_eq!(request["op"], topic);
-            validate(&serde_json::from_value(request.clone()).unwrap()).unwrap();
-        }
+        let expected: Vec<_> = examples
+            .iter()
+            .filter(|example| example["op"] == topic)
+            .cloned()
+            .collect();
+        assert_eq!(selected["commands"], json!(expected), "topic {topic}");
     }
     for args in [&["read", "1"][..], &["output"][..]] {
         let Parsed::Command { request, .. } = parse(args).unwrap() else {

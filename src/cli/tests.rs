@@ -73,14 +73,6 @@ fn unknown_constraints_are_not_dropped() {
     assert!(serde_json::from_value::<Request>(json!({"op":"status","force":true})).is_err());
 }
 #[test]
-fn every_advertised_schema_example_is_a_complete_valid_typed_request() {
-    for example in schema()["commands"].as_array().unwrap() {
-        let request: Request = serde_json::from_value(example.clone())
-            .unwrap_or_else(|error| panic!("{example}: {error}"));
-        validate(&request).unwrap_or_else(|error| panic!("{example}: {error}"));
-    }
-}
-#[test]
 fn local_tab_close_is_typed_distinct_from_global_close_and_validates_ids() {
     let request: Request = serde_json::from_value(json!({
         "op": "layout",
