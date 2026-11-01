@@ -51,8 +51,7 @@ impl Fixture {
         let mut app = VEditApp::empty(ctx);
         app.recovery_session_path = self.0.join("recovery/session.json");
         app.settings.autosave = false;
-        app.add_project(self.0.clone());
-        wait_until(&mut app, |app| app.projects.iter().all(|p| !p.indexing));
+        app.projects.push(Project::new(self.0.clone()));
         app
     }
 

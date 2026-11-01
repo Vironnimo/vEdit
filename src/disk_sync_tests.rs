@@ -32,19 +32,10 @@ impl Fixture {
         let mut app = VEditApp::empty(ctx);
         app.recovery_session_path = self.0.join("recovery/session.json");
         app.settings.autosave = false;
-        app.add_project(self.0.clone());
-        wait_until(&mut app, |app| app.projects.iter().all(|p| !p.indexing));
+        app.projects.push(Project::new(self.0.clone()));
         app.open_file(path.clone());
         let id = app.tab().expect("opened tab").id;
-        // Pending Explorer results would race with tests that read the worker
-        // channel directly.
-        wait_until(&mut app, |app| {
-            !app.tab().unwrap().loading
-                && app.projects[0]
-                    .explorer
-                    .as_ref()
-                    .is_none_or(|explorer| explorer.pending_count() == 0)
-        });
+        wait_until(&mut app, |app| !app.tab().unwrap().loading);
         app.tab_mut().unwrap().recovery_path = self.0.join(format!("recovery/{id}.txt"));
         (app, id, path)
     }
