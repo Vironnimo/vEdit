@@ -104,6 +104,8 @@ Behavioral entry points are `src/split_tests.rs`, `src/project_layout_tests.rs`,
 `src/explorer_filter_tests.rs` checks the Explorer/index boundary.
 `src/workspace/explorer_tests.rs` and `src/workspace/index_tests.rs` cover their
 distinct completeness, publication and resource-bound contracts.
+Their linked-directory cases use Unix symlinks or Windows junctions, preserving
+explicit Explorer expansion while keeping recursive indexing outside the target.
 
 For a targeted pane run use
 `cargo test --bin vedit app::split::tests -- --test-threads=8`.

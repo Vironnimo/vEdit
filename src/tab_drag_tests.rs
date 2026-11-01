@@ -1,6 +1,6 @@
 //! Real pointer drags and model moves must preserve buffers and pane-local state.
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{Harness, LazyRenderer, kittest::Queryable};
 
 fn fixture() -> VEditApp {
     let mut app = VEditApp::empty(egui::Context::default());
@@ -32,7 +32,9 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size([1440.0, 920.0])
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();

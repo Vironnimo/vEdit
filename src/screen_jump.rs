@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(LABEL_KEYS.len(), 26);
         assert_eq!(LABEL_KEYS.chars().collect::<HashSet<_>>().len(), 26);
         for count in [1, 9, 26, 27, 99, 676, 677] {
-            let jump = with_query("a", &"a ".repeat(count));
+            let mut jump = with_query("a", &"a ".repeat(count));
             let width = if count <= 26 {
                 1
             } else if count <= 676 {
@@ -611,17 +611,24 @@ mod tests {
             let labels: HashSet<_> = jump.targets.iter().map(|target| &target.label).collect();
             assert_eq!(labels.len(), count);
             assert!(labels.iter().all(|label| label.len() == width));
+            let targets: Vec<_> = jump
+                .targets
+                .iter()
+                .map(|target| (target.label.clone(), target.char_index))
+                .collect();
             // Every displayed label selects exactly its own target, including
             // the boundary where the first key alone is no longer sufficient.
-            for target in &jump.targets {
-                let mut selection = with_query("a", &"a ".repeat(count));
-                for (index, key) in target.label.chars().enumerate() {
+            for (label, char_index) in targets {
+                for (index, key) in label.chars().enumerate() {
                     let expected = if index + 1 == width {
-                        JumpAction::Jump(target.char_index)
+                        JumpAction::Jump(char_index)
                     } else {
                         JumpAction::None
                     };
-                    assert_eq!(selection.input_char(key), expected);
+                    assert_eq!(jump.input_char(key), expected);
+                }
+                for _ in 0..width {
+                    jump.backspace();
                 }
             }
         }

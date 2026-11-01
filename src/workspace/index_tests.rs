@@ -179,13 +179,14 @@ fn rust_detection_ignores_dependency_and_ignored_manifests_but_keeps_nested_proj
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn showing_ignored_files_never_follows_or_lists_symbolic_links() {
     let fixture = Fixture::new("links");
     let outside = Fixture::new("links-outside");
     let secret = outside.write("secret.txt", "outside");
-    std::os::unix::fs::symlink(&outside.0, fixture.0.join("external")).unwrap();
+    let directory_link = fixture.link_directory("external", &outside);
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&secret, fixture.0.join("linked.txt")).unwrap();
     for show_ignored_files in [false, true] {
         let index = build_index(
@@ -199,6 +200,9 @@ fn showing_ignored_files_never_follows_or_lists_symbolic_links() {
         assert!(index.entries.is_empty());
         assert!(index.quick_open("secret", 40).is_empty());
     }
+    drop(directory_link);
+    assert!(!fixture.0.join("external").exists());
+    assert_eq!(std::fs::read_to_string(secret).unwrap(), "outside");
 }
 
 #[test]

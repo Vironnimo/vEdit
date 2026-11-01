@@ -309,14 +309,14 @@ fn explorer_reopened_project_rejects_workers_from_the_previous_cache() {
     assert!(reopened.snapshot().has_entry(&fixture.0.join("source.txt")));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn explorer_lists_and_expands_user_selected_external_linked_folders() {
     let fixture = Fixture::new("explorer-linked-directory");
     let outside = Fixture::new("explorer-linked-target");
     outside.write("package/source.txt", "external dependency");
     let link = fixture.0.join("node_modules");
-    std::os::unix::fs::symlink(&outside.0, &link).unwrap();
+    let directory_link = fixture.link_directory("node_modules", &outside);
     let root = read_explorer_directory(&fixture.0, &fixture.0).unwrap();
     assert_eq!(root.entries.len(), 1);
     assert!(root.entries[0].is_dir);
@@ -326,6 +326,12 @@ fn explorer_lists_and_expands_user_selected_external_linked_folders() {
     let package = read_explorer_directory(&fixture.0, &link.join("package")).unwrap();
     assert_eq!(package.entries.len(), 1);
     assert_eq!(package.entries[0].path, link.join("package/source.txt"));
+    drop(directory_link);
+    assert!(!link.exists());
+    assert_eq!(
+        std::fs::read_to_string(outside.0.join("package/source.txt")).unwrap(),
+        "external dependency"
+    );
 }
 
 #[test]

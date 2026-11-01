@@ -1,7 +1,7 @@
 //! Pointer regressions for empty Explorer space and existing item menus.
 
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{Harness, LazyRenderer, kittest::Queryable};
 
 struct Fixture(PathBuf);
 
@@ -53,7 +53,9 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
         .with_size([520.0, 520.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();

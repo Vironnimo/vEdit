@@ -1,7 +1,7 @@
 //! External file changes reach the Explorer and Quick Open without a refresh.
 
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{Harness, LazyRenderer, kittest::Queryable};
 
 struct Fixture(PathBuf);
 
@@ -42,7 +42,9 @@ fn harness(root: &Path) -> Harness<'static, VEditApp> {
         .with_size([520.0, 620.0])
         .with_step_dt(1.0 / 60.0)
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();
@@ -110,6 +112,7 @@ fn click(screen: &mut Harness<'static, VEditApp>, label: &str) {
 fn external_files_appear_without_refresh_and_keep_selection_and_expansion() {
     let fixture = Fixture::new();
     let root = fixture.0.clone();
+    assert!(!root.join(".git").exists());
     let mut screen = harness(&root);
     click(&mut screen, "src");
     wait_until(&mut screen, "the expanded folder was not listed", |app| {
@@ -133,9 +136,10 @@ fn external_files_appear_without_refresh_and_keep_selection_and_expansion() {
     fs::write(root.join("agent.txt"), "from a terminal").unwrap();
     fs::write(root.join("src/new.rs"), "fn main() {}").unwrap();
     fs::write(root.join("src/nested/plan.md"), "# Plan").unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
     wait_until(&mut screen, "external files did not appear", |app| {
         app.explorer_index().is_some_and(|index| {
-            ["agent.txt", "src/new.rs", "src/nested/plan.md"]
+            ["agent.txt", "src/new.rs", "src/nested/plan.md", "docs"]
                 .iter()
                 .all(|path| index.has_entry(&root.join(path)))
         }) && ["agent.txt", "src/new.rs", "src/nested/plan.md"]
@@ -143,7 +147,7 @@ fn external_files_appear_without_refresh_and_keep_selection_and_expansion() {
             .all(|path| indexed(app, &root.join(path)))
     });
     screen.run_steps(3);
-    for label in ["agent.txt", "new.rs", "plan.md"] {
+    for label in ["agent.txt", "new.rs", "plan.md", "docs"] {
         assert!(
             screen.query_by_label(label).is_some(),
             "row {label} missing"
@@ -193,18 +197,4 @@ fn watcher_churn_in_generated_folders_and_git_internals_does_not_reindex() {
     }
     assert_eq!(screen.state().projects[0].index_request, request);
     assert!(!screen.state().projects[0].index_in_flight);
-}
-
-#[test]
-fn projects_without_git_follow_changes_too() {
-    // The fixture has no repository: the watcher alone keeps the tree current.
-    let fixture = Fixture::new();
-    let root = fixture.0.clone();
-    assert!(!root.join(".git").exists());
-    let mut screen = harness(&root);
-    fs::create_dir(root.join("docs")).unwrap();
-    wait_until(&mut screen, "the new folder did not appear", |app| {
-        app.explorer_index()
-            .is_some_and(|index| index.has_entry(&root.join("docs")))
-    });
 }
