@@ -3,6 +3,10 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht im [Benutzerhandbuch](handbuch.md).
 
+Version 0.6.5 verbessert das Zusammenspiel von Vim und Multicursor sowie die Navigation nach Editorbefehlen. Weitere Korrekturen erhalten abschließende Zeilenumbrüche bei Vim-Wortoperationen und sorgen dafür, dass Inbox und Befehlspalette Eingaben zuverlässig übernehmen.
+
+Fehlgeschlagenes Autosave wird erneut versucht; während eines laufenden Speichervorgangs lässt sich der Inhalt nicht verwerfen. Git-Diffs behandeln Konflikte und ungewöhnliche Dateipfade korrekt. Markdown-Linkhinweise, Fußnotensprünge und verlinkte Bilder, Task-Timeouts sowie die Zuordnung von Sprachdiagnosen wurden korrigiert. Das Hinzufügen von Projects ist vereinfacht, Listen reagieren unmittelbar auf Hover. Der Release-Ablauf umfasst jetzt ausdrücklich Quellcode-Push, Versionstag, GitHub Release und das vollständige Windows-Paket mit Prüfsumme.
+
 Version 0.6.4 ergänzt Drag-and-drop für die Projekt-Tabs, einschließlich **Other files**. Einfügemarkierung und Rand-Scrolling helfen beim Umsortieren; **Esc** oder Loslassen außerhalb der Leiste bricht ab. Das aktive Projekt bleibt erhalten, und die neue Reihenfolge wird mit der Sitzung gespeichert.
 
 Das neue Discover-Icon erscheint in der Titelleiste, der Taskleiste, den Programmdateien und Verknüpfungen. Die Projektsuche berücksichtigt den aktuellen Inhalt offener Dokumente einschließlich ungespeicherter Änderungen. Weitere Korrekturen betreffen die Wiederherstellung großer Entwürfe, veraltete Hintergrundresultate und Reviews, Task-Fehler und abgeschnittene Ausgaben, Unicode-Auswahlen sowie Git-Push und History ohne Upstream.
