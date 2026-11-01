@@ -1,6 +1,6 @@
 //! Actual pointer and keyboard input must keep user selections separate from marks.
 use super::*;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{Harness, LazyRenderer, kittest::Queryable};
 
 const DOCUMENT: &str = "before: target after\nSecond block · β🦀\nThird block for the agent\n";
 
@@ -31,7 +31,9 @@ fn harness(app: VEditApp, size: [f32; 2]) -> Harness<'static, VEditApp> {
     let mut screen = Harness::builder()
         .with_size(size)
         .with_os(egui::os::OperatingSystem::Windows)
-        .wgpu_setup(setup)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             move |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();

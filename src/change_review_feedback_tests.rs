@@ -39,13 +39,18 @@ fn diff_rect(screen: &Harness<'_, VEditApp>) -> egui::Rect {
     screen.get_by_label("Change review diff").rect()
 }
 
-/// Pointer interaction starts with a delivered comparison; Git loading has its
+/// UI interaction starts with a delivered comparison; Git loading has its
 /// own entry-point, freshness, generation and screenshot integration tests.
 fn loaded_branch_review_app() -> VEditApp {
     let mut app = VEditApp::empty(egui::Context::default());
     visual_tests::workspace(&mut app);
+    deliver_fixture_review(&mut app, ReviewSource::Branch { base: None });
+    app
+}
+
+fn deliver_fixture_review(app: &mut VEditApp, source: ReviewSource) {
     let root = app.projects[0].root.clone();
-    let source = ReviewSource::Branch { base: None };
+    let working = source == ReviewSource::WorkingTree;
     let generation = next_generation();
     let mut review = ChangeReview::new(source.clone(), root.clone());
     review.generation = generation;
@@ -124,11 +129,31 @@ fn loaded_branch_review_app() -> VEditApp {
             result: Ok(LoadedReview {
                 comparison: ReviewComparison {
                     source,
-                    key: "pointer-fixture".into(),
-                    title: "feature/login vs main".into(),
-                    detail: "main...feature/login".into(),
-                    old: "fixture-main".into(),
-                    new: Some("fixture-feature".into()),
+                    key: if working {
+                        "working-fixture"
+                    } else {
+                        "branch-fixture"
+                    }
+                    .into(),
+                    title: if working {
+                        "Working tree"
+                    } else {
+                        "feature/login vs main"
+                    }
+                    .into(),
+                    detail: if working {
+                        "HEAD vs working tree"
+                    } else {
+                        "main...feature/login"
+                    }
+                    .into(),
+                    old: if working {
+                        "fixture-feature"
+                    } else {
+                        "fixture-main"
+                    }
+                    .into(),
+                    new: (!working).then(|| "fixture-feature".into()),
                 },
                 files,
                 omitted_untracked: 0,
@@ -137,9 +162,8 @@ fn loaded_branch_review_app() -> VEditApp {
         })
         .unwrap();
     app.poll();
-    assert!(!view(&app).loading);
-    assert_eq!(view(&app).files.len(), 3);
-    app
+    assert!(!view(app).loading);
+    assert_eq!(view(app).files.len(), 3);
 }
 
 #[test]
@@ -603,28 +627,26 @@ fn branch_review_warns_when_the_base_moves_without_head_moving() {
 
 #[test]
 fn unsaved_documents_in_the_repository_are_named_and_shown_on_request() {
-    let repository = ReviewRepository::new();
-    let mut app = repository.app();
-    let path = repository.root.join("README.md");
-    let mut tab = EditorTab::new(Some(path.clone()), "README.md".into());
+    let mut app = loaded_branch_review_app();
+    let path = app.projects[0].root.join("README.md");
+    let tab = app.projects[0]
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.path.as_ref() == Some(&path))
+        .unwrap();
     tab.text = "# Demo\n\nUnsaved edit\n".into();
     tab.saved_text = "# Demo\n\nA small project.\nWorking tree edit\n".into();
     tab.dirty = true;
     let id = tab.id;
-    app.projects[0].tabs.push(tab);
+    let original = tab.text.clone();
     let mut screen = harness(app);
     let banner = "1 unsaved document is not included";
-    screen
-        .state_mut()
-        .show_change_review(0, ReviewSource::Branch { base: None });
     settle(&mut screen);
     assert!(
         screen.query_by_label(banner).is_none(),
         "a branch comparison does not read the working tree"
     );
-    screen
-        .state_mut()
-        .show_change_review(0, ReviewSource::WorkingTree);
+    deliver_fixture_review(screen.state_mut(), ReviewSource::WorkingTree);
     settle(&mut screen);
     assert!(screen.query_by_label(banner).is_some());
     screen.get_by_label("Show").click();
@@ -635,6 +657,7 @@ fn unsaved_documents_in_the_repository_are_named_and_shown_on_request() {
         screen.state().tab().unwrap().dirty,
         "the draft stays as it was"
     );
+    assert_eq!(screen.state().tab().unwrap().text, original);
 }
 
 #[test]
