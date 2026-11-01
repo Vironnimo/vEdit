@@ -404,6 +404,11 @@ fn ctrl_x_uses_the_system_clipboard_without_replacing_unnamed_register() {
 
 #[test]
 fn context_copy_and_cut_preserve_unnamed_register() {
+    let preserved = Yank {
+        text: UNNAMED.into(),
+        block_width: None,
+        linewise: false,
+    };
     for action in [EditorAction::Copy, EditorAction::Cut] {
         let mut app = fixture("αβ🦀tail\n");
         let id = app.tab().unwrap().id;
@@ -416,12 +421,16 @@ fn context_copy_and_cut_preserve_unnamed_register() {
         assert!(output.platform_output.commands.iter().any(|command| {
             matches!(command, egui::OutputCommand::CopyText(text) if text == "β🦀")
         }));
-        assert_unnamed(&app, UNNAMED, false);
+        assert_eq!(app.register.as_ref(), Some(&preserved));
+        assert_eq!(app.tab().unwrap().vim.register(), Some(&preserved));
         if action == EditorAction::Cut {
             assert_eq!(app.tab().unwrap().text, "αtail\n");
             app.apply_editor_context_action(id, EditorAction::Undo);
         }
         assert_eq!(app.tab().unwrap().text, "αβ🦀tail\n");
+        assert!(!app.tab().unwrap().dirty);
+        assert_eq!(app.register.as_ref(), Some(&preserved));
+        assert_eq!(app.tab().unwrap().vim.register(), Some(&preserved));
     }
 }
 
@@ -444,6 +453,7 @@ fn context_paste_preserves_register_and_replaces_selection_once() {
     );
     output.textures_delta.clear();
     assert_eq!(app.tab().unwrap().text, "αδ😀tail\n");
+    assert_eq!(app.tab().unwrap().vim.mode, VimMode::Normal);
     assert_unnamed(&app, UNNAMED, false);
     assert!(app.context_paste.is_none());
     app.apply_editor_context_action(id, EditorAction::Undo);

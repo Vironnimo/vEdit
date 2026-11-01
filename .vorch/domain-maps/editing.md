@@ -83,7 +83,8 @@ Pure operation regressions live inline in `src/editor.rs` and
 `src/multicursor.rs`; Vim contracts are grouped under `src/vim/tests/`, with shared
 input helpers in `src/vim/tests.rs`. Indentation regressions are inline in
 `src/indentation.rs`.
-`src/multicursor_tests.rs` covers the multicursor UI and history integration.
+`src/multicursor_tests.rs` covers the multicursor UI and history integration,
+including once-only completion auxiliary edits and atomic overlap refusal.
 Use the integration tests below when an edit crosses the widget or history boundary.
 
 ## References

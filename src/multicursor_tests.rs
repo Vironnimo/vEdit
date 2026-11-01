@@ -597,22 +597,111 @@ fn multicursor_ime_commit_inserts_once_at_each_selection() {
 
 #[test]
 fn multicursor_completion_repeats_matching_edits_and_refuses_other_contexts() {
-    let mut state = crate::multicursor::State::default();
-    state.selections = vec![Selection::new(2, 2), Selection::new(5, 5)];
-    let main = crate::lsp::TextEdit {
+    let edit = |text: &str, range: Range<usize>, replacement: &str| crate::lsp::TextEdit {
         range: crate::lsp::TextRange {
-            start: crate::lsp::char_to_position("fo fo", 3),
-            end: crate::lsp::char_to_position("fo fo", 5),
+            start: crate::lsp::char_to_position(text, range.start),
+            end: crate::lsp::char_to_position(text, range.end),
         },
-        new_text: "foo".into(),
+        new_text: replacement.into(),
     };
-    let (text, state) = multicursor_ui::complete("fo fo", &state, &main, &[], 5).unwrap();
-    assert_eq!(text, "foo foo");
-    assert_eq!(
-        state.selections.iter().map(|s| s.head).collect::<Vec<_>>(),
-        vec![3, 7]
-    );
-    assert!(multicursor_ui::complete("xx foo", &state, &main, &[], 5).is_err());
+    let original = "// 🦀\nfo fo\n";
+    let import = "use crate::Thing;\n";
+    let imported = format!("{import}// 🦀\nfoo foo\n");
+    for (text, carets, main_range, additional, expected) in [
+        ("fo fo", [2, 5], 3..5, vec![], Some(("foo foo", [3, 7]))),
+        ("xx foo", [2, 5], 3..5, vec![], None),
+        (
+            original,
+            [7, 10],
+            8..10,
+            vec![edit(original, 0..0, import)],
+            Some((imported.as_str(), [26, 30])),
+        ),
+        (
+            original,
+            [7, 10],
+            8..10,
+            vec![
+                edit(original, 0..0, import),
+                edit(original, 6..9, "overlap"),
+            ],
+            None,
+        ),
+    ] {
+        let mut app = VEditApp::empty(egui::Context::default());
+        app.settings.vim = true;
+        app.settings.autosave = false;
+        let root = std::env::temp_dir().join("multicursor-completion-in-memory");
+        let path = root.join("source.rs");
+        let mut project = Project::new(root);
+        let mut tab = EditorTab::new(Some(path.clone()), "source.rs".into());
+        tab.text = text.into();
+        tab.saved_text = text.into();
+        tab.vim.mode = VimMode::Insert;
+        tab.vim.multi.selections = carets.map(|at| Selection::new(at, at)).to_vec();
+        tab.sync_multicursor();
+        project.tabs.push(tab);
+        app.projects.push(project);
+        app.bind_current_pane();
+        let tab = app.tab().unwrap();
+        let (id, revision, cursor) = (tab.id, tab.revision, tab.vim.cursor);
+        let selection = tab.selection.clone();
+        let before = tab.vim.multi.clone();
+        let history = (tab.vim.can_undo(), tab.vim.can_redo());
+        app.projects[0]
+            .rust_language_mut()
+            .opened
+            .insert(path, (revision, 7));
+        app.completions = Some(CompletionPopup {
+            tab_id: id,
+            version: 7,
+            cursor,
+            selected: 0,
+            items: vec![crate::lsp::CompletionItem {
+                label: "foo".into(),
+                detail: None,
+                insert_text: "foo".into(),
+                text_edit: Some(edit(text, main_range, "foo")),
+                additional_text_edits: additional,
+            }],
+        });
+
+        app.apply_completion(0);
+
+        let tab = app.tab().unwrap();
+        assert_eq!(tab.saved_text, text);
+        if let Some((expected, mapped)) = expected {
+            assert_eq!(tab.text, expected);
+            assert!(tab.dirty);
+            assert_eq!(tab.revision, revision + 1);
+            assert_eq!(
+                tab.vim.multi.selections,
+                mapped.map(|at| Selection::new(at, at))
+            );
+            assert_eq!(tab.vim.cursor, mapped[1]);
+            assert_eq!(tab.selection, mapped[1]..mapped[1]);
+
+            app.apply_editor_context_action(id, context_actions::EditorAction::Undo);
+            let tab = app.tab().unwrap();
+            assert_eq!(tab.text, text);
+            assert!(!tab.dirty);
+            assert_eq!(tab.vim.multi, before);
+            assert!(tab.vim.can_redo());
+            let revision = tab.revision;
+            app.apply_editor_context_action(id, context_actions::EditorAction::Undo);
+            assert_eq!(app.tab().unwrap().text, text);
+            assert_eq!(app.tab().unwrap().revision, revision);
+        } else {
+            assert_eq!(tab.text, text);
+            assert_eq!(tab.revision, revision);
+            assert!(!tab.dirty);
+            assert_eq!(tab.selection, selection);
+            assert_eq!(tab.vim.cursor, cursor);
+            assert_eq!(tab.vim.multi, before);
+            assert_eq!((tab.vim.can_undo(), tab.vim.can_redo()), history);
+            assert!(app.status.as_ref().unwrap().1);
+        }
+    }
 }
 
 #[test]

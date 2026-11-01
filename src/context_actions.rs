@@ -2572,27 +2572,6 @@ mod tests {
     }
 
     #[test]
-    fn cut_preserves_unicode_and_can_be_undone_in_vim() {
-        let mut app = fixture();
-        let preserved = Yank {
-            text: "Vim register".into(),
-            block_width: None,
-            linewise: false,
-        };
-        app.register = Some(preserved.clone());
-        app.tab_mut().unwrap().vim.set_register(preserved.clone());
-        let id = app.tab().unwrap().id;
-        app.tab_mut().unwrap().selection = 1..3;
-        app.apply_editor_context_action(id, EditorAction::Cut);
-        assert_eq!(app.tab().unwrap().text, "α\nsecond\n");
-        assert_eq!(app.register.as_ref(), Some(&preserved));
-        assert_eq!(app.tab().unwrap().vim.register(), Some(&preserved));
-        app.apply_editor_context_action(id, EditorAction::Undo);
-        assert_eq!(app.tab().unwrap().text, "αβγ\nsecond\n");
-        assert!(!app.tab().unwrap().dirty);
-    }
-
-    #[test]
     fn close_others_preserves_dirty_and_in_flight_documents() {
         let mut app = fixture();
         let keep = app.projects[0].tabs[0].id;
@@ -2609,31 +2588,6 @@ mod tests {
         app.projects[0].tabs[0].saving = true;
         app.apply_tab_context_action(dirty, TabAction::CloseSaved);
         assert_eq!(app.projects[0].tabs.len(), 2);
-    }
-
-    #[test]
-    fn native_context_paste_replaces_selection_once_and_remains_undoable() {
-        let mut app = fixture();
-        let id = app.tab().unwrap().id;
-        app.tab_mut().unwrap().selection = 1..3;
-        app.apply_editor_context_action(id, EditorAction::Paste);
-        let ctx = app.ctx.clone();
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                events: vec![egui::Event::Paste("δ".into())],
-                ..Default::default()
-            },
-            |_| {
-                app.context_paste_poll();
-                app.context_paste_poll();
-            },
-        );
-        output.textures_delta.clear();
-        assert_eq!(app.tab().unwrap().text, "αδ\nsecond\n");
-        assert_eq!(app.tab().unwrap().vim.mode, VimMode::Normal);
-        assert!(app.context_paste.is_none());
-        app.apply_editor_context_action(id, EditorAction::Undo);
-        assert_eq!(app.tab().unwrap().text, "αβγ\nsecond\n");
     }
 
     #[test]

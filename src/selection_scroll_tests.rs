@@ -11,6 +11,10 @@ enum Editing {
 }
 
 fn fixture(editing: Editing, smooth: bool, wrap: bool) -> VEditApp {
+    fixture_with_lines(editing, smooth, wrap, 80)
+}
+
+fn fixture_with_lines(editing: Editing, smooth: bool, wrap: bool, lines: usize) -> VEditApp {
     let mut app = VEditApp::empty(egui::Context::default());
     app.settings.autosave = false;
     app.settings.smooth_scroll = smooth;
@@ -22,7 +26,7 @@ fn fixture(editing: Editing, smooth: bool, wrap: bool) -> VEditApp {
     project.last_git_refresh = Instant::now();
     project.index = Some(Arc::new(workspace::WorkspaceIndex::empty(root.clone())));
     let mut tab = EditorTab::new(Some(root.join("wide.txt")), "wide.txt".into());
-    tab.text = (1..=250)
+    tab.text = (1..=lines)
         .map(|line| format!("Line {line:03} · café Ω 🦀 {}\n", "wide words ".repeat(24)))
         .collect();
     tab.saved_text = tab.text.clone();
@@ -406,7 +410,7 @@ fn a_modal_opened_during_a_drag_suspends_source_autoscroll() {
 
 #[test]
 fn capturing_a_selection_drag_cancels_an_existing_animated_cursor_reveal() {
-    let mut screen = harness(fixture(Editing::Normal, true, false));
+    let mut screen = harness(fixture_with_lines(Editing::Normal, true, false, 250));
     let destination = character_at_line(&screen, 180, 20);
     screen
         .state_mut()
@@ -452,7 +456,7 @@ fn capturing_a_selection_drag_cancels_an_existing_animated_cursor_reveal() {
 
 #[test]
 fn vim_scroll_commands_align_the_cursor_line_and_screen_motions_follow_the_viewport() {
-    let mut screen = harness(fixture(Editing::Normal, false, false));
+    let mut screen = harness(fixture_with_lines(Editing::Normal, false, false, 250));
     let original = screen.state().tab().unwrap().text.clone();
     let line = |screen: &Harness<'_, VEditApp>| {
         let tab = screen.state().tab().unwrap();

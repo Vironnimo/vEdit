@@ -579,9 +579,8 @@ fn completion_navigation_reveals_results_beyond_one_hundred_and_enter_accepts_vi
 fn completion_pointer_can_accept_an_item_beyond_one_hundred() {
     let mut screen = harness(fixture("fo", false), [1200.0, 760.0]);
     suggestions(&mut screen, 180);
-    for _ in 0..110 {
-        key(&mut screen, Key::ArrowDown, egui::Modifiers::NONE);
-    }
+    screen.state_mut().completions.as_mut().unwrap().selected = 110;
+    screen.run_steps(2);
     screen.get_by_label_contains("candidate109").click();
     screen.run_steps(2);
     assert!(screen.state().completions.is_none());
