@@ -94,7 +94,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'AGENTS.md') -Destination $releaseDirectory -Force
     $fontLicenseDirectory = Join-Path $releaseDirectory 'assets/fonts'
     New-Item -ItemType Directory -Path $fontLicenseDirectory -Force | Out-Null
-    foreach ($fontDocumentation in @('OFL.txt', 'README.md')) {
+    foreach ($fontDocumentation in @('OFL.txt', 'OFL-Geist.txt', 'README.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "assets/fonts/$fontDocumentation") -Destination $fontLicenseDirectory -Force
     }
     $syntaxLicenseDirectory = Join-Path $releaseDirectory 'assets/syntaxes'

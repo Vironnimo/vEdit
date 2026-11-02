@@ -22,9 +22,11 @@ a Windows desktop and OpenGL. Keep this native check when upgrading eframe.
 ## Ownership boundaries
 
 `src/main.rs::app_icon` decodes the embedded `assets/vedit.png` for the native
-window and the custom titlebar. The titlebar caches its texture per egui context.
-Windows executable resources use the matching `assets/vedit.ico`; asset provenance
-is recorded in `assets/README.md` and packaging belongs to `development.md`.
+window. The custom titlebar instead shows the transparent `assets/vedit-mark.png`
+beside vBot's wordmark (spaced Geist SemiBold capitals in `BRAND_COPPER`, led by a
+`BRAND_STEEL` initial) and caches its texture per egui context. Windows executable
+resources use the matching `assets/vedit.ico`; asset provenance is recorded in
+`assets/README.md` and packaging belongs to `development.md`.
 
 `window_chrome::draw_top_bar` reserves distinct project controls, drag areas and
 window buttons. Geometry remains in logical client coordinates. It checks popup

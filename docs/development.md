@@ -305,8 +305,8 @@ Historical review/evaluation results retain their original product names and ver
 executables using `winresource` and the Windows SDK resource compiler. Shell
 shortcuts use the unquoted executable path followed by `,0`; registry icon
 locations retain their normal quoted path syntax. `assets/vedit.png` embeds the
-matching Discover artwork in the running window and custom titlebar; the titlebar
-caches its texture per egui context. See `assets/README.md` for asset provenance.
+matching Discover artwork in the running window; the custom titlebar shows the
+transparent `assets/vedit-mark.png` and caches its texture per egui context. See `assets/README.md` for asset provenance.
 Validate resources and actual Shell icon resolution (including a
 shortcut) with `powershell.exe -NoProfile -File scripts/test-branding.ps1`.
 Pass `-ExecutableDirectory` and `-ShortcutPath` to check the installed files.

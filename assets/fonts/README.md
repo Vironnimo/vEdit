@@ -6,4 +6,6 @@ Source: [JetBrains Mono v2.304](https://github.com/JetBrains/JetBrainsMono/relea
 
 Copyright 2020 The JetBrains Mono Project Authors. Redistributed and embedded under the [SIL Open Font License 1.1](OFL.txt). The portable package includes this license alongside its documentation.
 
+Geist SemiBold, version 1.9.0, unmodified: the titlebar wordmark face shared with vBot and vWatch. Source: [Geist v1.9.0](https://github.com/vercel/geist-font/releases/tag/v1.9.0), `geist-font/Geist/ttf/Geist-SemiBold.ttf`. Copyright 2024 The Geist Project Authors, embedded under the [SIL Open Font License 1.1](OFL-Geist.txt).
+
 The optional Consolas and Cascadia Mono faces are read from the user's Windows Fonts directory and are not redistributed. If unavailable, code uses the bundled face. UI fonts retain their independent proportional family and fallbacks.

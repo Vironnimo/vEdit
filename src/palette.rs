@@ -17,3 +17,6 @@ pub const GREEN: Color32 = Color32::from_rgb(0x5f, 0xcf, 0x8f);
 pub const BLUE: Color32 = Color32::from_rgb(0x74, 0xad, 0xf2);
 pub const ORANGE: Color32 = Color32::from_rgb(0xe5, 0xb5, 0x3e);
 pub const RED: Color32 = Color32::from_rgb(0xf2, 0x8b, 0x82);
+/// The mark's two metals, lifted for the wordmark text as in vBot.
+pub const BRAND_STEEL: Color32 = Color32::from_rgb(0xa3, 0x9c, 0x94);
+pub const BRAND_COPPER: Color32 = Color32::from_rgb(0xc9, 0x8d, 0x52);

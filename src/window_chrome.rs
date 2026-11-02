@@ -3,9 +3,10 @@
 //! Geometry stays in logical client coordinates. The native integration converts
 //! it with the current viewport's pixels per point when publishing hit regions.
 
+use crate::palette::{BRAND_COPPER, BRAND_STEEL};
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Layout, PointerButton, Rect, Response, Sense, Stroke,
-    StrokeKind, Ui, UiBuilder, Vec2, ViewportCommand, WidgetInfo, WidgetType,
+    self, Align, Color32, FontId, Layout, PointerButton, Rect, Response, Sense, Stroke, StrokeKind,
+    Ui, UiBuilder, Vec2, ViewportCommand, WidgetInfo, WidgetType,
 };
 
 pub(crate) const HEIGHT: f32 = 42.0;
@@ -231,17 +232,20 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         return;
     }
     let center = egui::pos2(rect.left() + 23.0, rect.center().y);
-    let texture_key = egui::Id::new("vedit_brand_icon");
+    let texture_key = egui::Id::new("vedit_brand_mark");
     let texture = ui
         .ctx()
         .data(|data| data.get_temp::<egui::TextureHandle>(texture_key))
         .unwrap_or_else(|| {
-            let icon = crate::app_icon();
+            // The transparent mark, not the tiled app icon, as in vBot's header.
+            let mark =
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/vedit-mark.png"))
+                    .expect("the bundled vEdit mark must be a valid PNG");
             let texture = ui.ctx().load_texture(
-                "vEdit icon",
+                "vEdit mark",
                 egui::ColorImage::from_rgba_unmultiplied(
-                    [icon.width as usize, icon.height as usize],
-                    &icon.rgba,
+                    [mark.width as usize, mark.height as usize],
+                    &mark.rgba,
                 ),
                 egui::TextureOptions::LINEAR,
             );
@@ -251,18 +255,34 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         });
     ui.painter().image(
         texture.id(),
-        Rect::from_center_size(center, Vec2::splat(28.0)),
+        Rect::from_center_size(center, Vec2::splat(30.0)),
         Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
         Color32::WHITE,
     );
     if text {
-        ui.painter().text(
-            egui::pos2(rect.left() + 43.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            "vEdit",
-            FontId::proportional(15.0),
-            ui.visuals().text_color(),
-        );
+        // vBot's wordmark: spaced copper capitals led by a steel initial.
+        let brand = crate::typography::brand_family();
+        let family = if ui.fonts_mut(|fonts| fonts.families().contains(&brand)) {
+            brand
+        } else {
+            egui::FontFamily::Proportional
+        };
+        let mut job = egui::text::LayoutJob::default();
+        for (part, color) in [("V", BRAND_STEEL), ("EDIT", BRAND_COPPER)] {
+            job.append(
+                part,
+                0.0,
+                egui::TextFormat {
+                    font_id: FontId::new(13.5, family.clone()),
+                    extra_letter_spacing: 13.5 * 0.22,
+                    color,
+                    ..Default::default()
+                },
+            );
+        }
+        let galley = ui.painter().layout_job(job);
+        let pos = egui::pos2(rect.left() + 48.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(pos, galley, Color32::PLACEHOLDER);
     }
 }
 

@@ -32,6 +32,11 @@ pub(crate) fn tab_family(width: usize) -> FontFamily {
     FontFamily::Name(format!("vedit-tabs-{}", width.clamp(1, 8)).into())
 }
 
+/// Geist SemiBold for the title-bar wordmark, shared with vBot and vWatch.
+pub(crate) fn brand_family() -> FontFamily {
+    FontFamily::Name("vedit-brand".into())
+}
+
 fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     // The bundled Light face matches the visual weight of native editors:
@@ -71,6 +76,13 @@ fn fonts_from(directory: &Path, choice: EditorFont) -> FontDefinitions {
         fonts.font_data.insert(name.clone(), data.into());
         fonts.families.insert(tab_family(width), vec![name]);
     }
+    fonts.font_data.insert(
+        "vedit-brand".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Geist-SemiBold.ttf")).into(),
+    );
+    fonts
+        .families
+        .insert(brand_family(), vec!["vedit-brand".into()]);
 
     for (name, file) in [
         ("vedit-ui", "segoeui.ttf"),
