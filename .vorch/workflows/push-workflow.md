@@ -42,8 +42,8 @@ existing visual harness. An explicit caller value is preserved; individual
 harnesses can still select GL themselves. Follow the renderer and serial-run guidance in
 `docs/development.md` if the driver fails. Snapshot-update environment flags are
 removed, and survey reports are preserved under `logs/test-survey/` before cleanup.
-Native branding, window and profile-migration
-checks remain separate release gates; ignored SDK/benchmark tests run when their
+Branding remains a separate package gate. Native GUI checks are opt-in, outside
+routine deployment and push checks; ignored SDK/benchmark tests run when their
 prerequisites and task apply. See `release-workflow.md` and `live-testing-workflow.md`.
 
 Allow more than 30 minutes for a cold build; the command reports each running

@@ -78,6 +78,6 @@ no fallback to the legacy product name.
 - `cargo test --bin vedit process_liveness`: current versus exited processes.
 
 `scripts/test-profile-migration.ps1` exercises actual startup import in isolated
-APPDATA, including additional windows and repeated launch;
-`scripts/test-windows.ps1` checks executable window routing and independent state.
-Use `docs/development.md` for their release-directory options and prerequisites.
+APPDATA, including additional windows and repeated launch. It opens native editor
+windows and is opt-in; see the live-testing workflow. Use `docs/development.md`
+for its release-directory options and prerequisites.

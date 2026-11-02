@@ -74,18 +74,17 @@ formatting, Clippy and repository checks on the exact commit it pushes. No
 snapshot-update flags belong in a final check. See `development/testing.md` in
 the domain maps for test isolation and the Windows renderer caveat.
 
-Run the native package gates with private fixture state:
+Run the package gates with private fixture state:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-branding.ps1 -ExecutableDirectory dist/vEdit
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -ExecutableDirectory dist/vEdit
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-profile-migration.ps1 -ExecutableDirectory dist/vEdit
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-install.ps1
 ```
 
-These checks cover resources/icons, executable startup/windows, migration and
-isolated installation. They do not establish physical DPI transitions, native
-dialogs or Snap; check those interactively when affected.
+These checks cover resources/icons and isolated installation without opening
+editor windows. Native GUI checks, including executable profile migration, run
+only when the user explicitly requests desktop testing; see
+`live-testing-workflow.md`. Report unverified native behavior when affected.
 
 Push through the existing owner, following `push-workflow.md`:
 

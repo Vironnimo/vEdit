@@ -3,20 +3,23 @@
 Use this workflow to check an actual vEdit executable, native windows or a CLI
 change against an isolated editor. Headless tests need no live user session.
 
-## Prefer the existing isolated checks
+## Choose a check without desktop windows
 
-Build from the current checkout, keeping its own `target/`:
+Routine builds, installations, releases and pushes must not launch GUI test
+windows. Native desktop checks are opt-in: run them only when the user explicitly
+requests desktop testing.
+
+Build from the current checkout, keeping its own `target/`, when an executable
+check is needed:
 
 ```powershell
 cargo build --locked --bins
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1
 ```
 
-The window script uses private projects and `VEDIT_PROFILE_DIR`, checks startup,
-forwarding, independent windows and recovery, and cleans up only its recorded
-fixture processes. Pass `-ExecutableDirectory dist/vEdit` to check a packaged build.
-For migration use `scripts/test-profile-migration.ps1`; it redirects `APPDATA`
-because a profile override deliberately bypasses migration.
+For explicitly requested desktop migration testing use
+`scripts/test-profile-migration.ps1`; it redirects `APPDATA` because a profile
+override deliberately bypasses migration. Pass `-ExecutableDirectory dist/vEdit`
+to check a packaged build. It opens native editor windows.
 
 Executable CLI round-trip tests use a headless editor and private endpoints.
 `docs/development.md` -> CLI integration fixtures documents the individual
@@ -25,7 +28,7 @@ building that binary, rather than sending a test to the user's current window.
 
 ## Start an interactive fixture
 
-For a behavior the existing fixture cannot show, load
+For explicitly requested interactive desktop testing, load
 `.agents/skills/vedit/SKILL.md` before controlling the editor. Create fixture files
 under a unique `.tmp/<task>/` directory and pass the same absolute
 `VEDIT_PROFILE_DIR` to both the GUI and every CLI invocation. That override
@@ -82,6 +85,5 @@ and logs below the fixture directory and describe which checks were manual.
 Close fixture windows normally when finished. If a broken fixture requires forced
 cleanup, verify its private endpoint, executable path and recorded process start
 before stopping that exact process. Never stop all `vedit` processes by name.
-Use the existing native scripts when a test needs several spawned windows and
-automated cleanup; their ownership checks already cover those processes.
+The migration script's ownership checks cover its own spawned windows and cleanup.
 Retain failure logs and remove only a verified fixture directory inside `.tmp/`.

@@ -276,8 +276,10 @@ registry subtree, never the live installation:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-install.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1 -ExecutableDirectory dist/vEdit
 ```
+
+Routine builds, installations, releases and pushes do not launch GUI test windows.
+Native desktop checks run only when the user explicitly requests desktop testing.
 
 `startup.rs` parses shell arguments and obtains the selected window's lock before
 loading any session. Main keeps the legacy single-instance lock and profile;
@@ -335,6 +337,7 @@ Validate resources and actual Shell icon resolution (including a
 shortcut) with `powershell.exe -NoProfile -File scripts/test-branding.ps1`.
 Pass `-ExecutableDirectory` and `-ShortcutPath` to check the installed files.
 Profile migration regressions run with `cargo test profile_migration`.
+For explicitly requested desktop testing,
 `powershell.exe -NoProfile -File scripts/test-profile-migration.ps1` exercises
 the actual startup import and recovery in isolated `APPDATA`, including a second
 window and a repeated launch. It accepts `-ExecutableDirectory` for release tests.
