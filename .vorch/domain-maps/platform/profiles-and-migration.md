@@ -18,7 +18,7 @@ must already have a saved directory. File opening belongs to the normal app
 dispatch after the window owner is known.
 
 `app_session::Startup` prepares the control server, reads the manifest and shared
-preferences, observes Project/recovery availability and warms the font-file cache
+preferences, observes Project/recovery availability and prepares font definitions
 on a worker while eframe creates the graphics context. App construction consumes that snapshot;
 legacy RON app state is decoded only when the manifest is unreadable. eframe
 still owns native geometry and egui memory restoration.

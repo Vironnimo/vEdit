@@ -201,6 +201,7 @@ impl VEditApp {
         };
         project.clear_language_diagnostics(language);
         project.languages.remove(language);
+        project.language_configs.remove(language);
         if self.active_project == project_index {
             self.completions = None;
             self.completion_request = None;
@@ -221,6 +222,7 @@ impl VEditApp {
             session.diagnostics.clear();
             session.diagnostic_origins.clear();
         }
+        project.language_configs.clear();
         project.diagnostics.clear();
         project.diagnostics_revision = project.diagnostics_revision.wrapping_add(1);
         if project_index == self.active_project {
@@ -463,6 +465,35 @@ impl VEditApp {
         ui.add_space(6.0);
     }
     pub(super) fn sync_languages(&mut self, force: bool) {
+        let wanted: Vec<_> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_other_files())
+            .flat_map(|(index, project)| {
+                self.settings
+                    .language_servers
+                    .iter()
+                    .filter(|config| {
+                        config.enabled
+                            && ((config.language_id == "rust" && project.rust_project)
+                                || (config.language_id != "rust"
+                                    && project.tabs.iter().any(|tab| {
+                                        tab.path.as_deref().is_some_and(|path| config.matches(path))
+                                    })))
+                    })
+                    .filter(|config| {
+                        project
+                            .languages
+                            .get(&config.language_id)
+                            .is_none_or(|session| session.server.is_none())
+                    })
+                    .map(move |config| (index, config.clone()))
+            })
+            .collect();
+        for (index, config) in wanted {
+            self.request_language_config(index, &config);
+        }
         for project in &mut self.projects {
             if project.is_other_files() {
                 continue;
@@ -504,8 +535,24 @@ impl VEditApp {
                     continue;
                 }
                 if session.server.is_none() {
-                    let effective =
-                        config.resolve(&project.root, &project.tasks.python_program(&project.root));
+                    let key = language_settings::LanguageConfigKey {
+                        config: config.clone(),
+                        python_interpreter: project.tasks.python_interpreter.clone(),
+                    };
+                    let Some(resolved) = project
+                        .language_configs
+                        .get(&config.language_id)
+                        .and_then(|cache| cache.get(&key))
+                    else {
+                        continue;
+                    };
+                    let effective = match resolved {
+                        Ok(config) => config.clone(),
+                        Err(error) => {
+                            session.error = Some(error.clone());
+                            continue;
+                        }
+                    };
                     session.server = Some(crate::lsp::LanguageServer::start_configured(
                         project.root.clone(),
                         effective.clone(),

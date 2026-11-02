@@ -6,6 +6,7 @@ pub(super) enum DialogPurpose {
     Projects,
     Files,
     SaveAs(u64),
+    Interpreter(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,7 +76,7 @@ impl VEditApp {
         self.save_as = Some(id);
         self.start_native_dialog(DialogPurpose::SaveAs(id), directory, Some(title));
     }
-    fn start_native_dialog(
+    pub(super) fn start_native_dialog(
         &mut self,
         purpose: DialogPurpose,
         directory: Option<PathBuf>,
@@ -100,6 +101,7 @@ impl VEditApp {
             DialogPurpose::Projects => "Open project folders",
             DialogPurpose::Files => "Open files",
             DialogPurpose::SaveAs(_) => "Save file as",
+            DialogPurpose::Interpreter(_) => "Choose Python interpreter",
         });
         if let Some(directory) = directory {
             dialog = dialog.set_directory(crate::paths::display(&directory));
@@ -113,6 +115,7 @@ impl VEditApp {
                     DialogPurpose::Projects => dialog.pick_folders(),
                     DialogPurpose::Files => dialog.pick_files(),
                     DialogPurpose::SaveAs(_) => dialog.save_file().map(|path| vec![path]),
+                    DialogPurpose::Interpreter(_) => dialog.pick_file().map(|path| vec![path]),
                 };
                 let Some(paths) = paths else { return Ok(None) };
                 let paths: Vec<_> = paths
@@ -151,6 +154,19 @@ impl VEditApp {
         match result {
             Ok(Some(selection)) => {
                 match request.purpose {
+                    DialogPurpose::Interpreter(instance) => {
+                        if let Some(index) = self
+                            .projects
+                            .iter()
+                            .position(|project| project.instance_id == instance)
+                            && let Some(path) = selection.paths.into_iter().next()
+                        {
+                            self.projects[index].tasks.python_interpreter =
+                                path.to_string_lossy().into_owned();
+                            self.session_dirty = true;
+                            self.restart_project_language(index, "python");
+                        }
+                    }
                     DialogPurpose::Projects => {
                         for path in selection.paths {
                             self.add_project(path);

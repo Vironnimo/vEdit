@@ -100,6 +100,9 @@ face is the fallback when a selected Windows font is unavailable; symbol and CJK
 fallbacks remain later in the chain. Tab width uses a dedicated font family
 rather than replacing tabs in document text. Colors for status meaning remain
 independent of the brand accent.
+Startup prepares font definitions beside graphics initialization; subsequent
+font-file loading runs on app workers. Only definitions for the currently
+selected face may be installed into the live egui context.
 
 Character counts are Unicode scalars in the live buffer, including whitespace and
 raw CRLF, not bytes or user-perceived graphemes. Token counts use the bundled

@@ -56,7 +56,19 @@ fn harness(app: VEditApp) -> Harness<'static, VEditApp> {
             app,
         );
     screen.run_steps(4);
+    settle_fonts(&mut screen);
     screen
+}
+
+fn settle_fonts(screen: &mut Harness<'_, VEditApp>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while screen.state().applied_editor_font != screen.state().settings.editor_font {
+        screen.run_steps(1);
+        assert!(Instant::now() < deadline, "font selection did not finish");
+        std::thread::yield_now();
+    }
+    // Font installation takes effect when egui begins its next pass.
+    screen.run_steps(2);
 }
 
 fn source_shape(screen: &Harness<'_, VEditApp>, text: &str) -> egui::epaint::TextShape {
@@ -351,6 +363,7 @@ fn settings_font_combo_preserves_mouse_selection_mode_and_document() {
         );
         screen.get_by_label("Consolas").click();
         screen.run_steps(3);
+        settle_fonts(&mut screen);
         assert_eq!(
             screen.state().settings.editor_font,
             crate::cli::EditorFont::Consolas
@@ -431,7 +444,7 @@ fn receiver_font_change_relayouts_split_sources_and_keeps_search_marks_on_glyphs
 
     // Exercise the production receiver used by agent commands, not direct font installation.
     let recovery = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/test-state")
+        .join(".tmp/test-state")
         .join(format!("typography-ui-{}-{peer_id}", std::process::id()));
     screen.state_mut().recovery_session_path = recovery.join("session.json");
     let response = screen
@@ -444,6 +457,7 @@ fn receiver_font_change_relayouts_split_sources_and_keeps_search_marks_on_glyphs
         });
     assert!(response.ok, "{response:?}");
     screen.run_steps(4);
+    settle_fonts(&mut screen);
 
     assert_eq!(
         serde_json::to_value(screen.state().editor_session_layout()).unwrap(),

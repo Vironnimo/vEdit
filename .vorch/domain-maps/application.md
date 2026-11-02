@@ -43,6 +43,11 @@ example index project instance/generation/request, search Project/Document ident
 or document ID and its load/save state. A surviving project path alone does not
 prove a result belongs to a reopened project.
 
+Worker results are drained in bounded batches with a repaint for the remainder,
+so a burst of completions does not monopolize one frame. `BackgroundValue` in
+`app_workers.rs` coalesces settings/font discovery to one in-flight request and
+one keyed result; globally unique request IDs reject replacement-cache results.
+
 `worker` catches panics and reports them. Use `worker_or` for jobs whose pending
 state must be released on failure: its failure closure returns the matching
 error result, so the normal completion path clears loading, saving or other

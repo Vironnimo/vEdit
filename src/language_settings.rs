@@ -416,6 +416,59 @@ fn unwrap_windows_launcher(
     (program, args)
 }
 
+#[derive(Clone, PartialEq)]
+pub(super) struct LanguageConfigKey {
+    pub(super) config: LanguageServerSettings,
+    pub(super) python_interpreter: String,
+}
+
+impl VEditApp {
+    pub(super) fn request_language_config(
+        &mut self,
+        index: usize,
+        config: &LanguageServerSettings,
+    ) {
+        let project = &mut self.projects[index];
+        let key = LanguageConfigKey {
+            config: config.clone(),
+            python_interpreter: project.tasks.python_interpreter.clone(),
+        };
+        let Some(request) = project
+            .language_configs
+            .entry(config.language_id.clone())
+            .or_default()
+            .request(key.clone())
+        else {
+            return;
+        };
+        let instance = project.instance_id;
+        let root = project.root.clone();
+        let language = config.language_id.clone();
+        let failed_language = language.clone();
+        self.worker_or(
+            move || {
+                let interpreter = project_tasks::TaskConfiguration {
+                    python_interpreter: key.python_interpreter,
+                    ..Default::default()
+                }
+                .python_program(&root);
+                WorkerResult::LanguageConfig {
+                    instance,
+                    language,
+                    request,
+                    result: Ok(key.config.resolve(&root, &interpreter)),
+                }
+            },
+            move |error| WorkerResult::LanguageConfig {
+                instance,
+                language: failed_language,
+                request,
+                result: Err(error),
+            },
+        );
+    }
+}
+
 pub(super) struct LanguageSettingsDraft {
     config: LanguageServerSettings,
     extensions: String,
@@ -464,26 +517,44 @@ impl VEditApp {
         ui.label(RichText::new("LANGUAGES").size(11.0).color(ACCENT));
         ui.label("Diagnostics, completion and go to definition use an installed language server. Multiple languages can run in the same project.");
         let configurations = self.settings.language_servers.clone();
-        let project_root = self
-            .project()
-            .and_then(|project| project.folder_root().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let interpreter = self
-            .project()
-            .filter(|project| !project.is_other_files())
-            .map(|project| project.tasks.python_program(&project.root))
-            .unwrap_or_else(|| "python".into());
         let mut changed = Vec::new();
         let mut remove = None;
         for (index, config) in configurations.iter().enumerate() {
+            let command = if self.active_folder().is_some() {
+                self.request_language_config(self.active_project, config);
+                let project = &self.projects[self.active_project];
+                let key = LanguageConfigKey {
+                    config: config.clone(),
+                    python_interpreter: project.tasks.python_interpreter.clone(),
+                };
+                match project
+                    .language_configs
+                    .get(&config.language_id)
+                    .and_then(|cache| cache.get(&key))
+                {
+                    Some(Ok(effective)) => format!(
+                        "Current command: {} {}",
+                        effective.program,
+                        effective
+                            .args
+                            .iter()
+                            .map(|arg| format!("{arg:?}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    Some(Err(error)) => error.clone(),
+                    None => "Resolving current command…".into(),
+                }
+            } else {
+                "Open a project to resolve the current command.".into()
+            };
             let draft = self
                 .language_settings_drafts
                 .entry(config.language_id.clone())
                 .or_insert_with(|| LanguageSettingsDraft::new(config.clone()));
             egui::CollapsingHeader::new(format!("{} · {}", config.name, if config.enabled { "enabled" } else { "disabled" })).id_salt(("language_settings", &config.language_id)).show(ui, |ui| {
                 ui.label(config.install_hint());
-                let effective = config.resolve(&project_root, &interpreter);
-                ui.label(RichText::new(format!("Current command: {} {}", effective.program, effective.args.iter().map(|arg|format!("{arg:?}")).collect::<Vec<_>>().join(" "))).size(10.5).color(MUTED));
+                ui.label(RichText::new(command).size(10.5).color(MUTED));
                 ui.checkbox(&mut draft.config.enabled, "Enable language analysis");
                 ui.label("Display name"); ui.text_edit_singleline(&mut draft.config.name);
                 if !matches!(config.language_id.as_str(), "rust" | "python" | "dart") { ui.label("LSP language ID"); ui.text_edit_singleline(&mut draft.config.language_id); }
@@ -538,6 +609,7 @@ impl VEditApp {
                 for language in &changed {
                     project.clear_language_diagnostics(language);
                     project.languages.remove(language);
+                    project.language_configs.remove(language);
                 }
             }
             self.completions = None;

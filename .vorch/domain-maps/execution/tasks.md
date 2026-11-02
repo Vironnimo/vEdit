@@ -26,6 +26,13 @@ state follows the selected interpreter. Dart can inherit the selected language
 SDK, with an explicit project task override taking precedence. See
 `language-services/configuration.md` for the analysis side of interpreter changes.
 
+Tasks settings resolve interpreter, profile and default-command previews on a
+worker, keyed by configuration and active file. Results belong to the originating
+Project instance; opening Tasks refreshes discovery. Interpreter selection reuses
+the app's asynchronous native-dialog owner and cannot change a reopened Project.
+Opening an external terminal also prepares its environment and starts the process
+off the UI thread.
+
 ## Worker behavior and output
 
 `tasks::run_task` closes stdin, runs in the specified directory with environment

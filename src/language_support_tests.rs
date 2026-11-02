@@ -24,6 +24,57 @@ fn diagnostic() -> Diagnostic {
 }
 
 #[test]
+fn language_discovery_is_deferred_and_restarted_projects_reject_old_results() {
+    let mut app = rust_app();
+    let config = app
+        .settings
+        .language_servers
+        .iter()
+        .find(|config| config.language_id == "rust")
+        .unwrap()
+        .clone();
+    app.request_language_config(0, &config);
+    let key = language_settings::LanguageConfigKey {
+        config: config.clone(),
+        python_interpreter: String::new(),
+    };
+    assert!(app.projects[0].language_configs["rust"].get(&key).is_none());
+    assert!(app.projects[0].rust_language().server.is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.projects[0].language_configs["rust"].get(&key).is_none() {
+        app.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(
+        app.projects[0].language_configs["rust"]
+            .get(&key)
+            .unwrap()
+            .is_ok()
+    );
+    let old_instance = app.projects[0].instance_id;
+    app.projects[0] = Project::new(app.projects[0].root.clone());
+    let request = app.projects[0]
+        .language_configs
+        .entry("rust".into())
+        .or_default()
+        .request(key.clone())
+        .unwrap();
+    app.sender
+        .send(WorkerResult::LanguageConfig {
+            instance: old_instance,
+            language: "rust".into(),
+            request,
+            result: Ok(crate::lsp::ServerConfig::rust()),
+        })
+        .unwrap();
+    app.poll();
+    assert!(app.projects[0].language_configs["rust"].get(&key).is_none());
+    app.restart_project_language(0, "rust");
+    assert!(!app.projects[0].language_configs.contains_key("rust"));
+}
+
+#[test]
 fn problems_cache_tracks_publications_even_when_vector_storage_is_reused() {
     let mut app = rust_app();
     let (server, events) = LanguageServer::test_channel();

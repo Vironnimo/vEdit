@@ -259,6 +259,7 @@ pub struct VEditApp {
     agent_marks: crate::agent_marks::AgentMarks,
     agent_marks_ui: agent_marks_ui::AgentMarksUi,
     applied_editor_font: crate::cli::EditorFont,
+    editor_fonts: BackgroundValue<crate::cli::EditorFont, egui::FontDefinitions>,
     save_as: Option<u64>,
     save_queue: std::collections::VecDeque<u64>,
     /// Save As destinations confirmed while that document was still saving.
@@ -368,6 +369,8 @@ impl VEditApp {
         app.settings.normalize_appearance();
         let shortcut_warnings = keybindings::restore_bindings(&mut app.settings.keybindings);
         app.ctx.set_zoom_factor(app.settings.ui_scale);
+        app.ctx.set_fonts(prepared.fonts.1);
+        app.applied_editor_font = prepared.fonts.0;
         app.apply_editor_font();
         app.settings.leader_key = crate::cli::normalize_leader_key(&app.settings.leader_key)
             .unwrap_or_else(|_| " ".into());
@@ -419,6 +422,7 @@ impl VEditApp {
             external_open_revision: 0,
             external_open_save_pending: false,
             applied_editor_font: crate::cli::EditorFont::default(),
+            editor_fonts: BackgroundValue::default(),
             bookmarks: crate::bookmarks::BookmarkStore::default(),
             bookmark_lines: HashMap::new(),
             pending_bookmark_jump: None,
@@ -780,8 +784,12 @@ impl eframe::App for VEditApp {
         }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.flush_recovery();
         eframe::set_value(storage, eframe::APP_KEY, &self.session());
+    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Periodic recovery already uses workers. Only shutdown must wait for
+        // the latest snapshots to become durable before the process exits.
+        self.flush_recovery();
     }
 }
 

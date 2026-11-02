@@ -10,6 +10,7 @@ pub(super) struct StartupData {
     pub(super) manifest: Option<Session>,
     pub(super) inherited_settings: Option<Settings>,
     pub(super) external_open: bool,
+    pub(super) fonts: (crate::cli::EditorFont, egui::FontDefinitions),
 }
 
 impl Startup {
@@ -71,12 +72,13 @@ impl StartupData {
             .or(inherited_settings.as_ref())
             .map(|settings| settings.editor_font)
             .unwrap_or_default();
-        // Warm the shared font-file cache without changing the live egui context.
-        let _ = crate::typography::fonts(font);
+        // Prepare definitions and warm font files without locking the live context.
+        let fonts = crate::typography::fonts(font);
         Self {
             manifest,
             inherited_settings,
             external_open: crate::profile::read_open_mode(parent.unwrap_or(directory)),
+            fonts: (font, fonts),
         }
     }
 }

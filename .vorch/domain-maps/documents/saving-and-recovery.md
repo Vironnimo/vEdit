@@ -81,6 +81,10 @@ An ordinary save error delays autosave retries until five seconds without an edi
 or failed save. Retries use the normal fingerprint guard; disk conflicts, agent
 drafts, pending Save As and Git checkout guards still suspend autosave.
 
+Periodic eframe `App::save` stores session metadata only; it must not synchronously
+flush document recovery. Normal frame-driven recovery uses workers. `on_exit`
+performs the final durable recovery flush, including edits before the debounce.
+
 On restore, a fresh disk read is an observation. Dirty recovered text receives
 its recorded baseline; differing disk content becomes a conflict, and missing
 baseline/disk information keeps the original protected. Unreadable recovery

@@ -20,6 +20,7 @@ impl VEditApp {
     }
 
     pub(super) fn open_settings_section(&mut self, section: &str) {
+        self.refresh_settings_preview(section);
         self.interface_zoom_draft = None;
         if SECTIONS.contains(&section) {
             self.ctx.data_mut(|data| {
@@ -27,6 +28,16 @@ impl VEditApp {
             });
         }
         self.settings_open = true;
+    }
+
+    fn refresh_settings_preview(&mut self, section: &str) {
+        if let Some(project) = self.projects.get_mut(self.active_project) {
+            match section {
+                "Languages" => project.language_configs.clear(),
+                "Tasks" => project.task_preview = BackgroundValue::default(),
+                _ => {}
+            }
+        }
     }
 
     pub(super) fn settings_navigation_ui(&mut self, ui: &mut egui::Ui) {
@@ -38,6 +49,7 @@ impl VEditApp {
             }
         });
         if selected != previous {
+            self.refresh_settings_preview(&selected);
             self.interface_zoom_draft = None;
             if previous == "Tasks" {
                 self.apply_pending_project_interpreter();

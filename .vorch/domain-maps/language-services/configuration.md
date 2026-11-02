@@ -11,6 +11,13 @@ separate process arguments. On Windows, known SDK/npm launchers are unwrapped by
 `unwrap_windows_launcher`; the LSP process layer rejects unresolved `.cmd` and
 `.bat` servers rather than running their paths as shell source.
 
+Executable/interpreter discovery runs on app workers before a wanted server
+starts. Per-Project caches key the applied language configuration and interpreter
+selection; completion checks the Project instance and cache request. Settings
+reuse these results for command previews instead of scanning PATH every frame.
+Opening Languages or explicitly restarting analysis invalidates the corresponding
+cache so newly installed executables can be discovered.
+
 Python discovery tries installed basedpyright, pyright and pylsp servers before
 the bundled basedpyright JavaScript/Node pair. The bundled search checks the
 application's `tools` directory and the source checkout's `tools` directory.

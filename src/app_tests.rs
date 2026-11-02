@@ -485,6 +485,41 @@ fn native_folder_cancellation_and_stale_results_preserve_the_document() {
 }
 
 #[test]
+fn interpreter_dialog_applies_to_its_project_and_ignores_a_reopened_project() {
+    let fixture = Fixture::new("interpreter-dialog");
+    let interpreter = fixture.write("python.exe", "");
+    let mut app = fixture.app();
+    let instance = app.projects[0].instance_id;
+    app.start_native_dialog(DialogPurpose::Interpreter(instance), None, None);
+    let request = app.picker.unwrap();
+    app.projects.push(Project::new(fixture.0.join("second")));
+    app.switch_project(1);
+    app.finish_native_dialog(
+        request,
+        Ok(Some(DialogSelection {
+            paths: vec![interpreter.clone()],
+            overwrite: None,
+        })),
+    );
+    assert_eq!(
+        app.projects[0].tasks.python_interpreter,
+        interpreter.to_string_lossy()
+    );
+    assert!(app.projects[1].tasks.python_interpreter.is_empty());
+    app.start_native_dialog(DialogPurpose::Interpreter(instance), None, None);
+    let request = app.picker.unwrap();
+    app.projects[0] = Project::new(fixture.0.clone());
+    app.finish_native_dialog(
+        request,
+        Ok(Some(DialogSelection {
+            paths: vec![interpreter],
+            overwrite: None,
+        })),
+    );
+    assert!(app.projects[0].tasks.python_interpreter.is_empty());
+}
+
+#[test]
 fn native_save_as_overwrites_only_the_confirmed_fingerprint() {
     let fixture = Fixture::new("native-save-confirmed");
     let original = fixture.write("original.txt", "original");
@@ -717,7 +752,27 @@ fn shutdown_recovery_keeps_latest_named_and_untitled_edits_before_debounce() {
     app.tab_mut().unwrap().recovery_path = fixture.0.join("recovery/untitled.txt");
     change_tab(&mut app, "latest untitled edit");
 
-    app.flush_recovery();
+    let mut storage = std::collections::HashMap::<String, String>::new();
+    impl eframe::Storage for TestStorage<'_> {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+    struct TestStorage<'a>(&'a mut std::collections::HashMap<String, String>);
+    eframe::App::save(&mut app, &mut TestStorage(&mut storage));
+    assert!(storage.contains_key(eframe::APP_KEY));
+    assert!(
+        !app.recovery_session_path.exists(),
+        "periodic eframe saves must not flush recovery on the UI thread"
+    );
+    eframe::App::on_exit(&mut app, None);
 
     assert_eq!(fs::read_to_string(&path).unwrap(), "saved version");
     let saved: Session =

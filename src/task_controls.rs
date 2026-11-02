@@ -41,14 +41,13 @@ impl VEditApp {
         let Some(root) = self.active_folder().map(Path::to_path_buf) else {
             return;
         };
-        let environment = self
-            .project_task_configuration()
-            .unwrap()
-            .environment(&root, self.tab().and_then(|tab| tab.path.as_deref()));
-        match tasks::open_terminal(&root, environment) {
-            Ok(()) => self.status("Terminal opened in this project", false),
-            Err(error) => self.status(error, true),
-        }
+        let config = self.project_task_configuration().unwrap();
+        let file = self.tab().and_then(|tab| tab.path.clone());
+        self.worker(move || {
+            let environment = config.environment(&root, file.as_deref());
+            let result = tasks::open_terminal(&root, environment);
+            WorkerResult::TerminalOpened { root, result }
+        });
     }
     pub(super) fn output_ui(&mut self, ui: &mut egui::Ui) {
         if !self.output_visible {

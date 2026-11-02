@@ -78,6 +78,72 @@ pub(super) enum ProjectTaskAction {
     RunFile,
 }
 
+#[derive(Clone, PartialEq)]
+pub(super) struct TaskPreviewKey {
+    config: TaskConfiguration,
+    file: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+pub(super) struct TaskPreview {
+    profile: TaskProfile,
+    python: String,
+    commands: [String; 4],
+}
+
+impl VEditApp {
+    fn request_task_preview(&mut self) -> Option<Result<TaskPreview, String>> {
+        let file = self.tab().and_then(|tab| tab.path.clone());
+        let config = self.project_task_configuration()?;
+        let config = TaskConfiguration {
+            profile: config.profile,
+            python_interpreter: config.python_interpreter,
+            dart_executable: config.dart_executable,
+            ..Default::default()
+        };
+        let key = TaskPreviewKey { config, file };
+        let project = &mut self.projects[self.active_project];
+        if let Some(result) = project.task_preview.get(&key) {
+            return Some(result.clone());
+        }
+        if let Some(request) = project.task_preview.request(key.clone()) {
+            let root = project.root.clone();
+            let instance = project.instance_id;
+            self.worker_or(
+                move || {
+                    let preview = TaskPreview {
+                        profile: key.config.effective_profile(&root, key.file.as_deref()),
+                        python: key.config.python_program(&root),
+                        commands: [
+                            ProjectTaskAction::RunFile,
+                            ProjectTaskAction::Check,
+                            ProjectTaskAction::Test,
+                            ProjectTaskAction::Build,
+                        ]
+                        .map(|action| {
+                            key.config
+                                .resolve(&root, key.file.as_deref(), action)
+                                .map(|task| task.display())
+                                .unwrap_or_else(|_| "Enter a command".into())
+                        }),
+                    };
+                    WorkerResult::TaskPreview {
+                        instance,
+                        request,
+                        result: Ok(preview),
+                    }
+                },
+                move |error| WorkerResult::TaskPreview {
+                    instance,
+                    request,
+                    result: Err(error),
+                },
+            );
+        }
+        None
+    }
+}
+
 /// One project's build/test/command run. Each project runs at most one
 /// task; the Output panel shows the active project's.
 pub(super) struct ProjectRun {
@@ -561,9 +627,16 @@ impl VEditApp {
             heading.scroll_to_me(Some(Align::Min));
             self.project_tasks_settings_requested = false;
         }
-        let active_path = self.tab().and_then(|tab| tab.path.clone());
+        let preview = self.request_task_preview();
+        let preview_error = preview
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .cloned();
+        let preview = preview.and_then(Result::ok);
         let inherited_dart = self.inherited_dart_executable();
         let active_project = self.active_project;
+        let mut choose_interpreter = None;
+        let mut refresh_preview = false;
         let Some(project) = self.projects.get_mut(active_project) else {
             ui.label("Open a project to configure its commands and Python interpreter.");
             return;
@@ -574,6 +647,9 @@ impl VEditApp {
                 .color(MUTED),
         );
         let previous = project.tasks.clone();
+        if let Some(error) = preview_error {
+            ui.colored_label(RED, error);
+        }
         egui::ComboBox::from_label("Task profile")
             .selected_text(project.tasks.profile.label())
             .show_ui(ui, |ui| {
@@ -587,13 +663,15 @@ impl VEditApp {
                     ui.selectable_value(&mut project.tasks.profile, profile, profile.label());
                 }
             });
-        let profile = project
-            .tasks
-            .effective_profile(&project.root, active_path.as_deref());
         ui.label(
-            RichText::new(format!("Current task language: {}", profile.label()))
-                .size(11.0)
-                .color(MUTED),
+            RichText::new(
+                preview
+                    .as_ref()
+                    .map(|preview| format!("Current task language: {}", preview.profile.label()))
+                    .unwrap_or_else(|| "Resolving task language…".into()),
+            )
+            .size(11.0)
+            .color(MUTED),
         );
         ui.label("Python interpreter (running and analysis)");
         ui.label(
@@ -608,24 +686,22 @@ impl VEditApp {
         );
         let mut restart = interpreter.lost_focus();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Choose interpreter…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_directory(&project.root)
-                    .pick_file()
-            {
-                project.tasks.python_interpreter = path.to_string_lossy().into_owned();
-                restart = true;
+            if ui.button("Choose interpreter…").clicked() {
+                choose_interpreter = Some((project.instance_id, project.root.clone()));
             }
             if ui.button("Use automatic interpreter").clicked() {
                 project.tasks.python_interpreter.clear();
                 restart = true;
+                refresh_preview = true;
             }
         });
         ui.label(
-            RichText::new(format!(
-                "Using: {}",
-                project.tasks.python_program(&project.root)
-            ))
+            RichText::new(
+                preview
+                    .as_ref()
+                    .map(|preview| format!("Using: {}", preview.python))
+                    .unwrap_or_else(|| "Resolving interpreter…".into()),
+            )
             .size(10.5)
             .color(MUTED),
         );
@@ -641,25 +717,19 @@ impl VEditApp {
         );
         ui.label(RichText::new("Leave empty to use the Dart SDK selected in Languages, then PATH. Enter an executable path without quotes or arguments.").size(10.5).color(MUTED));
         ui.label(RichText::new("Empty commands use the current language's defaults. Overrides apply to this project, including other languages in it.").size(11.0).color(MUTED));
-        for (action, label) in [
+        for (preview_index, (action, label)) in [
             (ProjectTaskAction::RunFile, "Run active file"),
             (ProjectTaskAction::Check, "Check project"),
             (ProjectTaskAction::Test, "Run tests"),
             (ProjectTaskAction::Build, "Build project"),
-        ] {
-            let default = TaskConfiguration {
-                profile: project.tasks.profile,
-                python_interpreter: project.tasks.python_interpreter.clone(),
-                dart_executable: if project.tasks.dart_executable.trim().is_empty() {
-                    inherited_dart.clone()
-                } else {
-                    project.tasks.dart_executable.clone()
-                },
-                ..Default::default()
-            }
-            .resolve(&project.root, active_path.as_deref(), action)
-            .map(|task| task.display())
-            .unwrap_or_else(|_| "Enter a command".into());
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let default = preview
+                .as_ref()
+                .map(|preview| preview.commands[preview_index].as_str())
+                .unwrap_or("Resolving command…");
             let value = match action {
                 ProjectTaskAction::RunFile => &mut project.tasks.run_file,
                 ProjectTaskAction::Check => &mut project.tasks.check,
@@ -689,11 +759,17 @@ impl VEditApp {
             };
         }
         self.session_dirty |= previous != project.tasks;
+        if refresh_preview {
+            project.task_preview = BackgroundValue::default();
+        }
         if previous.python_interpreter != project.tasks.python_interpreter {
             self.project_tasks_interpreter_pending = Some(active_project);
         }
         if restart || !interpreter.has_focus() {
             self.apply_pending_project_interpreter();
+        }
+        if let Some((instance, root)) = choose_interpreter {
+            self.start_native_dialog(DialogPurpose::Interpreter(instance), Some(root), None);
         }
         ui.add_space(12.0);
     }

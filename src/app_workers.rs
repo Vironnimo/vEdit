@@ -1,7 +1,72 @@
 //! Background execution and result routing in the application frame.
 use super::*;
 
+/// One in-flight computation and one cached value. Keys describe the inputs;
+/// request IDs prevent a completion from reaching a replacement cache.
+pub(super) struct BackgroundValue<K, V> {
+    pending: Option<(u64, K)>,
+    ready: Option<(K, Result<V, String>)>,
+}
+
+impl<K, V> Default for BackgroundValue<K, V> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            ready: None,
+        }
+    }
+}
+
+impl<K: PartialEq, V> BackgroundValue<K, V> {
+    pub(super) fn get(&self, key: &K) -> Option<&Result<V, String>> {
+        self.ready
+            .as_ref()
+            .filter(|(ready, _)| ready == key)
+            .map(|(_, value)| value)
+    }
+
+    pub(super) fn request(&mut self, key: K) -> Option<u64> {
+        if self.pending.is_some() || self.get(&key).is_some() {
+            return None;
+        }
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let request = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        self.pending = Some((request, key));
+        Some(request)
+    }
+
+    pub(super) fn complete(&mut self, request: u64, result: Result<V, String>) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == request)
+        {
+            let (_, key) = self.pending.take().unwrap();
+            self.ready = Some((key, result));
+        }
+    }
+}
+
 pub(super) enum WorkerResult {
+    EditorFonts {
+        request: u64,
+        result: Result<egui::FontDefinitions, String>,
+    },
+    LanguageConfig {
+        instance: u64,
+        language: String,
+        request: u64,
+        result: Result<crate::lsp::ServerConfig, String>,
+    },
+    TaskPreview {
+        instance: u64,
+        request: u64,
+        result: Result<project_tasks::TaskPreview, String>,
+    },
+    TerminalOpened {
+        root: PathBuf,
+        result: Result<(), String>,
+    },
     ControlSearch {
         root: PathBuf,
         owner: project_search_ui::SearchOwner,
@@ -215,8 +280,49 @@ impl VEditApp {
     }
     pub(super) fn poll(&mut self) {
         self.poll_launches();
-        while let Ok(result) = self.receiver.try_recv() {
+        // A burst of finished jobs must leave room for input and rendering.
+        // The next frame continues draining; no result is discarded.
+        for processed in 0..32 {
+            let Ok(result) = self.receiver.try_recv() else {
+                break;
+            };
             match result {
+                WorkerResult::EditorFonts { request, result } => {
+                    self.editor_fonts.complete(request, result)
+                }
+                WorkerResult::LanguageConfig {
+                    instance,
+                    language,
+                    request,
+                    result,
+                } => {
+                    if let Some(cache) = self
+                        .projects
+                        .iter_mut()
+                        .find(|p| p.instance_id == instance)
+                        .and_then(|p| p.language_configs.get_mut(&language))
+                    {
+                        cache.complete(request, result);
+                    }
+                }
+                WorkerResult::TaskPreview {
+                    instance,
+                    request,
+                    result,
+                } => {
+                    if let Some(project) =
+                        self.projects.iter_mut().find(|p| p.instance_id == instance)
+                    {
+                        project.task_preview.complete(request, result);
+                    }
+                }
+                WorkerResult::TerminalOpened { root, result } => match result {
+                    Ok(()) => self.status(
+                        format!("Terminal opened in {}", crate::paths::display(&root)),
+                        false,
+                    ),
+                    Err(error) => self.status(error, true),
+                },
                 WorkerResult::ControlSearch {
                     root,
                     owner,
@@ -382,6 +488,9 @@ impl VEditApp {
                     hunks,
                 } => self.apply_git_gutter_diff(document, request, revision, key, base, hunks),
             }
+            if processed == 31 {
+                self.ctx.request_repaint();
+            }
         }
         self.resume_deferred_save_as();
         if self.save_as.is_none() && self.picker.is_none() {
@@ -412,5 +521,52 @@ impl VEditApp {
         {
             self.ctx.request_repaint_after(Duration::from_millis(50));
         }
+    }
+}
+
+#[cfg(test)]
+mod background_value_tests {
+    use super::{BackgroundValue, VEditApp, WorkerResult, egui};
+
+    #[test]
+    fn coalesces_requests_and_rejects_results_from_a_replaced_cache() {
+        let mut cache = BackgroundValue::<u64, String>::default();
+        let first = cache.request(1).unwrap();
+        assert!(cache.request(1).is_none());
+        assert!(cache.request(2).is_none());
+        cache.complete(first, Ok("old settings".into()));
+        assert!(cache.get(&2).is_none());
+        let second = cache.request(2).unwrap();
+        cache.complete(first, Ok("late duplicate".into()));
+        assert!(cache.get(&2).is_none());
+        cache.complete(second, Err("discovery failed".into()));
+        assert!(cache.get(&2).unwrap().is_err());
+        assert!(cache.request(2).is_none(), "failures wait for invalidation");
+        cache = BackgroundValue::default();
+        let replacement = cache.request(2).unwrap();
+        cache.complete(second, Ok("obsolete result".into()));
+        assert!(cache.get(&2).is_none());
+        cache.complete(replacement, Ok("new settings".into()));
+        assert_eq!(cache.get(&2).unwrap().as_deref(), Ok("new settings"));
+    }
+
+    #[test]
+    fn a_result_burst_is_drained_across_frames_without_losing_results() {
+        let mut app = VEditApp::empty(egui::Context::default());
+        for index in 0..100 {
+            app.sender
+                .send(WorkerResult::Panicked(index.to_string()))
+                .unwrap();
+        }
+        app.poll();
+        assert_ne!(
+            app.status.as_ref().unwrap().0,
+            "99",
+            "one frame must leave room for input after a burst"
+        );
+        for _ in 0..100 {
+            app.poll();
+        }
+        assert_eq!(app.status.as_ref().unwrap().0, "99");
     }
 }

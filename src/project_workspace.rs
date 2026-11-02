@@ -69,6 +69,12 @@ pub(super) struct Project {
     pub(super) run: project_tasks::ProjectRun,
     pub(super) root: PathBuf,
     pub(super) tasks: project_tasks::TaskConfiguration,
+    pub(super) task_preview:
+        BackgroundValue<project_tasks::TaskPreviewKey, project_tasks::TaskPreview>,
+    pub(super) language_configs: HashMap<
+        String,
+        BackgroundValue<language_settings::LanguageConfigKey, crate::lsp::ServerConfig>,
+    >,
     pub(super) tabs: Vec<EditorTab>,
     pub(super) closed_tabs: Vec<reopen::ClosedTab>,
     pub(super) active_tab: usize,
@@ -143,6 +149,8 @@ impl Project {
             run: project_tasks::ProjectRun::default(),
             root,
             tasks: project_tasks::TaskConfiguration::default(),
+            task_preview: BackgroundValue::default(),
+            language_configs: HashMap::new(),
             tabs: Vec::new(),
             closed_tabs: Vec::new(),
             active_tab: 0,

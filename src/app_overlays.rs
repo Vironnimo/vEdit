@@ -351,11 +351,25 @@ impl VEditApp {
         self.ctx.request_repaint();
     }
     pub(super) fn apply_editor_font(&mut self) {
-        if self.applied_editor_font != self.settings.editor_font {
-            self.ctx
-                .set_fonts(crate::typography::fonts(self.settings.editor_font));
-            self.applied_editor_font = self.settings.editor_font;
+        let choice = self.settings.editor_font;
+        if self.applied_editor_font == choice {
+            return;
+        }
+        if let Some(Ok(fonts)) = self.editor_fonts.get(&choice) {
+            self.ctx.set_fonts(fonts.clone());
+            self.applied_editor_font = choice;
             self.ctx.request_repaint();
+        } else if let Some(request) = self.editor_fonts.request(choice) {
+            self.worker_or(
+                move || WorkerResult::EditorFonts {
+                    request,
+                    result: Ok(crate::typography::fonts(choice)),
+                },
+                move |error| WorkerResult::EditorFonts {
+                    request,
+                    result: Err(error),
+                },
+            );
         }
     }
 }

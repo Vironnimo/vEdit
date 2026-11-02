@@ -313,6 +313,44 @@ fn project_tasks_persist_and_legacy_projects_get_defaults() {
 }
 
 #[test]
+fn task_previews_resolve_off_thread_and_follow_the_active_document() {
+    let fixture = Fixture::new();
+    fixture.write("Cargo.toml");
+    let mut app = VEditApp::empty(egui::Context::default());
+    let mut project = Project::new(fixture.0.clone());
+    project.tabs.push(EditorTab::new(
+        Some(fixture.write("main.py")),
+        "main.py".into(),
+    ));
+    app.projects.push(project);
+    assert!(app.request_task_preview().is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let preview = loop {
+        app.poll();
+        if let Some(preview) = app.request_task_preview() {
+            break preview.unwrap();
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    };
+    assert_eq!(preview.profile, TaskProfile::Python);
+    app.projects[0].tabs[0].path = Some(fixture.write("main.rs"));
+    assert!(
+        app.request_task_preview().is_none(),
+        "a Python preview must not describe the Rust document"
+    );
+    let preview = loop {
+        app.poll();
+        if let Some(preview) = app.request_task_preview() {
+            break preview.unwrap();
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    };
+    assert_eq!(preview.profile, TaskProfile::Rust);
+}
+
+#[test]
 fn tasks_refuse_dirty_or_still_saving_buffers_without_starting_a_process() {
     let fixture = Fixture::new();
     let file = fixture.write("main.py");
