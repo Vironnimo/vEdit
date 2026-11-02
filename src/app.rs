@@ -195,6 +195,7 @@ enum SidebarView {
     SourceControl,
     #[serde(alias = "Review")]
     Review,
+    Messages,
 }
 
 pub struct VEditApp {
@@ -380,6 +381,7 @@ impl VEditApp {
         app.bookmarks = crate::bookmarks::BookmarkStore::from_items(session.bookmarks);
         app.agent_marks = session.agent_marks;
         app.notifications = session.notifications;
+        let notifications_pruned = app.notifications.normalize();
         app.find_regex = session.find_regex;
         app.restore_recent(session.recent);
         if let Some(autosave) = session.autosave {
@@ -390,7 +392,7 @@ impl VEditApp {
         for index in 0..app.projects.len() {
             app.index_project(index);
         }
-        app.session_dirty = !shortcut_warnings.is_empty();
+        app.session_dirty = notifications_pruned || !shortcut_warnings.is_empty();
         // Folders first, so mixed shell arguments use the same ownership rule as drops.
         let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| path.is_dir());
         for path in folders.into_iter().chain(files) {
@@ -715,7 +717,7 @@ impl VEditApp {
         self.finish_region_focus();
         self.overlays();
         self.agent_marks_dialog();
-        self.notifications_dialog();
+        self.notifications_toast();
         self.status_details_ui();
         self.sync_agent_marks();
         self.navigation_ui();

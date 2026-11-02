@@ -834,32 +834,22 @@ fn project_cycle_shortcuts_wrap_without_reloading_or_losing_selection() {
 }
 
 #[test]
-fn notification_inbox_owns_global_and_region_shortcuts() {
+fn messages_view_leaves_project_cycling_available() {
     let mut app = fixture(2);
     app.open_notifications();
     let mut screen = harness(app);
-    let focus = screen.ctx.memory(|memory| memory.focused());
-    for (key, modifiers) in [
-        (Key::F, egui::Modifiers::CTRL),
-        (Key::W, egui::Modifiers::CTRL),
-        (Key::O, egui::Modifiers::CTRL.plus(egui::Modifiers::ALT)),
-        (Key::F6, egui::Modifiers::NONE),
-        (
-            Key::PageDown,
-            egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
-        ),
-    ] {
-        shortcut(&mut screen, key, modifiers);
-        assert!(screen.state().notifications.is_open());
-        assert!(!screen.state().find_visible, "{key:?}");
-        assert_eq!(screen.state().projects[0].tabs.len(), 1, "{key:?}");
-        assert_eq!(screen.state().active_project, 0, "{key:?}");
-        assert_eq!(
-            screen.ctx.memory(|memory| memory.focused()),
-            focus,
-            "{key:?}"
-        );
-    }
+    assert!(screen.state().sidebar_view_visible(SidebarView::Messages));
+    shortcut(
+        &mut screen,
+        Key::PageDown,
+        egui::Modifiers::CTRL.plus(egui::Modifiers::ALT),
+    );
+    assert_eq!(
+        screen.state().active_project,
+        1,
+        "seeing messages never blocks editor shortcuts"
+    );
+    assert!(screen.state().sidebar_view_visible(SidebarView::Messages));
 }
 
 #[test]

@@ -50,7 +50,6 @@ impl VEditApp {
             || self.picker.is_some()
             || self.settings_open
             || self.status_details.is_some()
-            || self.notifications.is_open()
             || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.context_file_dialog.is_some()
@@ -108,6 +107,23 @@ impl VEditApp {
                         }
                         ui.add_space(6.0);
                     }
+                    let messages = icon_button(
+                        ui,
+                        Icon::Messages,
+                        self.sidebar_view_visible(SidebarView::Messages),
+                        "Messages from agents",
+                    );
+                    if let Some(level) = self.notifications.unread_severity() {
+                        ui.painter().circle_filled(
+                            messages.rect.right_top() + Vec2::new(-6.0, 6.0),
+                            3.2,
+                            notifications::level_color(level),
+                        );
+                    }
+                    if messages.clicked() {
+                        self.toggle_sidebar_view(SidebarView::Messages);
+                    }
+                    ui.add_space(6.0);
                 }
                 if self.review.is_some() {
                     if icon_button(
@@ -484,6 +500,7 @@ pub(super) fn icon_button(
         Icon::Console => "Output",
         Icon::Settings => "Settings",
         Icon::Review => "Agent review",
+        Icon::Messages => "Messages",
     };
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
@@ -585,6 +602,21 @@ pub(super) fn icon_button(
                 line(Vec2::new(3.0, y), Vec2::new(5.0, y));
             }
         }
+        Icon::Messages => {
+            for (a, b) in [
+                (Vec2::new(-6.0, 4.0), Vec2::new(-4.5, 1.5)),
+                (Vec2::new(-4.5, 1.5), Vec2::new(-4.5, -2.5)),
+                (Vec2::new(-4.5, -2.5), Vec2::new(-2.5, -6.0)),
+                (Vec2::new(-2.5, -6.0), Vec2::new(2.5, -6.0)),
+                (Vec2::new(2.5, -6.0), Vec2::new(4.5, -2.5)),
+                (Vec2::new(4.5, -2.5), Vec2::new(4.5, 1.5)),
+                (Vec2::new(4.5, 1.5), Vec2::new(6.0, 4.0)),
+                (Vec2::new(6.0, 4.0), Vec2::new(-6.0, 4.0)),
+            ] {
+                line(a, b);
+            }
+            painter.circle_filled(c + Vec2::new(0.0, 7.0), 1.4, color);
+        }
     }
     response
         .on_hover_text(hint)
@@ -604,4 +636,5 @@ pub(super) enum Icon {
     Console,
     Settings,
     Review,
+    Messages,
 }

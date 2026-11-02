@@ -359,7 +359,6 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
     // Restore into a fresh application just as startup does.
     app = folders.app(&["A"]);
     app.notifications = saved.notifications;
-    assert!(!app.notifications.is_open());
     app.run_notification(first.result["id"].as_u64().unwrap());
     assert_eq!(
         app.notifications.unread(),
@@ -381,7 +380,7 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
         Some(folders.path("B/one.md").as_path())
     );
     assert_eq!(tab.selection.start, 4, "line 2 of the file");
-    // Opening one action reads only its entry; the overview reads nothing.
+    // Opening one action reads only its entry; seeing the view reads the rest.
     assert_eq!(app.notifications.unread(), 1);
     assert!(
         app.session_dirty,
@@ -389,32 +388,44 @@ fn notifications_join_the_callers_project_inbox_without_changing_anything() {
     );
     app.open_notifications();
     let ctx = app.ctx.clone();
-    let mut output = ctx.run_ui(egui::RawInput::default(), |_| app.notifications_dialog());
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.messages_panel(ui));
     output.textures_delta.clear();
-    assert_eq!(app.notifications.unread(), 1);
+    assert_eq!(
+        app.notifications.unread(),
+        0,
+        "a message visible in the Messages view counts as read"
+    );
     let arrived_while_open = app.control_request(notify("Another result"));
-    assert_eq!(arrived_while_open.result["unread"], 2);
+    assert_eq!(arrived_while_open.result["unread"], 1);
+    assert_eq!(
+        app.notifications.toast_count(),
+        0,
+        "a visible Messages view needs no arrival card"
+    );
+    let ctx = app.ctx.clone();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.messages_panel(ui));
+    output.textures_delta.clear();
     app.flush_recovery();
     let saved: Session =
         serde_json::from_slice(&fs::read(&app.recovery_session_path).unwrap()).unwrap();
     let mut restored = folders.app(&["B", "A"]);
     restored.notifications = saved.notifications;
-    assert!(
-        !restored.notifications.is_open(),
-        "the open dialog is not restored"
-    );
+    restored.notifications.normalize();
     let status = restored.control_request(Request::Status {});
     assert_eq!(status.result["notifications"]["total"], 3);
-    assert_eq!(status.result["notifications"]["unread"], 2);
-    assert_eq!(status.result["workspaces"][0]["unread_notifications"], 2);
+    assert_eq!(status.result["notifications"]["unread"], 0);
+    assert_eq!(status.result["workspaces"][0]["unread_notifications"], 0);
     assert_eq!(status.result["workspaces"][1]["unread_notifications"], 0);
+    // Everything above was seen, so an identical message starts a new entry and
+    // an immediate repeat of that entry counts it.
     let repeat = restored.control_request(notify("All tests pass"));
-    assert_eq!(repeat.result["id"], first.result["id"]);
-    assert_eq!(repeat.result["repeat_count"], 3);
+    assert_ne!(repeat.result["id"], first.result["id"]);
+    assert_eq!(repeat.result["repeat_count"], 1);
+    let again = restored.control_request(notify("All tests pass"));
+    assert_eq!(again.result["id"], repeat.result["id"]);
+    assert_eq!(again.result["repeat_count"], 2);
     let next = restored.control_request(notify("After restart"));
-    assert!(
-        next.result["id"].as_u64().unwrap() > arrived_while_open.result["id"].as_u64().unwrap()
-    );
+    assert!(next.result["id"].as_u64().unwrap() > repeat.result["id"].as_u64().unwrap());
     let legacy: Session = serde_json::from_str("{}").unwrap();
     assert!(
         legacy.notifications.items_empty(),

@@ -4,11 +4,12 @@ use super::*;
 const MIN_SIDEBAR: f32 = 200.0;
 const MAX_SIDEBAR: f32 = 520.0;
 const MIN_EDITOR: f32 = 320.0;
-const VIEWS: [SidebarView; 4] = [
+const VIEWS: [SidebarView; 5] = [
     SidebarView::Explorer,
     SidebarView::Search,
     SidebarView::SourceControl,
     SidebarView::Review,
+    SidebarView::Messages,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,11 +57,11 @@ pub(super) struct SidebarLayout {
     right_width: f32,
     right_views: Vec<SidebarView>,
     open_views: Vec<SidebarView>,
-    view_rects: [Option<egui::Rect>; 4],
+    view_rects: [Option<egui::Rect>; 5],
     collapsed: [bool; 2],
     compact_preferred: Side,
     rects: [Option<egui::Rect>; 2],
-    last_widgets: [Option<egui::Id>; 4],
+    last_widgets: [Option<egui::Id>; 5],
     available_width: Option<f32>,
 }
 
@@ -74,11 +75,11 @@ impl Default for SidebarLayout {
             right_width: defaults.right_width,
             right_views: defaults.right_views,
             open_views: vec![SidebarView::Explorer],
-            view_rects: [None; 4],
+            view_rects: [None; 5],
             collapsed: [false; 2],
             compact_preferred: Side::Left,
             rects: [None; 2],
-            last_widgets: [None; 4],
+            last_widgets: [None; 5],
             available_width: None,
         }
     }
@@ -95,6 +96,7 @@ impl SidebarView {
             Self::Search => "Search",
             Self::SourceControl => "Source control",
             Self::Review => "Review",
+            Self::Messages => "Messages",
         }
     }
 }
@@ -195,11 +197,11 @@ impl VEditApp {
             right_width: valid_width(saved.right_width, 310.0),
             right_views: saved.right_views,
             open_views,
-            view_rects: [None; 4],
+            view_rects: [None; 5],
             collapsed: [false; 2],
             compact_preferred: Side::Left,
             rects: [None; 2],
-            last_widgets: [None; 4],
+            last_widgets: [None; 5],
             available_width: None,
         };
         self.reconcile_sidebar_selection(Side::Left);
@@ -220,14 +222,18 @@ impl VEditApp {
 
     fn sidebar_views(&self, side: Side) -> Vec<SidebarView> {
         if self.project().is_some_and(Project::is_other_files) {
-            return [SidebarView::Explorer, SidebarView::Review]
-                .into_iter()
-                .filter(|view| {
-                    self.sidebar_side(*view) == side
-                        && (*view == SidebarView::Explorer
-                            || self.sidebar_layout.open_views.contains(view))
-                })
-                .collect();
+            return [
+                SidebarView::Explorer,
+                SidebarView::Review,
+                SidebarView::Messages,
+            ]
+            .into_iter()
+            .filter(|view| {
+                self.sidebar_side(*view) == side
+                    && (*view == SidebarView::Explorer
+                        || self.sidebar_layout.open_views.contains(view))
+            })
+            .collect();
         }
         self.sidebar_layout
             .open_views
@@ -269,7 +275,7 @@ impl VEditApp {
         }
     }
 
-    fn sidebar_view_has_focus(&self, view: SidebarView) -> bool {
+    pub(super) fn sidebar_view_has_focus(&self, view: SidebarView) -> bool {
         if view == SidebarView::Explorer && self.explorer_keyboard_focused() {
             return true;
         }
@@ -633,7 +639,7 @@ impl VEditApp {
     }
 
     pub(super) fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
-        self.sidebar_layout.view_rects = [None; 4];
+        self.sidebar_layout.view_rects = [None; 5];
         if self.projects.is_empty() {
             self.sidebar_layout.rects = [None; 2];
             return;
@@ -930,6 +936,7 @@ impl VEditApp {
                     }
                     SidebarView::SourceControl => self.git_ui(ui),
                     SidebarView::Review => self.review_ui(ui),
+                    SidebarView::Messages => self.messages_panel(ui),
                 }
             },
         );

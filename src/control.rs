@@ -774,8 +774,6 @@ impl VEditApp {
             Some("settings")
         } else if self.agent_marks_modal_open() {
             Some("agent_marks")
-        } else if self.notifications.is_open() {
-            Some("notifications")
         } else if self.palette.is_some() {
             Some("palette")
         } else if self.workspace_picker_open() {

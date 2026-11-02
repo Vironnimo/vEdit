@@ -180,9 +180,9 @@ impl VEditApp {
             }
             if design::menu_item(
                 ui,
-                "Agent notifications",
+                "Agent messages",
                 &self.shortcut_label(keybindings::Action::AgentNotifications),
-                "Messages agents sent during this session; open their file or review",
+                "Open the Messages view with what agents reported and what it points at",
             )
             .clicked()
             {
