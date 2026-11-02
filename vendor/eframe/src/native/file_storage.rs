@@ -110,6 +110,11 @@ impl Drop for FileStorage {
             profiling::scope!("wait_for_save");
             join_handle.join().ok();
         }
+        // A periodic flush may have deferred newer state while the previous
+        // write was still busy. Shutdown must publish that final snapshot.
+        if self.dirty {
+            save_to_disk(&self.ron_filepath, &self.kv);
+        }
     }
 }
 
@@ -166,6 +171,15 @@ impl crate::Storage for FileStorage {
 
     fn flush(&mut self) {
         if self.dirty {
+            if self
+                .last_save_join_handle
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+            {
+                // Keep the latest kv and dirty bit; the next periodic flush
+                // retries without making the UI wait for slow storage.
+                return;
+            }
             profiling::scope!("FileStorage::flush");
             self.dirty = false;
 
@@ -187,6 +201,7 @@ impl crate::Storage for FileStorage {
                     self.last_save_join_handle = Some(join_handle);
                 }
                 Err(err) => {
+                    self.dirty = true;
                     log::warn!("Failed to spawn thread to save app state: {err}");
                 }
             }
@@ -253,6 +268,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_flush_defers_without_waiting_and_drop_persists_latest_state() {
+        use crate::Storage as _;
+        let directory =
+            std::env::temp_dir().join(format!("eframe-busy-storage-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.ron");
+        let mut storage = FileStorage::from_ron_filepath(&path);
+        let (release, blocked) = std::sync::mpsc::channel();
+        storage.last_save_join_handle = Some(std::thread::spawn(move || {
+            // Bound a regression's wait as well as the successful test path.
+            let _ = blocked.recv_timeout(std::time::Duration::from_secs(2));
+        }));
+        storage.set_string("session", "latest".into());
+        storage.flush();
+        let deferred = storage.dirty;
+        let _ = release.send(());
+        drop(storage);
+        assert!(deferred, "a busy flush must leave the latest state queued");
+        assert_eq!(
+            read_ron::<HashMap<String, String>>(&path).unwrap()["session"],
+            "latest"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn directories_storage_dir(app_id: &str) -> Option<PathBuf> {
         directories::ProjectDirs::from("", "", app_id)

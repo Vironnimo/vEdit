@@ -18,7 +18,9 @@ connects the custom titlebar to the maintained Windows backend.
 - `vendor/egui-winit` preserves keyboard provenance before clipboard translation;
   the editor input owner uses it to route configurable Ctrl chords to Vim.
 - `vendor/eframe` presents the first Glow frame before showing the native window;
-  see `vendor/eframe/VEDIT_PATCH.md` before changing startup rendering or upgrading it.
+  its periodic storage flush also defers unfinished writes instead of joining
+  them on the UI thread, with final persistence on Drop. See
+  `vendor/eframe/VEDIT_PATCH.md` before changing startup/persistence or upgrading it.
 - Endpoint discovery/forwarding lives in `src/cli_transport.rs`; see `control.md`.
   Packaging, installation, registry integration and embedded executable resources
   belong to `development.md`.

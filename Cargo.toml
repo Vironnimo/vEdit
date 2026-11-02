@@ -42,7 +42,7 @@ egui-wgpu = { version = "0.36.2", default-features = false }
 egui-winit = { version = "0.36.2", default-features = false }
 
 [patch.crates-io]
-# Present the first Glow frame before showing the window: see vendor/eframe/VEDIT_PATCH.md.
+# First-frame presentation and nonblocking persistence: vendor/eframe/VEDIT_PATCH.md.
 eframe = { path = "vendor/eframe" }
 # Windows mixed-DPI dragging, custom chrome and file-drop coordinates: see vendor/winit/VEDIT_PATCH.md.
 winit = { path = "vendor/winit" }

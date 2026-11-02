@@ -1,4 +1,4 @@
-# vEdit's first-frame presentation patch
+# vEdit's presentation and persistence patches
 
 This is the crates.io source of eframe 0.36.2, from upstream commit
 `49682f8baa058bf49e011035cfbd6e825f88a5ef` (`crates/eframe`). The original
@@ -34,3 +34,11 @@ The test is ignored by default because it needs a native desktop and graphics
 driver. Headless snapshots cannot verify this ordering. When upgrading eframe,
 remove this patch only once upstream shows the Glow window after presenting its
 first frame and this native regression passes against the replacement.
+
+Periodic `FileStorage::flush` also avoids joining an unfinished persistence
+thread. It keeps the latest in-memory state dirty until the next flush; Drop
+waits for the previous write and persists any deferred final state. Thread-spawn
+failure retains the dirty bit too. This prevents a slow profile disk from
+blocking the UI without losing the final window/session snapshot. The unit test
+`native::file_storage::tests::busy_flush_defers_without_waiting_and_drop_persists_latest_state`
+uses a controlled worker to cover both deferral and final publication.
