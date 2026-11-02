@@ -161,9 +161,7 @@ impl Server {
         private_directory(&directory)
             .map_err(|error| format!("Could not create the vEdit control directory: {error}"))?;
         let endpoint_path = directory.join("control.json");
-        if let Ok(endpoint) = read_endpoint(&endpoint_path)
-            && TcpStream::connect_timeout(&endpoint_address(&endpoint), CONNECT_TIMEOUT).is_ok()
-        {
+        if alive_at(&endpoint_path).is_some() {
             return Err("Another vEdit control server is already running.".into());
         }
         // The listener blocks in accept() instead of polling, so an idle editor
@@ -335,7 +333,10 @@ pub fn saved_window_ids() -> Vec<String> {
 
 fn alive_at(path: &Path) -> Option<Endpoint> {
     read_endpoint(path).ok().filter(|endpoint| {
-        TcpStream::connect_timeout(&endpoint_address(endpoint), CONNECT_TIMEOUT).is_ok()
+        // A dead owner's port may now be closed or belong to an unrelated
+        // process. Skip it before repeated startup probes can wait on TCP.
+        crate::process_liveness::running(endpoint.pid)
+            && TcpStream::connect_timeout(&endpoint_address(endpoint), CONNECT_TIMEOUT).is_ok()
     })
 }
 
@@ -1146,15 +1147,34 @@ mod tests {
     }
 
     #[test]
-    fn stale_endpoint_is_replaced_when_its_listener_is_gone() {
-        let mut fixture = Fixture::new();
-        let old = fixture.endpoint();
-        drop(fixture.server.take());
-        write_endpoint(&fixture.path(), &old).unwrap();
-        let replacement =
-            Server::start_in(egui::Context::default(), fixture.directory.clone()).unwrap();
-        fixture.server = Some(replacement);
-        assert_ne!(fixture.endpoint().token, old.token);
+    fn stale_endpoint_is_replaced_when_its_process_or_listener_is_gone() {
+        for owner_running in [false, true] {
+            let mut fixture = Fixture::new();
+            let mut old = fixture.endpoint();
+            drop(fixture.server.take());
+            let unrelated_listener = (!owner_running).then(|| {
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                listener.set_nonblocking(true).unwrap();
+                old.pid = u32::MAX;
+                old.port = listener.local_addr().unwrap().port();
+                listener
+            });
+            write_endpoint(&fixture.path(), &old).unwrap();
+            if !owner_running {
+                assert!(alive_at(&fixture.path()).is_none());
+            }
+            let replacement =
+                Server::start_in(egui::Context::default(), fixture.directory.clone()).unwrap();
+            fixture.server = Some(replacement);
+            assert_ne!(fixture.endpoint().token, old.token);
+            assert!(alive_at(&fixture.path()).is_some());
+            if let Some(listener) = unrelated_listener {
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
+            }
+        }
     }
 
     #[test]

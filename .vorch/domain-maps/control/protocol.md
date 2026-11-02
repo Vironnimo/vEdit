@@ -14,6 +14,11 @@ The CLI adds canonical caller `cwd` to its envelope. It retries once without `cw
 
 Help and schema work offline. Open, manifest review and workspace commands can start the sibling GUI; background requests and `--no-start` prevent this. Other actions require an existing receiver. More than one live window without an explicit selector fails before startup/mutation. Tab IDs cannot be carried to another selected process.
 
+Window discovery and control-server startup skip endpoint files whose recorded
+process has exited before attempting a TCP connection. The shared
+`process_liveness` owner treats uncertainty and reused process IDs conservatively;
+an apparently live process still requires a reachable listener.
+
 Text/JSON file inputs accept UTF-8 with/without BOM and UTF-16 with BOM. Encoded and decoded inputs are bounded separately; the encoded transport packet also has its limit. Request-relative paths use the caller directory and manifest paths use the manifest directory. Literal option values are not reinterpreted as global flags; `--` terminates options for positional text beginning with a dash.
 
 ## Applied versus completed
