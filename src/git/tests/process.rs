@@ -61,7 +61,7 @@ fn timing_out_git_stops_its_hook_process_tree() {
         ),
     )
     .unwrap();
-    let mut command = Command::new("git");
+    let mut command = test_command();
     command
         .arg("-C")
         .arg(&repository.0)

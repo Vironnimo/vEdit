@@ -115,13 +115,19 @@ than monkey-patching process-wide timing behavior.
 - App, Git, recovery and control fixtures create their own named directories,
   usually using the process ID and a counter or timestamp. App fixtures redirect
   recovery files and disable autosave; Git fixtures configure local test authors
-  and isolated hooks. The CLI round-trip fixtures use private control endpoints.
+  and isolated hooks. `git::test_command` clears inherited author/committer names,
+  email addresses and dates, plus the `EMAIL` fallback, on each child process.
+  Test-build Git operations and direct Git fixtures use it so Cargo tests honor
+  local authors without mutating shared environment state. Fixtures can still
+  set explicit child-process dates for stable commit hashes. The CLI round-trip
+  fixtures use private control endpoints.
 - The survey additionally gives each test process an empty `HOME`/`USERPROFILE`,
   private `APPDATA`/`LOCALAPPDATA`, a private `VEDIT_PROFILE_DIR`, an empty global
   Git config and disabled system Git config. It clears inherited Git repository
-  selectors, Git config overrides, `XDG_CONFIG_HOME` and control-endpoint
-  overrides. Its build keeps the caller's toolchain environment. `TEMP` remains
-  the checkout root `.tmp/` because the Cargo environment test requires it.
+  selectors, Git config overrides, author/committer identity and dates, `EMAIL`,
+  `XDG_CONFIG_HOME` and control-endpoint overrides. Its build keeps the caller's
+  toolchain environment. `TEMP` remains the checkout root `.tmp/` because the
+  Cargo environment test requires it.
 - Direct Cargo tests do not receive those extra survey per-case settings. Existing
   fixtures must therefore continue to pass explicit repositories, recovery paths
   and endpoints; a survey pass is not permission to remove fixture isolation.
@@ -174,10 +180,10 @@ The shared `src/visual_tests.rs::harness` creates its explicitly selected OpenGL
 renderer on the first snapshot/render call. UI-only assertions keep the renderer
 lazy; real renders still receive accumulated texture updates. Explicit-GL UI-only
 harnesses use the same lazy pattern, including tab drags, Explorer interaction,
-Agent marks and worktree tooltip labels. The survey defaults
+Agent marks, worktree tooltip labels and multicursor rendering. The survey defaults
 to `WGPU_BACKEND=gl` on Windows unless a value is already set. The multicursor
-harness honors the environment choice; on this host its DX12 device creation
-failed while GL passed against the unchanged snapshot. An environment preference
+harness explicitly selects GL, independently of that environment choice; its
+default DX12 device creation failed on this host. An environment preference
 is not proof of every harness's actual renderer. Driver crashes can
 require a serial run (`--jobs 1` for the survey or `--test-threads=1` for Cargo).
 Use the scoped environment example in `docs/development.md` -> Visual references.

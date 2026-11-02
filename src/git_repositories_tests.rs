@@ -1143,7 +1143,7 @@ struct RealWorktrees {
 }
 
 fn run_git(directory: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let output = git::test_command()
         .arg("-C")
         .arg(directory)
         .args(args)

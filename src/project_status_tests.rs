@@ -264,7 +264,7 @@ fn real_repository_reports_untracked_staged_modified_and_clean_status() {
         ("commit.gpgsign", "false"),
         ("core.hooksPath", hooks.to_str().unwrap()),
     ] {
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .args(["-C"])
             .arg(&root)
             .args(["config", key, value])

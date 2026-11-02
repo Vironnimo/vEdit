@@ -1,6 +1,6 @@
 use super::*;
 use crate::multicursor::Selection;
-use egui_kittest::Harness;
+use egui_kittest::{Harness, LazyRenderer};
 
 fn harness(text: &str, vim: bool) -> Harness<'static, VEditApp> {
     let mut app = VEditApp::empty(egui::Context::default());
@@ -17,9 +17,16 @@ fn harness(text: &str, vim: bool) -> Harness<'static, VEditApp> {
     project.tabs.push(tab);
     app.projects.push(project);
     app.bind_current_pane();
+    let mut setup = egui_wgpu::WgpuSetup::without_display_handle();
+    if let egui_wgpu::WgpuSetup::CreateNew(options) = &mut setup {
+        options.instance_descriptor.backends = egui_wgpu::wgpu::Backends::GL;
+    }
     let mut screen = Harness::builder()
         .with_size([1100.0, 740.0])
         .with_os(egui::os::OperatingSystem::Windows)
+        .renderer(LazyRenderer::new(move || {
+            egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+        }))
         .build_ui_state(
             |ui, app: &mut VEditApp| {
                 app.ctx = ui.ctx().clone();

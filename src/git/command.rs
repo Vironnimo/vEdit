@@ -93,6 +93,25 @@ const PINNED_CONFIG: &[&str] = &[
     "i18n.logOutputEncoding=UTF-8",
 ];
 
+#[cfg(test)]
+pub(crate) fn test_command() -> Command {
+    // Direct Cargo tests need the fixture's local identity too, independently
+    // of the survey runner. Never change the shared process environment.
+    let mut command = Command::new("git");
+    for variable in [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "EMAIL",
+    ] {
+        command.env_remove(variable);
+    }
+    command
+}
+
 pub(super) fn run_git(
     root: &Path,
     args: &[OsString],
@@ -103,7 +122,10 @@ pub(super) fn run_git(
 ) -> GitResult<Output> {
     #[cfg(test)]
     GIT_COMMAND_COUNT.with(|count| count.set(count.get() + 1));
+    #[cfg(not(test))]
     let mut command = Command::new("git");
+    #[cfg(test)]
+    let mut command = test_command();
     command.arg("--no-pager").arg("--literal-pathspecs");
     for setting in PINNED_CONFIG {
         command.arg("-c").arg(setting);

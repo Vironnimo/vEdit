@@ -376,6 +376,8 @@ mod repository;
 mod review;
 
 pub use changes::*;
+#[cfg(test)]
+pub(crate) use command::test_command;
 use command::*;
 pub use history::*;
 pub use repository::*;

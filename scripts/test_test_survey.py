@@ -108,16 +108,21 @@ class SurveyTests(unittest.TestCase):
                 self.assertEqual(stat.read_text().split(") ", 1)[1][0], "Z")
 
     def test_case_environment_is_private_and_temp_contract_is_preserved(self):
-        inherited = dict(self.env, GIT_DIR="wrong", VEDIT_CONTROL_DIR="wrong", XDG_CONFIG_HOME="wrong")
+        overrides = dict.fromkeys((
+            "GIT_DIR", "VEDIT_CONTROL_DIR", "XDG_CONFIG_HOME",
+            "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE", "EMAIL",
+        ), "wrong")
+        inherited = dict(self.env, **overrides)
         env = survey.case_environment(inherited, self.directory / "isolation")
-        self.assertNotIn("GIT_DIR", env)
-        self.assertNotIn("VEDIT_CONTROL_DIR", env)
-        self.assertNotIn("XDG_CONFIG_HOME", env)
+        for key, value in overrides.items():
+            with self.subTest(key=key):
+                self.assertFalse(key in env, f"{key} must not reach test processes")
+                self.assertEqual(inherited[key], value)
         self.assertEqual(env["TEMP"], str(survey.ROOT / ".tmp"))
         self.assertEqual(env["GIT_CEILING_DIRECTORIES"], env["TEMP"])
         self.assertEqual(env["HOME"], env["USERPROFILE"])
         self.assertTrue(Path(env["VEDIT_PROFILE_DIR"]).is_relative_to(self.directory))
-        self.assertEqual(inherited["VEDIT_CONTROL_DIR"], "wrong")
 
     def test_cli_help_and_invalid_json_call(self):
         script = str(Path(__file__).with_name("test_survey.py"))

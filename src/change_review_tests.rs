@@ -79,7 +79,7 @@ impl ReviewRepository {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .arg("-C")
             .arg(&self.root)
             .args(args)

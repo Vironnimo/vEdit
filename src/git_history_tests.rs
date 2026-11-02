@@ -135,7 +135,7 @@ struct HoverRepository(PathBuf);
 
 impl HoverRepository {
     fn git(&self, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .arg("-C")
             .arg(&self.0)
             .args(args)
@@ -400,7 +400,7 @@ fn unchanged_repository_refresh_on_main_launches_three_git_processes() {
         ["branch", "-M", "main"].as_slice(),
         &["update-ref", "refs/remotes/origin/main", "HEAD"],
     ] {
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .arg("-C")
             .arg(&repository.0)
             .args(args)
@@ -551,7 +551,7 @@ fn primary_push_button_pushes_to_an_isolated_local_remote() {
             vec!["remote", "add", "origin", remote.to_str().unwrap()],
             vec!["push", "-u", "origin", "HEAD"],
         ] {
-            let output = std::process::Command::new("git")
+            let output = git::test_command()
                 .arg("-C")
                 .arg(&repository.0)
                 .args(args)
@@ -608,7 +608,7 @@ fn primary_push_button_pushes_to_an_isolated_local_remote() {
                 .ahead,
             0
         );
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .arg("-C")
             .arg(&remote)
             .args(["rev-parse", &branch])
@@ -728,7 +728,7 @@ fn remote_ref_updates_refresh_history_decorations_without_a_new_local_commit() {
             .iter()
             .all(|commit| !commit.on_remote)
     );
-    let output = std::process::Command::new("git")
+    let output = git::test_command()
         .arg("-C")
         .arg(&repository.0)
         .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
@@ -803,7 +803,7 @@ fn automatic_history_refresh_retains_loaded_depth_and_can_continue_paging() {
         input.push('\n');
     }
     input.push_str("done\n");
-    let mut child = std::process::Command::new("git")
+    let mut child = git::test_command()
         .arg("-C")
         .arg(&repository.0)
         .args(["fast-import", "--quiet", "--done"])
@@ -833,7 +833,7 @@ fn automatic_history_refresh_retains_loaded_depth_and_can_continue_paging() {
     deliver_refresh(&mut app, snapshot, Some(page));
     let selected = app.projects[0].recent_commits[90].hash.clone();
     app.projects[0].git_view.selected_commit = Some(selected.clone());
-    let output = std::process::Command::new("git")
+    let output = git::test_command()
         .arg("-C")
         .arg(&repository.0)
         .args([
@@ -1627,7 +1627,7 @@ fn git_cli_reply(app: &mut VEditApp, request: crate::cli::Request) -> crate::cli
 fn git_cli_pages_branches_and_history_and_waits_for_safe_switch_completion() {
     use crate::cli::Request;
     let repo = HoverRepository::new();
-    let result = std::process::Command::new("git")
+    let result = git::test_command()
         .arg("-C")
         .arg(&repo.0)
         .args(["branch", "feature/Überarbeitung"])

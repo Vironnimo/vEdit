@@ -278,7 +278,7 @@ impl DemoRepository {
     }
 
     fn git(&self, args: &[&str]) {
-        let output = std::process::Command::new("git")
+        let output = git::test_command()
             .arg("-C")
             .arg(&self.root)
             .args(args)

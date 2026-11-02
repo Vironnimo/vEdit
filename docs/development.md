@@ -102,7 +102,9 @@ headless renderer still selects OpenGL. In the 0.6.0 integration run, the new
 multicursor harness failed during device creation with DX12 requested, while GL
 passed against its unchanged reference. The survey and push tools therefore
 default to GL, preserving explicit caller overrides. For a backend-sensitive
-test, use a scoped choice (`dx12` remains an alternative for OpenGL driver failures):
+test, use a scoped choice (`dx12` remains an alternative for harnesses that honor
+it). The multicursor render harness explicitly uses GL, like the shared visual
+harness, and initializes its renderer only when a render is requested:
 
 ```powershell
 $previousGpuBackend = $env:WGPU_BACKEND

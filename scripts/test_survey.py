@@ -81,6 +81,8 @@ def case_environment(env, directory):
         if key.startswith("GIT_CONFIG_") or key in {
             "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE", "EMAIL",
             "XDG_CONFIG_HOME", "VEDIT_CONTROL_DIR", "MORROW_CONTROL_DIR",
         }:
             env.pop(key)
