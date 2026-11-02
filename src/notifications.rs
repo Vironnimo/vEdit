@@ -1,13 +1,22 @@
-//! Persistent messages agents send with `vedit-cli notify`: unread indicators
-//! stay until the user expands an entry or opens its file or review.
+//! Messages agents send with `vedit-cli notify`: the Messages sidebar view keeps
+//! the full text, and a brief arrival card appears in the window. A message
+//! counts as read once it is visible in the view or its file or review is opened
+//! from the notification.
 use super::*;
 use crate::cli::{NotificationLevel, NotificationOpen, NotificationReview, OpenFile, Response};
 use serde_json::{Value, json};
 
-/// Bound the read history without discarding messages the user has not read.
+/// Bound the read history without discarding messages the user has not seen.
 const MAX_READ_ENTRIES: usize = 100;
+/// Read messages leave the inbox after this long.
+const READ_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// The taskbar flashes at most this often, however many messages arrive.
 const FLASH_INTERVAL: Duration = Duration::from_secs(5);
+/// An arrival card stays this long; hovering holds it longer.
+const TOAST_LIFETIME: Duration = Duration::from_secs(8);
+/// Newer arrival cards push older ones out.
+const TOAST_LIMIT: usize = 3;
+const TOAST_WIDTH: f32 = 330.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Notification {
@@ -22,6 +31,10 @@ pub(super) struct Notification {
     time: i64,
     count: u32,
     read: bool,
+    /// Unix seconds when the user first saw the message. Saved sessions from
+    /// before the Messages view keep `read` without this stamp.
+    #[serde(default)]
+    read_at: Option<i64>,
 }
 
 impl Notification {
@@ -35,6 +48,13 @@ impl Notification {
     }
 }
 
+/// One arrival card; transient, so it is never part of the saved session.
+#[derive(Clone, Copy)]
+struct Toast {
+    id: u64,
+    expires: Instant,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct Inbox {
@@ -42,11 +62,7 @@ pub(super) struct Inbox {
     items: Vec<Notification>,
     next_id: u64,
     #[serde(skip)]
-    open: bool,
-    #[serde(skip)]
-    expanded: Option<u64>,
-    #[serde(skip)]
-    project_filter: Option<PathBuf>,
+    toast: Vec<Toast>,
     #[serde(skip)]
     last_flash: Option<Instant>,
 }
@@ -72,12 +88,23 @@ impl Inbox {
             .max_by_key(|level| severity(*level))
     }
 
-    pub(super) fn is_open(&self) -> bool {
-        self.open
+    /// The most severe unread level of the whole inbox, for the Messages icon.
+    pub(super) fn unread_severity(&self) -> Option<NotificationLevel> {
+        self.items
+            .iter()
+            .filter(|item| !item.read)
+            .map(|item| item.level)
+            .max_by_key(|level| severity(*level))
     }
 
     pub(super) fn items_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Arrival cards currently waiting in the window.
+    #[cfg(test)]
+    pub(super) fn toast_count(&self) -> usize {
+        self.toast.len()
     }
 
     pub(super) fn status_json(&self, projects: &[Project]) -> Value {
@@ -97,6 +124,8 @@ impl Inbox {
     /// Add a message, or count a repeat of an identical unread one.
     /// Returns its id, whether it was a repeat, and its repeat count.
     fn push(&mut self, mut notification: Notification) -> (u64, bool, u32) {
+        let now = unix_now();
+        self.prune_history(now, None);
         if let Some(position) = self
             .items
             .iter()
@@ -117,6 +146,7 @@ impl Inbox {
     }
 
     fn set_read(&mut self, id: u64, read: bool) -> bool {
+        let now = unix_now();
         let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
             return false;
         };
@@ -124,8 +154,24 @@ impl Inbox {
             return false;
         }
         item.read = read;
-        // Drop older read entries, but keep the entry just opened so that its
-        // body cannot disappear while the user is reading it.
+        item.read_at = read.then_some(now);
+        if read {
+            // Keep the message just seen so its text cannot disappear from under
+            // the reader while older read entries leave.
+            self.prune_history(now, Some(id));
+        }
+        true
+    }
+
+    /// Drop read messages older than the retention window and bound the read
+    /// history. Unread messages always stay.
+    fn prune_history(&mut self, now: i64, keep: Option<u64>) {
+        self.items.retain(|item| {
+            !item.read
+                || item
+                    .read_at
+                    .is_none_or(|at| now.saturating_sub(at) < READ_RETENTION_SECONDS)
+        });
         let mut excess = self
             .items
             .iter()
@@ -133,14 +179,63 @@ impl Inbox {
             .count()
             .saturating_sub(MAX_READ_ENTRIES);
         self.items.retain(|item| {
-            if excess > 0 && item.read && item.id != id {
+            if excess > 0 && item.read && Some(item.id) != keep {
                 excess -= 1;
                 false
             } else {
                 true
             }
         });
-        true
+    }
+
+    /// Give old saved read entries a start for the retention window and drop
+    /// messages whose retention has passed. Returns whether the inbox changed.
+    pub(super) fn normalize(&mut self) -> bool {
+        let now = unix_now();
+        let before = self.items.len();
+        for item in &mut self.items {
+            if item.read && item.read_at.is_none() {
+                item.read_at = Some(now);
+            }
+        }
+        self.prune_history(now, None);
+        self.items.len() != before
+    }
+
+    fn dismiss(&mut self, id: u64) {
+        self.items.retain(|item| item.id != id);
+        self.toast.retain(|toast| toast.id != id);
+    }
+
+    fn clear_read(&mut self) {
+        self.items.retain(|item| !item.read);
+        let remaining: Vec<u64> = self.items.iter().map(|item| item.id).collect();
+        self.toast.retain(|toast| remaining.contains(&toast.id));
+    }
+
+    fn queue_toast(&mut self, id: u64) {
+        self.toast.retain(|toast| toast.id != id);
+        self.toast.push(Toast {
+            id,
+            expires: Instant::now() + TOAST_LIFETIME,
+        });
+        while self.toast.len() > TOAST_LIMIT {
+            self.toast.remove(0);
+        }
+    }
+
+    fn touch_toast(&mut self, id: u64) {
+        if let Some(toast) = self.toast.iter_mut().find(|toast| toast.id == id) {
+            toast.expires = Instant::now() + Duration::from_secs(2);
+        }
+    }
+
+    fn dismiss_toast(&mut self, id: u64) {
+        self.toast.retain(|toast| toast.id != id);
+    }
+
+    fn expire_toasts(&mut self, now: Instant) {
+        self.toast.retain(|toast| toast.expires > now);
     }
 
     /// Whether the taskbar may flash now; records the flash.
@@ -243,7 +338,12 @@ impl VEditApp {
             time: unix_now(),
             count: 1,
             read: false,
+            read_at: None,
         });
+        // A visible Messages view shows the message right away, so no card.
+        if !self.sidebar_view_visible(SidebarView::Messages) {
+            self.notifications.queue_toast(id);
+        }
         self.notification_state_changed();
         let focused = self.ctx.input(|input| input.focused);
         let flashed = !focused && self.notifications.take_flash();
@@ -264,21 +364,13 @@ impl VEditApp {
         }))
     }
 
+    /// Open the Messages view without taking the user away from their documents.
     pub(super) fn open_notifications(&mut self) {
         self.cancel_navigation();
         self.palette = None;
         self.picker = None;
         self.completions = None;
-        self.notifications.open = true;
-        self.notifications.project_filter = self
-            .active_folder()
-            .filter(|root| {
-                self.notifications
-                    .items
-                    .iter()
-                    .any(|item| item.root.as_deref() == Some(*root))
-            })
-            .map(Path::to_path_buf);
+        self.show_sidebar(SidebarView::Messages);
         self.ctx.request_repaint();
     }
 
@@ -310,16 +402,16 @@ impl VEditApp {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
         });
-        if unread > 0 || response.hovered() || response.has_focus() || self.notifications.open {
+        if unread > 0
+            || response.hovered()
+            || response.has_focus()
+            || self.sidebar_view_visible(SidebarView::Messages)
+        {
             ui.painter().rect_filled(rect, 4.0, HOVER);
         }
         let color = self
             .notifications
-            .items
-            .iter()
-            .filter(|item| !item.read)
-            .map(|item| item.level)
-            .max_by_key(|level| severity(*level))
+            .unread_severity()
             .map_or(MUTED, level_color);
         let center = rect.left_center() + Vec2::new(12.0, 0.0);
         // A bell drawn as paths so no symbol font is required.
@@ -362,180 +454,334 @@ impl VEditApp {
             );
         }
         if response.clicked() {
-            self.open_notifications();
+            self.toggle_sidebar_view(SidebarView::Messages);
         }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
-                "Messages from agents · {label}\nRead messages and open attached files or change reviews."
+                "Messages from agents · {label}\nOpen what a message points at, or copy its text."
             ));
     }
 
-    pub(super) fn notifications_dialog(&mut self) {
-        if !self.notifications.open {
+    /// The Messages sidebar view: full text, one card per message, newest first.
+    /// A card is read as soon as it is visible while the window has focus.
+    pub(super) fn messages_panel(&mut self, ui: &mut egui::Ui) {
+        self.notifications.prune_history(unix_now(), None);
+        let unread = self.notifications.unread();
+        ui.horizontal(|ui| {
+            let label = match unread {
+                0 => "No new messages".to_owned(),
+                1 => "1 new message".to_owned(),
+                count => format!("{count} new messages"),
+            };
+            ui.label(
+                RichText::new(label)
+                    .size(11.0)
+                    .color(if unread > 0 { BLUE } else { MUTED }),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let has_read = self.notifications.items.iter().any(|item| item.read);
+                let clear = ui
+                    .add_enabled(
+                        has_read,
+                        egui::Button::new(RichText::new("Clear read").size(11.0))
+                            .frame_when_inactive(false)
+                            .min_size(Vec2::new(0.0, 22.0)),
+                    )
+                    .on_hover_text(
+                        "Remove messages you have already seen. Unread messages stay; read ones leave after seven days.",
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if clear.clicked() {
+                    self.notifications.clear_read();
+                    self.notification_state_changed();
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if self.notifications.items.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No messages yet. Agents notify you when work is finished, blocked or needs a decision.",
+                )
+                .size(11.0)
+                .color(MUTED),
+            );
             return;
         }
-        let ctx = self.ctx.clone();
+        // Only an on-screen message counts as seen; a background window or a
+        // message below the scroll viewport stays unread.
+        let window_focused = self.ctx.input(|input| input.focused);
         let now = unix_now();
-        let mut close = false;
-        let mut clear = false;
+        let items: Vec<Notification> = self.notifications.items.clone();
+        let mut seen = Vec::new();
         let mut run = None;
-        let mut expand = None;
-        let mut mark_unread = None;
-        let active_root = self.active_folder().map(Path::to_path_buf);
-        let unread = self.notifications.unread();
-        let items = &self.notifications.items;
-        let modal = egui::Modal::new(egui::Id::new("agent_notifications_dialog"))
-            .backdrop_color(Color32::from_black_alpha(80))
-            .show(&ctx, |ui| {
-                ui.set_width((ctx.content_rect().width() - 64.0).clamp(240.0, 680.0));
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Messages from agents").size(20.0).strong());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let response = design::ghost_button(ui, "×", "Close notifications (Esc)");
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                "Close notifications",
-                            )
-                        });
-                        close |= response.clicked();
-                    });
-                });
-                ui.label(RichText::new(format!("{unread} unread · Read updates and follow attached files or change reviews.")).size(12.0).color(MUTED));
-                ui.add_space(10.0);
-                if items.is_empty() {
-                    ui.label(
-                        RichText::new("No messages yet.")
-                            .color(MUTED),
-                    );
-                    return;
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(root) = &active_root {
-                        let count = items.iter().filter(|item| item.root.as_ref() == Some(root) && !item.read).count();
-                        ui.selectable_value(&mut self.notifications.project_filter, Some(root.clone()), format!("This project ({count})"))
-                            .on_hover_text(crate::paths::display(root));
-                    }
-                    ui.selectable_value(&mut self.notifications.project_filter, None, format!("All projects ({unread})"))
-                        .on_hover_text("Includes messages without a project and from closed projects");
-                });
-                if let Some(root) = &self.notifications.project_filter {
-                    ui.add(egui::Label::new(RichText::new(crate::paths::display(root)).size(11.0).color(MUTED)).truncate())
-                        .on_hover_text(crate::paths::display(root));
-                }
-                ui.separator();
-                let height = (ctx.content_rect().height() - 250.0).clamp(100.0, 540.0);
-                egui::ScrollArea::vertical()
-                    .id_salt(("agent_messages", &self.notifications.project_filter))
-                    .max_height(height)
-                    // The centered modal must not derive its viewport from its
-                    // previous position; otherwise it moves under the first click.
-                    .min_scrolled_height(height)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        let mut shown = false;
-                        for item in items.iter().rev().filter(|item| {
-                            self.notifications.project_filter.as_ref().is_none_or(|root| item.root.as_ref() == Some(root))
-                        }) {
-                            shown = true;
-                            let expanded = self.notifications.expanded == Some(item.id);
-                            ui.push_id(item.id, |ui| {
-                                egui::Frame::new()
-                                    .fill(if expanded { HOVER } else { PANEL })
-                                    .stroke(Stroke::new(1.0, if !item.read { level_color(item.level).linear_multiply(0.5) } else { BORDER }))
-                                    .corner_radius(6)
-                                    .inner_margin(12)
-                                    .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    let project = item.root.as_deref().map(file_title).unwrap_or_else(|| "No project".into());
-                                    let level = match item.level {
-                                        NotificationLevel::Info => "Info",
-                                        NotificationLevel::Success => "Success",
-                                        NotificationLevel::Warning => "Warning",
-                                        NotificationLevel::Error => "Error",
-                                    };
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new(if item.read { "Read" } else { "Unread" }).size(11.0).color(if item.read { MUTED } else { BLUE }));
-                                        ui.label(RichText::new(level).size(11.0).color(level_color(item.level)));
-                                        let detail = format!("{project} · {}", git_panel::relative_time(item.time, now));
-                                        ui.label(RichText::new(detail).size(11.0).color(MUTED))
-                                            .on_hover_text(item.root.as_deref().map(crate::paths::display).unwrap_or_else(|| "No project".into()));
-                                        if item.count > 1 {
-                                            ui.label(RichText::new(format!("×{}", item.count)).size(11.0).color(MUTED));
-                                        }
-                                    });
-                                    let heading = item.title.clone().unwrap_or_else(|| short_line(&item.message, 90));
-                                    if ui.add(egui::Button::selectable(expanded, RichText::new(heading).strong().color(TEXT)).wrap())
-                                        .on_hover_text(if expanded { "Collapse message" } else { "Read full message" }).clicked() {
-                                        expand = Some((item.id, !expanded));
-                                    }
-                                    ui.add_space(4.0);
-                                    let message = if expanded { item.message.clone() } else { message_preview(&item.message) };
-                                    ui.add(egui::Label::new(RichText::new(message).color(TEXT)).wrap().selectable(true));
-                                    ui.add_space(8.0);
-                                    ui.label(RichText::new(notification_target(item)).size(11.5).color(MUTED)).on_hover_text(notification_target(item));
-                                    ui.horizontal_wrapped(|ui| {
-                                        if let Some(action) = notification_action(item)
-                                            && ui.button(action).clicked() {
-                                            run = Some(item.id);
-                                        }
-                                        if !expanded && design::ghost_button(ui, "Read message", "Show the full message and mark it as read").clicked() {
-                                            expand = Some((item.id, true));
-                                        }
-                                        if expanded {
-                                            if design::ghost_button(ui, "Copy message", "Copy the full message text").clicked() {
-                                                ui.ctx().copy_text(item.message.clone());
-                                            }
-                                            if design::ghost_button(ui, "Mark unread", "Keep this message's project indicator until you read it again").clicked() {
-                                                mark_unread = Some(item.id);
-                                            }
-                                        }
-                                    });
-                                });
-                                ui.add_space(8.0);
-                            });
+        let mut dismiss = None;
+        egui::ScrollArea::vertical()
+            .id_salt("agent_messages")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for item in items.iter().rev() {
+                    ui.push_id(item.id, |ui| {
+                        let card = self.message_card(ui, item, now, &mut run, &mut dismiss);
+                        if window_focused && !item.read && ui.is_rect_visible(card) {
+                            seen.push(item.id);
                         }
-                        if !shown {
-                            ui.label(RichText::new("No messages for this project. Choose All projects to see the others.").color(MUTED));
-                        }
+                        ui.add_space(8.0);
                     });
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Read messages stay here for later.").size(11.0).color(MUTED));
-                    clear = design::ghost_button(ui, "Clear all", "Remove all saved notifications across all projects, including unread messages").clicked();
-                });
+                }
             });
-        close |= modal.should_close()
-            || modal
-                .backdrop_response
-                .clicked_by(egui::PointerButton::Secondary)
-            || modal
-                .backdrop_response
-                .clicked_by(egui::PointerButton::Middle);
-        if clear {
-            self.notifications.items.clear();
-            self.notifications.expanded = None;
+        for id in seen {
+            self.set_notification_read(id, true);
+        }
+        if let Some(id) = dismiss {
+            self.notifications.dismiss(id);
             self.notification_state_changed();
         }
-        if let Some((id, expanded)) = expand {
-            self.notifications.expanded = expanded.then_some(id);
-            if expanded {
-                self.set_notification_read(id, true);
-            }
-        }
-        if let Some(id) = mark_unread {
-            self.notifications.expanded = None;
-            self.set_notification_read(id, false);
-        }
-        if close || clear {
-            self.notifications.open = false;
-        }
         if let Some(id) = run {
-            self.notifications.open = false;
             self.run_notification(id);
         }
+        if self.sidebar_view_has_focus(SidebarView::Messages)
+            && ui.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            self.focus_editor();
+        }
+    }
+
+    /// One message card; returns its rectangle for the seen check.
+    fn message_card(
+        &self,
+        ui: &mut egui::Ui,
+        item: &Notification,
+        now: i64,
+        run: &mut Option<u64>,
+        dismiss: &mut Option<u64>,
+    ) -> egui::Rect {
+        let card = egui::Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(
+                1.0,
+                if item.read {
+                    BORDER
+                } else {
+                    level_color(item.level).linear_multiply(0.55)
+                },
+            ))
+            .corner_radius(6)
+            .inner_margin(10)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if !item.read {
+                        ui.label(RichText::new("●").size(9.0).color(level_color(item.level)));
+                    }
+                    // Bound the project name so time, repeat count and the
+                    // dismiss button keep their space in a narrow sidebar.
+                    let reserve = 60.0 + if item.count > 1 { 28.0 } else { 0.0 } + 26.0;
+                    let max_project = (ui.available_width() - reserve).max(40.0);
+                    let project = item
+                        .root
+                        .as_deref()
+                        .map(file_title)
+                        .unwrap_or_else(|| "No project".into());
+                    ui.add_sized(
+                        Vec2::new(max_project, 18.0),
+                        egui::Label::new(RichText::new(project).size(10.5).color(MUTED)).truncate(),
+                    )
+                    .on_hover_text(
+                        item.root
+                            .as_deref()
+                            .map(crate::paths::display)
+                            .unwrap_or_else(|| "No project".into()),
+                    );
+                    ui.label(
+                        RichText::new(git_panel::relative_time(item.time, now))
+                            .size(10.5)
+                            .color(MUTED),
+                    );
+                    if item.count > 1 {
+                        ui.label(
+                            RichText::new(format!("×{}", item.count))
+                                .size(10.5)
+                                .color(MUTED),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if design::ghost_button(ui, "×", "Dismiss this message").clicked() {
+                            *dismiss = Some(item.id);
+                        }
+                    });
+                });
+                let (heading, body) = message_parts(item);
+                if let Some(heading) = heading {
+                    ui.add(egui::Label::new(RichText::new(heading).strong().color(TEXT)).wrap());
+                }
+                if !body.trim().is_empty() {
+                    ui.add(
+                        egui::Label::new(RichText::new(body).size(12.0).color(TEXT))
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+                if let Some(target) = notification_target(item) {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(target).size(10.5).color(MUTED));
+                }
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(action) = notification_action(item)
+                        && design::ghost_button(ui, &action, "Open this file or change review")
+                            .clicked()
+                    {
+                        *run = Some(item.id);
+                    }
+                    if design::ghost_button(ui, "Copy", "Copy the full message text").clicked() {
+                        ui.ctx().copy_text(item.message.clone());
+                    }
+                });
+            });
+        card.response.rect
+    }
+
+    /// Brief arrival card in the window corner; it never takes focus and opens
+    /// the message's target or the Messages view.
+    pub(super) fn notifications_toast(&mut self) {
+        if self.notifications.toast.is_empty() || !self.toast_allowed() {
+            return;
+        }
+        self.notifications.expire_toasts(Instant::now());
+        let items: Vec<Notification> = self.notifications.items.clone();
+        let ids: Vec<u64> = self
+            .notifications
+            .toast
+            .iter()
+            .map(|toast| toast.id)
+            .collect();
+        let mut open = None;
+        let mut held = Vec::new();
+        let ctx = self.ctx.clone();
+        egui::Area::new(egui::Id::new("agent_message_toast"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -42.0))
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(&ctx, |ui| {
+                ui.set_width(TOAST_WIDTH);
+                for id in ids {
+                    let Some(item) = items.iter().find(|item| item.id == id) else {
+                        continue;
+                    };
+                    let (heading, body) = message_parts(item);
+                    let heading = heading.unwrap_or_else(|| "Agent message".into());
+                    let action =
+                        notification_action(item).unwrap_or_else(|| "Show in Messages".into());
+                    let card = egui::Frame::new()
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(
+                            1.0,
+                            level_color(item.level).linear_multiply(0.65),
+                        ))
+                        .corner_radius(6)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.set_width(TOAST_WIDTH - 20.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("●").size(9.0).color(level_color(item.level)),
+                                );
+                                let reserve = if item.count > 1 { 28.0 } else { 0.0 };
+                                let max_project = (ui.available_width() - reserve).max(60.0);
+                                let project = item
+                                    .root
+                                    .as_deref()
+                                    .map(file_title)
+                                    .unwrap_or_else(|| "No project".into());
+                                ui.add_sized(
+                                    Vec2::new(max_project, 18.0),
+                                    egui::Label::new(
+                                        RichText::new(project).size(10.5).color(MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                                if item.count > 1 {
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(format!("×{}", item.count))
+                                                .size(10.5)
+                                                .color(MUTED),
+                                        );
+                                    });
+                                }
+                            });
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(heading.clone()).strong().color(TEXT),
+                                )
+                                .truncate(),
+                            );
+                            if !body.trim().is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(short_line(&body, 120))
+                                            .size(11.0)
+                                            .color(MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(action.clone()).size(11.0).color(BLUE));
+                        })
+                        .response;
+                    let response = ui.interact(
+                        card.rect,
+                        egui::Id::new(("agent_message_toast_card", id)),
+                        egui::Sense::click(),
+                    );
+                    let accessible = format!("Agent message: {heading}");
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &accessible)
+                    });
+                    if response.hovered() {
+                        ui.painter().rect_stroke(
+                            card.rect,
+                            6.0,
+                            Stroke::new(1.0, level_color(item.level).linear_multiply(0.8)),
+                            egui::StrokeKind::Inside,
+                        );
+                        held.push(id);
+                    }
+                    if response.clicked() {
+                        open = Some(id);
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        for id in held {
+            self.notifications.touch_toast(id);
+        }
+        let Some(id) = open else {
+            self.ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        };
+        let has_target = self
+            .notifications
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .is_some_and(|item| item.open.is_some() || item.review.is_some());
+        self.notifications.dismiss_toast(id);
+        if has_target {
+            self.run_notification(id);
+        } else {
+            self.open_notifications();
+        }
+        self.ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
+    /// Cards wait while another surface owns input and do not count down in a
+    /// background window, so a return to vEdit still shows what arrived.
+    fn toast_allowed(&self) -> bool {
+        self.ctx.input(|input| input.focused) && !self.chrome_blocked()
     }
 
     /// Switch to the notification's project and open what it points at.
@@ -611,12 +857,12 @@ fn notification_action(item: &Notification) -> Option<String> {
     None
 }
 
-fn notification_target(item: &Notification) -> String {
+fn notification_target(item: &Notification) -> Option<String> {
     if let Some(review) = item.review {
-        return match review {
+        return Some(match review {
             NotificationReview::Working => "Change review · Working changes".into(),
             NotificationReview::Branch => "Change review · Branch changes".into(),
-        };
+        });
     }
     if let Some(open) = &item.open {
         let path = item
@@ -624,33 +870,36 @@ fn notification_target(item: &Notification) -> String {
             .as_deref()
             .and_then(|root| open.path.strip_prefix(root).ok())
             .unwrap_or(&open.path);
-        return match &open.location {
-            Some(location) => format!(
-                "File · {} · Line {}, column {}",
-                crate::paths::display(path),
-                location.line,
-                location.column
-            ),
-            None => format!("File · {}", crate::paths::display(path)),
-        };
+        return Some(match &open.location {
+            Some(location) => format!("{} · line {}", crate::paths::display(path), location.line),
+            None => crate::paths::display(path),
+        });
     }
-    "Message only · No file or change review attached".into()
+    None
 }
 
-fn message_preview(message: &str) -> String {
-    let mut chars = message.chars();
-    let mut preview: String = chars.by_ref().take(220).collect();
-    if chars.next().is_some() {
-        preview.push('…');
+/// Split a message into a heading line and the remaining body, so a title or
+/// first line is not repeated as both heading and text. A single-line message
+/// stays whole in the body.
+fn message_parts(item: &Notification) -> (Option<String>, String) {
+    if let Some(title) = &item.title {
+        return (Some(title.clone()), item.message.clone());
     }
-    // A preview stays compact even for messages containing many short lines.
-    preview.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut lines = item.message.lines();
+    let first = lines.next().unwrap_or_default();
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    if rest.trim().is_empty() {
+        (None, item.message.clone())
+    } else {
+        (Some(first.to_owned()), rest)
+    }
 }
 
 fn short_line(text: &str, limit: usize) -> String {
     let line = text.lines().next().unwrap_or_default();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() <= limit {
-        line.to_owned()
+        line
     } else {
         let mut short: String = line.chars().take(limit - 1).collect();
         short.push('…');
@@ -675,7 +924,31 @@ mod tests {
             time: 1,
             count: 1,
             read: false,
+            read_at: None,
         }
+    }
+
+    fn harness(app: VEditApp) -> egui_kittest::Harness<'static, VEditApp> {
+        let mut screen = egui_kittest::Harness::builder()
+            .with_size([1100.0, 760.0])
+            .build_ui_state(
+                |ui, app: &mut VEditApp| {
+                    app.ctx = ui.ctx().clone();
+                    app.header(ui);
+                    app.activity(ui);
+                    app.sidebar_ui(ui);
+                    app.notifications_toast();
+                },
+                app,
+            );
+        set_style(&screen.ctx);
+        screen.ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        screen.input_mut().focused = true;
+        screen.run_steps(3);
+        screen
     }
 
     #[test]
@@ -712,8 +985,87 @@ mod tests {
         assert_eq!(inbox.unread(), 1);
         inbox.set_read(1, true);
         assert_eq!(inbox.items.len(), MAX_READ_ENTRIES);
-        assert_eq!(inbox.items[0].message, "0", "keep the message just opened");
+        assert_eq!(inbox.items[0].message, "0", "keep the message just seen");
         assert_eq!(inbox.items[1].message, "6");
+    }
+
+    #[test]
+    fn read_messages_leave_after_seven_days_and_legacy_entries_restart_their_window() {
+        let mut inbox = Inbox::default();
+        let (stale, _, _) = inbox.push(note("stale"));
+        inbox.set_read(stale, true);
+        inbox.items[0].read_at = Some(unix_now() - READ_RETENTION_SECONDS - 1);
+        let (fresh, _, _) = inbox.push(note("fresh"));
+        inbox.set_read(fresh, true);
+        let (unread, _, _) = inbox.push(note("unread"));
+        inbox.normalize();
+        assert_eq!(
+            inbox.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![fresh, unread]
+        );
+
+        let mut legacy = Inbox::default();
+        let (id, _, _) = legacy.push(note("legacy"));
+        legacy.items[0].read = true;
+        legacy.normalize();
+        assert_eq!(legacy.items.len(), 1, "an old read entry stays usable");
+        assert!(
+            legacy.items[0].read_at.is_some(),
+            "the retention window starts when the session is restored"
+        );
+        assert_eq!(id, legacy.items[0].id);
+    }
+
+    #[test]
+    fn dismissing_removes_one_message_and_clearing_read_keeps_unread_ones() {
+        let mut inbox = Inbox::default();
+        let (read, _, _) = inbox.push(note("seen"));
+        let (unread, _, _) = inbox.push(note("new"));
+        inbox.set_read(read, true);
+        inbox.queue_toast(unread);
+        inbox.clear_read();
+        assert_eq!(inbox.items.len(), 1);
+        assert_eq!(inbox.items[0].id, unread);
+        assert_eq!(inbox.toast.len(), 1, "the unread card stays");
+        inbox.dismiss(unread);
+        assert!(inbox.items_empty());
+        assert!(inbox.toast.is_empty());
+    }
+
+    #[test]
+    fn arrival_cards_hold_the_newest_three_and_pause_while_hovered() {
+        let mut inbox = Inbox::default();
+        let mut ids = Vec::new();
+        for index in 0..4 {
+            let (id, _, _) = inbox.push(note(&index.to_string()));
+            inbox.queue_toast(id);
+            ids.push(id);
+        }
+        assert_eq!(
+            inbox.toast.iter().map(|toast| toast.id).collect::<Vec<_>>(),
+            ids[1..].to_vec(),
+            "older cards leave before newer ones"
+        );
+        let first = inbox.toast[0].expires;
+        // Hover holds a card that would otherwise leave.
+        inbox.toast[0].expires = Instant::now() - Duration::from_secs(1);
+        inbox.touch_toast(ids[2]);
+        let now = Instant::now();
+        inbox.expire_toasts(now);
+        assert_eq!(
+            inbox.toast.iter().map(|toast| toast.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[3]],
+            "an expired card leaves, the held card and its neighbour stay"
+        );
+        assert!(inbox.toast[0].expires > now);
+        assert!(first > now);
+        inbox.expire_toasts(now + Duration::from_secs(3));
+        assert_eq!(
+            inbox.toast.iter().map(|toast| toast.id).collect::<Vec<_>>(),
+            vec![ids[3]]
+        );
+        inbox.expire_toasts(now + TOAST_LIFETIME + Duration::from_secs(3));
+        assert!(inbox.toast.is_empty());
     }
 
     #[test]
@@ -724,181 +1076,101 @@ mod tests {
     }
 
     #[test]
-    fn the_user_reads_individual_messages_and_can_mark_them_unread_again() {
+    fn messages_open_in_their_own_view_with_full_text_and_are_read_once_visible() {
         let mut app = VEditApp::empty(egui::Context::default());
         visual_tests::workspace(&mut app);
         let root = app.projects[0].root.clone();
-        for index in 0..20 {
-            let mut item = note(&format!("Result {index}: all checks passed."));
-            item.title = Some(format!("Task {index} finished"));
-            item.root = Some(root.clone());
-            app.notifications.push(item);
-        }
-        // Render only this owner's surfaces so no unrelated session/recovery
-        // housekeeping clears the persistence flag under test.
-        let mut screen = egui_kittest::Harness::builder()
-            .with_size([1100.0, 760.0])
-            .build_ui_state(
-                |ui, app: &mut VEditApp| {
-                    app.ctx = ui.ctx().clone();
-                    app.header(ui);
-                    app.notifications_dialog();
-                },
-                app,
-            );
-        set_style(&screen.ctx);
-        screen.ctx.all_styles_mut(|style| {
-            style.animation_time = 0.0;
-            style.scroll_animation = egui::style::ScrollAnimation::none();
+        let long = format!(
+            "All checks passed. {}The parser change is ready for review.",
+            "Detailed report line. ".repeat(14)
+        );
+        let mut report = note(&long);
+        report.title = Some("Checks finished".into());
+        report.root = Some(root.clone());
+        app.notifications.push(report);
+        let mut target = note("The parser now accepts empty input.");
+        target.title = Some("Parser ready".into());
+        target.level = NotificationLevel::Success;
+        target.root = Some(root.clone());
+        target.open = Some(NotificationOpen {
+            path: root.join("src/main.rs"),
+            location: Some(crate::cli::Location { line: 3, column: 1 }),
         });
+        app.notifications.push(target);
+
+        let mut screen = harness(app);
+        screen.get_by_label("2 unread agent notifications").click();
         screen.run_steps(3);
-        screen.get_by_label("20 unread agent notifications").click();
-        screen.run();
-        assert_eq!(screen.state().notifications.unread_for(&root), 20);
+        assert!(screen.state().sidebar_view_visible(SidebarView::Messages));
         assert!(
-            !screen.state().session_dirty,
-            "overview alone reads nothing, including offscreen entries"
+            screen.query_by_label(&long).is_some(),
+            "the view shows the whole message without an extra click"
         );
-        assert!(
-            screen
-                .query_by_label("Result 19: all checks passed.")
-                .is_some(),
-            "the overview shows the message preview before opening it"
+        assert_eq!(
+            screen.state().notifications.unread(),
+            0,
+            "visible messages count as read"
         );
-        assert!(
-            screen.query_by_label("Show project").is_none(),
-            "a message without an attachment must not suggest a navigation target"
-        );
-        screen.get_by_label("Task 19 finished").click();
-        screen.run();
-        assert!(
-            screen
-                .query_by_label("Result 19: all checks passed.")
-                .is_some()
-        );
-        assert_eq!(screen.state().notifications.unread_for(&root), 19);
         assert!(screen.state().session_dirty);
         screen.state_mut().session_dirty = false;
-        screen.get_by_label("Mark unread").click();
+
+        screen.get_by_label("Open main.rs:3").click();
         screen.run_steps(3);
-        assert_eq!(screen.state().notifications.unread_for(&root), 20);
-        assert!(screen.state().notifications.expanded.is_none());
-        assert!(screen.state().session_dirty);
-        screen.get_by_label("Close notifications").click();
-        screen.run_steps(3);
-        assert!(!screen.state().notifications.is_open());
-        screen.state_mut().open_notifications();
-        screen.run_steps(3);
-        assert_eq!(screen.state().notifications.unread(), 20);
-        screen.state_mut().session_dirty = false;
-        screen.get_by_label("Clear all").click();
+        assert_eq!(
+            screen.state().tab().and_then(|tab| tab.path.clone()),
+            Some(root.join("src/main.rs"))
+        );
+
+        screen.get_by_label("Clear read").click();
         screen.run_steps(3);
         assert!(screen.state().notifications.items_empty());
         assert!(screen.state().session_dirty);
-        let session = serde_json::to_vec(&screen.state().session()).unwrap();
-        let restored: Session = serde_json::from_slice(&session).unwrap();
-        assert!(restored.notifications.items_empty());
-        assert!(restored.notifications.last_flash.is_none());
-        assert!(restored.notifications.expanded.is_none());
-        let mut inbox = restored.notifications;
-        assert_eq!(inbox.push(note("After clearing")), (21, false, 1));
+        assert!(
+            screen
+                .query_by_label(
+                    "No messages yet. Agents notify you when work is finished, blocked or needs a decision."
+                )
+                .is_some()
+        );
     }
 
     #[test]
-    fn project_messages_distinguish_attachments_and_keep_other_projects_reachable() {
+    fn an_arrival_card_opens_the_target_without_taking_focus() {
         let mut app = VEditApp::empty(egui::Context::default());
-        let root = PathBuf::from("C:/project");
-        app.projects.push(Project::new(root.clone()));
-        // No open documents: the window header must still expose messages.
-        let mut review = note("Please check the changes on this branch.");
-        review.title = Some("Changes ready for review".into());
-        review.review = Some(NotificationReview::Branch);
-        app.notifications.push(review);
-        let mut file = note("The parser now accepts empty input. The test is linked below.");
-        file.title = Some("Parser updated".into());
-        file.open = Some(NotificationOpen {
-            path: root.join("src/parser.rs"),
-            location: Some(crate::cli::Location {
-                line: 42,
-                column: 3,
+        visual_tests::workspace(&mut app);
+        let root = app.projects[0].root.clone();
+        let response = app.control_request(crate::cli::Request::Notify {
+            message: "All tests pass; the parser change is ready.".into(),
+            title: Some("Parser ready".into()),
+            level: NotificationLevel::Success,
+            workspace: None,
+            open: Some(NotificationOpen {
+                path: root.join("src/main.rs"),
+                location: None,
             }),
+            review: None,
         });
-        app.notifications.push(file);
-        let mut plain = note("All checks passed. There is nothing else to open for this update.");
-        plain.title = Some("Checks finished".into());
-        plain.level = NotificationLevel::Success;
-        app.notifications.push(plain);
-        let mut closed = note("A message from a closed project.");
-        closed.title = Some("Other project result".into());
-        closed.root = Some(PathBuf::from("C:/closed-project"));
-        app.notifications.push(closed);
-        let mut unscoped = note("A message without a project.");
-        unscoped.title = Some("General update".into());
-        unscoped.root = None;
-        app.notifications.push(unscoped);
-        for item in &mut app.notifications.items {
-            item.time = unix_now();
-        }
-        let mut screen = visual_tests::harness(app);
-        screen.run_steps(5);
-        let button = screen.get_by_label("5 unread agent notifications");
-        assert!(
-            button.rect().bottom() < 60.0,
-            "messages belong to the project header"
-        );
-        button.click();
-        screen.run();
-        assert_eq!(
-            screen.state().notifications.project_filter.as_deref(),
-            Some(root.as_path())
-        );
-        assert!(screen.query_by_label("Checks finished").is_some());
-        assert!(screen.query_by_label("Other project result").is_none());
-        assert!(screen.query_by_label("General update").is_none());
+        assert!(response.ok);
+        assert_eq!(app.notifications.toast.len(), 1);
+        let mut screen = harness(app);
+        let focus = screen.ctx.memory(|memory| memory.focused());
         assert!(
             screen
-                .query_by_label("Message only · No file or change review attached")
+                .query_by_label("Agent message: Parser ready")
                 .is_some()
         );
-        assert!(screen.query_by_label("Open parser.rs:42").is_some());
-        assert!(screen.query_by_label("Review branch changes").is_some());
-        assert!(screen.query_by_label("Show project").is_none());
-        assert_eq!(screen.state().notifications.unread(), 5);
-        screen.get_by_label("All projects (5)").click();
-        screen.run();
-        assert!(screen.query_by_label("Other project result").is_some());
-        assert!(screen.query_by_label("General update").is_some());
-        assert_eq!(screen.state().notifications.unread(), 5);
-        screen.get_by_label("This project (3)").click();
-        screen.run();
-        screen.get_by_label("Checks finished").click();
-        screen.run();
-        assert_eq!(screen.state().notifications.unread(), 4);
-        assert!(screen.query_by_label("Copy message").is_some());
-        screen.get_by_label("Close notifications").click();
+        screen.get_by_label("Agent message: Parser ready").click();
         screen.run_steps(3);
-        screen.get_by_label("4 unread agent notifications").click();
-        screen.run();
-        assert_eq!(screen.state().notifications.expanded, Some(3));
-        assert!(screen.query_by_label("Copy message").is_some());
-        assert_eq!(screen.state().notifications.unread(), 4);
-
-        screen.set_size(Vec2::new(640.0, 480.0));
-        screen.run_steps(3);
-        screen.run();
-        for label in [
-            "Close notifications",
-            "This project (2)",
-            "All projects (4)",
-            "Clear all",
-        ] {
-            assert!(
-                screen
-                    .ctx
-                    .content_rect()
-                    .contains_rect(screen.get_by_label(label).rect()),
-                "{label} must remain visible in a small window"
-            );
-        }
+        assert_eq!(
+            screen.state().tab().and_then(|tab| tab.path.clone()),
+            Some(root.join("src/main.rs"))
+        );
+        assert!(screen.state().notifications.toast.is_empty());
+        assert_eq!(screen.state().notifications.unread(), 0);
+        assert_eq!(
+            screen.ctx.memory(|memory| memory.focused()),
+            focus,
+            "the card never takes keyboard focus"
+        );
     }
 }

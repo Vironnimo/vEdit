@@ -58,13 +58,13 @@ The user can have several projects open, and you can be one of several agents, e
 - `open` reuses an existing buffer, otherwise puts the file into the deepest open project containing it or Other files. It does not open parent folders or repositories. Other files tabs have `workspace:null` and `workspace_kind:"other_files"`; use their tab IDs for document commands. Project commands need an open folder project.
 - `--background` on `open` and `review` keeps the user's visible project, document and keyboard and does not raise the window; files wait in their project's tabs. Use it while the user works elsewhere; omit it when the user asked to see the result now.
 
-When you finish, get blocked, or need a decision, tell the user with `notify`. It puts a message into the window's inbox: a dot on your project's tab, an unread count beside "For agent", and a taskbar flash when the window is in the background. It changes nothing else. The entry's action button opens the file or review you name:
+When you finish, get blocked, or need a decision, tell the user with `notify`. It puts a message into the window's inbox: a dot on your project's tab, an unread count in the Messages view, a brief card in the window, and a taskbar flash when the window is in the background. It changes nothing else. The card and the entry's action button open the file or review you name:
 
 ```powershell
 & $VEditCli notify 'All tests pass; the parser change is ready for review.' --title 'Parser ready' --level success --review working
 ```
 
-Levels are `info` (default), `success`, `warning` and `error`. `--open '<path>:<line>'` opens a file instead of `--review working|branch`. Repeating an unread message counts it again instead of adding an entry. Messages and their read state survive restarts; `status` reports unread counts per project. A message becomes read when the user expands it or opens its action.
+Levels are `info` (default), `success`, `warning` and `error`. `--open '<path>:<line>'` opens a file instead of `--review working|branch`. Repeating an unread message counts it again instead of adding an entry. Messages and their read state survive restarts; `status` reports unread counts per project. A message becomes read when it is visible in the Messages view or the user opens its action; a message the user has not seen stays unread.
 
 ## Common goals
 

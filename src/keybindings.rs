@@ -756,7 +756,6 @@ impl VEditApp {
             || self.navigation_pending()
             || self.status_details.is_some()
             || self.agent_marks_modal_open()
-            || self.notifications.is_open()
             || self.context_file_dialog.is_some()
             || self.vim_command.is_some()
             || self.screen_jump.is_some()

@@ -25,8 +25,9 @@ the egui frame without becoming the owner of every feature it displays.
   `src/editor_preferences.rs` owns reading preferences and their UI.
   Feature-specific settings remain with indentation, language, task and sidebar
   owners rather than being reimplemented in the settings router.
-- `src/notifications.rs` owns the session inbox and its presentation. Its CLI
-  entry point and response contract also cross `control.md`.
+- `src/notifications.rs` owns the session inbox, its Messages sidebar view, the
+  arrival cards and taskbar attention throttling. Its CLI entry point and
+  response contract also cross `control.md`.
 - `src/status_messages.rs` owns copyable status details and their stable modal
   snapshot. Language-server failures originate in `language-services.md`.
 
@@ -58,9 +59,6 @@ checks deliberately do not wake an idle window.
 actions. Event order and focus are behavioral contracts: drawing an overlay late
 in the frame does not by itself prevent earlier source handlers from receiving
 its keys. Read `editing/input-and-history.md` before moving input phases.
-The notification inbox blocks global shortcuts, region focus and Project
-navigation as well as source input. An open palette also blocks Project cycling
-and the workspace picker, including deferred actions.
 The hover-details frame begins before application/source input and ends after
 language hover rendering, before deferred input owners finish. This preserves
 the selectable details card's input ownership; see `rendering.md`.
@@ -81,7 +79,9 @@ publication belongs to `documents.md`.
   translated or revised display labels must never select behavior. Snapshot and
   history request/completion guards live in `src/git_refresh.rs`.
 - Notifications persist in the window's session and do not change focus or open
-  documents on receipt. Read-state and retention rules belong to
+  documents on receipt. The Messages view is an ordinary sidebar view and owns no
+  input; a message becomes read by being visible there or by its target being
+  opened. Read-state and retention rules belong to
   `application/commands-and-settings.md`.
 - App modules remain methods on the same application state. A file split does
   not introduce a second document, session or worker owner. Keep shared-document

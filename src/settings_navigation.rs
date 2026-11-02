@@ -257,7 +257,9 @@ mod tests {
             .collect();
         let mut screen = visual_tests::harness(app);
         screen.state_mut().open_settings_section("Layout");
-        screen.run_steps(3);
+        // A page taller than the settings viewport grows the centered modal for a
+        // few frames; let its controls settle before clicking one.
+        screen.run_steps(8);
         screen
             .get_by_label("Open external files in a new window")
             .click();

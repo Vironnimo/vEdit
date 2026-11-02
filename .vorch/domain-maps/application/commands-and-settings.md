@@ -93,32 +93,43 @@ read-only modal supports selection and copying, suppresses source input and
 restores the prior focus when closed. `src/status_message_tests.rs` covers this
 behavior; `control.md` describes the observation/mutation boundary.
 
-`src/notifications.rs` owns the inbox, per-project unread indicators and taskbar
-attention throttling. `Session` persists its messages, IDs, repeat counts and
-read state through the existing recovery writer; dialog state and flash timing
-are transient. Older sessions default to an empty inbox. Receipt, read-state
-changes and clearing the inbox schedule session persistence.
+`src/notifications.rs` owns the inbox, its Messages sidebar view, the arrival
+cards and taskbar attention throttling. `Session` persists messages, IDs, repeat
+counts, read state and the time a message was first seen through the existing
+recovery writer; arrival cards and flash timing are transient. Older sessions
+keep `read` without a seen time and start their retention window at restore.
+Receipt, read-state changes, dismissal and clearing schedule session
+persistence.
 
-The window header owns the inbox entry point, separate from the pane's user-mark
-collection. The overview defaults to the active project's messages when any
-exist, with an all-project filter that includes closed projects and unscoped
-messages. Filtering and previews do not acknowledge entries. Cards distinguish
-text-only messages from file/review attachments; only actual attachments offer
-navigation actions. A plain message never implies source annotations. The last
-expanded message remains available on reopening within the same session/filter;
-filter and expansion state are not persisted.
+The inbox is the `Messages` entry of `SidebarView`, opened from the project
+header, the activity rail, View -> Agent messages or the command palette. It is
+an ordinary sidebar view and owns no input; it does not block shortcuts or
+region focus. The view lists every message with its full text, project, time and
+target, without a per-project filter. An action opens the attached file or
+change review; a text-only message has no action and never implies source
+annotations.
 
-The user reads an entry by expanding it or opening its action, and can mark it
-unread again. Opening the overview, switching projects or receiving a message
-while the inbox is open does not acknowledge it. Closed/offline project entries
-stay in the inbox. Unread entries are retained until read or explicitly cleared;
-only the read history is limited to 100 entries, retaining the entry just opened
-while pruning older read entries. An unavailable action leaves its entry unread.
-Identical unread entries coalesce by their message and action; a repeated message
-after reading is a new entry. Receipt does not switch workspace, steal focus or execute the
-optional open/review action.
+A message counts as read when it is visible in the view while the window has
+focus, or when its target is opened. Messages below the scroll viewport, in a
+hidden view or in a background window stay unread, so the header count, the
+project tab dot and the activity dot report only unseen messages. A message that
+arrives while the view is visible becomes read on the next frame and produces no
+arrival card. Closed/offline project entries stay reachable.
 
-Use the inline inbox tests for coalescing, retention, read interactions and flash
-throttling; `src/agent_projects_tests.rs` covers session round trips. CLI
-workspace selection, request fields, response text and schema belong to
-`control.md`; preserve that contract when editing `control_notify`.
+The user can dismiss one message or clear the read history; unread messages
+survive both. Read messages leave after seven days, and the read history stays
+bounded at 100 entries, retaining the message just seen. Identical unread
+messages coalesce by message and action; a repeat after reading starts a new
+entry and shows its card again.
+
+An arrival card in the window corner shows the title, first line, project and
+target action. It waits while another surface owns input and does not count down
+in a background window; hovering holds it. Cards and the view never switch
+workspace, steal focus or execute the optional open/review action, and receipt
+stays allowed during user dialogs.
+
+Use the inline notification tests for coalescing, retention, read-on-view,
+dismissal, arrival cards and flash throttling; `src/agent_projects_tests.rs`
+covers session round trips. CLI workspace selection, request fields, response
+text and schema belong to `control.md`; preserve that contract when editing
+`control_notify`.
