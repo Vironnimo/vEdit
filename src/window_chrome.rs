@@ -13,6 +13,7 @@ pub(crate) const HEIGHT: f32 = 42.0;
 const CONTROL_WIDTH: f32 = 46.0;
 const PROJECT_PADDING: f32 = 10.0;
 const MIN_PROJECT_WIDTH: f32 = 28.0;
+const BRAND_MARK_SIZE: f32 = 30.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChromeOptions {
@@ -232,30 +233,36 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         return;
     }
     let center = egui::pos2(rect.left() + 23.0, rect.center().y);
+    // The GPU's linear filter skips most texels when shrinking a large image,
+    // which leaves jagged edges. Downsample once to the exact physical size and
+    // draw it pixel-aligned instead.
+    let ppp = ui.ctx().pixels_per_point();
+    let pixels = (BRAND_MARK_SIZE * ppp).round().max(1.0) as usize;
     let texture_key = egui::Id::new("vedit_brand_mark");
-    let texture = ui
+    let texture = match ui
         .ctx()
-        .data(|data| data.get_temp::<egui::TextureHandle>(texture_key))
-        .unwrap_or_else(|| {
-            // The transparent mark, not the tiled app icon, as in vBot's header.
-            let mark =
-                eframe::icon_data::from_png_bytes(include_bytes!("../assets/vedit-mark.png"))
-                    .expect("the bundled vEdit mark must be a valid PNG");
+        .data(|data| data.get_temp::<(usize, egui::TextureHandle)>(texture_key))
+    {
+        Some((size, texture)) if size == pixels => texture,
+        _ => {
             let texture = ui.ctx().load_texture(
                 "vEdit mark",
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [mark.width as usize, mark.height as usize],
-                    &mark.rgba,
-                ),
+                brand_mark(pixels),
                 egui::TextureOptions::LINEAR,
             );
             ui.ctx()
-                .data_mut(|data| data.insert_temp(texture_key, texture.clone()));
+                .data_mut(|data| data.insert_temp(texture_key, (pixels, texture.clone())));
             texture
-        });
+        }
+    };
+    let side = pixels as f32 / ppp;
+    let min = egui::pos2(
+        ((center.x - side / 2.0) * ppp).round() / ppp,
+        ((center.y - side / 2.0) * ppp).round() / ppp,
+    );
     ui.painter().image(
         texture.id(),
-        Rect::from_center_size(center, Vec2::splat(30.0)),
+        Rect::from_min_size(min, Vec2::splat(side)),
         Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
         Color32::WHITE,
     );
@@ -284,6 +291,61 @@ fn paint_brand(ui: &Ui, rect: Rect, text: bool) {
         let pos = egui::pos2(rect.left() + 48.0, rect.center().y - galley.size().y / 2.0);
         ui.painter().galley(pos, galley, Color32::PLACEHOLDER);
     }
+}
+
+/// The transparent mark, not the tiled app icon, as in vBot's header, area-averaged
+/// down to `pixels` square in premultiplied alpha.
+fn brand_mark(pixels: usize) -> egui::ColorImage {
+    let mark = eframe::icon_data::from_png_bytes(include_bytes!("../assets/vedit-mark.png"))
+        .expect("the bundled vEdit mark must be a valid PNG");
+    let (width, height) = (mark.width as usize, mark.height as usize);
+    let premultiplied: Vec<[f32; 4]> = mark
+        .rgba
+        .chunks_exact(4)
+        .map(|p| {
+            let a = f32::from(p[3]) / 255.0;
+            [
+                f32::from(p[0]) * a,
+                f32::from(p[1]) * a,
+                f32::from(p[2]) * a,
+                f32::from(p[3]),
+            ]
+        })
+        .collect();
+    let columns = area_weights(width, pixels);
+    let rows = area_weights(height, pixels);
+    let mut out = Vec::with_capacity(pixels * pixels * 4);
+    for row in &rows {
+        for column in &columns {
+            let mut sum = [0.0_f32; 4];
+            for &(y, wy) in row {
+                for &(x, wx) in column {
+                    let source = premultiplied[y * width + x];
+                    for channel in 0..4 {
+                        sum[channel] += source[channel] * wx * wy;
+                    }
+                }
+            }
+            out.extend(sum.map(|value| value.round().clamp(0.0, 255.0) as u8));
+        }
+    }
+    egui::ColorImage::from_rgba_premultiplied([pixels, pixels], &out)
+}
+
+/// For each target pixel, the source pixels it covers and their coverage share.
+fn area_weights(source: usize, target: usize) -> Vec<Vec<(usize, f32)>> {
+    let scale = source as f32 / target as f32;
+    (0..target)
+        .map(|index| {
+            let (start, end) = (index as f32 * scale, (index + 1) as f32 * scale);
+            (start.floor() as usize..(end.ceil() as usize).min(source))
+                .map(|pixel| {
+                    let covered = end.min(pixel as f32 + 1.0) - start.max(pixel as f32);
+                    (pixel, covered.max(0.0) / scale)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]

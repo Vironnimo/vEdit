@@ -11,7 +11,7 @@ taskbar.
   Windows executable resources and Shell icons.
 - `vedit.png`: the 256 pixel tile, embedded in the running window and displayed
   in the repository README.
-- `vedit-mark.png`: the transparent 128 pixel mark without tile, shown in the
+- `vedit-mark.png`: the transparent 256 pixel mark without tile, shown in the
   custom titlebar like `vbot-mark-transparent.png` in vBot's header.
 
 Keep all three files from the same export. None of them requires the original
