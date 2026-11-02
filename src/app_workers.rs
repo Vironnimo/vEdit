@@ -63,10 +63,6 @@ pub(super) enum WorkerResult {
         request: u64,
         result: Result<project_tasks::TaskPreview, String>,
     },
-    TerminalOpened {
-        root: PathBuf,
-        result: Result<(), String>,
-    },
     ControlSearch {
         root: PathBuf,
         owner: project_search_ui::SearchOwner,
@@ -316,13 +312,6 @@ impl VEditApp {
                         project.task_preview.complete(request, result);
                     }
                 }
-                WorkerResult::TerminalOpened { root, result } => match result {
-                    Ok(()) => self.status(
-                        format!("Terminal opened in {}", crate::paths::display(&root)),
-                        false,
-                    ),
-                    Err(error) => self.status(error, true),
-                },
                 WorkerResult::ControlSearch {
                     root,
                     owner,

@@ -21,6 +21,8 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 similar = "2.7"
 notify = { version = "8.2.0", default-features = false }
 unicode-segmentation = "1.13.3"
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
 
 [build-dependencies]
 winresource = "0.1.34"

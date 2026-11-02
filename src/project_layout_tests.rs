@@ -967,6 +967,39 @@ fn wheel(screen: &mut Harness<'_, VEditApp>, x: f32, amount: f32) {
     screen.run_steps(3);
 }
 
+#[test]
+fn switching_projects_restores_the_selected_terminal_keyboard_owner() {
+    let files = WorkspaceFiles::new();
+    let mut app = fixture(&files);
+    let terminal = app.add_test_terminal();
+    app.dock_terminal_in_pane(terminal, app.current_pane_id(), 0)
+        .unwrap();
+    let mut screen = harness(app);
+    screen.state_mut().switch_project(1);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_project, 1);
+    assert!(screen.state().focused_terminal_id().is_none());
+
+    screen.state_mut().switch_project(0);
+    screen.run_steps(3);
+    assert_eq!(screen.state().active_pane_terminal(), Some(terminal));
+    assert_eq!(screen.state().focused_terminal_id(), Some(terminal));
+    screen.event(egui::Event::Text("shell suffix".into()));
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state_mut().terminal_input_bytes(terminal),
+        b"shell suffix"
+    );
+    assert_eq!(
+        screen.state().projects[0].tabs[0].text,
+        document("A", "first.md")
+    );
+    assert_eq!(
+        screen.state().projects[1].tabs[0].text,
+        document("B", "first.md")
+    );
+}
+
 fn preview_offset(app: &VEditApp, pane: u64) -> f32 {
     let snapshot = layout(app);
     let pane = snapshot["panes"]

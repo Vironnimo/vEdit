@@ -1005,3 +1005,59 @@ fn agent_observations_remain_available_but_mutations_wait_during_pointer_drag() 
         });
     assert!(response.ok, "{}", response.result);
 }
+
+#[test]
+fn terminal_pointer_drag_moves_one_session_between_panel_strip_and_split() {
+    let mut app = fixture();
+    let terminal = app.add_test_terminal();
+    let original: Vec<_> = app.projects[0]
+        .tabs
+        .iter()
+        .map(|tab| tab.text.clone())
+        .collect();
+    let mut screen = harness(app);
+    let start = screen.get_by_label("Terminal 1").rect().center();
+    let destination = tab_center(&screen, 1, "second.txt") - Vec2::new(20.0, 0.0);
+    pointer(&mut screen, start, true, egui::PointerButton::Primary);
+    screen.event(egui::Event::PointerMoved(start + Vec2::new(15.0, 0.0)));
+    screen.run_steps(1);
+    screen.event(egui::Event::PointerMoved(destination));
+    screen.run_steps(2);
+    assert!(screen.state().terminal_tab_drag_active());
+    release(&mut screen, destination);
+    assert_eq!(screen.state().pane_terminal(terminal), Some(1));
+    assert_eq!(
+        screen.state().current_pane_tabs()[1],
+        PaneTab::Terminal(terminal)
+    );
+
+    let pane = screen.state().editor_layout.rects[&1];
+    let destination = egui::pos2(pane.right() - 4.0, pane.center().y);
+    start_drag(&mut screen, 1, "Terminal 1", destination);
+    release(&mut screen, destination);
+    let terminal_pane = screen.state().pane_terminal(terminal).unwrap();
+    assert_ne!(terminal_pane, 1);
+    assert_eq!(screen.state().editor_layout.panes.len(), 2);
+
+    screen.state_mut().output_visible = false;
+    screen.run_steps(1);
+    let start = tab_center(&screen, terminal_pane, "Terminal 1");
+    pointer(&mut screen, start, true, egui::PointerButton::Primary);
+    screen.event(egui::Event::PointerMoved(start + Vec2::new(15.0, 0.0)));
+    screen.run_steps(2);
+    let destination = screen.get_by_label("Drop terminal here").rect().center();
+    screen.event(egui::Event::PointerMoved(destination));
+    screen.run_steps(2);
+    release(&mut screen, destination);
+    assert_eq!(screen.state().panel_terminal_id(), Some(terminal));
+    assert!(screen.state().pane_terminal(terminal).is_none());
+    assert_eq!(screen.state().editor_layout.panes.len(), 1);
+    assert_eq!(
+        screen.state().projects[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.text.clone())
+            .collect::<Vec<_>>(),
+        original
+    );
+}

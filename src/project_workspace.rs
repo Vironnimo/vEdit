@@ -67,6 +67,7 @@ pub(super) struct Project {
     pub(super) kind: WorkspaceKind,
     pub(super) launch: project_launch::LaunchState,
     pub(super) run: project_tasks::ProjectRun,
+    pub(super) terminals: project_terminal::ProjectTerminals,
     pub(super) root: PathBuf,
     pub(super) tasks: project_tasks::TaskConfiguration,
     pub(super) task_preview:
@@ -147,6 +148,7 @@ impl Project {
             kind: WorkspaceKind::Project,
             launch: project_launch::LaunchState::default(),
             run: project_tasks::ProjectRun::default(),
+            terminals: project_terminal::ProjectTerminals::default(),
             root,
             tasks: project_tasks::TaskConfiguration::default(),
             task_preview: BackgroundValue::default(),
@@ -404,6 +406,12 @@ impl VEditApp {
         self.set_active_project_context(project_index);
         if switching_project {
             self.focus_existing_project_tab(project_index, tab_index);
+        }
+        self.activate_pane_document();
+        self.terminal_focus = None;
+        if let Some(terminal) = self.focused_terminal_id() {
+            self.ctx
+                .memory_mut(|memory| memory.surrender_focus(Self::terminal_widget_id(terminal)));
         }
         self.clear_empty_workspace();
         let project = &mut self.projects[project_index];

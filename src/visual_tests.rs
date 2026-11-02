@@ -341,7 +341,6 @@ fn polished_screenshots() {
     app.projects[active].run.output =
         "> cargo check\n\n    Checking example v0.1.0\n    Finished `dev` profile in 0.42s\n"
             .into();
-    app.command = "cargo check".into();
     app.projects[active].run.status = "Completed".into();
     snapshot(&mut screen, "vedit_output");
 
@@ -405,6 +404,27 @@ fn polished_screenshots() {
     })
     .expect("narrow source and table preview split");
     snapshot(&mut screen, "vedit_narrow_source_preview_split");
+
+    screen.set_size(Vec2::new(1440.0, 920.0));
+    let app = screen.state_mut();
+    let focused = app.layout_status()["focused_pane"].as_u64().unwrap();
+    app.control_layout(crate::cli::LayoutAction::Close { pane_id: focused })
+        .unwrap();
+    app.activate_tab(0, 0);
+    let terminal = app.add_test_terminal();
+    app.feed_test_terminal_output(terminal, b"\x1b[32mPS C:\\Projects\\vEdit>\x1b[0m cargo test\r\n   Compiling example v0.1.0\r\n\x1b[32mtest result: ok.\x1b[0m 12 passed; 0 failed\r\n\x1b[32mPS C:\\Projects\\vEdit>\x1b[0m ");
+    snapshot(&mut screen, "vedit_terminal_panel");
+    let app = screen.state_mut();
+    let pane = app.current_pane_id();
+    app.dock_terminal_in_split(
+        terminal,
+        pane,
+        crate::cli::SplitOrientation::Vertical,
+        false,
+    )
+    .unwrap();
+    app.output_visible = false;
+    snapshot(&mut screen, "vedit_terminal_pane");
 }
 
 fn review(app: &mut VEditApp) {

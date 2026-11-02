@@ -1,7 +1,7 @@
 # Execution
 
-Execution runs saved project files in background processes and presents task and
-application output without turning the editor into an interactive terminal.
+Execution owns project tasks, application launches and interactive terminal
+sessions. Task/application output and terminal emulation have separate lifecycles.
 
 ## Overview
 
@@ -16,6 +16,10 @@ application output without turning the editor into an interactive terminal.
   `src/cli_launch.rs` defines and validates the shared launch configuration/actions.
 - `src/task_output_ui.rs` owns cached output presentation and clickable locations;
   `src/output_links.rs` parses locations and resolves their paths.
+- `src/terminal.rs` and its private units own terminal emulation, PTY workers,
+  shell input and rendering. `src/project_terminal.rs` owns Project session
+  identity, lazy startup and the bottom-panel UI. Pane placement belongs to
+  `src/split/terminal_tabs.rs` (see `projects.md`).
 - App's `src/app_workers.rs` polls task completions; `src/task_controls.rs`
   integrates task controls and Output. CLI routing belongs to
   `control.md`. File writes and external-change protection belong to `documents.md`.
@@ -60,8 +64,15 @@ response or a stop request alone does not prove a running/terminated process.
   A launcher script must remain alive until its application ends.
   Task guards terminate remaining descendants even after the parent exits;
   Git's successful-command release policy in `src/git/command.rs` is different.
-- Output-pane stdin is closed. `open_terminal` intentionally creates a visible,
-  independent PowerShell window whose lifetime is separate from task handles.
+- Task/application stdin is closed. Interactive terminals use ConPTY with
+  Alacritty emulation, independently of task/launch handles. Moving or hiding
+  their view preserves the shell; closing the terminal or Project drops its
+  owned process tree. Restored terminal metadata never replays commands.
+- Shell discovery, runtime environment resolution and PTY creation run on the
+  startup worker. PowerShell 7 is preferred over Windows PowerShell; profiles
+  load before enforcing the starting Project folder and its local PSReadLine
+  history file. History identity uses the canonical Project path, independent
+  of tab identity and the shell's later working directory.
 - Output links resolve on a worker, trying project root before command working
   directory. Applying a result checks project identity and request ID; clicking an
   old link must not navigate a newly selected or reopened project.

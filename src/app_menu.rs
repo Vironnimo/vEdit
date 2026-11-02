@@ -397,11 +397,22 @@ impl VEditApp {
                 ui,
                 "Open terminal",
                 &self.shortcut_label(keybindings::Action::Terminal),
-                "Open PowerShell in this project",
+                "Focus this project's terminal at its current position",
             )
             .clicked()
             {
                 self.run_shortcut_action(keybindings::Action::Terminal);
+                ui.close();
+            }
+            if design::menu_item(
+                ui,
+                "New terminal",
+                &self.shortcut_label(keybindings::Action::NewTerminal),
+                "Start another terminal in this project",
+            )
+            .clicked()
+            {
+                self.run_shortcut_action(keybindings::Action::NewTerminal);
                 ui.close();
             }
             ui.separator();
@@ -432,19 +443,6 @@ impl VEditApp {
             .clicked()
             {
                 self.run_shortcut_action(keybindings::Action::ConfigureTasks);
-                ui.close();
-            }
-            ui.separator();
-            if design::menu_item(
-                ui,
-                "Custom command",
-                "",
-                "Run a command and view its output",
-            )
-            .clicked()
-            {
-                self.output_visible = true;
-                self.problems_visible = false;
                 ui.close();
             }
         });

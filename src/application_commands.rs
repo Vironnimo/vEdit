@@ -13,7 +13,13 @@ impl VEditApp {
                 }
             }
             Action::CloseTab => {
-                if let Some(tab) = self.tab() {
+                if let Some(id) = self
+                    .panel_terminal_id()
+                    .filter(|_| self.terminal_keyboard_focused())
+                    .or_else(|| self.active_pane_terminal())
+                {
+                    self.close_terminal(id);
+                } else if let Some(tab) = self.tab() {
                     self.request_close(CloseAction::PaneTab {
                         pane_id: self.current_pane_id(),
                         id: tab.id,
@@ -22,26 +28,37 @@ impl VEditApp {
             }
             Action::ReopenTab => self.reopen_closed_tab(),
             Action::NextTab | Action::PreviousTab => {
+                if self.panel_terminal_id().is_some() && self.terminal_keyboard_focused() {
+                    self.cycle_panel_terminal(action == Action::PreviousTab);
+                    return;
+                }
                 self.bind_current_pane();
-                let ids = self.current_pane_tab_ids();
+                let ids = self.current_pane_tabs();
                 if ids.is_empty() {
                     return;
                 }
                 let active = self
-                    .tab()
-                    .and_then(|tab| ids.iter().position(|id| *id == tab.id))
+                    .current_pane_active_tab()
+                    .and_then(|tab| ids.iter().position(|id| *id == tab))
                     .unwrap_or(0);
                 let next = if action == Action::PreviousTab {
                     (active + ids.len() - 1) % ids.len()
                 } else {
                     (active + 1) % ids.len()
                 };
+                if let split::PaneTab::Terminal(id) = ids[next] {
+                    self.focus_terminal(id);
+                    return;
+                }
+                let split::PaneTab::Document(document) = ids[next] else {
+                    unreachable!()
+                };
                 if let Some((project, tab)) =
                     self.projects.iter().enumerate().find_map(|(pi, project)| {
                         project
                             .tabs
                             .iter()
-                            .position(|tab| tab.id == ids[next])
+                            .position(|tab| tab.id == document)
                             .map(|ti| (pi, ti))
                     })
                 {
@@ -209,6 +226,7 @@ impl VEditApp {
             Action::StopApplication => self.stop_application(),
             Action::ConfigureTasks => self.open_project_task_settings(),
             Action::Terminal => self.open_terminal(),
+            Action::NewTerminal => self.new_terminal(),
             Action::ToggleWrap => {
                 self.settings.word_wrap = !self.settings.word_wrap;
                 self.session_dirty = true;

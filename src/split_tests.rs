@@ -1243,3 +1243,117 @@ fn legacy_shared_strip_session_migrates_all_documents_without_losing_selected_ta
     assert_eq!(restarted.tab().unwrap().id, ids[1]);
     assert_eq!(restarted.projects[0].tabs.len(), 3);
 }
+
+#[test]
+fn terminal_placements_move_and_restore_without_becoming_documents() {
+    let mut app = fixture();
+    let documents = app.current_pane_tab_ids();
+    let terminal = app.add_test_terminal();
+    app.dock_terminal_in_pane(terminal, 1, 1).unwrap();
+    app.problems_visible = true;
+    app.focus_terminal(terminal);
+    assert!(
+        app.problems_visible,
+        "Pane focus preserves the bottom panel's selection"
+    );
+    app.problems_visible = false;
+    app.projects[0].launch.show_output = true;
+    app.focus_terminal(terminal);
+    assert!(
+        app.projects[0].launch.show_output,
+        "Pane focus preserves Application output"
+    );
+    app.projects[0].launch.show_output = false;
+    assert_eq!(
+        app.current_pane_tabs(),
+        vec![
+            PaneTab::Document(documents[0]),
+            PaneTab::Terminal(terminal),
+            PaneTab::Document(documents[1]),
+            PaneTab::Document(documents[2]),
+        ]
+    );
+    assert!(
+        app.tab().is_none(),
+        "a terminal must not expose a hidden Document"
+    );
+    assert_eq!(
+        app.layout_status()["panes"][0]["tab_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(app.projects[0].tabs.len(), 3);
+    app.run_shortcut_action(keybindings::Action::NextTab);
+    assert_eq!(
+        app.current_pane_active_tab(),
+        Some(PaneTab::Document(documents[1]))
+    );
+    app.run_shortcut_action(keybindings::Action::PreviousTab);
+    assert_eq!(
+        app.current_pane_active_tab(),
+        Some(PaneTab::Terminal(terminal))
+    );
+
+    app.drop_document_tab_at_mixed_index(1, 1, documents[2], 0)
+        .unwrap();
+    assert_eq!(
+        app.current_pane_tabs(),
+        vec![
+            PaneTab::Document(documents[2]),
+            PaneTab::Document(documents[0]),
+            PaneTab::Terminal(terminal),
+            PaneTab::Document(documents[1]),
+        ]
+    );
+    let right = app
+        .dock_terminal_in_split(terminal, 1, SplitOrientation::Vertical, false)
+        .unwrap();
+    app.editor_layout.rects.insert(
+        1,
+        egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(600.0, 400.0)),
+    );
+    app.editor_layout.rects.insert(
+        right,
+        egui::Rect::from_min_size(egui::pos2(605.0, 0.0), Vec2::new(600.0, 400.0)),
+    );
+    app.move_tab_direction(Vec2::LEFT).unwrap();
+    assert_eq!(app.pane_terminal(terminal), Some(1));
+    assert_eq!(
+        app.editor_layout.panes.len(),
+        1,
+        "moving the only tab collapses its old pane"
+    );
+    let right = app
+        .dock_terminal_in_split(terminal, 1, SplitOrientation::Horizontal, true)
+        .unwrap();
+    assert_eq!(app.active_pane_terminal(), Some(terminal));
+    let layout = serde_json::to_string(&app.editor_session_layout()).unwrap();
+    let terminals = app.projects[0].terminals.session();
+
+    let mut restored = fixture();
+    restored.projects[0].terminals = restored.restore_terminals(terminals);
+    restored.restore_editor_layout(Some(serde_json::from_str(&layout).unwrap()));
+    assert_eq!(restored.pane_terminal(terminal), Some(right));
+    assert_eq!(restored.active_pane_terminal(), Some(terminal));
+    assert_eq!(restored.projects[0].tabs.len(), 3);
+    let other = Project::new(std::env::temp_dir().join("vedit-terminal-other-project"));
+    restored.projects.push(other);
+    restored.switch_project(1);
+    assert!(restored.pane_terminal(terminal).is_none());
+    restored.switch_project(0);
+    assert_eq!(restored.pane_terminal(terminal), Some(right));
+    restored.close_editor_pane(right).unwrap();
+    assert!(restored.pane_terminal(terminal).is_none());
+    assert!(
+        restored.terminal_exists(terminal),
+        "closing a pane releases placement, not its shell"
+    );
+    assert_eq!(restored.projects[0].tabs.len(), 3);
+    restored.dock_terminal_in_pane(terminal, 1, 0).unwrap();
+    restored.run_shortcut_action(keybindings::Action::CloseTab);
+    assert!(!restored.terminal_exists(terminal));
+    assert_eq!(
+        restored.projects[0].tabs.len(),
+        3,
+        "terminal close keeps every Document"
+    );
+}

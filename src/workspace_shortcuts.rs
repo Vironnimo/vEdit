@@ -28,8 +28,11 @@ impl VEditApp {
         {
             return;
         }
-        self.multicursor_keys();
-        if self.completion_keys() || self.split_shortcuts(&ctx) {
+        let terminal = self.terminal_input_active();
+        if !terminal {
+            self.multicursor_keys();
+        }
+        if !terminal && self.completion_keys() || self.split_shortcuts(&ctx) {
             return;
         }
         let review_visible = self.change_review_visible();

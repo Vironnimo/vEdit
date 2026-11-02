@@ -466,6 +466,13 @@ impl VEditApp {
             self.ctx.request_repaint();
             return;
         }
+        if let Some(terminal) = self.active_pane_terminal() {
+            self.ctx
+                .memory_mut(|memory| memory.request_focus(Self::terminal_widget_id(terminal)));
+            self.editor_focused = false;
+            self.ctx.request_repaint();
+            return;
+        }
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }

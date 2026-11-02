@@ -25,6 +25,7 @@ Keep all your projects open side by side, let terminal agents such as Claude Cod
 | **Agent drafts stay unsaved**<br>Agent edits wait as drafts until you save them, even with autosave on. When an agent writes a file you haven't touched, vEdit reloads it as one undoable step. | **Messages**<br>Agents report when they are done, stuck or need a decision. The message links to a file or a change review and survives restarts. |
 | **Vim built in**<br>Motions, text objects, surround, Visual Block, `.` repeat, a leader key, bookmarks and an on-screen jump. Multicursor keeps Vim modes and runs motions and operators at every cursor. Vim can be switched off. | **Git and worktrees**<br>Source control panel, change markers in the gutter, a history graph and branch switching. Worktrees of a repository open as their own projects. |
 | **Language support**<br>Diagnostics, completion and go to definition for Rust (rust-analyzer), Python (bundled basedpyright) and Dart, plus hover, references and symbol search where the server offers them. | **Run and launch**<br>Check, test, build or run per project, with clickable error locations. Agents can set up launch options that you start from a Run button. |
+| **Project terminals**<br>Open PowerShell with Ctrl+Backtick, repeat project commands from history and keep shells running while you switch projects. | **Place terminals beside code**<br>Drag the same terminal between the bottom panel and editor tabs, or onto a pane edge to create a split. |
 
 ## Get started
 
@@ -49,7 +50,7 @@ You need `git` on PATH for the Git features. Rust support uses `rust-analyzer` (
 
 ## Working with agents
 
-vEdit doesn't run agents. Start them in a terminal as usual, and they use `vedit-cli` to show you their work. The bundled [vEdit skill](.agents/skills/vedit/SKILL.md) teaches an agent the CLI. It ships in the package under `skills/vedit/`, so pointing your agent at it is enough.
+Start agents in vEdit's project terminal or an external terminal; they use `vedit-cli` to show you their work. The bundled [vEdit skill](.agents/skills/vedit/SKILL.md) teaches an agent the CLI. It ships in the package under `skills/vedit/`, so pointing your agent at it is enough.
 
 ```powershell
 vedit-cli open plan.md --preview                          # show a document
@@ -99,4 +100,4 @@ vEdit is in active development and runs on Windows only. Versions are 0.x, so se
 
 ## License
 
-[MIT](LICENSE). Bundled fonts, the Python language server, Node and patched dependencies keep their own licenses, which the package ships under `licenses/`.
+[MIT](LICENSE). Bundled fonts, the Python language server, Node, terminal components and patched dependencies keep their own licenses, which the package ships under `licenses/`.

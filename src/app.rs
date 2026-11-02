@@ -59,6 +59,8 @@ mod git_refresh;
 mod language_integration;
 #[path = "project_search_ui.rs"]
 mod project_search_ui;
+#[path = "project_terminal.rs"]
+mod project_terminal;
 #[path = "project_workspace.rs"]
 mod project_workspace;
 #[path = "source_editor.rs"]
@@ -224,6 +226,7 @@ pub struct VEditApp {
     palette_query: String,
     palette_selected: usize,
     palette_focus: bool,
+    overlay_terminal_focus: Option<app_overlays::TerminalFocusOwner>,
     find_visible: bool,
     replace_visible: bool,
     find_text: String,
@@ -284,7 +287,7 @@ pub struct VEditApp {
     /// The document comparison shown in the diff dialog instead of a Git patch.
     comparison: Option<disk_sync::Comparison>,
     output_visible: bool,
-    command: String,
+    terminal_focus: Option<u64>,
     task_output_cache: task_output_ui::TaskOutputCache,
     register: Option<Yank>,
     yank_register: Option<Yank>,
@@ -437,6 +440,7 @@ impl VEditApp {
             palette_query: String::new(),
             palette_selected: 0,
             palette_focus: false,
+            overlay_terminal_focus: None,
             find_visible: false,
             replace_visible: false,
             find_text: String::new(),
@@ -490,7 +494,7 @@ impl VEditApp {
             diff_error: None,
             comparison: None,
             output_visible: false,
-            command: String::new(),
+            terminal_focus: None,
             task_output_cache: task_output_ui::TaskOutputCache::default(),
             register: None,
             yank_register: None,
@@ -538,6 +542,12 @@ impl VEditApp {
         self.projects.get(self.active_project)
     }
     fn tab(&self) -> Option<&EditorTab> {
+        if matches!(
+            self.current_pane_active_tab(),
+            Some(split::PaneTab::Terminal(_))
+        ) {
+            return None;
+        }
         if self.pane_has_empty_workspace() {
             return None;
         }
@@ -545,6 +555,12 @@ impl VEditApp {
         p.tabs.get(p.active_tab)
     }
     fn tab_mut(&mut self) -> Option<&mut EditorTab> {
+        if matches!(
+            self.current_pane_active_tab(),
+            Some(split::PaneTab::Terminal(_))
+        ) {
+            return None;
+        }
         if self.pane_has_empty_workspace() {
             return None;
         }
@@ -565,6 +581,7 @@ impl VEditApp {
 impl VEditApp {
     fn draw_ui(&mut self, ui: &mut egui::Ui) {
         design::begin_hover_frame(&self.ctx);
+        self.capture_overlay_focus();
         self.prune_empty_other_files();
         self.receive_file_drop();
         design::focus_visible(&self.ctx);
@@ -685,6 +702,8 @@ impl VEditApp {
             && !self.navigation_modal_open()
             && self.screen_jump.is_none()
             && !self.restore_git_popup_focus()
+            && !self.terminal_keyboard_focused()
+            && self.active_pane_terminal().is_none()
             && let Some(tab) = self.tab_mut()
         {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;

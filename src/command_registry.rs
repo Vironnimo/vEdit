@@ -133,7 +133,7 @@ actions! {
     ToggleLeftSidebar, "toggle_left_sidebar", "Toggle left sidebar", "Layout", ["Ctrl+Alt+E", "Ctrl+B"];
     ToggleRightSidebar, "toggle_right_sidebar", "Toggle right sidebar", "Layout", ["Ctrl+Alt+B"];
     ExplorerGitLayout, "explorer_git_layout", "Explorer left, Git right", "Layout", [];
-    ToggleOutput, "toggle_output", "Toggle output", "Layout", ["Ctrl+Backtick"];
+    ToggleOutput, "toggle_output", "Toggle output", "Layout", [];
     CheckProject, "check_project", "Check project", "Run", ["F5"];
     TestProject, "test_project", "Run tests", "Run", ["Alt+F6"];
     BuildProject, "build_project", "Build project", "Run", [];
@@ -141,7 +141,8 @@ actions! {
     RunApplication, "run_application", "Run application", "Run", [];
     StopApplication, "stop_application", "Stop application", "Run", [];
     ConfigureTasks, "configure_tasks", "Configure project tasks", "Run", [];
-    Terminal, "terminal", "Open terminal", "Run", [];
+    Terminal, "terminal", "Open terminal", "Run", ["Ctrl+Backtick"];
+    NewTerminal, "new_terminal", "New terminal", "Run", ["Ctrl+Shift+Backtick"];
     ToggleWrap, "toggle_wrap", "Toggle word wrap", "Editing", ["Alt+Z"];
     ToggleVim, "toggle_vim", "Toggle Vim motions", "Editing", [];
     VisualBlock, "visual_block", "Toggle Vim Visual Block", "Editing", [];

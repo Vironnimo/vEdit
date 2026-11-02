@@ -1,7 +1,49 @@
 //! Modal ordering, settings, close confirmations and diff presentation.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct TerminalFocusOwner {
+    project: u64,
+    terminal: u64,
+}
+
 impl VEditApp {
+    /// Remember the keyboard owner before a dialog or menu borrows focus.
+    /// A Project instance prevents closing and reopening the same folder from
+    /// reviving an old terminal destination.
+    pub(super) fn capture_overlay_focus(&mut self) {
+        if self.chrome_blocked()
+            || self.navigation_pending()
+            || self.screen_jump.is_some()
+            || self.vim_command.is_some()
+        {
+            return;
+        }
+        let terminal = self.focused_terminal_id();
+        self.overlay_terminal_focus = terminal.and_then(|terminal| {
+            self.project().map(|project| TerminalFocusOwner {
+                project: project.instance_id,
+                terminal,
+            })
+        });
+    }
+
+    fn restore_overlay_terminal_focus(&mut self) -> bool {
+        let Some(owner) = self.overlay_terminal_focus else {
+            return false;
+        };
+        if self
+            .project()
+            .is_none_or(|project| project.instance_id != owner.project)
+            || !self.terminal_belongs_to_project(owner.terminal, self.active_project)
+            || !self.terminal_visible(owner.terminal)
+        {
+            return false;
+        }
+        self.focus_terminal(owner.terminal);
+        true
+    }
+
     pub(super) fn overlays(&mut self) {
         let ctx = self.ctx.clone();
         self.context_file_dialog_ui(&ctx);
@@ -68,15 +110,7 @@ impl VEditApp {
                 self.interface_zoom_draft = None;
                 self.apply_pending_project_interpreter();
                 self.keybinding_ui = keybindings::State::default();
-                ctx.memory_mut(|memory| {
-                    if let Some(id) = memory.focused() {
-                        memory.surrender_focus(id);
-                    }
-                });
-                if let Some(tab) = self.tab_mut() {
-                    tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
-                }
-                ctx.request_repaint();
+                self.restore_document_focus();
             }
         }
         if let Some(action) = self.close_action
@@ -186,14 +220,7 @@ impl VEditApp {
             if cancel || modal.should_close() {
                 self.close_action = None;
                 self.close_after_save = false;
-                if let Some(tab) = self.tab_mut() {
-                    tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
-                }
-                if let Some(tab) = self.tab()
-                    && tab.agent_view == crate::cli::DocumentView::Source
-                {
-                    ctx.memory_mut(|memory| memory.request_focus(self.document_widget_id(tab.id)));
-                }
+                self.restore_document_focus();
             }
             if discard {
                 self.perform_close(action);
@@ -333,20 +360,27 @@ impl VEditApp {
         }
         self.restore_document_focus();
     }
-    fn restore_document_focus(&mut self) {
+    pub(super) fn restore_document_focus(&mut self) {
         self.ctx.memory_mut(|memory| {
             if let Some(id) = memory.focused() {
                 memory.surrender_focus(id);
             }
         });
+        if self.restore_overlay_terminal_focus() {
+            return;
+        }
         if let Some(tab) = self.tab_mut() {
             tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
         }
         if let Some(tab) = self.tab()
             && tab.agent_view == crate::cli::DocumentView::Source
+            && !tab.loading
+            && tab.error.is_none()
         {
             let id = self.document_widget_id(tab.id);
-            self.ctx.memory_mut(|memory| memory.request_focus(id));
+            if self.ctx.read_response(id).is_some() {
+                self.ctx.memory_mut(|memory| memory.request_focus(id));
+            }
         }
         self.ctx.request_repaint();
     }

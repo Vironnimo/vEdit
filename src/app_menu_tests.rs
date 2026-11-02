@@ -89,6 +89,8 @@ fn welcome_menu_and_file_view_run_actions_work_at_the_native_minimum_size() {
     ] {
         let mut screen = harness(fixture(), 500.0, 360.0);
         open_menu(&mut screen, section);
+        screen.get_by_label_contains(action).scroll_to_me();
+        screen.run_steps(3);
         let response = screen.get_by_label_contains(action);
         assert!(
             screen.ctx.content_rect().contains_rect(response.rect()),

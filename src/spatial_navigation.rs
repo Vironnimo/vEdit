@@ -8,10 +8,6 @@ pub(super) enum Region {
     Output,
 }
 
-pub(in crate::app) fn output_command_id() -> egui::Id {
-    egui::Id::new("output_command_input")
-}
-
 fn output_focus_id() -> egui::Id {
     egui::Id::new("output_region_focus")
 }
@@ -199,12 +195,8 @@ impl VEditApp {
     pub(super) fn move_tab_direction(&mut self, direction: Vec2) -> Result<(), String> {
         let source = self.editor_layout.focused;
         let tab = self
-            .editor_layout
-            .panes
-            .iter()
-            .find(|pane| pane.id == source)
-            .and_then(|pane| pane.document)
-            .ok_or("This pane has no document to move")?;
+            .current_pane_active_tab()
+            .ok_or("This pane has no tab to move")?;
         let origin = *self
             .editor_layout
             .rects
@@ -223,16 +215,29 @@ impl VEditApp {
         let Some(Region::Pane(destination)) = destination else {
             return Err("No editor pane in that direction. Split the editor first.".into());
         };
-        let index = self
-            .editor_layout
-            .panes
-            .iter()
-            .find(|pane| pane.id == destination)
-            .map(|pane| pane.documents.len() - usize::from(pane.documents.contains(&tab)))
-            .unwrap_or(0);
-        // A directional keyboard move takes the active location with it, even
-        // when the target already contains another view of this same buffer.
-        self.move_pane_tab_inner(source, destination, tab, index, true, true)
+        match tab {
+            PaneTab::Document(id) => {
+                let index = self
+                    .editor_layout
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == destination)
+                    .map(|pane| pane.documents.len() - usize::from(pane.documents.contains(&id)))
+                    .unwrap_or(0);
+                // A directional move takes the active location with it, even
+                // when the target already shows this same shared Document.
+                self.move_pane_tab_inner(source, destination, id, index, true, true)
+            }
+            PaneTab::Terminal(id) => {
+                let index = self
+                    .editor_layout
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == destination)
+                    .map_or(0, |pane| pane.ordered_tabs().len());
+                self.dock_terminal_in_pane(id, destination, index)
+            }
+        }
     }
 
     pub(super) fn cycle_spatial_region(&mut self, backwards: bool) {
@@ -275,8 +280,18 @@ impl VEditApp {
     }
 
     fn output_owns_widget(&self, widget: egui::Id) -> bool {
+        // A moved terminal keeps its widget identity, so its previous panel
+        // rectangle must not claim focus after docking it into a Pane.
+        if self
+            .active_pane_terminal()
+            .is_some_and(|id| widget == Self::terminal_widget_id(id))
+        {
+            return false;
+        }
         widget == output_focus_id()
-            || widget == output_command_id()
+            || self
+                .panel_terminal_id()
+                .is_some_and(|id| widget == Self::terminal_widget_id(id))
             || self.ctx.read_response(widget).is_some_and(|response| {
                 self.ctx
                     .read_response(output_focus_id())
@@ -307,6 +322,7 @@ impl VEditApp {
         }
         let remembered = self.region_focus.output_widget.filter(|id| {
             self.region_focus.output_widget_problems == Some(self.problems_visible)
+                && self.region_focus.output_widget_terminal == self.panel_terminal_id()
                 && self
                     .ctx
                     .read_response(*id)
@@ -314,11 +330,8 @@ impl VEditApp {
                 && self.output_owns_widget(*id)
         });
         let destination = remembered.unwrap_or_else(|| {
-            if self.problems_visible {
-                output_focus_id()
-            } else {
-                output_command_id()
-            }
+            self.panel_terminal_id()
+                .map_or_else(output_focus_id, Self::terminal_widget_id)
         });
         self.region_focus.output_focus_pending = remembered.is_none() && self.problems_visible;
         self.ctx
@@ -381,6 +394,7 @@ impl VEditApp {
         if self.output_keyboard_focused() {
             self.region_focus.output_widget = self.ctx.memory(|memory| memory.focused());
             self.region_focus.output_widget_problems = Some(self.problems_visible);
+            self.region_focus.output_widget_terminal = self.panel_terminal_id();
             // Focused lines and tabs show their own focus; the panel frame only
             // marks keyboard focus on the region before an item has taken it.
             if crate::design::focus_visible(&self.ctx)

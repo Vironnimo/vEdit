@@ -19,6 +19,13 @@ impl VEditApp {
         ui.spacing_mut().item_spacing.y = 0.0;
         self.tabs_ui(ui);
         ui.separator();
+        if let Some(terminal) = self.current_pane_terminal() {
+            self.editor_focused = false;
+            self.editor_rect = None;
+            self.editor_cursor_rect = None;
+            self.render_terminal(ui, terminal);
+            return;
+        }
         if self.render_pane_is_focused() && self.find_visible {
             self.find_ui(ui);
         }
@@ -179,31 +186,42 @@ impl VEditApp {
     }
     pub(super) fn tabs_ui(&mut self, ui: &mut egui::Ui) {
         let tabs: Vec<_> = self
-            .current_pane_tab_ids()
+            .current_pane_tabs()
             .into_iter()
-            .filter_map(|id| {
-                self.projects.iter().enumerate().find_map(|(pi, project)| {
-                    project
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .find(|(_, tab)| tab.id == id)
-                        .map(|(ti, tab)| (pi, ti, tab))
-                })
-            })
-            .map(|(pi, ti, t)| {
-                (
-                    t.id,
-                    t.title.clone(),
-                    t.dirty,
-                    t.loading,
-                    t.path.clone(),
-                    t.annotations.len(),
-                    t.saving,
-                    pi,
-                    ti,
-                    t.preview_tab,
-                )
+            .filter_map(|item| match item {
+                split::PaneTab::Terminal(id) => Some((
+                    id,
+                    self.terminal_title(id),
+                    false,
+                    false,
+                    None,
+                    0,
+                    false,
+                    None,
+                    false,
+                )),
+                split::PaneTab::Document(id) => {
+                    self.projects.iter().enumerate().find_map(|(pi, project)| {
+                        project
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .find(|(_, tab)| tab.id == id)
+                            .map(|(ti, t)| {
+                                (
+                                    t.id,
+                                    t.title.clone(),
+                                    t.dirty,
+                                    t.loading,
+                                    t.path.clone(),
+                                    t.annotations.len(),
+                                    t.saving,
+                                    Some((pi, ti)),
+                                    t.preview_tab,
+                                )
+                            })
+                    })
+                }
             })
             .collect();
         let tab_labels = crate::file_identity::disambiguate_labels(
@@ -212,11 +230,13 @@ impl VEditApp {
                 .map(|tab| (tab.1.as_str(), tab.4.as_deref()))
                 .collect::<Vec<_>>(),
         );
-        let active_id = self.tab().map(|tab| tab.id);
+        let active_id = self.current_pane_active_tab().map(split::PaneTab::id);
         let mut tab_drop_rects = Vec::new();
         let reveal_active = self.tab_strip_active != active_id;
         self.tab_strip_active = active_id;
         let mut select = None;
+        let mut select_terminal = None;
+        let mut return_terminal = None;
         let mut close = None;
         let mut context_action = None;
         let markdown = self
@@ -235,7 +255,8 @@ impl VEditApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
-                    for ((id, original_title, dirty, loading, path, marks, saving, project_index, tab_index, preview), title) in tabs.iter().zip(&tab_labels) {
+                    for ((id, original_title, dirty, loading, path, marks, saving, location, preview), title) in tabs.iter().zip(&tab_labels) {
+                        let terminal = location.is_none();
                         let selected = Some(*id) == active_id;
                         let font = FontId::proportional(12.0);
                         let title_galley = design::document_tab_galley(
@@ -251,7 +272,18 @@ impl VEditApp {
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title)
                         });
-                        if let Some(action) = context_actions::tab_menu(&response, path.is_some(), !loading && !saving, path.is_some() && !loading, &self.settings.keybindings) {
+                        if terminal {
+                            response.context_menu(|ui| {
+                                if ui.button("Move to terminal panel").clicked() {
+                                    return_terminal = Some(*id);
+                                    ui.close();
+                                }
+                                if ui.button("Close terminal").clicked() {
+                                    close = Some(*id);
+                                    ui.close();
+                                }
+                            });
+                        } else if let Some(action) = context_actions::tab_menu(&response, path.is_some(), !loading && !saving, path.is_some() && !loading, &self.settings.keybindings) {
                             context_action = Some((*id, action));
                         }
                         if selected && reveal_active {
@@ -268,7 +300,7 @@ impl VEditApp {
                                 Stroke::new(1.5, ACCENT.gamma_multiply(0.85)),
                             );
                         }
-                        let badge = file_badge(path.as_deref().unwrap_or(Path::new("")));
+                        let badge = if terminal { ">_" } else { file_badge(path.as_deref().unwrap_or(Path::new(""))) };
                         ui.painter().text(
                             rect.left_center() + Vec2::new(9.0, 0.0),
                             egui::Align2::LEFT_CENTER,
@@ -309,7 +341,8 @@ impl VEditApp {
                             egui::Sense::click(),
                         );
                         if !close_rect.contains(ui.input(|input| input.pointer.press_origin().unwrap_or_default())) {
-                            self.start_tab_drag(&response, *id, title);
+                            if terminal { self.start_terminal_tab_drag(&response, *id, title); }
+                            else { self.start_tab_drag(&response, *id, title); }
                         }
                         if hovered || close_response.hovered() || (selected && !*dirty) {
                             if close_response.hovered() {
@@ -356,14 +389,15 @@ impl VEditApp {
                                 ui.input(|input| input.pointer.interact_pos().unwrap_or_default()),
                             )
                         {
-                            select = Some((*project_index, *tab_index));
-                            if response.double_clicked() {
+                            if let Some((project_index, tab_index)) = location { select = Some((*project_index, *tab_index)); }
+                            else { select_terminal = Some(*id); }
+                            if !terminal && response.double_clicked() {
                                 self.keep_tab_open(*id);
                             }
                         }
-                        let mut tooltip = path.as_ref()
+                        let mut tooltip = if terminal { "Interactive terminal".into() } else { path.as_ref()
                             .map(|p| crate::paths::display(p))
-                            .unwrap_or_else(|| "Untitled document".into());
+                            .unwrap_or_else(|| "Untitled document".into()) };
                         if *dirty {
                             tooltip.push_str("\nUnsaved changes");
                         }
@@ -403,11 +437,22 @@ impl VEditApp {
         if let Some((project, index)) = select {
             self.activate_tab(project, index);
         }
+        if let Some(id) = select_terminal {
+            self.focus_terminal(id);
+        }
+        if let Some(id) = return_terminal {
+            self.undock_terminal(id);
+            self.focus_terminal(id);
+        }
         if let Some(id) = close {
-            self.request_close(CloseAction::PaneTab {
-                pane_id: self.current_pane_id(),
-                id,
-            });
+            if self.terminal_exists(id) {
+                self.close_terminal(id);
+            } else {
+                self.request_close(CloseAction::PaneTab {
+                    pane_id: self.current_pane_id(),
+                    id,
+                });
+            }
         }
         if let Some((id, action)) = context_action {
             self.apply_tab_context_action(id, action);

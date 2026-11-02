@@ -107,6 +107,10 @@ try {
     New-Item -ItemType Directory -Path $tokenizerLicenseDirectory -Force | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'licenses/tokenizer') -File |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $tokenizerLicenseDirectory -Force }
+    $terminalLicenseDirectory = Join-Path $releaseDirectory 'licenses/terminal'
+    New-Item -ItemType Directory -Path $terminalLicenseDirectory -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'licenses/terminal') -File |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $terminalLicenseDirectory -Force }
     New-Item -ItemType Directory -Path $windowLicenseDirectory -Force | Out-Null
     foreach ($windowDocumentation in @('LICENSE', 'VEDIT_PATCH.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot "vendor/winit/$windowDocumentation") -Destination $windowLicenseDirectory -Force

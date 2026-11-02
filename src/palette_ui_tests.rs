@@ -220,6 +220,91 @@ fn outside_source_click_preserves_insert_and_the_next_typed_character() {
 }
 
 #[test]
+fn transient_ui_returns_keyboard_input_to_the_originating_terminal() {
+    for docked in [false, true] {
+        for overlay in ["palette", "settings", "close_confirmation"] {
+            let (_fixture, mut app) = Fixture::new(2);
+            let terminal = app.add_test_terminal();
+            if docked {
+                app.dock_terminal_in_pane(terminal, app.current_pane_id(), 0)
+                    .unwrap();
+            }
+            let mut screen = harness(app);
+            screen.state_mut().focus_terminal(terminal);
+            screen.run_steps(3);
+            match overlay {
+                "palette" => open(&mut screen, Palette::Commands),
+                "settings" => {
+                    screen
+                        .state_mut()
+                        .run_shortcut_action(keybindings::Action::Settings);
+                    screen.run_steps(3);
+                    assert!(screen.state().settings_open);
+                }
+                "close_confirmation" => {
+                    screen.state_mut().projects[0].tabs[0].dirty = true;
+                    screen.state_mut().request_close(CloseAction::Exit);
+                    screen.run_steps(3);
+                    assert!(screen.state().close_action.is_some());
+                }
+                _ => unreachable!(),
+            }
+            screen.key_press(Key::Escape);
+            screen.run_steps(3);
+            assert!(screen.state().palette.is_none());
+            assert!(!screen.state().settings_open);
+            assert!(screen.state().close_action.is_none());
+            assert_eq!(
+                screen.ctx.memory(|memory| memory.focused()),
+                Some(VEditApp::terminal_widget_id(terminal)),
+                "docked={docked}, overlay={overlay}"
+            );
+            text(&mut screen, "shell suffix");
+            assert_eq!(
+                screen.state_mut().terminal_input_bytes(terminal),
+                b"shell suffix"
+            );
+            assert_eq!(screen.state().projects[0].tabs[0].text, DOCUMENT);
+        }
+    }
+}
+
+#[test]
+fn palette_dismissal_does_not_reopen_a_terminal_after_its_context_changes() {
+    for context in ["hidden", "closed", "other_project"] {
+        let (_fixture, mut app) = Fixture::new(1);
+        let terminal = app.add_test_terminal();
+        let mut screen = harness(app);
+        screen.state_mut().focus_terminal(terminal);
+        screen.run_steps(3);
+        open(&mut screen, Palette::Commands);
+        match context {
+            "hidden" => screen.state_mut().output_visible = false,
+            "closed" => screen.state_mut().close_terminal(terminal),
+            "other_project" => {
+                let root = screen.state().projects[0].root.join("other-project");
+                let mut project = Project::new(root);
+                project.tabs.push(EditorTab::new(None, "other.txt".into()));
+                screen.state_mut().projects.push(project);
+                screen.state_mut().switch_project(1);
+            }
+            _ => unreachable!(),
+        }
+        screen.key_press(Key::Escape);
+        screen.run_steps(3);
+        assert!(screen.state().palette.is_none());
+        assert!(screen.state().focused_terminal_id().is_none(), "{context}");
+        assert_eq!(
+            screen.state().active_project,
+            usize::from(context == "other_project")
+        );
+        if context == "hidden" {
+            assert!(!screen.state().output_visible);
+        }
+    }
+}
+
+#[test]
 fn outside_source_click_preserves_visual_lines_and_the_next_vim_motion() {
     for palette in [Palette::Files, Palette::Commands, Palette::Line] {
         let (_fixture, app) = Fixture::new(2);
@@ -667,30 +752,60 @@ fn quick_open_down_home_end_and_page_keys_reveal_the_selected_file() {
 
 #[test]
 fn quick_open_enter_activates_only_the_selected_existing_document() {
-    let (_fixture, app) = Fixture::new(45);
-    let mut screen = harness(app);
-    let expected = screen.state().projects[0].tabs[39].id;
-    let texts: Vec<_> = screen.state().projects[0]
-        .tabs
-        .iter()
-        .map(|tab| tab.text.clone())
-        .collect();
-    open(&mut screen, Palette::Files);
-    screen.key_press(Key::End);
-    screen.run_steps(3);
-    assert_eq!(screen.state().palette_selected, 39);
-    assert_eq!(screen.state().projects[0].active_tab, 0);
-    screen.key_press(Key::Enter);
-    screen.run_steps(3);
-    assert!(screen.state().palette.is_none());
-    assert_eq!(screen.state().tab().unwrap().id, expected);
-    assert_eq!(screen.state().projects[0].tabs.len(), 45);
-    for (tab, original) in screen.state().projects[0].tabs.iter().zip(texts) {
-        assert_eq!(tab.text, original);
-        assert!(!tab.dirty);
-        assert!(!tab.loading);
+    for origin in ["document", "panel_terminal", "pane_terminal"] {
+        let (_fixture, mut app) = Fixture::new(45);
+        app.settings.vim = false;
+        let terminal = if origin == "document" {
+            None
+        } else {
+            let terminal = app.add_test_terminal();
+            if origin == "pane_terminal" {
+                app.dock_terminal_in_pane(terminal, app.current_pane_id(), 0)
+                    .unwrap();
+            }
+            Some(terminal)
+        };
+        let mut screen = harness(app);
+        if let Some(terminal) = terminal {
+            screen.state_mut().focus_terminal(terminal);
+            screen.run_steps(2);
+        }
+        let expected = screen.state().projects[0].tabs[39].id;
+        let texts: Vec<_> = screen.state().projects[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.text.clone())
+            .collect();
+        open(&mut screen, Palette::Files);
+        screen.key_press(Key::End);
+        screen.run_steps(3);
+        assert_eq!(screen.state().palette_selected, 39);
+        assert_eq!(screen.state().projects[0].active_tab, 0);
+        screen.key_press(Key::Enter);
+        screen.run_steps(3);
+        assert!(screen.state().palette.is_none());
+        assert_eq!(screen.state().tab().unwrap().id, expected);
+        assert_eq!(screen.state().projects[0].tabs.len(), 45);
+        for (tab, original) in screen.state().projects[0].tabs.iter().zip(texts) {
+            assert_eq!(tab.text, original);
+            assert!(!tab.dirty);
+            assert!(!tab.loading);
+        }
+        assert_source_focus(&screen);
+        text(&mut screen, "source input");
+        assert!(
+            screen
+                .state()
+                .tab()
+                .unwrap()
+                .text
+                .starts_with("source input"),
+            "{origin}"
+        );
+        if let Some(terminal) = terminal {
+            assert!(screen.state_mut().terminal_input_bytes(terminal).is_empty());
+        }
     }
-    assert_source_focus(&screen);
 }
 
 #[test]

@@ -218,6 +218,9 @@ fn native_command_key(event: &egui::Event) -> bool {
 
 impl VEditApp {
     pub(super) fn apply_editor_command(&mut self, command: Command) {
+        if self.terminal_input_active() {
+            return;
+        }
         let Some(tab) = self
             .tab()
             .filter(|tab| !tab.loading && tab.agent_view == crate::cli::DocumentView::Source)
@@ -281,6 +284,9 @@ impl VEditApp {
     }
 
     fn editor_input_owner(&self) -> Option<Owner> {
+        if self.terminal_input_active() {
+            return None;
+        }
         let tab = self.tab()?;
         Some(Owner {
             pane: self.current_pane_id(),

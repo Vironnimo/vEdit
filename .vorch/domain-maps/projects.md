@@ -35,6 +35,11 @@ document IDs and per-document navigation/view state. A split is another view of
 the same document, including its edit history, rather than a copied buffer.
 `VimNavigation` also carries each pane's multicursor selections; transaction and
 selection-history rules belong to `editing/input-and-history.md`.
+`src/split/terminal_tabs.rs` extends Pane ordering with typed Document/Terminal
+tabs. Terminal sessions stay in their Project registry, outside Document buffers,
+recovery and CLI document IDs. A terminal has one placement, in a Pane or the
+bottom panel; moving its tab preserves the session. Closing a Pane returns its
+terminals to the panel. Session layouts persist placement, not shell processes.
 Inactive projects park their `EditorLayout`; switching projects restores that
 layout without reopening their documents. Project tab drags reorder the session's
 project list without switching the active workspace or its layout; the picker

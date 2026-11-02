@@ -88,7 +88,7 @@ impl ProcessTree {
 }
 
 #[cfg(windows)]
-mod windows_job {
+pub(crate) mod windows_job {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
@@ -128,10 +128,14 @@ mod windows_job {
         fn CloseHandle(handle: Handle) -> i32;
     }
 
-    pub(super) struct Job(Handle);
+    pub(crate) struct Job(Handle);
 
     impl Job {
         pub(super) fn assign(child: &Child) -> Option<Self> {
+            Self::assign_raw(child.as_raw_handle())
+        }
+
+        pub(crate) fn assign_raw(process: std::os::windows::io::RawHandle) -> Option<Self> {
             // All handles stay on this worker. The pointers refer to live,
             // correctly laid out Win32 structures for the duration of calls.
             unsafe {
@@ -148,7 +152,7 @@ mod windows_job {
                     (&limits as *const ExtendedLimits).cast(),
                     std::mem::size_of::<ExtendedLimits>() as u32,
                 ) == 0
-                    || AssignProcessToJobObject(handle, child.as_raw_handle().cast()) == 0
+                    || AssignProcessToJobObject(handle, process.cast()) == 0
                 {
                     return None;
                 }

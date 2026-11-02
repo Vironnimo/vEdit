@@ -172,7 +172,7 @@ impl VEditApp {
                 ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
                 ui.horizontal_centered(|ui| {
                     // Resting modes stay muted; color marks modes that change what keys do.
-                    let (mode, color) = if self.tab().is_some_and(|t| t.vim.multi.placing()) { ("PLACE", ORANGE) } else if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
+                    let (mode, color) = if self.terminal_keyboard_focused() || self.current_pane_terminal().is_some() { ("TERMINAL", MUTED) } else if self.tab().is_some_and(|t| t.vim.multi.placing()) { ("PLACE", ORANGE) } else if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
                             VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
@@ -183,7 +183,7 @@ impl VEditApp {
                         match self.tab().unwrap().vim.mode { VimMode::Normal => "MULTI NORMAL", VimMode::Insert => "MULTI INSERT", VimMode::Visual => "MULTI VISUAL", VimMode::VisualLine => "MULTI V-LINE", VimMode::VisualBlock => "MULTI V-BLOCK" }
                     } else { mode };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
-                        .on_hover_text(format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)));
+                        .on_hover_text(if mode == "TERMINAL" { "Keyboard input goes to the shell. Ctrl+C interrupts; Ctrl+Shift+C/V copy and paste.".into() } else { format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)) });
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
                         let placing = tab.vim.multi.placing();
                         let count = tab.vim.multi.selections.len() - usize::from(placing);

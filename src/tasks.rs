@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -99,54 +99,6 @@ pub fn spawn_application(
     environment: Vec<(OsString, OsString)>,
 ) -> RunningTask {
     spawn_invocation(root, command, environment, None)
-}
-
-/// Open an interactive terminal in a project directory.
-///
-/// This is deliberately a visible, independent window. Unlike output-pane
-/// tasks, it remains open until the user closes the shell.
-pub fn open_terminal(root: &Path, environment: Vec<(OsString, OsString)>) -> Result<(), String> {
-    let metadata = root.metadata().map_err(|error| {
-        format!(
-            "Could not open a terminal in {}: {error}",
-            crate::paths::display(root)
-        )
-    })?;
-    if !metadata.is_dir() {
-        return Err(format!(
-            "{} is not a project directory.",
-            crate::paths::display(root)
-        ));
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = Command::new("powershell.exe");
-        command
-            .args(["-NoLogo", "-NoExit", "-NoProfile"])
-            .current_dir(root)
-            .envs(environment)
-            .creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
-        let mut child = command.spawn().map_err(|error| {
-            format!(
-                "Could not open PowerShell in {}: {error}",
-                crate::paths::display(root)
-            )
-        })?;
-        // Waiting in a detached worker releases the process handle when the
-        // user exits, without blocking the editor or tying shell lifetime to it.
-        let _ = thread::Builder::new()
-            .name("vedit-terminal".into())
-            .spawn(move || {
-                let _ = child.wait();
-            });
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = environment;
-        Err("Opening an interactive terminal is currently supported on Windows.".into())
-    }
 }
 
 #[cfg(test)]
@@ -361,7 +313,7 @@ fn shell_command(command: &str) -> Command {
 }
 
 mod output;
-mod process;
+pub(crate) mod process;
 
 #[cfg(test)]
 use output::Utf8Decoder;

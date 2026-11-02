@@ -94,7 +94,7 @@ pub(super) struct TaskPreview {
 impl VEditApp {
     fn request_task_preview(&mut self) -> Option<Result<TaskPreview, String>> {
         let file = self.tab().and_then(|tab| tab.path.clone());
-        let config = self.project_task_configuration()?;
+        let config = self.project_task_configuration_for(self.active_project)?;
         let config = TaskConfiguration {
             profile: config.profile,
             python_interpreter: config.python_interpreter,
@@ -492,10 +492,6 @@ impl VEditApp {
             .map_or_else(String::new, |language| language.program.clone())
     }
 
-    pub(super) fn project_task_configuration(&self) -> Option<TaskConfiguration> {
-        self.project_task_configuration_for(self.active_project)
-    }
-
     pub(super) fn project_task_configuration_for(&self, index: usize) -> Option<TaskConfiguration> {
         self.projects
             .get(index)
@@ -574,6 +570,7 @@ impl VEditApp {
             Ok(task) => self.start_resolved_task(self.active_project, task),
             Err(error) => {
                 self.output_visible = true;
+                self.select_task_output();
                 self.problems_visible = false;
                 self.status(error, true);
             }
@@ -601,6 +598,7 @@ impl VEditApp {
         ));
         if index == self.active_project {
             project.launch.show_output = false;
+            project.terminals.show_panel = false;
             self.output_visible = true;
             self.problems_visible = false;
         }

@@ -4,7 +4,9 @@ pub(super) use crate::cli::SplitOrientation;
 use crate::cli::{DocumentView, LayoutAction};
 use crate::vim::VimNavigation;
 use serde_json::{Value, json};
-pub(super) use spatial_navigation::output_command_id;
+#[path = "split/terminal_tabs.rs"]
+mod terminal_tabs;
+pub(super) use terminal_tabs::PaneTab;
 
 const MAX_PANES: usize = 8;
 
@@ -22,6 +24,7 @@ pub(super) struct RegionFocusState {
     output_rect: Option<egui::Rect>,
     output_widget: Option<egui::Id>,
     output_widget_problems: Option<bool>,
+    output_widget_terminal: Option<u64>,
     output_focus_pending: bool,
 }
 
@@ -35,6 +38,7 @@ struct RegionInputOwner {
     vim_swap_jk: bool,
     leader_key: String,
     view: Option<DocumentView>,
+    terminal: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +215,8 @@ struct Pane {
     id: u64,
     documents: Vec<u64>,
     document: Option<u64>,
+    terminal: Option<u64>,
+    order: Vec<PaneTab>,
     empty_workspace: Option<PathBuf>,
     view: DocumentView,
     states: HashMap<u64, PaneDocumentState>,
@@ -225,6 +231,7 @@ struct Pane {
 struct PaneView {
     id: u64,
     document: Option<u64>,
+    terminal: Option<u64>,
     empty_workspace: Option<PathBuf>,
     view: DocumentView,
     state: Option<PaneDocumentState>,
@@ -237,6 +244,8 @@ impl Pane {
             id,
             documents: Vec::new(),
             document: None,
+            terminal: None,
+            order: Vec::new(),
             empty_workspace: None,
             view: DocumentView::Source,
             states: HashMap::new(),
@@ -250,6 +259,7 @@ impl Pane {
         PaneView {
             id: self.id,
             document: self.document,
+            terminal: self.terminal,
             empty_workspace: self.empty_workspace.clone(),
             view: self.view,
             state: self.document.and_then(|id| self.states.get(&id)).cloned(),
@@ -296,6 +306,10 @@ struct SessionPane {
     documents: Option<Vec<(usize, usize)>>,
     #[serde(default)]
     states: Vec<SessionPaneDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    terminal_tabs: Vec<(u64, usize)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_terminal: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionPaneDocument {
@@ -583,6 +597,15 @@ impl VEditApp {
         self.initialize_pane_groups();
         self.adopt_orphan_documents();
         self.restore_focused_pane(false);
+        // This is an actual visible Project activation. Parked layouts and
+        // background updates must not claim keyboard focus on their own.
+        self.terminal_focus = self
+            .active_pane_terminal()
+            .filter(|_| !self.change_review_visible());
+        if let Some(terminal) = self.terminal_focus {
+            self.ctx
+                .memory_mut(|memory| memory.request_focus(Self::terminal_widget_id(terminal)));
+        }
         self.restore_project_scroll();
         let has_saved_scroll = self
             .editor_layout
@@ -741,6 +764,9 @@ impl VEditApp {
         }
         self.shift_shared_document_positions();
         self.initialize_pane_groups();
+        if self.current_pane_terminal().is_some() {
+            return;
+        }
         let pane_id = self.pane_context();
         let Some(tab) = self.tab() else {
             let empty_workspace = self.project().map(|project| project.root.clone());
@@ -928,6 +954,14 @@ impl VEditApp {
             .find(|pane| pane.id == pane_id)
             && let Some(position) = pane.documents.iter().position(|id| *id == previous)
         {
+            pane.order = pane.ordered_tabs();
+            pane.order
+                .retain(|tab| *tab != PaneTab::Document(replacement));
+            for tab in &mut pane.order {
+                if *tab == PaneTab::Document(previous) {
+                    *tab = PaneTab::Document(replacement);
+                }
+            }
             pane.documents.retain(|id| *id != replacement);
             pane.documents.insert(position, replacement);
         }
@@ -1264,6 +1298,7 @@ impl VEditApp {
                 pane.states.insert(tab_id, source_state.clone());
             }
             let state = pane.states.entry(tab_id).or_insert(source_state);
+            pane.terminal = None;
             pane.document = Some(tab_id);
             pane.empty_workspace = None;
             pane.view = state.view;
@@ -1398,7 +1433,7 @@ impl VEditApp {
         let empty: Vec<_> = layout
             .panes
             .iter()
-            .filter(|pane| pane.documents.is_empty())
+            .filter(|pane| pane.is_empty())
             .map(|pane| pane.id)
             .collect();
         for id in empty {
@@ -1454,11 +1489,14 @@ impl VEditApp {
         self.restore_focused_pane(true);
     }
     fn collapse_empty_panes(&mut self) {
+        for pane in &mut self.editor_layout.panes {
+            pane.normalize_tabs();
+        }
         let empty: Vec<_> = self
             .editor_layout
             .panes
             .iter()
-            .filter(|pane| pane.documents.is_empty())
+            .filter(|pane| pane.is_empty())
             .map(|pane| pane.id)
             .collect();
         for id in empty {
@@ -1504,6 +1542,17 @@ impl VEditApp {
         else {
             return;
         };
+        if let Some(terminal) = pane.terminal {
+            self.render_pane = pane.id;
+            self.editor_focused = false;
+            self.editor_rect = None;
+            self.editor_cursor_rect = None;
+            if request_focus {
+                self.ctx
+                    .memory_mut(|memory| memory.request_focus(Self::terminal_widget_id(terminal)));
+            }
+            return;
+        }
         let Some(id) = pane.document else {
             if let Some(index) = pane.empty_workspace.as_ref().and_then(|root| {
                 self.projects
@@ -1717,6 +1766,13 @@ impl VEditApp {
             .ok_or("Focused pane is unavailable")?;
         pane.id = id;
         pane.documents = pane.document.into_iter().collect();
+        pane.terminal = None;
+        pane.order = pane
+            .documents
+            .iter()
+            .copied()
+            .map(PaneTab::Document)
+            .collect();
         pane.states
             .retain(|document, _| Some(*document) == pane.document);
         pane.tab_strip_active = None;
@@ -1812,15 +1868,16 @@ impl VEditApp {
     }
     pub(super) fn layout_status(&self) -> Value {
         let panes: Vec<_> = self.editor_layout.panes.iter().map(|pane| {
-            let current = self.tab().filter(|t| pane.id == self.editor_layout.focused && Some(t.id) == pane.document);
+            let active_document = pane.document.filter(|_| pane.terminal.is_none());
+            let current = self.tab().filter(|t| pane.id == self.editor_layout.focused && Some(t.id) == active_document);
             let navigation = current.map(|t|t.vim.navigation()).or_else(||pane.document.and_then(|id|pane.states.get(&id)).map(|state|state.navigation.clone()));
-            let location = pane.document.and_then(|id|self.tab_location(id)).map(|(pi,ti)| {
+            let location = active_document.and_then(|id|self.tab_location(id)).map(|(pi,ti)| {
                 let tab = &self.projects[pi].tabs[ti];
                 let cursor = navigation.as_ref().map_or(0,|nav|nav.cursor);
                 let (line,column) = tab.lines.line_col(&tab.text,tab.revision,cursor);
                 json!({"line":line,"column":column})
             });
-            json!({"id":pane.id,"tab_id":pane.document,"tab_ids":pane.documents,"view":current.map_or(pane.view,|tab|tab.agent_view),"focused":pane.id==self.editor_layout.focused,"location":location})
+            json!({"id":pane.id,"tab_id":active_document,"tab_ids":pane.documents,"view":current.map_or(pane.view,|tab|tab.agent_view),"focused":pane.id==self.editor_layout.focused,"location":location})
         }).collect();
         json!({"workspace":self.active_folder().map(crate::paths::display),"workspace_kind":self.project().map(|p|p.kind),"scope":"active_workspace","focused_pane":self.editor_layout.focused,"max_panes":MAX_PANES,"tree":self.editor_layout.root,"panes":panes})
     }
@@ -2106,10 +2163,12 @@ impl VEditApp {
     }
 
     fn region_input_owner(&self) -> RegionInputOwner {
+        let terminal = self.focused_terminal_id();
+        let document = if terminal.is_none() { self.tab() } else { None };
         RegionInputOwner {
             project: self.project().map(|project| project.root.clone()),
             pane: self.current_pane_id(),
-            document: self.tab().map(|tab| {
+            document: document.map(|tab| {
                 (
                     tab.id,
                     tab.revision,
@@ -2122,7 +2181,8 @@ impl VEditApp {
             vim_enabled: self.settings.vim,
             vim_swap_jk: self.settings.swap_jk,
             leader_key: self.settings.leader_key.clone(),
-            view: self.tab().map(|tab| tab.agent_view),
+            view: document.map(|tab| tab.agent_view),
+            terminal,
         }
     }
 
@@ -2418,6 +2478,16 @@ impl VEditApp {
                             .collect(),
                     ),
                     states,
+                    terminal_tabs: pane
+                        .ordered_tabs()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, tab)| match tab {
+                            PaneTab::Terminal(id) => Some((*id, index)),
+                            PaneTab::Document(_) => None,
+                        })
+                        .collect(),
+                    active_terminal: pane.terminal,
                 }
             })
             .collect();
@@ -2456,6 +2526,7 @@ impl VEditApp {
             return self.empty_project_layout(root);
         }
         let mut panes = Vec::new();
+        let mut terminal_ids = std::collections::HashSet::new();
         for id in ids {
             let mut pane = Pane::empty(id);
             if let Some(saved) = session.panes.iter().find(|pane| pane.id == id) {
@@ -2526,7 +2597,23 @@ impl VEditApp {
                         .and_then(|id| pane.states.get(&id))
                         .map_or(DocumentView::Source, |state| state.view);
                 }
-                if !pane.documents.is_empty() || pane.empty_workspace.is_some() {
+                pane.order = pane
+                    .documents
+                    .iter()
+                    .copied()
+                    .map(PaneTab::Document)
+                    .collect();
+                for (terminal, index) in &saved.terminal_tabs {
+                    if self.terminal_belongs_to_project(*terminal, project)
+                        && terminal_ids.insert(*terminal)
+                    {
+                        pane.order
+                            .insert((*index).min(pane.order.len()), PaneTab::Terminal(*terminal));
+                    }
+                }
+                pane.terminal = saved.active_terminal.filter(|id| pane.has_terminal(*id));
+                pane.normalize_tabs();
+                if !pane.is_empty() || pane.empty_workspace.is_some() {
                     panes.push(pane);
                 }
             }

@@ -303,6 +303,7 @@ pub(super) enum Palette {
 
 impl VEditApp {
     pub(super) fn open_palette(&mut self, palette: Palette) {
+        self.capture_overlay_focus();
         self.find.break_escape_sequence();
         self.completions = None;
         self.palette = Some(palette);
@@ -321,24 +322,7 @@ impl VEditApp {
     fn close_palette(&mut self) {
         self.palette = None;
         self.palette_focus = false;
-        if let Some(focused) = self.ctx.memory(|memory| memory.focused()) {
-            self.ctx
-                .memory_mut(|memory| memory.surrender_focus(focused));
-        }
-        if let Some(tab) = self.tab_mut() {
-            tab.focus = tab.agent_view == crate::cli::DocumentView::Source;
-        }
-        if let Some(tab) = self.tab()
-            && tab.agent_view == crate::cli::DocumentView::Source
-            && !tab.loading
-            && tab.error.is_none()
-        {
-            let id = self.document_widget_id(tab.id);
-            if self.ctx.read_response(id).is_some() {
-                self.ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        self.ctx.request_repaint();
+        self.restore_document_focus();
     }
     fn quick_open_rows(&self) -> Vec<(language_intel::PaletteRow, Option<u64>)> {
         let Some(project) = self.project() else {

@@ -63,7 +63,7 @@ loaded only for their stated trigger (`AGENTS.md` -> Load context for the task).
 | git.md | `src/git.rs`, `src/git_panel.rs`, `src/git_graph.rs`, `src/git_gutter.rs` | Git subprocesses, status, history and diff presentation |
 | reviews.md | `src/change_review.rs`, `src/change_review_feedback.rs`, `src/agent_marks*.rs` | Change reviews and user mark collections |
 | language-services.md | `src/lsp.rs`, `src/language_*.rs`, `src/problems.rs` | LSP lifecycle, diagnostics and language intelligence |
-| execution.md | `src/tasks.rs`, `src/project_tasks.rs`, `src/project_launch.rs`, `src/task_output_ui.rs` | Task and launch processes, output and stopping |
+| execution.md | `src/tasks.rs`, `src/project_tasks.rs`, `src/project_launch.rs`, `src/terminal.rs`, `src/project_terminal.rs`, `src/task_output_ui.rs` | Task, launch and terminal processes, output and stopping |
 | control.md | `src/cli*.rs`, `src/control*.rs`, `.agents/skills/vedit/` | Agent CLI, transport, receiver and operating skill |
 | platform.md | `src/startup.rs`, `src/profile*.rs`, `src/single_instance.rs`, `src/window_chrome.rs`, `vendor/` | Windows lifecycle, profiles and native backend |
 | development.md | `scripts/`, `.cargo/`, `.githooks/`, `tests/`, manifests | Build, packaging, test infrastructure and repository tooling |

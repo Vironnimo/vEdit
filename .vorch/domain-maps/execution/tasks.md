@@ -14,8 +14,8 @@ cache results. The source constant is the implementation authority for that walk
 another project is visible. It rejects an already running task and dirty/saving
 documents with paths under the target root, including documents in other open
 projects; `RunFile` also checks the active document itself. `start_resolved_task`
-opens Output only for the visible project. The custom-output-command path lives
-in `src/task_controls.rs`; preserve its checks when changing the shared process layer.
+opens Output only for the visible project. Freeform interactive commands belong
+to Project terminals; `src/task_controls.rs` presents collected task output.
 
 Task configuration is session data, not `.vedit/launch.json`. The environment
 exports `VEDIT_ROOT`, `VEDIT_FILE`, `VEDIT_PYTHON` and Python pipe encoding/buffering
@@ -30,8 +30,6 @@ Tasks settings resolve interpreter, profile and default-command previews on a
 worker, keyed by configuration and active file. Results belong to the originating
 Project instance; opening Tasks refreshes discovery. Interpreter selection reuses
 the app's asynchronous native-dialog owner and cannot change a reopened Project.
-Opening an external terminal also prepares its environment and starts the process
-off the UI thread.
 
 ## Worker behavior and output
 

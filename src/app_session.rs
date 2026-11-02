@@ -176,6 +176,7 @@ pub(super) struct SessionProject {
     pub(super) restore_available: Option<bool>,
     pub(super) kind: WorkspaceKind,
     pub(super) launch_selected: Option<String>,
+    pub(super) terminals: project_terminal::SessionTerminals,
     pub(super) root: PathBuf,
     pub(super) tasks: project_tasks::TaskConfiguration,
     pub(super) open_files: Vec<PathBuf>,
@@ -263,6 +264,9 @@ impl VEditApp {
             };
             project.tasks = entry.tasks;
             project.launch.selected = entry.launch_selected;
+            if project.folder_root().is_some() {
+                project.terminals = self.restore_terminals(entry.terminals);
+            }
             project.git_approved_parent = entry.git_approved_parent;
             project.git_view.split_ratio = entry
                 .git_split_ratio
@@ -318,6 +322,7 @@ impl VEditApp {
                     restore_available: None,
                     kind: p.kind,
                     launch_selected: p.launch.selected.clone(),
+                    terminals: p.terminals.session(),
                     root: p
                         .folder_root()
                         .unwrap_or_else(|| Path::new(""))

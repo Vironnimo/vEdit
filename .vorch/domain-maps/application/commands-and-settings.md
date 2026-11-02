@@ -46,6 +46,10 @@ Consumed shortcuts remove only their generated text payload, not subsequent
 typing. Deferred widget input carries a focus/owner snapshot and is discarded
 when that owner or modal context changes. Source-specific continuation semantics
 are in `editing/input-and-history.md`.
+Terminal focus has its own shortcut context: navigation, palette and zoom remain
+application commands while ordinary shell keys bypass Document and task actions.
+Widget continuations bind to the terminal identity rather than an unrelated
+Document revision. Output region focus tracks its visible terminal, if any.
 
 Evidence and regression entry points:
 

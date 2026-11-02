@@ -156,7 +156,7 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 | Linke Seitenleiste ein-/ausblenden | Ctrl+Alt+E oder Ctrl+B² |
 | Rechte Seitenleiste ein-/ausblenden | Ctrl+Alt+B |
 | Oberfläche vergrößern / verkleinern / zurücksetzen | Ctrl++ / Ctrl+− / Ctrl+0 |
-| Ausgabe öffnen | Ctrl+` oder View → Output |
+| Ausgabe öffnen | Ctrl+Alt+O oder View → Output |
 | Zeilenumbruch umschalten | Alt+Z |
 | Editor nach rechts / unten teilen | Ctrl+\ / Ctrl+Shift+\ |
 | Aktuellen Editorbereich schließen | Ctrl+Alt+W |
@@ -171,7 +171,8 @@ Agenten lesen die Sammlung mit `vedit-cli agent-marks`. Mit `agent-marks take` h
 | Fehler und Warnungen anzeigen | Ctrl+Shift+M |
 | Auswahl für einen Agenten markieren | Ctrl+Shift+A oder Leader a |
 | Agent-Markierungen öffnen | Ctrl+Alt+Shift+A oder Leader A |
-| Interaktives Terminal im Projekt öffnen | Run → Open terminal |
+| Terminal öffnen / fokussieren | Ctrl+` oder Run → Open terminal |
+| Weiteres Terminal öffnen | Ctrl+Shift+` oder Run → New terminal |
 | Aktives Projekt prüfen | F5 |
 | Aktive Datei ausführen | Ctrl+F5 |
 | Projekttests starten | Alt+F6 |
@@ -520,9 +521,15 @@ Für Rückmeldungen an einen Agenten lassen sich Diffzeilen auswählen: per Klic
 
 Auch im Diff-Fenster aus Source control wählt ein Klick eine Zeile; ein Doppelklick oder **Enter** öffnet die Datei an dieser Zeile, ohne Auswahl an der obersten sichtbaren Zeile.
 
-Im Bereich **Output** lassen sich zusätzlich eigene Befehle im aktiven Projektordner starten. Sie verwenden die ausgewählte Python-Umgebung. Ausgabe und Rückgabestatus erscheinen dort; **Stop** beendet einen laufenden Befehl einschließlich seiner Unterprozesse. Eigene Befehle können `VEDIT_ROOT`, `VEDIT_FILE` und `VEDIT_PYTHON` als Umgebungsvariablen verwenden; Dateipfade werden nicht in Shellcode interpoliert.
+**Output** zeigt die Ausgabe vorbereiteter Build-, Test- und Prüfaufgaben. **Stop** beendet deren Prozessbaum. Aufgaben haben ein Zeitlimit von zehn Minuten; ihre Ausgabe wird begrenzt. Eigene Aufgaben lassen sich unter **Settings → Tasks** konfigurieren.
 
-Der Ausgabebereich ist ein Befehlsstarter mit Ausgabeanzeige. Interaktive Eingabe, Terminal-Anwendungen und Passwortabfragen sind dort nicht unterstützt. Befehle haben ein Zeitlimit von zehn Minuten; die Ausgabe wird begrenzt. **Run → Open terminal** öffnet für interaktive Arbeit ein separates PowerShell-Fenster im aktiven Projektordner. **Open terminal** ist ebenfalls in der Befehlspalette verfügbar. Im Ausgabebereich selbst stehen dafür **Terminal** und **Configure tasks** rechts in der Kopfzeile.
+**Ctrl+`** oder **Run → Open terminal** öffnet eine interaktive Shell im Project-Ordner oder fokussiert das zuletzt verwendete Terminal an seinem aktuellen Platz. Standard ist PowerShell 7, wenn installiert, sonst Windows PowerShell. Pfeil hoch/runter, Tab-Vervollständigung, History-Suche mit **Ctrl+R**, **Ctrl+C** zum Abbrechen und interaktive Rückfragen funktionieren direkt in der Shell. Die Command-History wird lokal getrennt je Project gespeichert und bleibt nach einem Editorneustart verfügbar. Die Shell übernimmt die für das Project ausgewählte Laufzeitumgebung.
+
+Terminals starten unten neben **Output**, **Application output** und **Problems**. Ziehe einen Terminal-Tab zwischen Datei-Tabs einer Pane oder an deren Rand, um einen neuen Split zu öffnen. Zurück nach unten geht es per Ziehen oder über das Kontextmenü des Terminal-Tabs. Verschieben erhält dieselbe Sitzung mit Arbeitsordner, Ausgabe und laufenden Commands. **+**, **Ctrl+Shift+`** oder **Run → New terminal** öffnet eine weitere Shell. **Ctrl+Tab / Ctrl+Shift+Tab** wechseln auch zwischen Terminal- und Datei-Tabs.
+
+Ausblenden und Project-Wechsel lassen die Shells weiterlaufen. Erneutes **Ctrl+`** blendet ein unten fokussiertes Terminal aus und führt zurück zum Editor. **Ctrl+W**, Mittelklick auf den Terminal-Tab oder dessen Schließen-Schaltfläche beendet das Terminal einschließlich seiner gestarteten Prozesse; beim Schließen des Projects oder Editors werden seine Terminals ebenfalls beendet. Gespeicherte Terminal-Tabs und ihre Positionen werden wiederhergestellt; beim nächsten Anzeigen startet eine frische Shell, frühere Commands werden nicht automatisch ausgeführt. **Other files** hat keine Project-Terminals.
+
+Terminaleingaben bleiben bei der Shell; globale Navigation, Befehlspalette und Oberflächenzoom sind weiterhin erreichbar. Kopieren und Einfügen funktionieren über **Ctrl+Shift+C / Ctrl+Shift+V**, **Ctrl+C** kopiert eine bestehende Textauswahl und sendet sonst den Abbruch an die Shell. Ungespeicherte Documents verhindern keine Terminaleingabe; Commands arbeiten mit dem Stand auf der Festplatte.
 
 vEdit bietet derzeit keinen Debugger, VS-Code-Erweiterungsmarkt oder vollständigen VS-Code-Funktionsumfang.
 

@@ -6,6 +6,7 @@ struct DraggedTab {
     pane: u64,
     tab: u64,
     title: String,
+    terminal: bool,
 }
 struct TabStrip {
     rect: egui::Rect,
@@ -18,6 +19,7 @@ pub(super) struct TabDragState {
     cancelled: bool,
     pane_ui_ids: HashMap<u64, egui::Id>,
     preview_moves: HashMap<(u64, u64), egui::Id>,
+    terminal_panel: Option<egui::Rect>,
 }
 
 impl VEditApp {
@@ -27,6 +29,15 @@ impl VEditApp {
     }
     pub(super) fn tab_drag_active(&self) -> bool {
         self.tab_drag.active.is_some()
+    }
+    pub(super) fn terminal_tab_drag_active(&self) -> bool {
+        self.tab_drag
+            .active
+            .as_ref()
+            .is_some_and(|drag| drag.terminal)
+    }
+    pub(super) fn register_terminal_panel_drop_rect(&mut self, rect: egui::Rect) {
+        self.tab_drag.terminal_panel = Some(rect);
     }
     pub(super) fn tab_pointer_interaction_active(&self) -> bool {
         self.tab_drag_active()
@@ -147,11 +158,14 @@ impl VEditApp {
         if self.tab_drag.active.is_none() {
             return;
         }
-        let unavailable = self
-            .tab_drag
-            .active
-            .as_ref()
-            .is_none_or(|drag| !self.pane_contains_tab(drag.pane, drag.tab));
+        let unavailable = self.tab_drag.active.as_ref().is_none_or(|drag| {
+            if drag.terminal {
+                !self.terminal_exists(drag.tab)
+                    || self.pane_terminal(drag.tab).unwrap_or(0) != drag.pane
+            } else {
+                !self.pane_contains_tab(drag.pane, drag.tab)
+            }
+        });
         let modal = self.picker.is_some()
             || self.save_as.is_some()
             || self.settings_open
@@ -189,6 +203,23 @@ impl VEditApp {
                 pane: self.current_pane_id(),
                 tab: id,
                 title: title.into(),
+                terminal: false,
+            });
+            self.ctx.request_repaint();
+        }
+    }
+    pub(super) fn start_terminal_tab_drag(
+        &mut self,
+        response: &egui::Response,
+        id: u64,
+        title: &str,
+    ) {
+        if !self.tab_drag.cancelled && response.drag_started_by(egui::PointerButton::Primary) {
+            self.tab_drag.active = Some(DraggedTab {
+                pane: self.pane_terminal(id).unwrap_or(0),
+                tab: id,
+                title: title.into(),
+                terminal: true,
             });
             self.ctx.request_repaint();
         }
@@ -295,6 +326,8 @@ impl VEditApp {
         let mut target = None;
         let mut marker = None;
         let mut body = None;
+        let mut split = None;
+        let mut panel_target = false;
         if let Some(position) = position {
             for (pane, strip) in &self.tab_drag.strips {
                 if !strip.rect.contains(position) {
@@ -321,10 +354,29 @@ impl VEditApp {
                 ));
                 break;
             }
-            if target.is_none() {
+            if target.is_none()
+                && drag.terminal
+                && let Some(rect) = self
+                    .tab_drag
+                    .terminal_panel
+                    .filter(|rect| rect.contains(position))
+            {
+                panel_target = true;
+                body = Some(rect);
+            }
+            if target.is_none() && !panel_target {
                 for (pane, rect) in self.tab_drag_pane_rects() {
                     let editor =
                         egui::Rect::from_min_max(rect.min + Vec2::new(0.0, 38.0), rect.max);
+                    if drag.terminal
+                        && editor.contains(position)
+                        && let Some((orientation, before, highlight)) =
+                            terminal_split_edge(editor, position)
+                    {
+                        split = Some((pane, orientation, before));
+                        body = Some(highlight);
+                        break;
+                    }
                     // Body drops append; strip drops choose an exact insertion point.
                     if pane != drag.pane
                         && editor.contains(position)
@@ -342,19 +394,34 @@ impl VEditApp {
         }
         if self.ctx.input(|input| input.pointer.primary_released()) {
             self.tab_drag.active = None;
-            if let Some((pane, index)) = target
-                && let Err(error) = self.drop_pane_tab(drag.pane, pane, drag.tab, index)
-            {
+            let result = if panel_target {
+                self.undock_terminal(drag.tab);
+                self.focus_terminal(drag.tab);
+                Ok(())
+            } else if let Some((pane, orientation, before)) = split {
+                self.dock_terminal_in_split(drag.tab, pane, orientation, before)
+                    .map(|_| ())
+            } else if let Some((pane, index)) = target {
+                if drag.terminal {
+                    self.dock_terminal_in_pane(drag.tab, pane, index)
+                } else {
+                    self.drop_document_tab_at_mixed_index(drag.pane, pane, drag.tab, index)
+                }
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
                 self.status(error, true);
             }
             self.ctx.request_repaint();
             return;
         }
-        self.ctx.set_cursor_icon(if target.is_some() {
-            egui::CursorIcon::Grabbing
-        } else {
-            egui::CursorIcon::NotAllowed
-        });
+        self.ctx
+            .set_cursor_icon(if target.is_some() || split.is_some() || panel_target {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::NotAllowed
+            });
         let painter = ui.painter();
         if let Some((x, rect)) = marker {
             painter.line_segment(
@@ -397,5 +464,36 @@ impl VEditApp {
             );
             ghost.galley(rect.min + Vec2::new(10.0, 7.0), label, TEXT);
         }
+    }
+}
+
+fn terminal_split_edge(
+    rect: egui::Rect,
+    position: egui::Pos2,
+) -> Option<(crate::cli::SplitOrientation, bool, egui::Rect)> {
+    use crate::cli::SplitOrientation;
+    let horizontal =
+        ((position.x - rect.left()) / rect.width()).min((rect.right() - position.x) / rect.width());
+    let vertical = ((position.y - rect.top()) / rect.height())
+        .min((rect.bottom() - position.y) / rect.height());
+    if horizontal.min(vertical) > 0.18 {
+        return None;
+    }
+    if horizontal < vertical {
+        let before = position.x < rect.center().x;
+        let half = if before {
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.center().x, rect.bottom()))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max)
+        };
+        Some((SplitOrientation::Vertical, before, half))
+    } else {
+        let before = position.y < rect.center().y;
+        let half = if before {
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.center().y))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(rect.left(), rect.center().y), rect.max)
+        };
+        Some((SplitOrientation::Horizontal, before, half))
     }
 }

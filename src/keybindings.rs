@@ -633,6 +633,7 @@ struct WidgetOwner {
     project: usize,
     pane: u64,
     document: Option<u64>,
+    terminal: Option<u64>,
     widget: Option<egui::Id>,
     bindings: Bindings,
     vim_keys: vim_keys::Preferences,
@@ -648,17 +649,65 @@ struct WidgetContinuation {
 #[derive(Clone, Copy)]
 pub(super) struct ShortcutContext {
     source: bool,
+    terminal: bool,
     vim_modal: bool,
     vim_mode: Option<VimMode>,
 }
 
+/// A terminal owns ordinary shell chords even when an editor command has the
+/// same binding. Only explicit application navigation crosses that boundary.
+fn terminal_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Terminal
+            | Action::NewTerminal
+            | Action::CommandPalette
+            | Action::SwitchProject
+            | Action::PreviousProject
+            | Action::NextProject
+            | Action::PreviousTab
+            | Action::NextTab
+            | Action::CloseTab
+            | Action::SplitRight
+            | Action::SplitDown
+            | Action::ClosePane
+            | Action::FocusExplorer
+            | Action::FocusEditor
+            | Action::FocusGit
+            | Action::FocusOutput
+            | Action::FocusLeft
+            | Action::FocusRight
+            | Action::FocusUp
+            | Action::FocusDown
+            | Action::FocusNextRegion
+            | Action::FocusPreviousRegion
+            | Action::FocusNextPane
+            | Action::FocusPreviousPane
+            | Action::MoveTabLeft
+            | Action::MoveTabRight
+            | Action::MoveTabUp
+            | Action::MoveTabDown
+            | Action::ToggleOutput
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::ZoomReset
+    )
+}
+
 impl VEditApp {
     fn shortcut_widget_owner(&self) -> WidgetOwner {
+        let widget = self.ctx.memory(|memory| memory.focused());
+        let terminal = self.focused_terminal_id();
         WidgetOwner {
             project: self.active_project,
             pane: self.current_pane_id(),
-            document: self.tab().map(|tab| tab.id),
-            widget: self.ctx.memory(|memory| memory.focused()),
+            document: if terminal.is_none() {
+                self.tab().map(|tab| tab.id)
+            } else {
+                None
+            },
+            terminal,
+            widget,
             bindings: self.settings.keybindings.clone(),
             vim_keys: self.settings.vim_keys.clone(),
         }
@@ -743,7 +792,8 @@ impl VEditApp {
         event: &egui::Event,
         context: ShortcutContext,
     ) -> bool {
-        !self.vim_key_forwarded_in(event, context)
+        (!context.terminal || terminal_action(action))
+            && !self.vim_key_forwarded_in(event, context)
             && matches(&self.settings.keybindings, action, event)
     }
     /// Only the focused source participates in Vim routing. Native fields,
@@ -768,8 +818,10 @@ impl VEditApp {
         ) == Some(vim_keys::Target::Vim)
     }
     pub(super) fn shortcut_input_context(&self) -> ShortcutContext {
+        let terminal = self.terminal_input_active();
         let source = self.tab().filter(|tab| {
-            tab.agent_view == crate::cli::DocumentView::Source
+            !terminal
+                && tab.agent_view == crate::cli::DocumentView::Source
                 && self
                     .ctx
                     .memory(|memory| memory.has_focus(self.document_widget_id(tab.id)))
@@ -789,6 +841,7 @@ impl VEditApp {
             .map(|tab| tab.vim.mode);
         ShortcutContext {
             source: source.is_some(),
+            terminal,
             vim_modal: self.settings.vim
                 && source
                     .is_some_and(|tab| tab.vim.mode != VimMode::Insert && !tab.vim.multi.active()),
@@ -801,7 +854,8 @@ impl VEditApp {
         event: &egui::Event,
         context: ShortcutContext,
     ) -> bool {
-        if self.vim_key_forwarded_in(event, context) {
+        if context.terminal && !terminal_action(action) || self.vim_key_forwarded_in(event, context)
+        {
             return false;
         }
         if matches!(

@@ -30,6 +30,7 @@ mod selection_scroll;
 mod single_instance;
 mod startup;
 mod tasks;
+mod terminal;
 mod text_statistics;
 mod typography;
 mod vim;

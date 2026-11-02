@@ -137,22 +137,6 @@ fn direct_program_preserves_literal_arguments_environment_and_exit_code() {
 }
 
 #[test]
-fn interactive_terminal_rejects_missing_directories_and_files() {
-    let missing = directory().join("this-directory-must-not-exist-vedit-terminal-test");
-    assert!(
-        open_terminal(&missing, Vec::new())
-            .unwrap_err()
-            .contains("Could not open a terminal")
-    );
-    let file = directory().join("Cargo.toml");
-    assert!(
-        open_terminal(&file, Vec::new())
-            .unwrap_err()
-            .contains("not a project directory")
-    );
-}
-
-#[test]
 fn runs_in_a_directory_with_spaces_and_unicode() {
     let root = std::env::temp_dir().join(format!(
         "vedit task café & project {} {}",

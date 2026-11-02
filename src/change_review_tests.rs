@@ -372,6 +372,32 @@ fn palette_opens_the_working_tree_review_and_escape_restores_the_panes() {
         Some(screen.state().document_widget_id(document)),
         "closing returns the keyboard to the document"
     );
+
+    let terminal = screen.state_mut().add_test_terminal();
+    let pane = screen.state().current_pane_id();
+    screen
+        .state_mut()
+        .dock_terminal_in_pane(terminal, pane, usize::MAX)
+        .unwrap();
+    screen
+        .state_mut()
+        .show_change_review(0, ReviewSource::WorkingTree);
+    settle(&mut screen);
+    assert!(screen.state().change_review_visible());
+    screen
+        .state_mut()
+        .run_shortcut_action(keybindings::Action::Terminal);
+    screen.run_steps(3);
+    assert!(
+        !screen.state().change_review_visible(),
+        "focusing a Pane terminal reveals its view"
+    );
+    screen.event(egui::Event::Text("terminal command".into()));
+    screen.run_steps(2);
+    assert_eq!(
+        screen.state_mut().terminal_input_bytes(terminal),
+        b"terminal command"
+    );
 }
 
 #[test]

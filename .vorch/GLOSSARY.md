@@ -10,8 +10,9 @@ unnamed draft. Several panes can show one document (`documents.md`, `projects.md
 
 ## Pane
 
-One editor region with its own tabs, active document and navigation state.
-It is a view of documents, not a second copy of their text (`projects.md`).
+One editor region with its own tabs, active view and navigation state; tabs can
+show Documents or Project-owned terminals. A Document view is not a second copy
+of its text (`projects.md`).
 
 ## Project
 

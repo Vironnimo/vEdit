@@ -154,7 +154,7 @@ fn f6_includes_output_and_skips_hidden_sidebars() {
     assert!(screen.state().output_keyboard_focused());
     assert_eq!(
         screen.ctx.memory(|memory| memory.focused()),
-        Some(output_command_id())
+        Some(output_focus_id())
     );
     screen.state_mut().cycle_focus_region(false);
     screen.run_steps(2);
@@ -179,29 +179,73 @@ fn output_up_returns_to_the_same_editor_column() {
 }
 
 #[test]
-fn output_focus_shortcut_preserves_text_on_each_side_of_event_boundary() {
+fn terminal_focus_shortcut_preserves_text_on_each_side_of_event_boundary() {
+    for document_changes in [false, true] {
+        let mut app = fixture();
+        let terminal = app.add_test_terminal();
+        let mut screen = harness(app);
+        screen.state_mut().focus_editor();
+        screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
+        screen.run_steps(2);
+        screen.input_mut().events.extend([
+            egui::Event::Text("source ".into()),
+            key(
+                Key::ArrowDown,
+                egui::Modifiers::COMMAND.plus(egui::Modifiers::ALT),
+            ),
+            egui::Event::Text("destination".into()),
+        ]);
+        screen.run_steps(1);
+        if document_changes {
+            // An independent edit may complete after focus moved but before
+            // the shell's queued suffix resumes. It does not own that suffix.
+            let document = &mut screen.state_mut().projects[0].tabs[0];
+            document.apply(editor::replace_selection(&document.text, 0..0, "agent "));
+        }
+        screen.run_steps(3);
+        assert_eq!(
+            screen.state().tab().unwrap().text,
+            if document_changes {
+                "agent source alpha\nbeta\ngamma\n"
+            } else {
+                "source alpha\nbeta\ngamma\n"
+            }
+        );
+        assert_eq!(
+            screen.state_mut().terminal_input_bytes(terminal),
+            b"destination"
+        );
+        assert!(screen.state().output_keyboard_focused());
+    }
+}
+
+#[test]
+fn returning_from_a_sidebar_focuses_the_terminal_in_the_editor_pane() {
     let mut app = fixture();
-    app.output_visible = true;
-    app.command.clear();
+    let terminal = app.add_test_terminal();
+    app.dock_terminal_in_pane(terminal, app.current_pane_id(), 0)
+        .unwrap();
     let mut screen = harness(app);
-    screen.state_mut().focus_editor();
-    screen.state_mut().tab_mut().unwrap().set_cursor(0..0);
-    screen.run_steps(2);
-    screen.input_mut().events.extend([
-        egui::Event::Text("source ".into()),
-        key(
-            Key::ArrowDown,
-            egui::Modifiers::COMMAND.plus(egui::Modifiers::ALT),
-        ),
-        egui::Event::Text("destination".into()),
-    ]);
-    screen.run_steps(4);
-    assert_eq!(
-        screen.state().tab().unwrap().text,
-        "source alpha\nbeta\ngamma\n"
-    );
-    assert_eq!(screen.state().command, "destination");
-    assert!(screen.state().output_keyboard_focused());
+    for sidebar in [SidebarView::Explorer, SidebarView::SourceControl] {
+        screen.state_mut().show_sidebar(sidebar);
+        let side = screen.state().sidebar_side(sidebar);
+        screen.state_mut().focus_sidebar_region(side);
+        screen.run_steps(2);
+        screen.input_mut().events.extend([
+            key(Key::Num1, egui::Modifiers::COMMAND),
+            egui::Event::Text("shell suffix".into()),
+        ]);
+        screen.run_steps(4);
+        assert_eq!(screen.state().focused_terminal_id(), Some(terminal));
+        assert_eq!(
+            screen.state_mut().terminal_input_bytes(terminal),
+            b"shell suffix"
+        );
+        assert_eq!(
+            screen.state().projects[0].tabs[0].text,
+            "alpha\nbeta\ngamma\n"
+        );
+    }
 }
 
 #[test]
@@ -398,8 +442,7 @@ fn offscreen_git_row_still_owns_region_navigation() {
 #[test]
 fn printable_alt_focus_chord_does_not_type_its_character_into_output() {
     let mut app = fixture();
-    app.output_visible = true;
-    app.command.clear();
+    let terminal = app.add_test_terminal();
     app.settings
         .keybindings
         .insert("focus_output".into(), Some("Alt+O".into()));
@@ -414,7 +457,10 @@ fn printable_alt_focus_chord_does_not_type_its_character_into_output() {
     ]);
     screen.run_steps(4);
     assert_eq!(screen.state().tab().unwrap().text, text);
-    assert_eq!(screen.state().command, "destination");
+    assert_eq!(
+        screen.state_mut().terminal_input_bytes(terminal),
+        b"destination"
+    );
 }
 
 #[test]
@@ -619,10 +665,9 @@ fn git_composer_save_then_focus_editor_replays_source_suffix_in_order() {
 }
 
 #[test]
-fn output_prefix_stays_in_command_when_hide_shortcut_focuses_source() {
+fn terminal_prefix_stays_in_shell_when_hide_shortcut_focuses_source() {
     let mut app = fixture();
-    app.output_visible = true;
-    app.command.clear();
+    let terminal = app.add_test_terminal();
     app.tab_mut().unwrap().set_cursor(0..0);
     let mut screen = harness(app);
     screen.state_mut().focus_output_region();
@@ -633,7 +678,10 @@ fn output_prefix_stays_in_command_when_hide_shortcut_focuses_source() {
         egui::Event::Text("source suffix".into()),
     ]);
     screen.run_steps(6);
-    assert_eq!(screen.state().command, "command prefix");
+    assert_eq!(
+        screen.state_mut().terminal_input_bytes(terminal),
+        b"command prefix"
+    );
     assert!(!screen.state().output_visible);
     assert_eq!(
         screen.state().tab().unwrap().text,
@@ -646,23 +694,21 @@ fn output_prefix_stays_in_command_when_hide_shortcut_focuses_source() {
 }
 
 #[test]
-fn output_save_then_focus_editor_replays_source_suffix_in_order() {
+fn terminal_shell_chord_then_focus_editor_replays_source_suffix_in_order() {
     let mut app = fixture();
-    app.output_visible = true;
-    app.command.clear();
+    let terminal = app.add_test_terminal();
     app.tab_mut().unwrap().set_cursor(0..0);
     let mut screen = harness(app);
     screen.state_mut().focus_output_region();
     screen.run_steps(2);
-    // An existing save keeps this shortcut test independent of filesystem workers.
-    screen.state_mut().tab_mut().unwrap().saving = true;
     screen.input_mut().events.extend([
         key(Key::S, egui::Modifiers::COMMAND),
         key(Key::Num1, egui::Modifiers::COMMAND),
         egui::Event::Text("source suffix".into()),
     ]);
     screen.run_steps(6);
-    assert!(screen.state().command.is_empty());
+    assert_eq!(screen.state_mut().terminal_input_bytes(terminal), [0x13]);
+    assert!(!screen.state().tab().unwrap().saving);
     assert_eq!(
         screen.state().tab().unwrap().text,
         "source suffixalpha\nbeta\ngamma\n"
@@ -674,11 +720,10 @@ fn output_save_then_focus_editor_replays_source_suffix_in_order() {
 }
 
 #[test]
-fn output_hide_dispatches_suffix_through_vim_after_restoring_source_focus() {
+fn terminal_hide_dispatches_suffix_through_vim_after_restoring_source_focus() {
     let mut app = fixture();
     app.settings.vim = true;
-    app.output_visible = true;
-    app.command.clear();
+    let terminal = app.add_test_terminal();
     app.tab_mut().unwrap().set_cursor(0..0);
     let mut screen = harness(app);
     screen.state_mut().focus_output_region();
@@ -689,7 +734,10 @@ fn output_hide_dispatches_suffix_through_vim_after_restoring_source_focus() {
         egui::Event::Text("iX".into()),
     ]);
     screen.run_steps(6);
-    assert_eq!(screen.state().command, "command prefix");
+    assert_eq!(
+        screen.state_mut().terminal_input_bytes(terminal),
+        b"command prefix"
+    );
     assert!(!screen.state().output_visible);
     assert_eq!(screen.state().tab().unwrap().text, "Xalpha\nbeta\ngamma\n");
     assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Insert);
@@ -714,21 +762,57 @@ fn find_and_replace_from_git_preserve_field_prefix_and_deliver_query_suffix() {
 }
 
 #[test]
-fn find_from_output_preserves_command_prefix_and_delivers_query_suffix() {
-    let mut app = fixture();
-    app.output_visible = true;
-    app.command.clear();
-    let mut screen = harness(app);
-    screen.state_mut().focus_output_region();
-    screen.run_steps(2);
-    screen.input_mut().events.extend([
-        egui::Event::Text("command prefix".into()),
-        key(Key::F, egui::Modifiers::COMMAND),
-        egui::Event::Text("needle".into()),
-    ]);
-    screen.run_steps(6);
-    assert_eq!(screen.state().command, "command prefix");
-    assert_eq!(screen.state().find_text, "needle");
-    assert!(screen.state().find_visible);
-    assert_eq!(screen.state().tab().unwrap().text, "alpha\nbeta\ngamma\n");
+fn terminal_owns_shell_chords_and_does_not_edit_the_document() {
+    for docked in [false, true] {
+        for vim in [false, true] {
+            let mut app = fixture();
+            app.settings.vim = vim;
+            let terminal = app.add_test_terminal();
+            if docked {
+                app.dock_terminal_in_pane(terminal, app.current_pane_id(), 0)
+                    .unwrap();
+            }
+            let mut screen = harness(app);
+            screen.state_mut().focus_terminal(terminal);
+            screen.run_steps(2);
+            screen.input_mut().events.extend([
+                egui::Event::Text("command prefix".into()),
+                key(Key::F, egui::Modifiers::COMMAND),
+                key(Key::R, egui::Modifiers::COMMAND),
+                key(Key::L, egui::Modifiers::COMMAND),
+                key(Key::P, egui::Modifiers::COMMAND),
+                key(Key::D, egui::Modifiers::COMMAND),
+                key(Key::Z, egui::Modifiers::COMMAND),
+                key(Key::Tab, egui::Modifiers::NONE),
+                key(Key::ArrowUp, egui::Modifiers::NONE),
+                egui::Event::Text("needle".into()),
+            ]);
+            screen.run_steps(6);
+            assert_eq!(
+                screen.state_mut().terminal_input_bytes(terminal),
+                b"command prefix\x06\x12\x0c\x10\x04\x1a\t\x1b[Aneedle",
+                "docked={docked}, vim={vim}"
+            );
+            assert!(screen.state().find_text.is_empty());
+            assert!(!screen.state().find_visible);
+            assert!(screen.state().palette.is_none());
+            assert!(screen.state().terminal_keyboard_focused());
+            assert_eq!(
+                screen.state().projects[0].tabs[0].text,
+                "alpha\nbeta\ngamma\n"
+            );
+
+            screen.state_mut().settings_open = true;
+            screen.input_mut().events.extend([
+                egui::Event::Text("modal input".into()),
+                key(Key::R, egui::Modifiers::COMMAND),
+            ]);
+            screen.run_steps(3);
+            assert!(screen.state_mut().terminal_input_bytes(terminal).is_empty());
+            assert_eq!(
+                screen.state().projects[0].tabs[0].text,
+                "alpha\nbeta\ngamma\n"
+            );
+        }
+    }
 }
