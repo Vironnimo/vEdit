@@ -36,7 +36,7 @@ vedit-cli windows
 vedit-cli --window main status
 ```
 
-Jedes zusätzliche Fenster beginnt ohne die Projekte und Tabs eines anderen Fensters und übernimmt anfangs die gespeicherten Einstellungen des Hauptfensters. Fenster besitzen getrennte Sitzungen; Änderungen derselben Datei in mehreren Fenstern unterliegen dem normalen Schutz vor externen Änderungen. Nach einem Absturz stellt der nächste Hauptfensterstart auch unterbrochene Zusatzfenster wieder her. Bewusst geschlossene Zusatzfenster bleiben als gespeicherte Fenster unter `vedit-cli windows` auffindbar und lassen sich mit `vedit --window ID` wiederherstellen. CLI-Befehle verwenden bei genau einem offenen Fenster dieses; bei mehreren verlangt die CLI `--window ID` **vor** dem Befehl. Tab- und Ansichts-IDs gelten nur innerhalb dieses Fensterprozesses.
+Jedes zusätzliche Fenster beginnt ohne die Projekte und Tabs eines anderen Fensters und übernimmt anfangs die gespeicherten Einstellungen des Hauptfensters. Fenster besitzen getrennte Sitzungen; Änderungen derselben Datei in mehreren Fenstern unterliegen dem normalen Schutz vor externen Änderungen. Nach einem Absturz stellt der nächste Hauptfensterstart auch unterbrochene Zusatzfenster wieder her; dabei erscheint zuerst das Hauptfenster. Bewusst geschlossene Zusatzfenster bleiben als gespeicherte Fenster unter `vedit-cli windows` auffindbar und lassen sich mit `vedit --window ID` wiederherstellen. CLI-Befehle verwenden bei genau einem offenen Fenster dieses; bei mehreren verlangt die CLI `--window ID` **vor** dem Befehl. Tab- und Ansichts-IDs gelten nur innerhalb dieses Fensterprozesses.
 
 Zum Bauen aus dem Quellcode: Rust mit dem stabilen Windows-Toolchain installieren und im Projektordner ausführen:
 

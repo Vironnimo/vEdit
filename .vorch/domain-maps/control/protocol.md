@@ -19,6 +19,13 @@ process has exited before attempting a TCP connection. The shared
 `process_liveness` owner treats uncertainty and reused process IDs conservatively;
 an apparently live process still requires a reachable listener.
 
+Startup prepares the control server alongside native graphics creation, then
+attaches the real egui context after App construction. Requests received earlier
+stay queued; attaching the context wakes the GUI. Startup retains and joins the
+preparation job before releasing the window's instance lock, including when
+graphics initialization fails. Published controls still wait for GUI dispatch
+before replying.
+
 Text/JSON file inputs accept UTF-8 with/without BOM and UTF-16 with BOM. Encoded and decoded inputs are bounded separately; the encoded transport packet also has its limit. Request-relative paths use the caller directory and manifest paths use the manifest directory. Literal option values are not reinterpreted as global flags; `--` terminates options for positional text beginning with a dash.
 
 ## Applied versus completed

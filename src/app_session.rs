@@ -1,6 +1,86 @@
 //! Application preferences and compatible session restoration and persistence.
 use super::*;
 
+/// Prepare disk-backed session state while the native graphics context starts.
+pub struct Startup(Option<std::thread::JoinHandle<StartupResult>>);
+
+type StartupResult = (StartupData, Result<crate::cli::Server, String>);
+
+pub(super) struct StartupData {
+    pub(super) manifest: Option<Session>,
+    pub(super) inherited_settings: Option<Settings>,
+    pub(super) external_open: bool,
+}
+
+impl Startup {
+    pub fn prepare() -> Self {
+        let directory = recovery_directory();
+        let parent =
+            (crate::profile::window_id() != "main").then(crate::profile::base_recovery_directory);
+        Self(Some(std::thread::spawn(move || {
+            let control = crate::cli::Server::prepare();
+            (StartupData::read(&directory, parent.as_deref()), control)
+        })))
+    }
+
+    pub(super) fn finish(mut self) -> StartupResult {
+        self.0
+            .take()
+            .expect("startup consumed once")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+}
+
+impl Drop for Startup {
+    fn drop(&mut self) {
+        // A graphics initialization failure must finish endpoint publication and
+        // drop its server before main releases the per-window instance lock.
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl StartupData {
+    fn read(directory: &Path, parent: Option<&Path>) -> Self {
+        let mut manifest = fs::read(directory.join("session.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok());
+        let inherited_settings = if manifest
+            .as_ref()
+            .is_none_or(|session| session.settings.is_none())
+        {
+            parent.and_then(|parent| {
+                fs::read(parent.join("session.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
+                    .and_then(|session| session.settings)
+            })
+        } else {
+            None
+        };
+        if let Some(session) = &mut manifest {
+            for project in &mut session.projects {
+                project.restore_available = Some(project.available());
+            }
+        }
+        let font = manifest
+            .as_ref()
+            .and_then(|session| session.settings.as_ref())
+            .or(inherited_settings.as_ref())
+            .map(|settings| settings.editor_font)
+            .unwrap_or_default();
+        // Warm the shared font-file cache without changing the live egui context.
+        let _ = crate::typography::fonts(font);
+        Self {
+            manifest,
+            inherited_settings,
+            external_open: crate::profile::read_open_mode(parent.unwrap_or(directory)),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct Settings {
@@ -89,6 +169,9 @@ pub(super) struct Session {
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub(super) struct SessionProject {
+    /// Startup's filesystem observation; never part of a persisted session.
+    #[serde(skip)]
+    pub(super) restore_available: Option<bool>,
     pub(super) kind: WorkspaceKind,
     pub(super) launch_selected: Option<String>,
     pub(super) root: PathBuf,
@@ -100,6 +183,18 @@ pub(super) struct SessionProject {
     pub(super) layout: Option<split::SessionLayout>,
     pub(super) git_split_ratio: Option<f32>,
     pub(super) git_approved_parent: Option<PathBuf>,
+}
+
+impl SessionProject {
+    fn available(&self) -> bool {
+        self.kind == WorkspaceKind::OtherFiles
+            || self.root.is_dir()
+            || self.tabs.iter().any(|tab| {
+                tab.recovery_path
+                    .as_ref()
+                    .is_some_and(|path| path.is_file())
+            })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -151,21 +246,14 @@ impl VEditApp {
     ) -> Vec<Option<usize>> {
         let mut mapping = vec![None; entries.len()];
         for (original, entry) in entries.into_iter().enumerate() {
+            if !entry.restore_available.unwrap_or_else(|| entry.available()) {
+                continue;
+            }
             let root = if entry.kind == WorkspaceKind::OtherFiles {
                 other_files::layout_key()
             } else {
                 entry.root
             };
-            if entry.kind == WorkspaceKind::Project
-                && !root.is_dir()
-                && !entry.tabs.iter().any(|tab| {
-                    tab.recovery_path
-                        .as_ref()
-                        .is_some_and(|path| path.is_file())
-                })
-            {
-                continue;
-            }
             let mut project = if entry.kind == WorkspaceKind::OtherFiles {
                 Project::other_files()
             } else {
@@ -225,6 +313,7 @@ impl VEditApp {
                 .projects
                 .iter()
                 .map(|p| SessionProject {
+                    restore_available: None,
                     kind: p.kind,
                     launch_selected: p.launch.selected.clone(),
                     root: p
@@ -283,5 +372,118 @@ impl VEditApp {
                 bytes,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_snapshot_preserves_project_eligibility_and_window_preferences() {
+        let root = std::env::temp_dir().join(format!(
+            "vedit-startup-snapshot-{}",
+            crate::recovery::session_prefix()
+        ));
+        let window = root.join("windows/w1");
+        let folder = root.join("project");
+        fs::create_dir_all(&window).unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        let recovery = root.join("draft.txt");
+        fs::write(&recovery, "retained draft").unwrap();
+        let parent = Session {
+            settings: Some(Settings {
+                font_size: 19.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        fs::write(
+            root.join("session.json"),
+            serde_json::to_vec(&parent).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("external-open.json"), "true").unwrap();
+        for own_settings in [
+            None,
+            Some(Settings {
+                font_size: 16.0,
+                ..Default::default()
+            }),
+        ] {
+            let session = Session {
+                settings: own_settings.clone(),
+                projects: vec![
+                    SessionProject {
+                        root: folder.clone(),
+                        ..Default::default()
+                    },
+                    SessionProject {
+                        root: root.join("missing"),
+                        ..Default::default()
+                    },
+                    SessionProject {
+                        root: root.join("offline"),
+                        tabs: vec![SessionTab {
+                            recovery_path: Some(recovery.clone()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    SessionProject {
+                        kind: WorkspaceKind::OtherFiles,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            fs::write(
+                window.join("session.json"),
+                serde_json::to_vec(&session).unwrap(),
+            )
+            .unwrap();
+            let snapshot = StartupData::read(&window, Some(&root));
+            assert!(snapshot.external_open);
+            assert_eq!(
+                snapshot
+                    .inherited_settings
+                    .as_ref()
+                    .map(|settings| settings.font_size),
+                own_settings.is_none().then_some(19.0)
+            );
+            let manifest = snapshot.manifest.unwrap();
+            assert_eq!(
+                manifest
+                    .settings
+                    .as_ref()
+                    .map(|settings| settings.font_size),
+                own_settings.as_ref().map(|settings| settings.font_size)
+            );
+            assert_eq!(
+                manifest
+                    .projects
+                    .iter()
+                    .map(|project| project.restore_available)
+                    .collect::<Vec<_>>(),
+                [Some(true), Some(false), Some(true), Some(true)]
+            );
+            let persisted = serde_json::to_value(&manifest).unwrap();
+            assert!(
+                persisted["projects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|project| project.get("restore_available").is_none())
+            );
+        }
+        fs::remove_file(window.join("session.json")).unwrap();
+        let fresh = StartupData::read(&window, Some(&root));
+        assert!(fresh.manifest.is_none());
+        assert_eq!(fresh.inherited_settings.unwrap().font_size, 19.0);
+        assert!(
+            recovery.is_file(),
+            "startup must not remove a retained draft"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

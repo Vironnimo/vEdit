@@ -82,7 +82,7 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     };
-    startup::recover_interrupted_windows();
+    let startup = app::Startup::prepare();
 
     let options = eframe::NativeOptions {
         persistence_path: profile::persistence_path(),
@@ -99,7 +99,7 @@ fn main() -> eframe::Result {
     let result = eframe::run_native(
         "vEdit",
         options,
-        Box::new(move |cc| Ok(Box::new(app::VEditApp::new(cc, paths)))),
+        Box::new(move |cc| Ok(Box::new(app::VEditApp::new(cc, paths, startup)))),
     );
     if result.is_ok() {
         open_window.closed();

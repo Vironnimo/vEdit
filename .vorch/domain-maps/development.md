@@ -59,6 +59,10 @@ commit advances `main` only after the commit hook passes. Use
 
 ## Constraints & Gotchas
 
+`scripts/measure-startup.ps1` is a manual Windows benchmark of first visibility
+and confirmed active-document readiness in fresh private profiles. See
+`docs/development.md` -> Startup measurements for cache and observation limits.
+
 `.cargo/config.toml` and `scripts/project-temp.ps1` set temporary paths and Git's
 discovery ceiling to the checkout's `.tmp/`. The direct Cargo integration test
 asserts this exact path. The survey preserves it while adding private per-test

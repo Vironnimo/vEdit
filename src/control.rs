@@ -17,9 +17,12 @@ mod agent_projects_tests;
 mod cli_round_trip_tests;
 
 impl VEditApp {
-    pub(super) fn start_control(&mut self) {
-        match cli::Server::start(self.ctx.clone()) {
-            Ok(server) => self.control = Some(server),
+    pub(super) fn start_control(&mut self, result: Result<cli::Server, String>) {
+        match result {
+            Ok(server) => {
+                server.attach_context(self.ctx.clone());
+                self.control = Some(server);
+            }
             Err(error) => self.status(format!("Agent controls unavailable: {error}"), true),
         }
     }

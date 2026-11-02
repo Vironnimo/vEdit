@@ -6,6 +6,8 @@ the egui frame without becoming the owner of every feature it displays.
 ## Overview
 
 - `src/app.rs` owns `VEditApp`, construction and frame orchestration.
+  `src/app_session.rs` prepares the startup session alongside native graphics
+  creation; startup ordering belongs to `platform/profiles-and-migration.md`.
   Its `#[path]` declarations make many flat `src/` files child modules with
   access to this state; check those declarations before changing visibility.
 - `src/app_workers.rs` owns worker execution, `WorkerResult` and `poll` routing;

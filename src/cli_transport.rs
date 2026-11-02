@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -138,6 +138,7 @@ pub struct Envelope {
 }
 
 pub struct Server {
+    ctx: Arc<OnceLock<egui::Context>>,
     receiver: mpsc::Receiver<Envelope>,
     stop: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -158,6 +159,22 @@ impl Server {
     }
 
     fn start_in(ctx: egui::Context, directory: PathBuf) -> Result<Self, String> {
+        let server = Self::prepare_in(directory)?;
+        server.attach_context(ctx);
+        Ok(server)
+    }
+
+    /// Publish controls while native graphics start; requests stay queued until
+    /// the application attaches its real GUI context and polls the receiver.
+    pub fn prepare() -> Result<Self, String> {
+        Self::prepare_in(endpoint_directory())
+    }
+
+    pub fn attach_context(&self, ctx: egui::Context) {
+        self.ctx.get_or_init(|| ctx).request_repaint();
+    }
+
+    fn prepare_in(directory: PathBuf) -> Result<Self, String> {
         private_directory(&directory)
             .map_err(|error| format!("Could not create the vEdit control directory: {error}"))?;
         let endpoint_path = directory.join("control.json");
@@ -186,6 +203,8 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let listener_stop = stop.clone();
         let active = Arc::new(AtomicUsize::new(0));
+        let ctx = Arc::new(OnceLock::new());
+        let listener_ctx = ctx.clone();
         #[cfg(test)]
         let wakeups = Arc::new(AtomicUsize::new(0));
         #[cfg(test)]
@@ -214,7 +233,7 @@ impl Server {
                             let worker_stop = listener_stop.clone();
                             let worker_sender = sender.clone();
                             let worker_token = endpoint.token.clone();
-                            let worker_ctx = ctx.clone();
+                            let worker_ctx = listener_ctx.clone();
                             let result = thread::Builder::new()
                                 .name("vedit-control-request".into())
                                 .spawn(move || {
@@ -240,6 +259,7 @@ impl Server {
                 format!("Could not start the vEdit control server: {error}")
             })?;
         Ok(Self {
+            ctx,
             receiver,
             stop,
             listener: Some(listener),
@@ -542,7 +562,7 @@ fn serve_connection(
     token: &str,
     sender: &mpsc::SyncSender<Envelope>,
     stop: &AtomicBool,
-    ctx: &egui::Context,
+    ctx: &OnceLock<egui::Context>,
 ) {
     if configure_stream(&stream).is_err() {
         return;
@@ -558,7 +578,9 @@ fn serve_connection(
                     cwd,
                 }) {
                     Ok(()) => {
-                        ctx.request_repaint();
+                        if let Some(ctx) = ctx.get() {
+                            ctx.request_repaint();
+                        }
                         wait_for_application(receiver, stop, timeout)
                     }
                     Err(mpsc::TrySendError::Full(_)) => Response::failure(
@@ -900,12 +922,21 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_deferred_context(false)
+        }
+
+        fn with_deferred_context(deferred: bool) -> Self {
             let directory = std::env::temp_dir().join(format!(
                 "vedit-control-test-{}-{}",
                 std::process::id(),
                 random_token().unwrap()
             ));
-            let server = Server::start_in(egui::Context::default(), directory.clone()).unwrap();
+            let server = if deferred {
+                Server::prepare_in(directory.clone())
+            } else {
+                Server::start_in(egui::Context::default(), directory.clone())
+            }
+            .unwrap();
             Self {
                 directory,
                 server: Some(server),
@@ -958,18 +989,26 @@ mod tests {
 
     #[test]
     fn round_trip_waits_for_the_gui_application_result() {
-        let fixture = Fixture::new();
-        let path = fixture.path();
-        let client = thread::spawn(move || send_to(&Request::Status {}, &path));
-        let envelope = fixture.receive();
-        assert!(matches!(envelope.request, Request::Status {}));
-        envelope
-            .reply
-            .send(Response::success(json!({"active_tab_id": 42})))
-            .unwrap();
-        let response = client.join().unwrap().unwrap();
-        assert!(response.ok);
-        assert_eq!(response.result["active_tab_id"], 42);
+        for deferred in [false, true] {
+            let fixture = Fixture::with_deferred_context(deferred);
+            let path = fixture.path();
+            let client = thread::spawn(move || send_to(&Request::Status {}, &path));
+            let envelope = fixture.receive();
+            assert!(matches!(envelope.request, Request::Status {}));
+            if deferred {
+                assert!(fixture.server().ctx.get().is_none());
+                let ctx = egui::Context::default();
+                fixture.server().attach_context(ctx.clone());
+                assert_eq!(fixture.server().ctx.get(), Some(&ctx));
+            }
+            envelope
+                .reply
+                .send(Response::success(json!({"active_tab_id": 42})))
+                .unwrap();
+            let response = client.join().unwrap().unwrap();
+            assert!(response.ok);
+            assert_eq!(response.result["active_tab_id"], 42);
+        }
     }
 
     #[test]

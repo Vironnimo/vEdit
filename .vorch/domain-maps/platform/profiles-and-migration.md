@@ -4,8 +4,9 @@
 
 `main` handles help/version before profile work, then validates the CLI
 environment, runs migration, calls `startup::prepare`, marks the open window and
-starts eframe. `--new-window`, `--reuse-window` and `--window ID` are mutually
-exclusive. `--` makes remaining arguments literal paths, including flag-like
+starts App's session preparation alongside eframe. `--new-window`,
+`--reuse-window` and `--window ID` are mutually exclusive. `--` makes remaining
+arguments literal paths, including flag-like
 filenames. The shared external-open preference affects ordinary launches with
 paths; it does not override explicit flags.
 
@@ -16,12 +17,19 @@ while a peer is starting/closing, with a bounded wait. An explicit non-main ID
 must already have a saved directory. File opening belongs to the normal app
 dispatch after the window owner is known.
 
+`app_session::Startup` prepares the control server, reads the manifest and shared
+preferences, observes Project/recovery availability and warms the font-file cache
+on a worker while eframe creates the graphics context. App construction consumes that snapshot;
+legacy RON app state is decoded only when the manifest is unreadable. eframe
+still owns native geometry and egui memory restoration.
+
 Every window has `session.json`, recovery content, eframe's `app.ron` and a
 `window-open` marker under its own recovery directory. A normal eframe return
 removes the marker; an abnormal exit leaves it. Starting `main` restores saved
-additional windows only when their marker and session exist and no live endpoint
-already reports them. Normal close retains an explicitly restorable saved
-session. `external-open.json` is shared across windows and is written only after
+additional windows on a worker after the main window becomes visible, only when
+their marker and session exist and no live endpoint already reports them.
+Normal close retains an explicitly restorable saved session. `external-open.json`
+is shared across windows and is written only after
 an explicit preference change; other preferences become window-local after
 initial inheritance.
 

@@ -71,6 +71,7 @@ mod vim_input;
 mod workspace_shortcuts;
 
 use app_chrome::*;
+pub use app_session::Startup;
 use app_session::*;
 use app_workers::*;
 use command_palette::*;
@@ -316,6 +317,7 @@ pub struct VEditApp {
     text_statistics: crate::text_statistics::Statistics,
     markdown: crate::markdown::MarkdownCache,
     control: Option<crate::cli::Server>,
+    recover_windows_after_show: bool,
     /// The working directory of the CLI request being applied, if it sent one.
     control_caller: Option<PathBuf>,
     notifications: notifications::Inbox,
@@ -330,14 +332,9 @@ pub struct VEditApp {
     rendering_panes: bool,
 }
 impl VEditApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
-        let stored: Session = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
-            .unwrap_or_default();
-        let manifest: Option<Session> = fs::read(recovery_directory().join("session.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>, startup: Startup) -> Self {
+        let (prepared, control) = startup.finish();
+        let manifest = prepared.manifest;
         // Only a readable manifest proves which recovery files are still in use.
         if let Some(session) = &manifest {
             let referenced: Vec<PathBuf> = session
@@ -354,19 +351,19 @@ impl VEditApp {
                 );
             });
         }
-        let mut session = manifest.unwrap_or(stored);
-        if session.settings.is_none() && crate::profile::window_id() != "main" {
+        let mut session = manifest.unwrap_or_else(|| {
+            cc.storage
+                .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
+                .unwrap_or_default()
+        });
+        if session.settings.is_none() {
             // Inherit preferences, never another window's documents or layout.
-            session.settings =
-                fs::read(crate::profile::base_recovery_directory().join("session.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
-                    .and_then(|primary| primary.settings);
+            session.settings = prepared.inherited_settings;
         }
         let mut app = Self::empty(cc.egui_ctx.clone());
         app.native_dialog_builder = Some(rfd::FileDialog::new().set_parent(cc));
         app.settings = session.settings.unwrap_or_default();
-        app.settings.external_open_new_window = crate::profile::external_open_new_window();
+        app.settings.external_open_new_window = prepared.external_open;
         app.settings.show_ignored_files = true;
         app.settings.normalize_appearance();
         let shortcut_warnings = keybindings::restore_bindings(&mut app.settings.keybindings);
@@ -399,7 +396,8 @@ impl VEditApp {
                 true,
             );
         }
-        app.start_control();
+        app.start_control(control);
+        app.recover_windows_after_show = crate::profile::window_id() == "main";
         app
     }
     fn empty(ctx: egui::Context) -> Self {
@@ -518,6 +516,7 @@ impl VEditApp {
             text_statistics: crate::text_statistics::Statistics::default(),
             markdown: crate::markdown::MarkdownCache::default(),
             control: None,
+            recover_windows_after_show: false,
             control_caller: None,
             notifications: notifications::Inbox::default(),
             review: None,
@@ -716,6 +715,22 @@ impl eframe::App for VEditApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(windows)]
         let window = frame.winit_window().cloned();
+        #[cfg(windows)]
+        if self.recover_windows_after_show {
+            if window
+                .as_ref()
+                .is_some_and(|window| window.is_visible() == Some(true))
+            {
+                self.recover_windows_after_show = false;
+                std::thread::spawn(crate::startup::recover_interrupted_windows);
+            } else {
+                self.ctx.request_repaint();
+            }
+        }
+        #[cfg(not(windows))]
+        if std::mem::take(&mut self.recover_windows_after_show) {
+            std::thread::spawn(crate::startup::recover_interrupted_windows);
+        }
         #[cfg(windows)]
         self.ctx.data_mut(|data| {
             data.insert_temp(egui::Id::new("native_window_chrome"), window.is_some());

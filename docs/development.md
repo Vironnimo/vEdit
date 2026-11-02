@@ -225,6 +225,28 @@ stays while any process with that PID runs (also a reused PID), and a backup tha
 cannot be deleted only produces a warning. Verify both packaged binaries and relevant copied files against the build
 outputs. `target/`, `dist/`, local backups and the shortcut are ignored by Git.
 
+## Startup measurements
+
+Run the manual Windows benchmark on an idle desktop with a release build:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/measure-startup.ps1 -ExecutableDirectory target/release -Runs 5
+```
+
+It starts and normally closes its own editor processes with private profiles:
+empty, five Projects with 30 Documents, and 20 Projects with 120 Documents. Each
+profile is measured fresh and again after saving its window/UI state.
+`visible_ms` observes an uncloaked native window; the presentation
+regression above separately checks its first pixels. `confirmed_ready_ms` also
+requires an authenticated status response and a loaded, error-free active
+Document. It includes observation round trips, rather than measuring exact input
+delivery latency. Results and the executable hash stay in `.tmp/startup-measurement/`.
+
+Each sample is a new process; the script does not flush Windows file or graphics
+driver caches. Keep the first sample visible in reports and compare repeated
+samples on the same idle host and build profile. These measurements do not prove
+startup time after a Windows reboot or a universal hardware-independent bound.
+
 ## User installation and windows
 
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1`
