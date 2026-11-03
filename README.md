@@ -12,7 +12,7 @@
 
 </div>
 
-Keep all your projects open side by side, let terminal agents such as Claude Code or Codex work in them, and review, comment on and steer their changes in one place. Vim motions, Git and language support for Rust, Python and Dart are built in.
+Keep all your projects open side by side, let terminal agents work in them, and review, comment on and steer their changes in one place. Vim motions, Git and language support for Rust, Python and Dart are built in.
 
 ![vEdit with four projects open: an agent's unsaved draft of src/tides.rs beside its plan in Markdown preview](.github/assets/workspace.webp)
 

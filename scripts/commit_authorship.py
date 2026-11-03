@@ -2,12 +2,11 @@
 """Keep AI tool attribution out of the history: commits carry only the user's authorship.
 
 Every commit, merge commit and push in a checkout that enabled the tracked hooks
-(``git config core.hooksPath .githooks``) passes through here; Claude Code sessions
-in this repository, cloud sessions included, enable them at session start
-(``.claude/settings.json``). Three commands, one per hook:
+(``git config core.hooksPath .githooks``) passes through here. Three commands,
+one per hook:
 
-- ``identity`` (``pre-commit``, ``pre-merge-commit``) refuses a commit whose author or
-  committer is an AI tool identity such as ``Claude <noreply@anthropic.com>``.
+- ``identity`` (``pre-commit``, ``pre-merge-commit``) requires author and committer
+  to match the repository's configured ``user.name`` and ``user.email``.
 - ``message <file>`` (``commit-msg``) removes attribution lines from the message:
   ``Co-Authored-By`` and ``Claude-Session`` trailers and "Generated with" footers.
 - ``push <remote>`` (``pre-push``) refuses to push a commit that carries either, so a
@@ -27,22 +26,15 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
-# An author or committer whose name or email matches is an AI tool, not the user.
-TOOL_IDENTITY = re.compile(
-    r"\bclaude\b|anthropic\.com|\bcodex\b|openai\.com|\bcopilot\b", re.IGNORECASE
-)
 # A message line that attributes the commit to an AI tool.
 ATTRIBUTION_LINE = re.compile(
     r"^\s*(?:co-authored-by:|claude-session:|"
-    r"(?:\U0001f916\s*)?generated (?:with|by) \[?(?:claude|codex)\b)",
+    r"(?:\U0001f916\s*)?generated (?:with|by)\b)",
     re.IGNORECASE,
 )
 NO_COMMIT = "0" * 40
 FIELD = "\x1f"
 RECORD = "\x1e"
-# The identity the refusal tells an agent to commit as.
-USER_NAME = "Julian B."
-USER_EMAIL = "virojb@web.de"
 REMEDY = (
     "Commits in this repository carry only the user's authorship: no AI tool as author or "
     "committer, no Co-Authored-By or Claude-Session trailers, no 'Generated with' footers."
@@ -56,6 +48,10 @@ class Commit(NamedTuple):
     message: str
 
 
+class AuthorshipError(Exception):
+    """A repository identity that cannot be checked."""
+
+
 def _git(*args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -67,9 +63,17 @@ def _git(*args: str) -> str:
     ).stdout
 
 
-def tool_identity(ident: str) -> bool:
-    """Return whether ``Name <email>`` names an AI tool."""
-    return bool(TOOL_IDENTITY.search(ident))
+def user_identity() -> str:
+    """Return the repository's configured user without author/committer overrides."""
+    try:
+        name = _git("config", "user.name").strip()
+        email = _git("config", "user.email").strip()
+    except subprocess.CalledProcessError as exc:
+        raise AuthorshipError("configure user.name and user.email locally before committing; "
+                              "the repository user identity is missing") from exc
+    if not name or not email:
+        raise AuthorshipError("configure nonempty user.name and user.email locally before committing")
+    return f"{name} <{email}>"
 
 
 def clean_message(message: str) -> str:
@@ -80,12 +84,12 @@ def clean_message(message: str) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def problems(commit: Commit) -> list[str]:
+def problems(commit: Commit, expected_identity: str) -> list[str]:
     """Return what makes ``commit`` carry attribution other than the user's."""
     found = [
         f"{role} {ident}"
         for role, ident in (("author", commit.author), ("committer", commit.committer))
-        if tool_identity(ident)
+        if ident != expected_identity
     ]
     found += [
         f"message line {line.strip()!r}"
@@ -110,14 +114,16 @@ def commits(*revisions: str) -> list[Commit]:
 
 
 def _report(offending: Iterable[Commit]) -> int:
-    lines = [
-        f"  {commit.sha[:12]}: {'; '.join(problems(commit))}"
-        for commit in offending
-        if problems(commit)
-    ]
+    expected = user_identity()
+    lines = []
+    for commit in offending:
+        found = problems(commit, expected)
+        if found:
+            lines.append(f"  {commit.sha[:12]}: {'; '.join(found)}")
     if not lines:
         return 0
-    print("These commits carry AI tool attribution:", *lines, sep="\n", file=sys.stderr)
+    print(f"These commits differ from the configured user {expected} or carry tool attribution:",
+          *lines, sep="\n", file=sys.stderr)
     print(
         f"\n{REMEDY}\nRewrite them with the user's identity and without those lines "
         "only for unpublished commits you own, then try again. Published history "
@@ -129,20 +135,22 @@ def _report(offending: Iterable[Commit]) -> int:
 
 
 def check_identity() -> int:
+    expected = user_identity()
     # git var prints "Name <email> <timestamp> <zone>".
     idents = {
         role: _git("var", variable).rsplit(">", 1)[0] + ">"
         for role, variable in (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT"))
     }
-    refused = [f"  {role}: {ident}" for role, ident in idents.items() if tool_identity(ident)]
+    refused = [f"  {role}: {ident}" for role, ident in idents.items() if ident != expected]
     if not refused:
         return 0
-    print("Commit blocked: an AI tool identity would author this commit.", *refused, sep="\n")
+    print("Commit blocked: author and committer must match the repository's configured user.",
+          *refused, sep="\n")
     print(
-        f"\n{REMEDY}\nCommit as the user: git config user.name '{USER_NAME}' and "
-        f"git config user.email {USER_EMAIL} in this repository (never --global), and "
-        "unset GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME and "
-        "GIT_COMMITTER_EMAIL when they name a tool. Then commit again."
+        f"\n{REMEDY}\nConfigured user: {expected}. Unset GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, "
+        "GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL when they override this identity, "
+        "then commit again. Correct user.name and user.email locally if they name "
+        "someone else (never --global)."
     )
     return 1
 
@@ -175,14 +183,18 @@ def main(argv: list[str]) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     command, *rest = argv or [""]
-    if command == "identity":
-        return check_identity()
-    if command == "message" and len(rest) == 1:
-        return strip_message(Path(rest[0]))
-    if command == "push" and rest:
-        return check_push(rest[0], sys.stdin.read())
-    if command == "history":
-        return _report(commits("HEAD"))
+    try:
+        if command == "identity":
+            return check_identity()
+        if command == "message" and len(rest) == 1:
+            return strip_message(Path(rest[0]))
+        if command == "push" and rest:
+            return check_push(rest[0], sys.stdin.read())
+        if command == "history":
+            return _report(commits("HEAD"))
+    except AuthorshipError as exc:
+        print(f"Authorship check failed: {exc}", file=sys.stderr)
+        return 1
     print("usage: commit_authorship.py identity | message <file> | push <remote> | history")
     return 2
 

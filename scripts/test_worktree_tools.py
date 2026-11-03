@@ -421,18 +421,30 @@ class GitToolContracts(unittest.TestCase):
     def test_hooks_reject_tool_identity_and_clean_message(self) -> None:
         self.write("other.txt", "authorship test\n")
         self.run_git("add", "other.txt")
-        self.env["GIT_AUTHOR_NAME"] = "Codex"
         before = self.run_git("rev-parse", "HEAD")
-        blocked = self.invoke(["git", "commit", "-m", "blocked"], expected=1)
-        self.assertIn("Commit blocked", blocked.stdout + blocked.stderr)
-        self.assertEqual(self.run_git("rev-parse", "HEAD"), before)
-        self.env["GIT_AUTHOR_NAME"] = "Fixture User"
+        for variable, wrong in (("GIT_AUTHOR_NAME", "Different Author"),
+                                ("GIT_AUTHOR_EMAIL", "different@example.invalid"),
+                                ("GIT_COMMITTER_NAME", "Different Committer"),
+                                ("GIT_COMMITTER_EMAIL", "different@example.invalid")):
+            with self.subTest(variable=variable):
+                original = self.env[variable]
+                self.env[variable] = wrong
+                blocked = self.invoke(["git", "commit", "-m", "blocked"], expected=1)
+                self.assertIn("Commit blocked", blocked.stdout + blocked.stderr)
+                self.assertEqual(self.run_git("rev-parse", "HEAD"), before)
+                self.env[variable] = original
+        self.run_git("config", "--unset", "user.name")
+        missing = self.invoke([sys.executable, "scripts/commit_authorship.py", "identity"], expected=1)
+        self.assertIn("user.name", missing.stderr)
+        self.assertNotIn("Traceback", missing.stderr)
+        self.run_git("config", "user.name", "Fixture User")
         message = self.root / ".tmp" / "message.txt"
-        message.write_text("real message\n\nCo-Authored-By: Codex <noreply@openai.com>\n", encoding="utf-8")
+        message.write_text("real message\n\nCo-Authored-By: Coding Agent <agent@example.invalid>\n"
+                           "Generated with Coding Agent\n", encoding="utf-8")
         self.run_git("commit", "--file", str(message))
         self.assertEqual(self.run_git("log", "-1", "--format=%B"), "real message")
         self.invoke([sys.executable, "scripts/commit_authorship.py", "history"])
-        self.env["GIT_AUTHOR_NAME"] = "Codex"
+        self.env["GIT_AUTHOR_NAME"] = "Different Author"
         self.run_git("-c", "core.hooksPath=.tmp/no-hooks", "commit", "--allow-empty", "-m", "fixture violation")
         self.env["GIT_AUTHOR_NAME"] = "Fixture User"
         violation = self.run_git("rev-parse", "HEAD")

@@ -53,7 +53,7 @@ Expected to stay unloaded:
 - “Ändere die README dieses Repositorys.”
 - “Schreibe einen Plan als Antwort hier im Chat.”
 
-These ten cases match the revised description by inspection. They are not fresh-agent trials. The supported operating harness here is Windows PowerShell/Codex; the executable workflow also covers installed PowerShell 7. No model-specific instructions were introduced. A separate `agent-eval` comparison would be useful for measuring first-use behavior in weaker models; no such model trial is claimed.
+These ten cases match the revised description by inspection. They are not fresh-agent trials. The operating harness used Windows PowerShell with a coding agent; the executable workflow also covers installed PowerShell 7. No model-specific instructions were introduced. A separate `agent-eval` comparison would be useful for measuring first-use behavior in weaker models; no such model trial is claimed.
 
 ## Validation
 

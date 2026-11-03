@@ -20,7 +20,11 @@ test suite. `docs/development.md` is the human-facing command and packaging guid
 ## Interfaces
 
 The repository-local Git hooks call `scripts/commit_authorship.py` and
-`scripts/commit_check.py`. The static checker reads staged blobs and leaves both
+`scripts/commit_check.py`. Authorship checks compare author and committer with
+the repository's configured `user.name` and `user.email`, independently of tool
+names. Attribution cleanup strips `Co-Authored-By`/`Claude-Session` trailers and generated-by
+footers. The same identity and attribution rules apply to history and pushes.
+The static checker reads staged blobs and leaves both
 the index and working files unchanged. It runs Rustfmt 1.97.1 through stdin for
 each staged Rust file, compiles staged Python syntax without writing bytecode,
 parses staged JSON, checks staged whitespace, and validates domain-map references
