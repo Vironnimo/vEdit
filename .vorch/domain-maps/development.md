@@ -50,8 +50,9 @@ harness and do not acquire this deadline or per-case environment isolation.
 and writes the README screenshots to `.github/assets/` (procedure in
 `docs/development.md`, README images).
 
-`scripts/worktree.py` owns marked `.worktrees/<name>` checkouts on `codex/<name>`;
-Host-managed checkouts have their own lifecycle, including archiving after landing.
+`scripts/worktree.py` exclusively owns task worktrees: marked `.worktrees/<name>`
+checkouts on branch `<name>`, without a prefix. Chats stay in the primary checkout;
+commands explicitly target the task checkout.
 The script installs nothing at creation and allocates no ports. Cargo builds on
 demand into that checkout's
 own `target/`. Its merge lock protects script operations; the checked landing

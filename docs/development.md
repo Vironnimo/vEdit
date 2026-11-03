@@ -77,8 +77,9 @@ separate checks. Details and commands live in `.vorch/domain-maps/development.md
 
 Use `python scripts/worktree.py create <task-name>` and finish the task with
 `python scripts/worktree.py merge <task-name>`: it checks and lands the merge,
-then removes the checkout and branch. If the host requires managed worktree tools,
-finish their lifecycle by archiving the source after landing its reviewed changes.
+then removes the checkout and branch. Task branches use the task name without a
+prefix. This script is the only task-worktree lifecycle; keep the chat in the
+primary checkout and pass the task checkout explicitly to its commands.
 Read `.vorch/workflows/worktree-workflow.md` for ownership and cleanup recovery.
 Each checkout owns its dependencies, profile fixtures and `target/`;
 never connect worktrees with junctions. Local commits do not authorize a push.

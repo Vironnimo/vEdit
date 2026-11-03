@@ -3,7 +3,7 @@
 
 Commands (``.vorch/workflows/worktree-workflow.md`` describes the workflow):
 
-- ``create <name>``: a new branch ``codex/<name>`` from ``main`` in ``.worktrees/<name>``,
+- ``create <name>``: a new branch ``<name>`` from ``main`` in ``.worktrees/<name>``,
   after retrying cleanup of completed tasks and interrupted private merges.
 - ``list``: the managed worktrees with branch, port, and pending work.
 - ``merge <name>``: merge the branch into ``main`` and remove the worktree. Merges
@@ -37,7 +37,6 @@ from uuid import uuid4
 # --- Project configuration -------------------------------------------------------
 
 PRIMARY_BRANCH = "main"
-BRANCH_PREFIX = "codex/"
 WORKTREES_DIR_NAME = ".worktrees"
 MARKER_FILE_NAME = ".vorch-worktree"
 """Ignored JSON ownership record: name, branch, port (null in vEdit), creation time."""
@@ -257,7 +256,7 @@ class Worktrees:
         except (OSError, ValueError, UnicodeError) as exc:
             raise WorktreeError(f"cannot read cleanup record for '{name}': {exc}") from exc
         if (not isinstance(record, dict) or record.get("name") != name
-                or record.get("branch") != BRANCH_PREFIX + name
+                or record.get("branch") != name
                 or not isinstance(record.get("tip"), str)
                 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", record["tip"])):
             raise WorktreeError(f"invalid cleanup record for '{name}'; nothing was removed")
@@ -379,7 +378,7 @@ class Worktrees:
         if not (path / MARKER_FILE_NAME).is_file():
             raise WorktreeError(f"no managed worktree '{name}' in {posix(self.dir)}")
         marker = self.marker(path)
-        expected = BRANCH_PREFIX + name
+        expected = name
         if marker.get("name") != name or marker.get("branch") != expected:
             raise WorktreeError(f"worktree '{name}' has a mismatched marker; nothing was removed")
         common = Path(git_out("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path))
@@ -497,7 +496,7 @@ def remove_directory_tree(path: Path) -> None:
 
 def create(trees: Worktrees, args: argparse.Namespace) -> int:
     name: str = args.name
-    branch = BRANCH_PREFIX + name
+    branch = name
     path = trees.path(name)
     trees.sweep_landings()
     trees.sweep_cleanup()

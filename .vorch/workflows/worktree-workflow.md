@@ -3,19 +3,16 @@
 Use a separate checkout for large, uncertain or concurrent work. Small, low-risk
 changes can stay on `main` (`AGENTS.md` -> Git).
 
-## Choose the worktree owner
+## Repository script
 
 Use the repository script below for the complete task lifecycle: create, work and
 commit, then merge and automatically remove the checkout and branch. It owns only
 marked checkouts under the primary checkout's `.worktrees/` directory.
 
-When the host requires its own managed worktree tools, reuse a suitable attachment
-or create one through those tools. After checks and a task commit, land only the
-reviewed task revision in the primary checkout on `main`, with the tracked commit
-hooks enabled. Archive the source through the host immediately afterwards; the
-app retains a recoverable snapshot. This script neither lists nor deletes those
-checkouts; do not fabricate a script marker. A landed task whose source remains
-is incomplete in either lifecycle.
+Use this script exclusively for task worktrees. Keep the chat attached to the
+primary checkout and pass the task checkout as the working directory for its
+commands. Worktree creation, merging and deletion require no chat handoff or
+application archive operation. A landed task whose source remains is incomplete.
 
 ## Create and work
 
@@ -25,10 +22,10 @@ python scripts/worktree.py list
 ```
 
 `create` prints `status`, `name`, `branch` and the absolute `path`. It creates
-`.worktrees/<task-name>` on `codex/<task-name>` from `main`. Names contain 1-63
-lowercase letters, digits or hyphens, begin with a letter or digit and cannot be
+`.worktrees/<task-name>` on branch `<task-name>` from `main`, without a prefix.
+Names contain 1-63 lowercase letters, digits or hyphens, begin with a letter or digit and cannot be
 Windows device names. `list` prints each task's uncommitted entry and unmerged
-commit counts. It does not list Codex-managed or other Git worktrees.
+commit counts. It lists only the script's own task worktrees.
 
 Change to the printed path before running commands; a script's location does not
 change the shell's working directory. Give delegated agents that path explicitly.
@@ -42,7 +39,7 @@ removals and removes owned private landing checkouts left by interrupted merges.
 The shared OS lock excludes live script operations. A fresh task with no commits
 is active work, not cleanup: ordinary checkouts are never selected by age or by
 having no commits ahead of `main`. Changed branches and dirty checkouts are kept
-and reported. Unknown private directories and host-managed worktrees are untouched.
+and reported. Unknown private directories and other Git worktrees are untouched.
 
 For shell tools, scope temporary paths with `scripts/project-temp.ps1` as described
 in `docs/development.md`. The worktree script scopes its subprocess temporary
@@ -117,8 +114,7 @@ checking its destination; never recursively delete through it.
   saved patch rather than an unqualified `git stash pop`.
 - Keep the primary checkout on `main` while operations run. The script lock
   coordinates this script, not unrelated Git commands or arbitrary file writers.
-  For script-managed tasks, do not hand-merge, switch the primary branch or edit
-  a task being removed.
+  Do not hand-merge, switch the primary branch or edit a task being removed.
 - Run merge/delete outside the checkout being removed. On Windows another shell
   or running process can hold it open; the command reports retained paths.
 - Private `.landing-*` checkouts have a sidecar ownership record tied to this repository,

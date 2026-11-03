@@ -51,7 +51,7 @@ if Path.cwd().name.startswith(".landing-"):
         subprocess.run(["git", "add", "other.txt"], cwd=root, env=environment, check=True)
         subprocess.run(["git", "-c", "core.hooksPath=.tmp/no-hooks", "commit", "-m", "main advanced"], cwd=root, env=environment, check=True)
     if mode == "lock-cleanup-ref":
-        (root / ".git" / "refs" / "heads" / "codex" / "task.lock").write_text("fixture lock", encoding="utf-8")
+        (root / ".git" / "refs" / "heads" / "task.lock").write_text("fixture lock", encoding="utf-8")
 '''
 
 
@@ -156,7 +156,7 @@ class GitToolContracts(unittest.TestCase):
 
     def task(self) -> Path:
         output = self.cli("create", "task")
-        self.assertIn("branch: codex/task", output)
+        self.assertIn("branch: task", output)
         path = self.root / ".worktrees/task"
         self.write("task.txt", "task change\n", path)
         self.run_git("add", "task.txt", cwd=path)
@@ -165,16 +165,20 @@ class GitToolContracts(unittest.TestCase):
 
     def test_create_list_delete_and_invalid_names(self) -> None:
         self.assertIn("status: empty", self.cli("list"))
-        self.assertIn("status: created", self.cli("create", "first"))
+        created = self.cli("create", "first")
+        self.assertIn("status: created", created)
+        self.assertIn("branch: first", created)
         self.cli("create", "second")
         listed = self.cli("list")
         self.assertIn("name: first", listed)
         self.assertIn("name: second", listed)
         marker = json.loads((self.root / ".worktrees/first/.vorch-worktree").read_text())
-        self.assertEqual(marker["branch"], "codex/first")
+        self.assertEqual(marker["branch"], "first")
         self.assertIsNone(marker["port"])
         self.cli("create", "../outside", expected=1)
         self.cli("create", "con", expected=1)
+        self.cli("create", "main", expected=1)
+        self.assertFalse((self.root / ".worktrees" / "main").exists())
         self.cli("delete", "missing", expected=1)
         self.cli("unknown", expected=2)
         self.cli("delete", "first")
@@ -193,7 +197,7 @@ class GitToolContracts(unittest.TestCase):
         self.assertEqual((self.root / "other.txt").read_text(), "unsaved primary\n")
         self.assertEqual((self.root / "task.txt").read_text(), "task change\n")
         self.assertFalse(path.exists())
-        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+        self.assertNotIn("task", self.run_git("branch", "--format=%(refname:short)"))
         self.assertNotIn(".worktrees", self.run_git("worktree", "list", "--porcelain"))
         self.assertEqual(len(self.run_git("rev-list", "--parents", "-n", "1", "HEAD").split()), 3)
 
@@ -226,7 +230,7 @@ class GitToolContracts(unittest.TestCase):
         self.assertIn("status: merged-cleanup-pending", output)
         self.assertIn("source worktree kept", output)
         self.assertIn("python scripts/worktree.py merge task", output)
-        self.run_git("merge-base", "--is-ancestor", "codex/task", "main")
+        self.run_git("merge-base", "--is-ancestor", "task", "main")
         self.assertEqual((path / "concurrent.txt").read_text(), "concurrent work\n")
         self.run_git("add", "concurrent.txt", cwd=path)
         self.run_git("commit", "-m", "finish concurrent work", cwd=path)
@@ -247,7 +251,7 @@ class GitToolContracts(unittest.TestCase):
         self.assertIn("status: cleanup-completed", self.cli("create", "third"))
         self.assertFalse(path.exists())
         self.assertTrue((self.root / ".worktrees" / "active").is_dir())
-        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+        self.assertNotIn("task", self.run_git("branch", "--format=%(refname:short)"))
 
     def test_cleanup_resumes_after_checkout_or_branch_removal(self) -> None:
         for stage in ("checkout-gone", "build-left", "branch-gone", "draft-left", "metadata-lost",
@@ -255,7 +259,7 @@ class GitToolContracts(unittest.TestCase):
             with self.subTest(stage=stage):
                 self.cli("create", stage)
                 path = self.root / ".worktrees" / stage
-                branch = f"codex/{stage}"
+                branch = stage
                 tip = self.run_git("rev-parse", branch)
                 record = self.root / ".worktrees" / f".cleanup-{stage}.json"
                 record.write_text(json.dumps({"name": stage, "branch": branch, "tip": tip}),
@@ -300,11 +304,11 @@ class GitToolContracts(unittest.TestCase):
         output = self.cli("merge", "task", expected=1)
         self.assertIn("status: merged-cleanup-pending", output)
         self.assertFalse(path.exists())
-        self.run_git("merge-base", "--is-ancestor", "codex/task", "main")
-        (self.root / ".git" / "refs" / "heads" / "codex" / "task.lock").unlink()
+        self.run_git("merge-base", "--is-ancestor", "task", "main")
+        (self.root / ".git" / "refs" / "heads" / "task.lock").unlink()
         self.cli("merge", "task")
         self.assertFalse((self.root / ".worktrees" / ".cleanup-task.json").exists())
-        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+        self.assertNotIn("task", self.run_git("branch", "--format=%(refname:short)"))
 
     def test_create_sweeps_only_owned_private_merge_checkouts(self) -> None:
         owned = self.root / ".worktrees" / ".landing-aborted-123456789abc"
@@ -344,7 +348,7 @@ class GitToolContracts(unittest.TestCase):
         output = self.cli("merge", "task", expected=1)
         self.assertIn("status: merged-cleanup-pending", output)
         self.assertIn("source worktree kept", output)
-        self.assertEqual(self.run_git("log", "-1", "--format=%s", "codex/task"), "concurrent")
+        self.assertEqual(self.run_git("log", "-1", "--format=%s", "task"), "concurrent")
         self.assertTrue(path.exists())
 
     def test_concurrent_primary_commit_rechecks_merge(self) -> None:
@@ -380,9 +384,9 @@ class GitToolContracts(unittest.TestCase):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertIn("stayed busy", self.cli("merge", "task", "--wait-timeout", "0", expected=1))
         self.run_git("switch", "-c", "other-task", cwd=path)
-        self.assertIn("expected 'codex/task'", self.cli("delete", "task", "--force", expected=1))
+        self.assertIn("expected 'task'", self.cli("delete", "task", "--force", expected=1))
         self.assertTrue(path.exists())
-        self.run_git("switch", "codex/task", cwd=path)
+        self.run_git("switch", "task", cwd=path)
         self.run_git("switch", "-c", "other-primary")
         before = self.run_git("rev-parse", "HEAD")
         self.assertIn("switch it back first", self.cli("merge", "task", expected=1))
