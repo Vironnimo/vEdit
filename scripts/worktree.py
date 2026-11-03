@@ -4,7 +4,7 @@
 Commands (``.vorch/workflows/worktree-workflow.md`` describes the workflow):
 
 - ``create <name>``: a new branch ``codex/<name>`` from ``main`` in ``.worktrees/<name>``,
-  with a marker file, an optional port, and the project's setup commands.
+  after retrying cleanup of completed tasks and interrupted private merges.
 - ``list``: the managed worktrees with branch, port, and pending work.
 - ``merge <name>``: merge the branch into ``main`` and remove the worktree. Merges
   are serialized by a lock. The merge commit is made in a private landing checkout,
@@ -212,7 +212,7 @@ class Worktrees:
     def marker(self, path: Path) -> dict[str, object]:
         try:
             data = json.loads((path / MARKER_FILE_NAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, UnicodeError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -226,6 +226,152 @@ class Worktrees:
             and not path.name.startswith(".")
             and (path / MARKER_FILE_NAME).is_file()
         )
+
+    def registrations(self) -> list[dict[str, str]]:
+        records: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for field in git_out("worktree", "list", "--porcelain", "-z", cwd=self.root).split("\0"):
+            if field:
+                key, _, value = field.partition(" ")
+                current[key] = value
+            elif current:
+                records.append(current)
+                current = {}
+        if current:
+            records.append(current)
+        return records
+
+    def registration(self, path: Path) -> dict[str, str] | None:
+        return next((record for record in self.registrations()
+                     if Path(record["worktree"]).resolve() == path.resolve()), None)
+
+    def cleanup_file(self, name: str) -> Path:
+        self.path(name)
+        path = self.dir / f".cleanup-{name}.json"
+        self.validate_path(path)
+        return path
+
+    def cleanup_record(self, name: str) -> dict[str, str]:
+        try:
+            record = json.loads(self.cleanup_file(name).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise WorktreeError(f"cannot read cleanup record for '{name}': {exc}") from exc
+        if (not isinstance(record, dict) or record.get("name") != name
+                or record.get("branch") != BRANCH_PREFIX + name
+                or not isinstance(record.get("tip"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", record["tip"])):
+            raise WorktreeError(f"invalid cleanup record for '{name}'; nothing was removed")
+        return record
+
+    def finish_cleanup(self, name: str, *, force: bool = False) -> None:
+        """Resume a recorded removal without relying on a surviving checkout."""
+        record = self.cleanup_record(name)
+        path = self.path(name)
+        branch, tip = record["branch"], record["tip"]
+        current = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=self.root)
+        if current.returncode not in (0, 1):
+            raise WorktreeError(f"cannot check branch '{branch}': {current.stderr.strip()}")
+        if current.returncode == 0 and current.stdout.strip() != tip:
+            raise WorktreeError(f"branch '{branch}' changed; its worktree and commits were kept")
+        if not force:
+            git_out("merge-base", "--is-ancestor", tip, PRIMARY_BRANCH, cwd=self.root)
+        if path.exists() and not (path / ".git").exists() and not force:
+            # Without an index, preserve anything beyond disposable build output.
+            if any(entry.name not in ("target", ".tmp", MARKER_FILE_NAME)
+                   for entry in path.iterdir()):
+                raise WorktreeError(f"worktree '{name}' has files without Git metadata; "
+                                    "restore its metadata before retrying")
+        registered = self.registration(path)
+        if registered is None and (path / ".git").exists():
+            raise WorktreeError(f"unregistered Git checkout kept at {path}")
+        if registered is not None:
+            if (registered.get("HEAD") != tip
+                    or registered.get("branch") != f"refs/heads/{branch}"
+                    or "locked" in registered):
+                raise WorktreeError(f"worktree '{name}' changed or is locked; nothing was removed")
+            had_metadata = (path / ".git").exists()
+            if not had_metadata and path.exists():
+                # Git repairs the backlink from its surviving administrative record.
+                # It can return nonzero after making that repair; verify the resulting
+                # checkout below instead of trusting its exit code alone.
+                repaired = git("worktree", "repair", str(path), cwd=self.root)
+                if not (path / ".git").is_file():
+                    raise WorktreeError(f"cannot restore worktree metadata: {repaired.stderr.strip()}")
+            if (path / ".git").exists():
+                marker = path / MARKER_FILE_NAME
+                if not marker.exists():
+                    with marker.open("x", encoding="utf-8") as handle:
+                        json.dump({"name": name, "branch": branch}, handle)
+                self.require(name)
+                if had_metadata and not force and self.pending(path, branch)[0]:
+                    raise WorktreeError(f"source worktree kept: '{name}' has uncommitted files")
+            validate_removal(path)
+            if Path.cwd().resolve().is_relative_to(path.resolve()):
+                os.chdir(self.root)
+            flags = ["--force"] if force or not had_metadata else []
+            removed = git("worktree", "remove", *flags,
+                          str(path), cwd=self.root)
+            # Git can deregister a Windows checkout before failing to delete locked files.
+            if removed.returncode != 0 and self.registration(path) is not None:
+                raise WorktreeError(f"source worktree kept: {removed.stderr.strip()}")
+        if path.exists():
+            validate_removal(path)
+            remove_directory_tree(path)
+        if any(item.get("branch") == f"refs/heads/{branch}" for item in self.registrations()):
+            raise WorktreeError(f"branch '{branch}' is checked out elsewhere; it was kept")
+        if current.returncode == 0:
+            git_out("update-ref", "-d", f"refs/heads/{branch}", tip, cwd=self.root)
+        self.cleanup_file(name).unlink()
+
+    def sweep_cleanup(self) -> None:
+        """Retry explicit completed-task removals; never select active tasks by age."""
+        for record in sorted(self.dir.glob(".cleanup-*.json")):
+            name = record.name[len(".cleanup-"):-len(".json")]
+            try:
+                self.finish_cleanup(name)
+                show(name=name, status="cleanup-completed")
+            except (WorktreeError, OSError) as exc:
+                print(f"note: cleanup pending for '{name}': {exc}")
+
+    def landing_file(self, path: Path) -> Path:
+        self.validate_path(path)
+        record = path.with_name(path.name + ".json")
+        self.validate_path(record)
+        return record
+
+    def owns_landing(self, path: Path) -> bool:
+        try:
+            marker = json.loads(self.landing_file(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return False
+        return marker == {"kind": "landing", "root": posix(self.root)}
+
+    def remove_landing(self, path: Path) -> None:
+        if not self.owns_landing(path):
+            raise WorktreeError(f"private checkout ownership is unknown: {path}")
+        registered = self.registration(path)
+        if registered is None and (path / ".git").exists():
+            raise WorktreeError(f"unregistered Git checkout kept at {path}")
+        if registered is not None and ("detached" not in registered or "locked" in registered):
+            raise WorktreeError(f"private checkout changed or is locked; kept at {path}")
+        validate_removal(path)
+        if registered is not None:
+            if path.exists() and not (path / ".git").exists():
+                git("worktree", "repair", str(path), cwd=self.root)
+            removed = git("worktree", "remove", "--force", str(path), cwd=self.root)
+            if removed.returncode != 0 and self.registration(path) is not None:
+                raise WorktreeError(f"private checkout kept at {path}: {removed.stderr.strip()}")
+        if path.exists():
+            remove_directory_tree(path)
+        self.landing_file(path).unlink()
+
+    def sweep_landings(self) -> None:
+        # Every landing runs under the same OS lock as this sweep. A killed
+        # process releases that lock; push checkouts have a separate lifecycle.
+        for record in sorted(self.dir.glob(".landing-*.json")):
+            path = record.with_name(record.name[:-len(".json")])
+            if self.owns_landing(path):
+                self.remove_landing(path)
 
     def require(self, name: str) -> tuple[Path, str]:
         """Return a managed worktree's path and checked-out branch."""
@@ -283,18 +429,16 @@ class Worktrees:
         if not force and git("merge-base", "--is-ancestor", expected, PRIMARY_BRANCH,
                              cwd=self.root).returncode != 0:
             raise WorktreeError(f"branch '{branch}' has unmerged commits; its worktree was kept")
-        if Path.cwd().resolve().is_relative_to(path.resolve()):
-            os.chdir(self.root)
-        removed = git("worktree", "remove", *(["--force"] if force else []), str(path), cwd=self.root)
-        if removed.returncode != 0:
-            raise WorktreeError(
-                f"the worktree could not be removed: {removed.stderr.strip()}\n"
-                f"hint: leave the directory, then run from {posix(self.root)}: "
-                f"python scripts/worktree.py delete {path.name}"
-            )
-        deleted = git("update-ref", "-d", f"refs/heads/{branch}", expected, cwd=self.root)
-        if deleted.returncode != 0:
-            print(f"note: branch '{branch}' kept: {deleted.stderr.strip()}")
+        record = self.cleanup_file(path.name)
+        temporary = self.root / ".tmp" / "worktree" / f".record-{uuid4().hex}.tmp"
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps({"name": path.name, "branch": branch, "tip": expected}),
+                             encoding="utf-8")
+        try:
+            os.replace(temporary, record)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.finish_cleanup(path.name, force=force)
 
 
 def is_link(path: Path) -> bool:
@@ -321,6 +465,33 @@ def validate_removal(path: Path) -> None:
                 raise WorktreeError(f"refusing removal with a nested Git repository: {entry}")
 
 
+def remove_directory_tree(path: Path) -> None:
+    """Retry transient Windows locks and read-only build files, within the checked tree."""
+    def readonly(function, filename, error_info):
+        target = Path(filename)
+        failure = error_info[1]
+        if (not isinstance(failure, PermissionError)
+                or function not in (os.unlink, os.remove, os.rmdir) or is_link(target)
+                or not target.resolve().is_relative_to(path.resolve())):
+            raise failure
+        target.chmod(target.stat().st_mode | stat.S_IWUSR)
+        function(filename)
+
+    for attempt in range(3):
+        try:
+            validate_removal(path)
+            shutil.rmtree(path, onerror=readonly)
+            return
+        except FileNotFoundError:
+            if not path.exists():
+                return
+            raise
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.2)
+
+
 # --- Commands ----------------------------------------------------------------------
 
 
@@ -328,6 +499,11 @@ def create(trees: Worktrees, args: argparse.Namespace) -> int:
     name: str = args.name
     branch = BRANCH_PREFIX + name
     path = trees.path(name)
+    trees.sweep_landings()
+    trees.sweep_cleanup()
+    if trees.cleanup_file(name).exists():
+        raise WorktreeError(f"cleanup of '{name}' is pending; run "
+                            f"python scripts/worktree.py delete {name} before reusing its name")
     if path.exists():
         raise WorktreeError(f"worktree '{name}' already exists: {posix(path)}")
     if (
@@ -371,12 +547,20 @@ def create(trees: Worktrees, args: argparse.Namespace) -> int:
 
 def list_worktrees(trees: Worktrees, _args: argparse.Namespace) -> int:
     paths = trees.managed()
-    if not paths:
+    pending_names = {path.name[len(".cleanup-"):-len(".json")]
+                     for path in trees.dir.glob(".cleanup-*.json")}
+    if not paths and not pending_names:
         show(status="empty")
         return 0
-    for index, path in enumerate(paths):
+    for index, name in enumerate(sorted({path.name for path in paths} | pending_names)):
         if index:
             print()
+        if name in pending_names:
+            record = trees.cleanup_record(name)
+            show(name=name, branch=record["branch"], path=posix(trees.path(name)),
+                 status="cleanup-pending")
+            continue
+        path = trees.path(name)
         path, branch = trees.require(path.name)
         status, ahead = trees.pending(path, branch)
         port = trees.marker(path).get("port")
@@ -425,18 +609,15 @@ def _fast_forward(root: Path, commit: str) -> subprocess.CompletedProcess[str]:
 def _landing_checkout(trees: Worktrees, name: str) -> Iterator[Path]:
     landing = trees.dir / f".landing-{name}-{uuid4().hex[:12]}"
     trees.validate_path(landing)
-    git_out("worktree", "add", "--detach", str(landing), PRIMARY_BRANCH, cwd=trees.root)
+    record = trees.landing_file(landing)
+    if landing.exists() or record.exists():
+        raise WorktreeError(f"private checkout path already exists: {landing}")
+    record.write_text(json.dumps({"kind": "landing", "root": posix(trees.root)}), encoding="utf-8")
     try:
+        git_out("worktree", "add", "--detach", str(landing), PRIMARY_BRANCH, cwd=trees.root)
         yield landing
     finally:
-        try:
-            trees.validate_path(landing)
-            validate_removal(landing)
-            removed = git("worktree", "remove", "--force", str(landing), cwd=trees.root)
-            if removed.returncode != 0:
-                print(f"note: private landing checkout kept at {landing}: {removed.stderr.strip()}")
-        except (WorktreeError, OSError) as exc:
-            print(f"note: private landing checkout kept at {landing}: {exc}")
+        trees.remove_landing(landing)
 
 
 def _land(trees: Worktrees, name: str, branch: str, tip: str, message: str) -> str:
@@ -500,6 +681,12 @@ def require_primary_branch(root: Path) -> None:
 
 def merge(trees: Worktrees, args: argparse.Namespace) -> int:
     name: str = args.name
+    trees.path(name)
+    trees.sweep_landings()
+    if trees.cleanup_file(name).exists() and not (trees.path(name) / ".git").exists():
+        trees.finish_cleanup(name)
+        show(name=name, status="removed")
+        return 0
     path, branch = trees.require(name)
     require_primary_branch(trees.root)
     tip = git_out("rev-parse", branch, cwd=trees.root)
@@ -513,34 +700,48 @@ def merge(trees: Worktrees, args: argparse.Namespace) -> int:
 
     if ahead == 0:
         print(f"'{branch}' has no commits that {PRIMARY_BRANCH} lacks; removing the worktree")
-        trees.remove(path, branch, force=False, expected=tip)
-        show(name=name, status="removed")
-        return 0
-
-    conflicts = _merge_conflicts(trees.root, tip)
-    if conflicts:
-        for conflict in conflicts:
-            print(f"conflicted: {conflict}")
-        print(
-            f"hint: in the worktree run `git rebase {PRIMARY_BRANCH}`, resolve, commit, "
-            "and merge again"
-        )
-        print(f"error: merging '{branch}' into {PRIMARY_BRANCH} conflicts; main is unchanged")
-        return CONFLICT_EXIT_CODE
+    else:
+        conflicts = _merge_conflicts(trees.root, tip)
+        if conflicts:
+            for conflict in conflicts:
+                print(f"conflicted: {conflict}")
+            print(
+                f"hint: in the worktree run `git rebase {PRIMARY_BRANCH}`, resolve, commit, "
+                "and merge again"
+            )
+            print(f"error: merging '{branch}' into {PRIMARY_BRANCH} conflicts; main is unchanged")
+            return CONFLICT_EXIT_CODE
 
     message = args.message or f"merge: {name}"
-    commit = _land(trees, name, branch, tip, message)
-
-    show(name=name, status="merged", commit=commit[:12], branch=branch)
+    commit = git_out("rev-parse", PRIMARY_BRANCH, cwd=trees.root)
     try:
+        if ahead:
+            commit = _land(trees, name, branch, tip, message)
         trees.remove(path, branch, force=False, expected=tip)
     except (WorktreeError, OSError) as exc:
-        print(f"note: merge completed; source worktree kept: {exc}")
+        if git("merge-base", "--is-ancestor", tip, PRIMARY_BRANCH,
+               cwd=trees.root).returncode != 0:
+            raise
+        commit = git_out("rev-parse", PRIMARY_BRANCH, cwd=trees.root)
+        show(name=name, status="merged-cleanup-pending", commit=commit[:12], branch=branch)
+        print(f"error: merge completed; cleanup pending: {exc}")
+        if path.exists():
+            print(f"note: source worktree kept at {posix(path)}")
+        print(f"hint: resolve the cleanup error, leave the worktree directory, then run from "
+              f"{posix(trees.root)}: python scripts/worktree.py merge {name}")
+        return 1
+    show(name=name, status="merged" if ahead else "removed", commit=commit[:12], branch=branch)
     return 0
 
 
 def delete(trees: Worktrees, args: argparse.Namespace) -> int:
     name: str = args.name
+    trees.path(name)
+    trees.sweep_landings()
+    if trees.cleanup_file(name).exists() and not (trees.path(name) / ".git").exists():
+        trees.finish_cleanup(name, force=args.force)
+        show(name=name, status="deleted")
+        return 0
     path, branch = trees.require(name)
     tip = git_out("rev-parse", branch, cwd=trees.root)
     if not args.force:
@@ -559,9 +760,12 @@ def delete(trees: Worktrees, args: argparse.Namespace) -> int:
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("create", help="create .worktrees/<name> on codex/<name>").add_argument("name")
+    commands.add_parser("create", help="retry recorded cleanup, then create a task worktree").add_argument("name")
     commands.add_parser("list", help="list task worktrees")
-    merging = commands.add_parser("merge", help="merge a task into main and remove it")
+    merging = commands.add_parser("merge", help="merge and remove a task; incomplete cleanup exits 1",
+                                  description="Merge a task into main and remove its checkout and branch. "
+                                  "Exit 0 means both completed; exit 1 includes pending cleanup. "
+                                  "Repeat after resolving the reported error to finish cleanup.")
     merging.add_argument("name")
     merging.add_argument("-m", "--message", help="merge commit message (default: merge: <name>)")
     merging.add_argument(

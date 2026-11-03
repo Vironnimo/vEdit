@@ -75,9 +75,12 @@ per clone with `git config --local core.hooksPath .githooks`. The hooks validate
 staged content without rewriting the worktree or index; full Clippy and tests are
 separate checks. Details and commands live in `.vorch/domain-maps/development.md`.
 
-Use Codex's managed worktree tools in Codex, or `python scripts/worktree.py create
-<task-name>` in a terminal. Read `.vorch/workflows/worktree-workflow.md` for merging
-and cleanup. Each checkout owns its dependencies, profile fixtures and `target/`;
+Use `python scripts/worktree.py create <task-name>` and finish the task with
+`python scripts/worktree.py merge <task-name>`: it checks and lands the merge,
+then removes the checkout and branch. If the host requires managed worktree tools,
+finish their lifecycle by archiving the source after landing its reviewed changes.
+Read `.vorch/workflows/worktree-workflow.md` for ownership and cleanup recovery.
+Each checkout owns its dependencies, profile fixtures and `target/`;
 never connect worktrees with junctions. Local commits do not authorize a push.
 For an authorized push follow `.vorch/workflows/push-workflow.md`.
 

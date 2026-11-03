@@ -50,6 +50,8 @@ if Path.cwd().name.startswith(".landing-"):
         (root / "other.txt").write_text("concurrent main commit\\n", encoding="utf-8")
         subprocess.run(["git", "add", "other.txt"], cwd=root, env=environment, check=True)
         subprocess.run(["git", "-c", "core.hooksPath=.tmp/no-hooks", "commit", "-m", "main advanced"], cwd=root, env=environment, check=True)
+    if mode == "lock-cleanup-ref":
+        (root / ".git" / "refs" / "heads" / "codex" / "task.lock").write_text("fixture lock", encoding="utf-8")
 '''
 
 
@@ -101,7 +103,8 @@ class GitToolContracts(unittest.TestCase):
             "\n".join(self.command_log), encoding="utf-8"
         )
         result = self._outcome.result
-        if any(test is self for test, _ in result.errors + result.failures):
+        if any(test is self or getattr(test, "test_case", None) is self
+               for test, _ in result.errors + result.failures):
             print(f"Failed fixture kept: {self.root}", flush=True)
             return
         for owned in sorted(set(self.owned_roots), key=lambda path: len(path.parts), reverse=True):
@@ -180,6 +183,9 @@ class GitToolContracts(unittest.TestCase):
 
     def test_merge_preserves_unrelated_primary_edits(self) -> None:
         path = self.task()
+        build = path / ".tmp" / "build"
+        build.mkdir(parents=True)
+        (build / "output.txt").write_text("ignored build output\n", encoding="utf-8")
         self.write("other.txt", "unsaved primary\n")
         output = self.cli("merge", "task")
         self.assertIn("Commit check:", output)
@@ -187,6 +193,8 @@ class GitToolContracts(unittest.TestCase):
         self.assertEqual((self.root / "other.txt").read_text(), "unsaved primary\n")
         self.assertEqual((self.root / "task.txt").read_text(), "task change\n")
         self.assertFalse(path.exists())
+        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+        self.assertNotIn(".worktrees", self.run_git("worktree", "list", "--porcelain"))
         self.assertEqual(len(self.run_git("rev-list", "--parents", "-n", "1", "HEAD").split()), 3)
 
     def test_overlap_and_failed_hook_leave_primary_unchanged(self) -> None:
@@ -214,13 +222,128 @@ class GitToolContracts(unittest.TestCase):
     def test_concurrent_source_edit_keeps_source(self) -> None:
         path = self.task()
         self.env["VORCH_TEST_HOOK"] = "edit-source"
-        self.assertIn("source worktree kept", self.cli("merge", "task"))
+        output = self.cli("merge", "task", expected=1)
+        self.assertIn("status: merged-cleanup-pending", output)
+        self.assertIn("source worktree kept", output)
+        self.assertIn("python scripts/worktree.py merge task", output)
+        self.run_git("merge-base", "--is-ancestor", "codex/task", "main")
         self.assertEqual((path / "concurrent.txt").read_text(), "concurrent work\n")
+        self.run_git("add", "concurrent.txt", cwd=path)
+        self.run_git("commit", "-m", "finish concurrent work", cwd=path)
+        self.env.pop("VORCH_TEST_HOOK")
+        self.cli("merge", "task")
+        self.assertFalse(path.exists())
+
+    def test_create_retries_only_recorded_completed_tasks(self) -> None:
+        self.cli("create", "active")
+        path = self.task()
+        self.env["VORCH_TEST_HOOK"] = "edit-source"
+        self.cli("merge", "task", expected=1)
+        self.env.pop("VORCH_TEST_HOOK")
+        self.assertIn("status: cleanup-pending", self.cli("list"))
+        self.assertIn("cleanup pending", self.cli("create", "second"))
+        self.assertTrue((path / "concurrent.txt").exists())
+        (path / "concurrent.txt").unlink()
+        self.assertIn("status: cleanup-completed", self.cli("create", "third"))
+        self.assertFalse(path.exists())
+        self.assertTrue((self.root / ".worktrees" / "active").is_dir())
+        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+
+    def test_cleanup_resumes_after_checkout_or_branch_removal(self) -> None:
+        for stage in ("checkout-gone", "build-left", "branch-gone", "draft-left", "metadata-lost",
+                      "replaced-repo"):
+            with self.subTest(stage=stage):
+                self.cli("create", stage)
+                path = self.root / ".worktrees" / stage
+                branch = f"codex/{stage}"
+                tip = self.run_git("rev-parse", branch)
+                record = self.root / ".worktrees" / f".cleanup-{stage}.json"
+                record.write_text(json.dumps({"name": stage, "branch": branch, "tip": tip}),
+                                  encoding="utf-8")
+                if stage == "metadata-lost":
+                    (path / ".git").unlink()
+                    self.cli("delete", stage, expected=1)
+                    self.assertTrue((path / "task.txt").is_file())
+                else:
+                    self.run_git("worktree", "remove", str(path))
+                if stage == "replaced-repo":
+                    path.mkdir()
+                    self.run_git("init", "-b", "replacement", cwd=path)
+                    self.owned_roots.append(path)
+                    (path / "keep.txt").write_text("replacement repository", encoding="utf-8")
+                    self.cli("delete", stage, "--force", expected=1)
+                    self.assertTrue((path / "keep.txt").is_file())
+                    self.assertTrue(record.is_file())
+                    continue
+                if stage == "branch-gone":
+                    self.run_git("branch", "-d", branch)
+                if stage in ("build-left", "draft-left"):
+                    path.mkdir()
+                    if stage == "build-left":
+                        (path / "target").mkdir()
+                        output = path / "target" / "readonly.txt"
+                        output.write_text("build output", encoding="utf-8")
+                        output.chmod(stat.S_IREAD)
+                    else:
+                        (path / "draft.txt").write_text("unexplained work", encoding="utf-8")
+                        self.cli("delete", stage, expected=1)
+                        self.assertTrue((path / "draft.txt").is_file())
+                self.cli("delete", stage,
+                         *(["--force"] if stage in ("draft-left", "metadata-lost") else []))
+                self.assertFalse(path.exists())
+                self.assertFalse(record.exists())
+                self.assertNotIn(branch, self.run_git("branch", "--format=%(refname:short)"))
+
+    def test_merge_reports_and_resumes_failed_branch_cleanup(self) -> None:
+        path = self.task()
+        self.env["VORCH_TEST_HOOK"] = "lock-cleanup-ref"
+        output = self.cli("merge", "task", expected=1)
+        self.assertIn("status: merged-cleanup-pending", output)
+        self.assertFalse(path.exists())
+        self.run_git("merge-base", "--is-ancestor", "codex/task", "main")
+        (self.root / ".git" / "refs" / "heads" / "codex" / "task.lock").unlink()
+        self.cli("merge", "task")
+        self.assertFalse((self.root / ".worktrees" / ".cleanup-task.json").exists())
+        self.assertNotIn("codex/task", self.run_git("branch", "--format=%(refname:short)"))
+
+    def test_create_sweeps_only_owned_private_merge_checkouts(self) -> None:
+        owned = self.root / ".worktrees" / ".landing-aborted-123456789abc"
+        unowned = self.root / ".worktrees" / ".landing-unowned-123456789abc"
+        for path in (owned, unowned):
+            self.run_git("worktree", "add", "--detach", str(path), "main")
+            self.owned_roots.append(path)
+        owned.with_name(owned.name + ".json").write_text(
+            json.dumps({"kind": "landing", "root": self.root.resolve().as_posix()}),
+            encoding="utf-8")
+        (owned / "temporary.txt").write_text("interrupted merge", encoding="utf-8")
+        (owned / ".git").unlink()
+        leftover = self.root / ".worktrees" / ".landing-partially-removed-123456789abc"
+        leftover.mkdir()
+        leftover_record = leftover.with_name(leftover.name + ".json")
+        leftover_record.write_text(
+            json.dumps({"kind": "landing", "root": self.root.resolve().as_posix()}),
+            encoding="utf-8")
+        self.cli("create", "task")
+        self.assertFalse(owned.exists())
+        self.assertFalse(leftover.exists())
+        self.assertFalse(leftover_record.exists())
+        self.assertTrue(unowned.exists())
+        self.assertNotIn(str(owned).replace("\\", "/"),
+                         self.run_git("worktree", "list", "--porcelain"))
+        unowned.with_name(unowned.name + ".json").write_text(
+            json.dumps({"kind": "landing", "root": self.root.resolve().as_posix()}),
+            encoding="utf-8")
+        self.run_git("switch", "-c", "adopted", cwd=unowned)
+        self.cli("create", "second", expected=1)
+        self.assertTrue(unowned.exists())
+        self.assertEqual(self.run_git("branch", "--show-current", cwd=unowned), "adopted")
 
     def test_concurrent_source_commit_keeps_branch(self) -> None:
         path = self.task()
         self.env["VORCH_TEST_HOOK"] = "commit-source"
-        self.assertIn("source worktree kept", self.cli("merge", "task"))
+        output = self.cli("merge", "task", expected=1)
+        self.assertIn("status: merged-cleanup-pending", output)
+        self.assertIn("source worktree kept", output)
         self.assertEqual(self.run_git("log", "-1", "--format=%s", "codex/task"), "concurrent")
         self.assertTrue(path.exists())
 

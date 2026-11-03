@@ -51,10 +51,13 @@ and writes the README screenshots to `.github/assets/` (procedure in
 `docs/development.md`, README images).
 
 `scripts/worktree.py` owns marked `.worktrees/<name>` checkouts on `codex/<name>`;
-Codex app-managed checkouts have their own lifecycle. The script installs nothing
-at creation and allocates no ports. Cargo builds on demand into that checkout's
+Host-managed checkouts have their own lifecycle, including archiving after landing.
+The script installs nothing at creation and allocates no ports. Cargo builds on
+demand into that checkout's
 own `target/`. Its merge lock protects script operations; the checked landing
-commit advances `main` only after the commit hook passes. Use
+commit advances `main` only after the commit hook passes. Cleanup failures return
+failure even after landing; recorded removals and owned interrupted landing
+checkouts are retried on the next create. Fresh task checkouts are not swept. Use
 `.vorch/workflows/worktree-workflow.md` for ownership, cleanup and merge limits.
 
 ## Constraints & Gotchas
