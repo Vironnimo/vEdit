@@ -1,6 +1,35 @@
 use super::*;
 use crate::multicursor::Selection;
 
+#[test]
+fn replace_mode_overwrites_at_every_cursor_and_repeats_as_one_edit() {
+    let mut text = "abc def\nuvw xyz".to_owned();
+    let mut state = cursors(&[0, 4]);
+    keys(&mut state, &mut text, "R");
+    assert!(state.is_replacing());
+    state.insert_text(&mut text, "XY");
+    state.handle_key(&mut text, VimKey::Backspace);
+    assert_eq!(text, "Xbc Xef\nuvw xyz");
+    state.finish_insert(&mut text);
+    assert!(!state.is_replacing());
+    keys(&mut state, &mut text, "u");
+    assert_eq!(text, "abc def\nuvw xyz");
+    state.handle_key(&mut text, VimKey::Redo);
+    assert_eq!(text, "Xbc Xef\nuvw xyz");
+    keys(&mut state, &mut text, "j0.");
+    assert_eq!(text, "Xbc Xef\nXvw xyz");
+    let mut text = "{}\n{}".to_owned();
+    let mut state = cursors(&[1, 4]);
+    keys(&mut state, &mut text, "R");
+    state.handle_key(&mut text, VimKey::Enter);
+    assert_eq!(text, "{\n    \n}\n{\n    \n}");
+    state.handle_key(&mut text, VimKey::Backspace);
+    assert_eq!(
+        text, "{}\n{}",
+        "generated newline layout restores at every cursor"
+    );
+}
+
 fn cursors(positions: &[usize]) -> VimState {
     let mut vim = VimState::new();
     vim.multi.selections = positions.iter().map(|&at| Selection::new(at, at)).collect();
@@ -93,6 +122,19 @@ fn operators_are_simultaneous_and_shared_history_restores_all_cursors() {
 
 #[test]
 fn visual_operators_and_pending_commands_survive_navigation_transfer() {
+    let mut text = "one two\nred blue".to_owned();
+    let mut named = cursors(&[0, 8]);
+    keys(&mut named, &mut text, "\"ayiw");
+    assert_eq!(named.register_value('a').unwrap().text, "red");
+    keys(&mut named, &mut text, "w\"Ayiw");
+    assert_eq!(named.register_value('a').unwrap().text, "redblue");
+    keys(&mut named, &mut text, "i");
+    named.start_insert_register(&mut text);
+    named.handle_key(&mut text, VimKey::Char('a'));
+    assert_eq!(text, "one redbluetwo\nred redblueblue");
+    named.handle_key(&mut text, VimKey::Escape);
+    keys(&mut named, &mut text, "u");
+    assert_eq!(text, "one two\nred blue");
     let mut text = "one two\nred blue".to_owned();
     let mut vim = cursors(&[0, 8]);
     keys(&mut vim, &mut text, "d");

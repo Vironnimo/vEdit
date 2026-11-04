@@ -502,7 +502,7 @@ impl VEditApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()

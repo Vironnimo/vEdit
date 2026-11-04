@@ -25,6 +25,21 @@ pub(super) struct Jump {
 }
 
 impl Jump {
+    pub(super) fn vim_mark(
+        document: u64,
+        path: Option<PathBuf>,
+        offset: usize,
+        line: usize,
+        column: usize,
+    ) -> Self {
+        Self {
+            document,
+            path,
+            offset,
+            line,
+            column,
+        }
+    }
     fn same_place(&self, other: &Self) -> bool {
         let same_document =
             self.document == other.document || (self.path.is_some() && self.path == other.path);
@@ -162,6 +177,7 @@ impl VEditApp {
 
     /// Runs once per frame after input and rendering.
     pub(super) fn observe_navigation(&mut self) {
+        self.refresh_vim_file_marks();
         if self.change_review_visible() {
             return;
         }
@@ -271,7 +287,7 @@ impl VEditApp {
     /// Show a recorded location in the focused pane. A closed document is
     /// reopened from its path; one without a path, or whose folder listing
     /// shows it no longer exists, is skipped.
-    fn open_jump(&mut self, target: &Jump) -> bool {
+    pub(super) fn open_jump(&mut self, target: &Jump) -> bool {
         let Some(project) = self.project() else {
             return false;
         };
@@ -346,6 +362,7 @@ impl VEditApp {
         tab.set_cursor(cursor..cursor);
         self.pending_jump = None;
         self.sync_external_document_navigation(id);
+        self.complete_vim_file_mark_jump(id);
     }
 }
 

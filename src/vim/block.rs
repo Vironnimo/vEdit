@@ -428,11 +428,17 @@ impl VimState {
     pub(super) fn cut_block(&mut self, text: &mut String) -> Action {
         let old_cursor = self.cursor;
         let visual = self.visual_change_geometry(text);
+        let selected_register = self.selected_register;
         self.cancel_pending_command();
+        self.selected_register = selected_register;
         let (consumed, text_changed, yanked) = self.apply_block(text, 'd', 1);
+        self.selected_register = None;
         if text_changed && !self.replaying {
             self.last_change = Some(RepeatChange {
-                keys: vec![VimKey::Char('d')],
+                keys: selected_register.map_or_else(
+                    || vec![VimKey::Char('d')],
+                    |name| vec![VimKey::Char('"'), VimKey::Char(name), VimKey::Char('d')],
+                ),
                 insert: None,
                 search: None,
                 visual,
@@ -484,13 +490,12 @@ impl VimState {
             self.message = Some("Block selection exceeds the 16 MiB clipboard limit".into());
             return (true, false, None);
         }
-        if let Some(yank) = &yank {
-            self.register = Some(yank.clone());
-            if key == 'y' {
-                self.yank_register = Some(yank.clone());
-            }
+        let yank = if let Some(yank) = yank {
             self.yanked_ranges = self.block_selection(text).unwrap_or_default();
-        }
+            self.capture_register(yank, key != 'y')
+        } else {
+            None
+        };
         if key == 'y' {
             let cursor = position_at(text, rows[geometry.first], geometry.left, self.indent_width);
             self.leave_visual();
@@ -872,9 +877,12 @@ impl VimState {
         if preserve_register {
             return (true, changed, None);
         }
-        self.register = deleted.clone();
         self.yanked_ranges = ranges;
-        (true, changed, deleted)
+        (
+            true,
+            changed,
+            deleted.and_then(|yank| self.capture_register(yank, true)),
+        )
     }
 
     /// Native paste replaces the rectangle but preserves Vim's registers.

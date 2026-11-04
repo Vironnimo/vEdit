@@ -1,4 +1,5 @@
 use super::*;
+use eframe::egui;
 
 #[test]
 fn yank_feedback_reports_unicode_source_ranges_and_real_newlines() {
@@ -358,6 +359,201 @@ fn yank_register_zero_survives_deletes_changes_and_visual_pastes() {
     assert_eq!(state.yank_register().unwrap().text, "one");
     keys(&mut state, &mut text, "u");
     assert_eq!(text, "one  three");
+}
+
+#[test]
+fn named_registers_capture_append_and_paste_without_losing_other_registers() {
+    let (mut text, _, mut state) = run("one two three", 0, "yiw\"ayiw");
+    assert_eq!(state.register_value('a').unwrap().text, "one");
+    assert_eq!(state.yank_register().unwrap().text, "one");
+    keys(&mut state, &mut text, "w\"Ayiw");
+    assert_eq!(state.register_value('a').unwrap().text, "onetwo");
+    assert_eq!(state.register().unwrap().text, "onetwo");
+    assert_eq!(
+        state.yank_register().unwrap().text,
+        "one",
+        "explicit yanks leave register 0 alone"
+    );
+    keys(&mut state, &mut text, "w\"adaw");
+    assert_eq!(text, "one two");
+    assert_eq!(state.register_value('a').unwrap().text, " three");
+    keys(&mut state, &mut text, "0\"aP");
+    assert_eq!(text, " threeone two");
+    assert_eq!(state.register().unwrap().text, " three");
+
+    for ending in ["\n", "\r\n"] {
+        let (mut text, _, mut state) = run(&format!("α{ending}🦀{ending}last"), 0, "\"ayyj\"Ayy");
+        assert_eq!(
+            state.register_value('a').unwrap().text,
+            format!("α{ending}🦀{ending}")
+        );
+        keys(&mut state, &mut text, "G\"ap");
+        assert_eq!(text, format!("α{ending}🦀{ending}last{ending}α{ending}🦀"));
+    }
+}
+
+#[test]
+fn delete_registers_rotate_and_black_hole_changes_preserve_every_register() {
+    let (_, cursor, _) = run("ab\ncd", 0, "G\"_yygg`[");
+    assert_eq!(
+        cursor, 3,
+        "black-hole yanks still update the affected-area marks"
+    );
+    for command in ["d%", "llma0d`a"] {
+        let (_, _, state) = run("(ab) tail", 0, command);
+        assert!(state.register_value('1').is_some(), "{command}");
+        assert!(state.register_value('-').is_some(), "{command}");
+    }
+    let (mut text, _, mut state) = run("one two\nthree\nfour", 0, "yiwx");
+    assert_eq!(state.register_value('-').unwrap().text, "o");
+    assert!(state.register_value('1').is_none());
+    keys(&mut state, &mut text, "dd\"add");
+    assert_eq!(state.register_value('1').unwrap().text, "three\n");
+    assert_eq!(state.register_value('2').unwrap().text, "ne two\n");
+    assert_eq!(state.register_value('a').unwrap().text, "three\n");
+    let unnamed = state.register().unwrap().clone();
+    let zero = state.yank_register().unwrap().clone();
+    let bank = format!("{:?}", state.register_bank());
+    keys(&mut state, &mut text, "\"_dd");
+    assert_eq!(text, "");
+    assert_eq!(state.register(), Some(&unnamed));
+    assert_eq!(state.yank_register(), Some(&zero));
+    assert_eq!(format!("{:?}", state.register_bank()), bank);
+    keys(&mut state, &mut text, "u\"1P");
+    assert_eq!(text, "three\nfour");
+}
+
+#[test]
+fn named_register_prefixes_survive_visual_changes_counts_search_and_dot() {
+    let (text, _, _) = run("x", 0, "2\"a3p");
+    assert_eq!(text, "x");
+    let mut state = VimState::new();
+    let mut text = "x".to_owned();
+    state.register_bank.set_text(
+        'a',
+        Yank {
+            text: "y".into(),
+            linewise: false,
+            block_width: None,
+        },
+    );
+    keys(&mut state, &mut text, "2\"a3p");
+    assert_eq!(text, "xyyyyyy");
+    let (mut text, _, mut state) = run("one two three four five six", 0, "\"ad2w");
+    assert_eq!(state.register_value('a').unwrap().text, "one two ");
+    keys(&mut state, &mut text, "2.");
+    assert_eq!(text, "five six");
+    assert_eq!(state.register_value('a').unwrap().text, "three four ");
+    let (text, _, _) = run("one two three", 0, "yiwwviw\"ap");
+    assert_eq!(
+        text, "one two three",
+        "an empty named register leaves the Visual area alone"
+    );
+    // Use an independent document for a populated Visual source and preservation.
+    let (mut text, _, mut state) = run("one two three", 0, "\"ayiw wviw\"ap");
+    assert_eq!(text, "one one three");
+    assert_eq!(state.register_value('a').unwrap().text, "one");
+    assert_eq!(state.register().unwrap().text, "two");
+    keys(&mut state, &mut text, "wviw\"_d");
+    assert_eq!(state.register_value('a').unwrap().text, "one");
+    assert_eq!(state.register().unwrap().text, "two");
+    let (mut text, _, mut state) = run("one two three", 0, "\"ad");
+    state.apply_search_motion(&mut text, 4, search_motion("two", false, 1));
+    assert_eq!(state.register_value('a').unwrap().text, "one ");
+    keys(&mut state, &mut text, ".");
+    assert_eq!(state.register_value('a').unwrap().text, "one ");
+}
+
+#[test]
+fn register_text_and_macro_payloads_use_the_same_named_namespace() {
+    let mut bank = RegisterBank::default();
+    let yank = |text: &str| Yank {
+        text: text.into(),
+        linewise: false,
+        block_width: None,
+    };
+    bank.set_macro('a', yank("ix"), vec![egui::Event::Text("ix".into())]);
+    assert!(bank.macro_events('A').is_some());
+    bank.set_text('A', yank("y"));
+    assert_eq!(bank.get('a').unwrap().yank.text, "ixy");
+    assert!(bank.macro_events('a').is_none());
+    bank.set_macro('a', yank("p"), vec![egui::Event::Text("p".into())]);
+    bank.set_macro('A', yank("j"), vec![egui::Event::Text("j".into())]);
+    assert_eq!(bank.get('a').unwrap().yank.text, "pj");
+    assert_eq!(bank.macro_events('a').unwrap().len(), 2);
+    for (old, new, expected, linewise, block_width) in [
+        (
+            Yank {
+                text: "abc\n".into(),
+                linewise: true,
+                block_width: None,
+            },
+            yank("XY"),
+            "abc\nXY",
+            false,
+            None,
+        ),
+        (
+            yank("abc"),
+            Yank {
+                text: "XY\n".into(),
+                linewise: true,
+                block_width: None,
+            },
+            "abcXY\n",
+            true,
+            None,
+        ),
+        (
+            Yank {
+                text: "ab\ncd".into(),
+                linewise: false,
+                block_width: Some(2),
+            },
+            Yank {
+                text: "XY\nZW".into(),
+                linewise: false,
+                block_width: Some(2),
+            },
+            "ab\ncd\nXY\nZW",
+            false,
+            Some(2),
+        ),
+    ] {
+        bank.set_text('a', old);
+        bank.set_text('A', new);
+        let value = &bank.get('a').unwrap().yank;
+        assert_eq!(value.text, expected);
+        assert_eq!(value.linewise, linewise);
+        assert_eq!(value.block_width, block_width);
+    }
+}
+
+#[test]
+fn insert_register_is_literal_grouped_with_typing_and_escape_only_cancels_its_prefix() {
+    for command in ["i", "R"] {
+        let original = "abcdef\r\nlast";
+        let (mut text, _, mut state) = run(original, 0, command);
+        state.register_bank.set_text(
+            'a',
+            Yank {
+                text: "α\r\n🦀".into(),
+                linewise: false,
+                block_width: None,
+            },
+        );
+        state.start_insert_register(&mut text);
+        assert!(state.insert_register_pending());
+        state.handle_key(&mut text, VimKey::Escape);
+        assert_eq!(state.mode, VimMode::Insert);
+        assert!(!state.insert_register_pending());
+        state.start_insert_register(&mut text);
+        state.handle_key(&mut text, VimKey::Char('a'));
+        state.finish_insert(&mut text);
+        assert!(text.contains("α\r\n🦀"), "{command}: {text:?}");
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, original);
+    }
 }
 
 #[test]

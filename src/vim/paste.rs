@@ -117,10 +117,9 @@ impl VimState {
         let yank = if preserve_register {
             None
         } else {
-            self.register = Some(deleted.clone());
             self.yanked_ranges.clear();
             self.yanked_ranges.push(range);
-            Some(deleted)
+            self.capture_register(deleted, true)
         };
         if changed {
             self.record(before, text);

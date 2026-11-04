@@ -294,6 +294,8 @@ pub struct SettingsPatch {
     pub keybindings: Option<std::collections::BTreeMap<String, Option<ShortcutBinding>>>,
     /// Partial key preference map: null resets one key, absent keys stay unchanged.
     pub vim_keys: Option<std::collections::BTreeMap<String, Option<VimKeyTarget>>>,
+    #[serde(default)]
+    pub vim_command_hints: Option<bool>,
     pub vim: Option<bool>,
     pub swap_jk: Option<bool>,
     pub autosave: Option<bool>,

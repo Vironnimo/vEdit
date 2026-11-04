@@ -3,6 +3,59 @@ use egui_kittest::{Harness, kittest::Queryable};
 
 const SUMMARY: &str = "Rust analysis stopped (exit code: 101).";
 
+#[test]
+fn vim_feedback_expires_or_clears_after_editing_without_erasing_durable_errors_or_details() {
+    let ctx = egui::Context::default();
+    let mut app = VEditApp::empty(ctx.clone());
+    visual_tests::workspace(&mut app);
+    ctx.begin_pass(egui::RawInput {
+        time: Some(10.0),
+        ..Default::default()
+    });
+    app.vim_input_status("Mark not set: z");
+    app.open_message_details("Mark not set: z".into(), true);
+    let mut output = ctx.end_pass();
+    output.textures_delta.clear();
+    ctx.begin_pass(egui::RawInput {
+        time: Some(12.9),
+        ..Default::default()
+    });
+    app.expire_vim_feedback();
+    assert!(app.status.is_some());
+    let mut output = ctx.end_pass();
+    output.textures_delta.clear();
+    ctx.begin_pass(egui::RawInput {
+        time: Some(13.1),
+        ..Default::default()
+    });
+    app.expire_vim_feedback();
+    assert!(app.status.is_none());
+    assert_eq!(
+        app.message_details_json().unwrap()["text"],
+        "Mark not set: z"
+    );
+    app.status_details = None;
+    app.vim_input_status("Not supported in vEdit: Z");
+    let tab = app.tab_mut().unwrap();
+    tab.text.push('x');
+    tab.changed();
+    app.expire_vim_feedback();
+    assert!(app.status.is_none());
+    app.vim_input_status("Mark not set: y");
+    app.status("Disk save failed", true);
+    let mut output = ctx.end_pass();
+    output.textures_delta.clear();
+    ctx.begin_pass(egui::RawInput {
+        time: Some(100.0),
+        ..Default::default()
+    });
+    app.expire_vim_feedback();
+    assert_eq!(app.status.as_ref().unwrap().0, "Disk save failed");
+    assert!(app.status.as_ref().unwrap().1);
+    let mut output = ctx.end_pass();
+    output.textures_delta.clear();
+}
+
 fn message() -> String {
     format!(
         "{SUMMARY}\r\nCause: missing source root 🦀\r\n{}",

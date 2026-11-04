@@ -117,6 +117,8 @@ impl VEditApp {
                     .on_hover_text("Use Normal, Insert, Visual, Visual Line and Visual Block modes. Changes apply immediately.").changed();
                 changed |= ui.checkbox(&mut self.settings.swap_jk, "Swap J and K")
                     .on_hover_text("Swap vertical Vim navigation. Inserted text and literal search targets stay unchanged.").changed();
+                changed |= ui.checkbox(&mut self.settings.vim_command_hints, "Show pending command hints")
+                    .on_hover_text("Show possible next keys at the bottom of the editor after a short pause in a Vim command.").changed();
                 changed |= egui::ComboBox::from_label("Leader key")
                     .selected_text(if self.settings.leader_key == " " {
                         "Space"
@@ -154,6 +156,9 @@ impl VEditApp {
                 );
                 ui.add_space(12.0);
                 ui.collapsing("Vim reference", |ui| {
+                    if ui.button("Open searchable Vim commands").clicked() {
+                        self.open_vim_reference();
+                    }
                     for text in [
                         "h j k l · w b e · 0 ^ $ · gg G · %",
                         "i a I A · o O · r · x · dd · cw · cc · D C",

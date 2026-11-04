@@ -49,7 +49,7 @@ impl VEditApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.close_action.is_some()
             || self.context_file_dialog.is_some()
@@ -160,6 +160,7 @@ impl VEditApp {
             });
     }
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
+        self.expire_vim_feedback();
         let problems = self.problem_list();
         let statistics = self.tab().filter(|tab| !tab.loading).map(|tab| {
             self.text_statistics.display(
@@ -190,16 +191,22 @@ impl VEditApp {
                     // Resting modes stay muted; color marks modes that change what keys do.
                     let (mode, color) = if self.terminal_keyboard_focused() || self.current_pane_terminal().is_some() { ("TERMINAL", MUTED) } else if self.tab().is_some_and(|t| t.vim.multi.placing()) { ("PLACE", ORANGE) } else if self.tab().is_some_and(|t| t.vim.multi.active()) { ("MULTI", BLUE) } else if self.screen_jump.is_some() { ("JUMP", ORANGE) } else if self.tab().is_some_and(|t| t.agent_view == crate::cli::DocumentView::Preview) { ("PREVIEW", MUTED) } else if self.settings.vim {
                         match self.tab().map(|t| t.vim.mode).unwrap_or(VimMode::Normal) {
-                            VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert => ("INSERT", BLUE),
+                            VimMode::Normal => ("NORMAL", MUTED), VimMode::Insert if self.tab().is_some_and(|tab| tab.vim.is_replacing()) => ("REPLACE", ORANGE), VimMode::Insert => ("INSERT", BLUE),
                             VimMode::Visual => ("VISUAL", ORANGE), VimMode::VisualLine => ("V-LINE", ORANGE),
                             VimMode::VisualBlock => ("V-BLOCK", ORANGE),
                         }
                     } else { ("EDIT", MUTED) };
                     let mode = if mode == "MULTI" && self.settings.vim {
-                        match self.tab().unwrap().vim.mode { VimMode::Normal => "MULTI NORMAL", VimMode::Insert => "MULTI INSERT", VimMode::Visual => "MULTI VISUAL", VimMode::VisualLine => "MULTI V-LINE", VimMode::VisualBlock => "MULTI V-BLOCK" }
+                        match self.tab().unwrap().vim.mode { VimMode::Normal => "MULTI NORMAL", VimMode::Insert if self.tab().unwrap().vim.is_replacing() => "MULTI REPLACE", VimMode::Insert => "MULTI INSERT", VimMode::Visual => "MULTI VISUAL", VimMode::VisualLine => "MULTI V-LINE", VimMode::VisualBlock => "MULTI V-BLOCK" }
                     } else { mode };
                     ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
                         .on_hover_text(if mode == "TERMINAL" { "Keyboard input goes to the shell. Ctrl+C interrupts; Ctrl+Shift+C/V copy and paste.".into() } else { format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)) });
+                    if self.settings.vim && mode != "TERMINAL" && mode != "PREVIEW" {
+                        let reference = ui.add_enabled(!self.chrome_blocked(), egui::Button::new(RichText::new("?").size(11.0).color(BLUE)).frame_when_inactive(false).corner_radius(3.0)).on_hover_text("Vim commands · Search the supported commands");
+                        reference.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Vim commands"));
+                        if reference.clicked() { self.open_vim_reference(); }
+                        if let Some(label) = self.vim_macros.label() { ui.label(RichText::new(label).monospace().size(11.0).color(ORANGE)); }
+                    }
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
                         let placing = tab.vim.multi.placing();
                         let count = tab.vim.multi.selections.len() - usize::from(placing);

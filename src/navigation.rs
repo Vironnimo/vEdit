@@ -54,7 +54,7 @@ impl VEditApp {
     }
 
     pub(super) fn navigation_pending(&self) -> bool {
-        self.navigation.leader.is_some()
+        self.navigation.leader.is_some() || self.vim_file_mark_pending()
     }
 
     pub(super) fn open_bookmarks(&mut self) {
@@ -254,7 +254,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && !self.navigation_modal_open()
             && self.save_as.is_none()

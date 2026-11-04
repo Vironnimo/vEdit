@@ -1058,7 +1058,7 @@ impl VEditApp {
             || self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -1160,6 +1160,9 @@ impl VEditApp {
         if let Some(yank) = state.take_yank() {
             self.register = Some(yank);
             self.yank_register = self.tab().and_then(|tab| tab.vim.yank_register().cloned());
+            if let Some(tab) = self.tab() {
+                self.vim_registers = tab.vim.register_bank().clone();
+            }
         }
         if !state.waiting() && !state.deferred_events.is_empty() {
             let mut queued = std::mem::take(&mut state.deferred_events);
@@ -1242,7 +1245,11 @@ impl VEditApp {
 
     pub(super) fn find_message(&mut self) {
         if let Some((message, error)) = self.find.message.take() {
-            self.status(message, error);
+            if error && self.settings.vim && !self.find_visible {
+                self.vim_input_status(message);
+            } else {
+                self.status(message, error);
+            }
         }
     }
 

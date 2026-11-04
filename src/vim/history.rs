@@ -1,7 +1,38 @@
 //! Insert transactions, shared Undo/Redo and repeat of completed changes.
 use super::*;
 
+/// Opaque history boundary for a macro spanning native input and navigation.
+#[derive(Debug)]
+pub struct MacroHistory {
+    origin: Snapshot,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+}
+
 impl VimState {
+    pub fn take_command_failure(&mut self) -> bool {
+        std::mem::take(&mut self.command_failed)
+    }
+    pub fn macro_checkpoint(&self, text: &str) -> MacroHistory {
+        MacroHistory {
+            origin: self.snapshot(text),
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+        }
+    }
+
+    /// Individual commands already moved marks and built dot recipes. Merge
+    /// only their history after the macro has finished in this Document.
+    pub fn finish_macro(&mut self, text: &str, checkpoint: MacroHistory) {
+        self.undo = checkpoint.undo;
+        if checkpoint.origin.text == text {
+            self.redo = checkpoint.redo;
+        } else {
+            self.redo.clear();
+            self.undo.push(checkpoint.origin);
+            trim_history(&mut self.undo);
+        }
+    }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty() || self.insert_origin.is_some()
     }
@@ -121,6 +152,8 @@ impl VimState {
     pub fn history_edit(&mut self, text: &mut String, redo: bool) -> Action {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
+        let replacing = self.is_replacing();
+        let replace_keys = self.replace_change_keys();
         let inserting = old_mode == VimMode::Insert;
         let mut insert_expanded =
             inserting && self.multi.active() && self.finish_multi_insert_history(text).text_changed;
@@ -143,8 +176,8 @@ impl VimState {
                 && changed
             {
                 self.last_change = Some(RepeatChange {
-                    keys: replay.keys,
-                    insert: inserted_delta,
+                    keys: replace_keys.unwrap_or(replay.keys),
+                    insert: if replacing { None } else { inserted_delta },
                     search: replay.search,
                     visual: replay.visual,
                 });
@@ -156,9 +189,13 @@ impl VimState {
         let text_changed = self.restore(text, redo) || insert_expanded;
         self.preferred_column = None;
         if inserting {
-            self.start_insert(text, self.cursor);
+            if replacing {
+                self.start_replace(text, 1);
+            } else {
+                self.start_insert(text, self.cursor);
+            }
             self.insert_replay = Some(InsertReplay {
-                keys: vec![VimKey::Char('i')],
+                keys: vec![VimKey::Char(if replacing { 'R' } else { 'i' })],
                 baseline: text.clone(),
                 cursor: self.cursor,
                 search: None,
@@ -179,6 +216,12 @@ impl VimState {
     }
 
     pub fn insert_text(&mut self, text: &mut String, inserted: &str) -> Action {
+        if self.multi.active() && self.is_replacing() {
+            return self.multi_replace_text(text, inserted);
+        }
+        if self.is_replacing() {
+            return self.replace_text(text, inserted);
+        }
         if self.mode != VimMode::Insert || inserted.is_empty() {
             return Action::default();
         }
@@ -200,6 +243,18 @@ impl VimState {
         text: &mut String,
         key: VimKey,
     ) -> (bool, bool, Option<Yank>) {
+        if self.insert_register_pending() {
+            self.pending = None;
+            if let VimKey::Char(name) = key {
+                let action = self.insert_register(text, name);
+                self.message = action.message;
+                return (true, action.text_changed, None);
+            }
+            return (true, false, None);
+        }
+        if self.is_replacing() {
+            return self.handle_replace_key(text, key);
+        }
         match key {
             VimKey::Escape => {
                 let block_inserting = self.block_insert.is_some();
@@ -244,15 +299,26 @@ impl VimState {
                 self.cursor -= count;
                 (true, true, None)
             }
-            VimKey::Redo | VimKey::Increment | VimKey::Decrement | VimKey::VisualBlock => {
-                (false, false, None)
-            }
+            VimKey::Redo
+            | VimKey::Increment
+            | VimKey::Decrement
+            | VimKey::VisualBlock
+            | VimKey::Left
+            | VimKey::Right
+            | VimKey::Up
+            | VimKey::Down
+            | VimKey::Home
+            | VimKey::End
+            | VimKey::Delete => (false, false, None),
         }
     }
 
     /// Finalize a counted insertion once for Escape and Windows history alike.
     /// The repeat delta is captured by callers before this expands the text.
     fn finish_insert_repetitions(&mut self, text: &mut String) -> bool {
+        if self.is_replacing() {
+            return self.finish_replace_repetitions(text);
+        }
         let mut changed = self.finish_block_insert(text);
         let line_prefix = self.insert_line_prefix.take();
         if self.insert_count > 1
@@ -281,6 +347,7 @@ impl VimState {
             cursor: self.cursor,
             multi: self.multi.clone(),
             marks: self.marks.named,
+            global_marks: self.marks.global,
         }
     }
 
@@ -295,6 +362,7 @@ impl VimState {
     }
 
     pub(super) fn start_insert(&mut self, text: &str, cursor: usize) {
+        self.replace = None;
         self.insert_origin = Some(self.snapshot(text));
         self.mode = VimMode::Insert;
         self.cursor = cursor.min(text.chars().count());
@@ -350,6 +418,7 @@ impl VimState {
         let current = self.snapshot(text);
         self.track_marks(text, &snapshot.text, false, self.cursor);
         self.marks.named = snapshot.marks;
+        self.marks.global = snapshot.global_marks;
         let target = if redo { &mut self.undo } else { &mut self.redo };
         target.push(current);
         trim_history(target);
@@ -358,6 +427,7 @@ impl VimState {
         self.multi = snapshot.multi;
         self.multi_cursors.clear();
         self.insert_origin = None;
+        self.replace = None;
         self.clear_command();
         true
     }
@@ -384,11 +454,25 @@ impl VimState {
                 .take_while(|key| matches!(key, VimKey::Char(ch) if ch.is_ascii_digit()))
                 .count();
             change.keys.drain(..digits);
-            let motion_offset = match change.keys.as_slice() {
+            let register_prefix = usize::from(matches!(
+                change.keys.as_slice(),
+                [VimKey::Char('"'), VimKey::Char(_), ..]
+            )) * 2;
+            let after_register_digits = change.keys[register_prefix..]
+                .iter()
+                .take_while(|key| matches!(key, VimKey::Char(ch) if ch.is_ascii_digit()))
+                .count();
+            if after_register_digits > 0 {
+                change
+                    .keys
+                    .drain(register_prefix..register_prefix + after_register_digits);
+            }
+            let motion_offset = match &change.keys[register_prefix..] {
                 [VimKey::Char('y'), VimKey::Char('s'), ..]
-                | [VimKey::Char('"'), VimKey::Char('0'), ..] => Some(2),
-                [VimKey::Char('g'), VimKey::Char('u' | 'U' | '~'), ..] => Some(2),
-                [VimKey::Char('d' | 'c' | 'y' | '>' | '<'), ..] => Some(1),
+                | [VimKey::Char('g'), VimKey::Char('u' | 'U' | '~'), ..] => {
+                    Some(register_prefix + 2)
+                }
+                [VimKey::Char('d' | 'c' | 'y' | '>' | '<'), ..] => Some(register_prefix + 1),
                 _ => None,
             };
             if let Some(offset) = motion_offset {
@@ -437,6 +521,11 @@ impl VimState {
             let action = self.handle_key(text, *key);
             if action.yanked.is_some() {
                 yank = action.yanked;
+            }
+            if self.global_mark_request.is_some() {
+                self.replaying = false;
+                self.pending_global_repeat = Some(change);
+                return (true, false, yank);
             }
         }
         if let Some(motion) = &change.search {

@@ -181,7 +181,7 @@ impl VEditApp {
             })
             && self.palette.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.picker.is_none()
             && self.save_as.is_none()

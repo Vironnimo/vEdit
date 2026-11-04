@@ -28,12 +28,18 @@ impl VimState {
         let old_cursor = self.cursor;
         let old_mode = self.mode;
         let visual = self.visual_repeat(text, &range);
+        let selected_register = self.selected_register;
         self.cancel_pending_command();
+        self.selected_register = selected_register;
         let (consumed, text_changed, yanked) = self.apply_visual(text, 'd', 1);
+        self.selected_register = None;
         self.clamp_cursor(text);
         if text_changed && !self.replaying {
             self.last_change = Some(RepeatChange {
-                keys: vec![VimKey::Char('d')],
+                keys: selected_register.map_or_else(
+                    || vec![VimKey::Char('d')],
+                    |name| vec![VimKey::Char('"'), VimKey::Char(name), VimKey::Char('d')],
+                ),
                 insert: None,
                 search: None,
                 visual: Some(visual),
@@ -55,8 +61,13 @@ impl VimState {
     /// unnamed register. The returned clipboard text is deliberately separate.
     pub fn cut_visual_to_clipboard(&mut self, text: &mut String) -> (Action, Option<String>) {
         let register = self.register.clone();
+        let yank_register = self.yank_register.clone();
+        let bank = self.register_bank.clone();
+        self.selected_register = None;
         let mut action = self.cut_visual(text);
         self.register = register;
+        self.yank_register = yank_register;
+        self.register_bank = bank;
         let copied = action.yanked.take().map(|yank| yank.text);
         action.yanked_ranges.clear();
         (action, copied)
@@ -78,15 +89,21 @@ impl VimState {
             Some(Pending::Operator(op, _, _)) => Some(op),
             _ => None,
         };
+        let selected_register = self.selected_register;
         self.cancel_pending_command();
+        self.selected_register = selected_register;
         let (consumed, text_changed, yanked) = if let Some(op) = operator {
+            self.numbered_delete = true;
             let result =
                 self.apply_exclusive(text, op, old_cursor.min(target), old_cursor.max(target));
             if op == Operator::Surround && self.pending.is_some() {
                 self.command_keys = vec![VimKey::Char('y'), VimKey::Char('s')];
                 self.surround_search = Some(motion);
             } else if !self.replaying {
-                let keys = op.command().chars().map(VimKey::Char).collect();
+                let mut keys: Vec<_> = op.command().chars().map(VimKey::Char).collect();
+                if let Some(name) = selected_register {
+                    keys.splice(0..0, [VimKey::Char('"'), VimKey::Char(name)]);
+                }
                 if self.mode == VimMode::Insert {
                     self.insert_replay = Some(InsertReplay {
                         keys,
@@ -111,6 +128,9 @@ impl VimState {
             (true, false, None)
         };
         self.clamp_cursor(text);
+        if self.pending.is_none() {
+            self.selected_register = None;
+        }
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
         Action {
             consumed,
@@ -188,6 +208,7 @@ impl VimState {
         count: usize,
         explicit: bool,
     ) -> (bool, bool, Option<Yank>) {
+        self.numbered_delete = matches!(key, '%' | '{' | '}');
         let chars: Vec<char> = text.chars().collect();
         let rows = lines(&chars);
         let row = row_for_cursor(&rows, self.cursor);
@@ -405,13 +426,12 @@ impl VimState {
             linewise: true,
             block_width: None,
         };
-        self.register = Some(yank.clone());
+        let published = self.capture_register(yank.clone(), op != Operator::Yank);
         self.yanked_ranges.clear();
         self.yanked_ranges
             .push(first_line.start..last_line.newline.map_or(last_line.end, |index| index + 1));
         if op == Operator::Yank {
-            self.yank_register = Some(yank.clone());
-            return (true, false, Some(yank));
+            return (true, false, published);
         }
         let before = self.snapshot(text);
         let mut start = first_line.start;
@@ -456,7 +476,7 @@ impl VimState {
             self.cursor = first_nonblank(&chars, rows[row_for_cursor(&rows, self.cursor)]);
         }
         self.preferred_column = None;
-        (true, changed, Some(yank))
+        (true, changed, published)
     }
 
     pub(super) fn apply_range(
@@ -521,17 +541,13 @@ impl VimState {
                 linewise: false,
                 block_width: None,
             };
-            self.register = Some(yank.clone());
             self.yanked_ranges.clear();
             self.yanked_ranges.push(start..end);
-            Some(yank)
+            self.capture_register(yank, op != Operator::Yank)
         } else {
             None
         };
         if op == Operator::Yank {
-            if yank.is_some() {
-                self.yank_register = yank.clone();
-            }
             return (true, false, yank);
         }
         let before = self.snapshot(text);

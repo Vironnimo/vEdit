@@ -20,7 +20,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()
@@ -122,7 +122,7 @@ impl VEditApp {
             && self.tab().is_some_and(|tab| {
                 !tab.loading
                     && !tab.vim.multi.active()
-                    && (!settings.vim || tab.vim.mode == VimMode::Insert)
+                    && (!settings.vim || tab.vim.mode == VimMode::Insert && !tab.vim.is_replacing())
             }) {
             editor_input::take_command(&ctx, document_id, !settings.vim, &settings.keybindings)
         } else {
@@ -150,7 +150,9 @@ impl VEditApp {
             crate::multicursor::Selection::new(range.start, range.end)
         });
         let mode = tab.vim.mode;
-        let modal = settings.vim && mode != VimMode::Insert && !tab.vim.multi.active();
+        let modal = settings.vim
+            && (mode != VimMode::Insert || tab.vim.is_replacing())
+            && !tab.vim.multi.active();
         let source_editable = source_interaction
             && !source_command_pending
             && !modal
