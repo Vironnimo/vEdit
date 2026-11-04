@@ -13,7 +13,11 @@ impl VEditApp {
         let undo = self.shortcut_label(keybindings::Action::Undo);
         let undo = if undo.is_empty() { "Undo" } else { &undo };
         let mut compare = None;
-        if let Some(tab) = self.tab() {
+        if let Some(tab) = self.tab().filter(|tab| {
+            self.settings.status_bar.save_status
+                || tab.disk_conflict.is_some()
+                || tab.error.is_some()
+        }) {
             // `Some(kind)` makes the state a button that opens that comparison.
             let (label, color, hint, action) = if tab.loading {
                 (

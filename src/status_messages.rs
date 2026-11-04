@@ -82,25 +82,33 @@ impl VEditApp {
         if response.clicked() {
             self.open_message_details(message.clone(), error);
         }
-        let snapshot_id = response.id.with("message_snapshot");
+        // Visibility changes can move this button's automatic widget ID.
+        // Keep the open menu and its message snapshot independent of its neighbors.
+        let menu_id = egui::Id::new("status_message_menu");
+        let snapshot_id = menu_id.with("message_snapshot");
         if response.secondary_clicked() {
             ui.ctx()
                 .data_mut(|data| data.insert_temp(snapshot_id, (message.clone(), error)));
         }
-        response.context_menu(|ui| {
-            let (message, error) = ui
-                .ctx()
-                .data(|data| data.get_temp::<(String, bool)>(snapshot_id))
-                .unwrap_or_else(|| (message.clone(), error));
-            if ui.button("Copy message").clicked() {
-                ui.ctx().copy_text(message.clone());
-                ui.close();
-            }
-            if ui.button("Show details…").clicked() {
-                self.open_message_details(message.clone(), error);
-                ui.close();
-            }
-        });
+        egui::Popup::context_menu(&response)
+            .id(menu_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let (message, error) = ui
+                    .ctx()
+                    .data(|data| data.get_temp::<(String, bool)>(snapshot_id))
+                    .unwrap_or_else(|| (message.clone(), error));
+                if ui.button("Copy message").clicked() {
+                    ui.ctx().copy_text(message.clone());
+                    ui.close();
+                }
+                if ui.button("Show details…").clicked() {
+                    self.open_message_details(message.clone(), error);
+                    ui.close();
+                }
+                ui.separator();
+                ui.menu_button("Status bar items", |ui| self.status_bar_menu_ui(ui));
+            });
     }
 
     pub(super) fn open_message_details(&mut self, message: String, error: bool) {

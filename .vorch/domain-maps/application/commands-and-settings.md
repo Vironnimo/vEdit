@@ -78,6 +78,14 @@ document beneath the dialog. `src/editor_ux_tests.rs` and the inline
 `src/typography_ui_tests.rs` covers zoom interaction and reading preferences;
 the inline `editor_preferences` test covers restored defaults and bounds.
 
+`app_chrome.rs` owns the status bar's grouped visibility menu and preferences,
+persisted in Settings for all projects in the window. Right-click works on the
+whole bar, including an empty bar and clickable entries; status messages retain
+their copy/details menu with a visibility submenu. Hiding an entry changes only
+presentation. Errors, disk conflicts, Git progress and active input hints remain
+available independently of the optional entries. `app_menu_tests.rs` covers
+customization, persistence, reset and access in small windows.
+
 The external-open preference is shared between windows. Only
 `set_external_open_new_window` explicitly writes `external-open.json`; background
 reads and write results carry revisions. Closing an older window must not
