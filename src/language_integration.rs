@@ -420,7 +420,7 @@ impl VEditApp {
         for (range, text, _) in replacements {
             t.text = editor::replace_selection(&t.text, range, &text).text;
         }
-        t.vim.notify_external_text_change();
+        t.vim.notify_external_text_change(&t.text);
         t.changed();
         t.set_cursor(cursor..cursor);
     }

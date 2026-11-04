@@ -272,6 +272,58 @@ fn history_shortcuts_and_mouse_buttons_go_back_and_forward() {
 }
 
 #[test]
+fn short_vim_jumps_enter_history_and_context_stays_with_each_pane() {
+    let fixture = Fixture::new();
+    let root = fixture.0.clone();
+    let mut app = app(&root);
+    app.open_file(root.join("a.rs"));
+    settle(&mut app);
+    {
+        let tab = app.tab_mut().unwrap();
+        for ch in "3G5G".chars() {
+            tab.vim
+                .handle_key(&mut tab.text, crate::vim::VimKey::Char(ch));
+        }
+    }
+    app.observe_navigation();
+    assert_eq!(location(&app), ("a.rs".into(), 5, 1));
+    app.navigate_history(true);
+    settle(&mut app);
+    assert_eq!(location(&app), ("a.rs".into(), 3, 1));
+    app.navigate_history(true);
+    settle(&mut app);
+    assert_eq!(location(&app), ("a.rs".into(), 1, 1));
+    app.reveal_line_column(root.join("a.rs"), 6, 4);
+    settle(&mut app);
+    let tab = app.tab_mut().unwrap();
+    let view = tab.vim.navigation();
+    tab.vim
+        .restore_navigation(&tab.text, &crate::vim::VimNavigation::default());
+    tab.vim.set_previous_context(50);
+    tab.vim.restore_navigation(&tab.text, &view);
+    for ch in "``".chars() {
+        tab.vim
+            .handle_key(&mut tab.text, crate::vim::VimKey::Char(ch));
+    }
+    assert_eq!(location(&app), ("a.rs".into(), 1, 1));
+    let tab = app.tab_mut().unwrap();
+    for ch in "3G".chars() {
+        tab.vim
+            .handle_key(&mut tab.text, crate::vim::VimKey::Char(ch));
+    }
+    app.record_vim_jumps();
+    app.open_file(root.join("b.rs"));
+    settle(&mut app);
+    app.navigate_history(true);
+    settle(&mut app);
+    assert_eq!(
+        location(&app),
+        ("a.rs".into(), 3, 1),
+        "a file switch records the destination of the preceding Vim jump"
+    );
+}
+
+#[test]
 fn vim_bracket_d_and_ctrl_o_ctrl_i_use_problems_and_history() {
     let fixture = Fixture::new();
     let root = fixture.0.clone();

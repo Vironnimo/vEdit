@@ -50,6 +50,7 @@ impl VimNavigation {
         let mut navigation = self.clone();
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
+        navigation.previous_context = navigation.previous_context.map(&map);
         navigation.multi.remap(&map);
         for cursor in &mut navigation.multi_cursors {
             cursor.remap(&map);
@@ -69,6 +70,7 @@ impl VimNavigation {
         let mut navigation = self.clone();
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
+        navigation.previous_context = navigation.previous_context.map(&map);
         navigation.preferred_column = None;
         navigation.multi.remap(&map);
         for cursor in &mut navigation.multi_cursors {
@@ -97,6 +99,8 @@ impl VimState {
             visual_to_line_end: self.visual_to_line_end,
             last_visual: self.last_visual,
             block_columns: self.block_columns,
+            previous_context: self.previous_context,
+            change_index: self.change_index,
         }
     }
 
@@ -120,6 +124,8 @@ impl VimState {
         self.visual_to_line_end = navigation.visual_to_line_end;
         self.last_visual = navigation.last_visual;
         self.block_columns = navigation.block_columns;
+        self.previous_context = navigation.previous_context;
+        self.change_index = navigation.change_index;
         if self.mode == VimMode::Insert && self.insert_origin.is_none() {
             self.insert_origin = Some(self.snapshot(text));
             self.insert_count = 1;
@@ -306,6 +312,7 @@ impl VimState {
             VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
         ) && let Some(anchor) = self.visual_anchor
         {
+            self.remember_visual(anchor);
             self.last_visual = Some(LastVisual {
                 mode: self.mode,
                 anchor,
@@ -326,6 +333,9 @@ impl VimState {
     }
 
     pub(super) fn move_cursor(&mut self, chars: &[char], key: char, count: usize, explicit: bool) {
+        if matches!(key, 'G' | '%' | '{' | '}' | 'H' | 'M' | 'L') {
+            self.remember_jump();
+        }
         if self.mode == VimMode::VisualBlock && self.move_block_cursor(chars, key, count) {
             return;
         }

@@ -964,7 +964,7 @@ impl VEditApp {
                     let cursor = edit.selection.start;
                     tab.apply(edit);
                     tab.set_cursor(cursor..cursor);
-                    tab.vim.notify_external_text_change();
+                    tab.vim.notify_external_text_change(&tab.text);
                 } else {
                     if linewise {
                         tab.flash_line_yank(vec![selection]);
@@ -1181,7 +1181,7 @@ impl VEditApp {
             tab.vim.set_selection(&tab.text, cursor..cursor);
         }
         tab.set_cursor(cursor..cursor);
-        tab.vim.notify_external_text_change();
+        tab.vim.notify_external_text_change(&tab.text);
     }
 
     pub(super) fn apply_tab_context_action(&mut self, id: u64, action: TabAction) {

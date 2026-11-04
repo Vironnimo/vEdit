@@ -279,7 +279,7 @@ impl VEditApp {
             ) {
                 tab.set_cursor(tab.selection.clone());
             }
-            tab.vim.notify_external_text_change();
+            tab.vim.notify_external_text_change(&tab.text);
         }
     }
 

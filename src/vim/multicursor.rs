@@ -240,6 +240,35 @@ impl VimState {
     }
 
     pub(super) fn handle_multi_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        if self.mode != VimMode::Insert {
+            if matches!(self.pending, Some(Pending::Ignore)) && self.multi_cursors.is_empty() {
+                self.clear_command();
+                return Action {
+                    consumed: true,
+                    ..Action::default()
+                };
+            }
+            let argument = self.pending.is_none() && matches!(key, VimKey::Char('m' | '\'' | '`'))
+                || matches!(self.pending, Some(Pending::Go { operator: None, .. }))
+                    && matches!(key, VimKey::Char('\'' | '`'));
+            let change_jump = matches!(self.pending, Some(Pending::Go { operator: None, .. }))
+                && matches!(key, VimKey::Char('i' | ';' | ','));
+            if argument || change_jump {
+                self.cancel_pending_command();
+                self.multi_cursors.clear();
+                if argument {
+                    self.pending = Some(Pending::Ignore);
+                }
+                return Action {
+                    consumed: true,
+                    message: Some(
+                        "Finish multicursor editing before using Vim marks or change locations"
+                            .into(),
+                    ),
+                    ..Action::default()
+                };
+            }
+        }
         if self.mode == VimMode::Normal
             && self.pending.is_none()
             && let VimKey::Char(ch) = key
@@ -343,7 +372,7 @@ impl VimState {
         if let Some(origin) = self.insert_origin.take()
             && origin.text != *text
         {
-            self.record(origin);
+            self.record(origin, text);
         }
         self.insert_replay = None;
         self.insert_count = 1;
@@ -506,7 +535,7 @@ impl VimState {
         {
             self.insert_origin = Some(before.clone());
         } else if old_mode != VimMode::Insert && !merged.is_empty() {
-            self.record(before);
+            self.record(before, text);
         }
         let output = if merged.is_empty() {
             None
@@ -543,7 +572,7 @@ impl VimState {
             && let Some(origin) = self.insert_origin.take()
             && origin.text != *text
         {
-            self.record(origin);
+            self.record(origin, text);
         }
         if let Some(yank) = &action.yanked {
             self.register = Some(yank.clone());

@@ -1,6 +1,138 @@
 use super::*;
 
 #[test]
+fn special_marks_distinguish_lines_positions_and_insert_boundaries() {
+    let (mut text, _, mut state) = run("  α🦀\r\n  beta\r\nlast", 2, "aXY\u{1b}G");
+    keys(&mut state, &mut text, "'.");
+    assert_eq!(position(&state, &text), (0, 2));
+    keys(&mut state, &mut text, "`.");
+    assert_eq!(position(&state, &text), (0, 4));
+    keys(&mut state, &mut text, "`^");
+    assert_eq!(position(&state, &text), (0, 5));
+    keys(&mut state, &mut text, "GgiZ");
+    state.finish_insert(&mut text);
+    assert_eq!(text, "  αXYZ🦀\r\n  beta\r\nlast");
+    for (initial, at, command, expected) in [
+        ("aaaa", 2, "ma0ia\u{1b}", 0),
+        ("abcd", 2, "ma0iX\u{1b}", 0),
+        ("abcd", 2, "aX\u{1b}", 3),
+    ] {
+        let (mut text, _, mut state) = run(initial, at, command);
+        keys(&mut state, &mut text, "`.");
+        assert_eq!(state.cursor, expected, "{command}");
+        keys(&mut state, &mut text, "`[");
+        assert_eq!(state.cursor, expected, "{command}");
+        if command.starts_with("ma") {
+            keys(&mut state, &mut text, "`a");
+            assert_eq!(state.cursor, 2, "marks keep their column in Vim");
+        }
+    }
+}
+
+#[test]
+fn gi_resumes_after_the_last_character_and_gi_without_a_mark_uses_the_cursor() {
+    let (mut text, _, mut state) = run("abc\nxyz", 0, "A!\u{1b}Ggi?");
+    state.finish_insert(&mut text);
+    assert_eq!(text, "abc!?\nxyz");
+    let (text, _, _) = run("  abc", 3, "gi!\u{1b}");
+    assert_eq!(text, "  a!bc");
+    let (text, _, _) = run("  abc", 3, "gI!\u{1b}");
+    assert_eq!(text, "!  abc");
+}
+
+#[test]
+fn context_marks_toggle_after_short_jumps_but_not_after_ordinary_motions() {
+    for jump in ["G", "gg", "%", "}", "H", "M", "L"] {
+        let mut text = "  a(b)\n\n  c\nlast".to_owned();
+        let mut state = VimState::new();
+        state.set_cursor(&text, 3);
+        keys(&mut state, &mut text, jump);
+        let target = state.cursor;
+        keys(&mut state, &mut text, "``");
+        assert_eq!(state.cursor, 3, "{jump}");
+        keys(&mut state, &mut text, "``");
+        assert_eq!(state.cursor, target, "{jump}");
+    }
+    let (_, cursor, _) = run("  abc\n  def", 3, "m'jhl''");
+    assert_eq!(cursor, 2);
+    let (_, cursor, _) = run("  abc\n  def", 3, "m`jhl``");
+    assert_eq!(cursor, 3);
+}
+
+#[test]
+fn named_marks_support_operators_visual_motions_and_literal_targets() {
+    for (command, expected) in [
+        ("maGd'a", ""),
+        ("maGd`a", "  last"),
+        ("maGg`a", "  abc\n  last"),
+    ] {
+        let (text, _, _) = run("  abc\n  last", 2, command);
+        assert_eq!(text, expected, "{command}");
+    }
+    let (mut text, _, mut state) = run("  α🦀\n  def", 3, "mjG");
+    keys(&mut state, &mut text, "`j");
+    assert_eq!(state.cursor, 3);
+    keys(&mut state, &mut text, "Gv`j");
+    assert_eq!(state.selection(&text), Some(3..8));
+    state.handle_key(&mut text, VimKey::Escape);
+    keys(&mut state, &mut text, "`<");
+    assert_eq!(state.cursor, 3);
+    keys(&mut state, &mut text, "`>");
+    assert_eq!(state.cursor, 7);
+    keys(&mut state, &mut text, "`z");
+    assert_eq!(state.pending_command(), "");
+    assert_eq!(state.cursor, 7);
+}
+
+#[test]
+fn marks_follow_edits_are_shared_by_views_and_restore_with_undo() {
+    let (mut text, _, mut state) = run("α\r\n🦀b\r\nlast", 4, "ma");
+    let view = state.navigation();
+    state.restore_navigation(&text, &VimNavigation::default());
+    keys(&mut state, &mut text, "Onew\u{1b}`a");
+    assert_eq!(position(&state, &text), (2, 1));
+    keys(&mut state, &mut text, "u`a");
+    assert_eq!(position(&state, &text), (1, 1));
+    keys(&mut state, &mut text, "dd");
+    let action = state.handle_key(&mut text, VimKey::Char('`'));
+    assert!(action.consumed);
+    let action = state.handle_key(&mut text, VimKey::Char('a'));
+    assert!(action.message.is_some());
+    keys(&mut state, &mut text, "u`a");
+    assert_eq!(position(&state, &text), (1, 1));
+    state.restore_navigation(&text, &view);
+    keys(&mut state, &mut text, "`a");
+    assert_eq!(position(&state, &text), (1, 1));
+    state.begin_external_edit(&text);
+    text.insert_str(0, "native\n");
+    state.notify_external_text_change(&text);
+    keys(&mut state, &mut text, "`a");
+    assert_eq!(position(&state, &text), (2, 1));
+}
+
+#[test]
+fn change_locations_and_affected_marks_cover_insert_delete_yank_and_counts() {
+    let (mut text, _, mut state) = run("αbc\n  def\nlast", 0, "xjxlx");
+    keys(&mut state, &mut text, "99g;");
+    assert_eq!(position(&state, &text), (0, 0));
+    keys(&mut state, &mut text, "99g,");
+    assert_eq!(position(&state, &text).0, 1);
+    keys(&mut state, &mut text, "ggyyG`[");
+    assert_eq!(state.cursor, 0);
+    keys(&mut state, &mut text, "`]");
+    assert_eq!(state.cursor, 1); // Normal mode clamps the yanked newline.
+    let (mut text, _, mut state) = run("abc\ndef\nlast", 0, "xjxu");
+    keys(&mut state, &mut text, "g;");
+    assert_eq!(position(&state, &text).0, 1);
+    keys(&mut state, &mut text, "g;");
+    assert_eq!(
+        position(&state, &text).0,
+        0,
+        "Undo does not add a change location"
+    );
+}
+
+#[test]
 fn word_motions_stop_on_the_last_real_line() {
     for (initial, command, expected) in [
         ("foo bar\n", "9w", 6),
@@ -346,15 +478,11 @@ fn unsupported_commands_consume_their_argument_and_report_it() {
     for (command, message) in [
         ("qa", "q"),
         ("@a", "@"),
-        ("ma", "m"),
-        ("`a", "`"),
-        ("'a", "'"),
         ("R", "R"),
         ("ZZ", "Z"),
         ("zf", "zf"),
         ("gq", "gq"),
         ("dq", "dq"),
-        ("d'a", "d'"),
     ] {
         let mut state = VimState::new();
         let mut text = "abc def".to_owned();

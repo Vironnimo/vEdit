@@ -17,6 +17,8 @@ impl VimState {
                     | Pending::TextObject { .. }
                     | Pending::Ignore
                     | Pending::Bracket(_)
+                    | Pending::SetMark
+                    | Pending::Mark { .. }
             )
         )
     }
@@ -157,6 +159,17 @@ impl VimState {
                 }
             ),
             Some(Pending::Bracket(bracket)) => bracket.to_string(),
+            Some(Pending::SetMark) => "m".into(),
+            Some(Pending::Mark {
+                operator,
+                linewise,
+                keep_jumps,
+            }) => format!(
+                "{}{}{}",
+                operator.map(|op| op.command()).unwrap_or_default(),
+                if keep_jumps { "g" } else { "" },
+                if linewise { '\'' } else { '`' }
+            ),
             Some(Pending::Ignore) | None => String::new(),
         };
         if self.count > 0 {
@@ -194,6 +207,25 @@ impl VimState {
         }
         if let Some(Pending::Ignore) = self.pending {
             self.clear_command();
+            return (true, false, None);
+        }
+        if matches!(self.pending, Some(Pending::SetMark | Pending::Mark { .. })) {
+            let pending = self.pending.take().unwrap();
+            self.count = 0;
+            if let VimKey::Char(name) = key {
+                return match pending {
+                    Pending::SetMark => {
+                        self.set_mark(name);
+                        (true, false, None)
+                    }
+                    Pending::Mark {
+                        operator,
+                        linewise,
+                        keep_jumps,
+                    } => self.jump_to_mark(text, name, operator, linewise, keep_jumps),
+                    _ => unreachable!(),
+                };
+            }
             return (true, false, None);
         }
         if let Some(Pending::Bracket(bracket)) = self.pending {
@@ -437,6 +469,30 @@ impl VimState {
                 } => {
                     let count = prefix.saturating_mul(count).min(MAX_COUNT);
                     let rows = lines(&chars);
+                    if matches!(ch, '\'' | '`') {
+                        self.pending = Some(Pending::Mark {
+                            operator,
+                            linewise: ch == '\'',
+                            keep_jumps: true,
+                        });
+                        return (true, false, None);
+                    }
+                    if operator.is_none() && self.mode == VimMode::Normal {
+                        if matches!(ch, 'i' | 'I') {
+                            let target = if ch == 'i' {
+                                self.marks.insert.unwrap_or(self.cursor)
+                            } else {
+                                rows[row_for_cursor(&rows, self.cursor)].start
+                            };
+                            self.start_insert(text, target);
+                            self.insert_count = count;
+                            return (true, false, None);
+                        }
+                        if matches!(ch, ';' | ',') {
+                            self.change_location(text, count, ch == ';');
+                            return (true, false, None);
+                        }
+                    }
                     if operator.is_none() && ch == 'J' {
                         let count = if matches!(
                             self.mode,
@@ -531,6 +587,7 @@ impl VimState {
                     if let Some(op) = operator {
                         return self.apply_lines(text, op, row_for_cursor(&rows, self.cursor), row);
                     }
+                    self.remember_jump();
                     self.cursor = first_nonblank(&chars, rows[row]);
                     self.visual_to_line_end = false;
                     self.preferred_column = None;
@@ -538,6 +595,14 @@ impl VimState {
                 }
                 Pending::Operator(op, prefix, explicit_prefix) => {
                     let count = prefix.saturating_mul(count).min(MAX_COUNT);
+                    if matches!(ch, '\'' | '`') {
+                        self.pending = Some(Pending::Mark {
+                            operator: Some(op),
+                            linewise: ch == '\'',
+                            keep_jumps: false,
+                        });
+                        return (true, false, None);
+                    }
                     if ch == 's'
                         && matches!(op, Operator::Yank | Operator::Delete | Operator::Change)
                     {
@@ -636,6 +701,7 @@ impl VimState {
                 | Pending::Bracket(_) => {
                     unreachable!()
                 }
+                Pending::SetMark | Pending::Mark { .. } => unreachable!(),
             }
         }
 
@@ -700,6 +766,18 @@ impl VimState {
         }
 
         match ch {
+            'm' => {
+                self.pending = Some(Pending::SetMark);
+                (true, false, None)
+            }
+            '\'' | '`' => {
+                self.pending = Some(Pending::Mark {
+                    operator: None,
+                    linewise: ch == '\'',
+                    keep_jumps: false,
+                });
+                (true, false, None)
+            }
             '"' => {
                 self.pending = Some(Pending::Register(count));
                 (true, false, None)
@@ -868,7 +946,7 @@ impl VimState {
             }
             // Commands vEdit does not implement. Swallow their argument so
             // that it cannot run as a command of its own.
-            'q' | '@' | 'm' | '`' | '\'' | 'Z' => {
+            'q' | '@' | 'Z' => {
                 self.unsupported(&ch.to_string());
                 self.pending = Some(Pending::Ignore);
                 (true, false, None)

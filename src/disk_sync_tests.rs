@@ -154,6 +154,14 @@ fn clean_reload_is_one_vim_undo_step_and_reports_the_changed_lines() {
     let (app, id, path) = fixture.app(original);
     let mut screen = harness(app);
     assert!(screen.state().settings.vim);
+    {
+        let tab = screen.state_mut().tab_mut().unwrap();
+        tab.vim.set_cursor(&tab.text, 12);
+        for ch in "ma".chars() {
+            tab.vim
+                .handle_key(&mut tab.text, crate::vim::VimKey::Char(ch));
+        }
+    }
 
     change_on_disk(screen.state_mut(), id, &path, "alpha\nBETA\ngamma\ndelta\n");
     let (message, error) = status(screen.state());
@@ -165,6 +173,15 @@ fn clean_reload_is_one_vim_undo_step_and_reports_the_changed_lines() {
     let tab = screen.state().tab().unwrap();
     assert_eq!(tab.text, "alpha\nBETA\ngamma\ndelta\n");
     assert_eq!(tab.saved_text, tab.text);
+    {
+        let tab = screen.state_mut().tab_mut().unwrap();
+        for ch in "`a".chars() {
+            tab.vim
+                .handle_key(&mut tab.text, crate::vim::VimKey::Char(ch));
+        }
+        assert_eq!(tab.vim.cursor, 12);
+    }
+    let tab = screen.state().tab().unwrap();
     assert!(!tab.dirty);
     assert!(
         tab.disk_reload.as_ref().is_some_and(

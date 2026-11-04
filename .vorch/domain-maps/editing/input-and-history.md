@@ -35,6 +35,19 @@ replay. `src/vim/commands.rs` decodes pending keys; `src/vim.rs::handle_key`
 coordinates the completed action and repeat bookkeeping. These are private
 implementation units, not additional application interfaces.
 
+`src/vim/marks.rs` owns local a-z marks, automatic change/Insert/affected/Visual
+positions and the bounded change list. Completed transactions map these through
+their text replacements; Undo/Redo also restore named marks from snapshots.
+`EditorTab::changed` completes pending external Normal edits; disk reloads call
+`notify_external_text_change` explicitly before restoring pane navigation.
+Insert mapping finishes once for the whole transaction, including native typing.
+Above 4 MiB combined text size, a linear prefix/suffix replacement bounds mark
+mapping; marks inside a replaced span retain logical line/column where possible.
+Previous-jump context and change-list traversal belong to `VimNavigation`.
+Explicit Vim jumps queue their origins for `jump_list.rs`, so even short motions
+enter the pane's back/forward history. Mark and change-list commands require one
+cursor; the multicursor adapter consumes them with feedback.
+
 `VimState` owns document history; `VimNavigation` captures the pane-local modal
 and multicursor state. Finish an active Insert transaction before switching views, then restore
 navigation without replacing shared Undo/Redo. Counted insertion can change text

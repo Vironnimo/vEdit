@@ -71,6 +71,8 @@ does not migrate a previously opened loose document into it.
   document switches and large cursor moves, but small feature-driven jumps need
   an explicit record. History is pane-local and session-only; bookmarks and
   recently closed files have different persistence contracts.
+  Vim motions queue explicit origins, including short jumps; the frame observer
+  drains them without replacing the latest Vim previous-context mark.
 
 ## Constraints & Gotchas
 

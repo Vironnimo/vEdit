@@ -16,6 +16,22 @@ fn keys(vim: &mut VimState, text: &mut String, keys: &str) {
 
 #[test]
 fn each_cursor_uses_vim_motion_counts_and_character_targets() {
+    for command in ["ma", "`a", "'a", "g`a", "g'a", "gi", "g;", "g,"] {
+        let mut text = "abc def".to_owned();
+        let mut multi = cursors(&[0, 4]);
+        let mut message = false;
+        for ch in command.chars() {
+            message |= multi
+                .handle_key(&mut text, VimKey::Char(ch))
+                .message
+                .is_some();
+        }
+        assert!(message, "{command}");
+        assert_eq!(multi.pending_command(), "", "{command}");
+        assert_eq!(text, "abc def", "{command}");
+        keys(&mut multi, &mut text, "x");
+        assert_eq!(text, "bc ef", "{command} must consume only its own keys");
+    }
     for ending in ["\n", "\r\n"] {
         let original = ["ä first second last", "🦀 different words here"].join(ending);
         let start = 20 + ending.chars().count() - 1;

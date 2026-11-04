@@ -72,6 +72,35 @@ fn text<'a>(screen: &'a Harness<'_, VEditApp>) -> &'a str {
 }
 
 #[test]
+fn vim_marks_resume_native_insert_and_keep_literal_targets_out_of_search() {
+    let mut screen = harness("  α🦀\n  last", true);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("A!".into()),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "  α🦀!\n  last");
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("Ggi?".into()),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "  α🦀!?\n  last");
+    events(&mut screen, [egui::Event::Text("`^".into())]);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 5);
+    events(&mut screen, [egui::Event::Text("mjG`j".into())]);
+    assert_eq!(screen.state().tab().unwrap().vim.cursor, 5);
+    events(&mut screen, [egui::Event::Text("`/x".into())]);
+    assert!(!screen.state().vim_search_active());
+    assert_eq!(text(&screen), "  α🦀!\n  last");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+}
+
+#[test]
 fn bound_line_edits_preserve_vim_positions_and_visual_direction() {
     for direct in [false, true] {
         for visual in [false, true] {

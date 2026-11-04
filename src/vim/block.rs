@@ -542,7 +542,7 @@ impl VimState {
             self.leave_visual();
             self.cursor = cursor;
             if changed {
-                self.record(before);
+                self.record(before, text);
             }
         }
         (true, changed, yank)
@@ -679,7 +679,7 @@ impl VimState {
         let rows = lines(&text.chars().collect::<Vec<_>>());
         self.cursor = position_at(text, rows[geometry.first], geometry.left, self.indent_width);
         if changed {
-            self.record(before);
+            self.record(before, text);
         }
         changed
     }
@@ -758,7 +758,7 @@ impl VimState {
         );
         let changed = *text != before.text;
         if changed {
-            self.record(before);
+            self.record(before, text);
         }
         changed
     }
@@ -867,7 +867,7 @@ impl VimState {
         );
         let changed = *text != before.text;
         if changed {
-            self.record(before);
+            self.record(before, text);
         }
         if preserve_register {
             return (true, changed, None);

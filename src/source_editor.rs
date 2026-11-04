@@ -442,7 +442,7 @@ impl VEditApp {
                 }
             }
             if output.response.changed() {
-                tab.vim.notify_external_text_change();
+                tab.vim.notify_external_text_change(&tab.text);
                 tab.changed();
             }
             if modal && !pointer_selection && !tab.vim.multi.active() {

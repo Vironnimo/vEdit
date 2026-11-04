@@ -32,7 +32,14 @@ fn position(state: &VimState, text: &str) -> (usize, usize) {
 
 fn keys(state: &mut VimState, text: &mut String, value: &str) {
     for ch in value.chars() {
-        state.handle_key(text, VimKey::Char(ch));
+        state.handle_key(
+            text,
+            match ch {
+                '\u{1b}' => VimKey::Escape,
+                '\n' => VimKey::Enter,
+                ch => VimKey::Char(ch),
+            },
+        );
     }
 }
 
