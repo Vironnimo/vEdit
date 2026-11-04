@@ -347,7 +347,6 @@ impl VimState {
             cursor: self.cursor,
             multi: self.multi.clone(),
             marks: self.marks.named,
-            global_marks: self.marks.global,
         }
     }
 
@@ -418,7 +417,6 @@ impl VimState {
         let current = self.snapshot(text);
         self.track_marks(text, &snapshot.text, false, self.cursor);
         self.marks.named = snapshot.marks;
-        self.marks.global = snapshot.global_marks;
         let target = if redo { &mut self.undo } else { &mut self.redo };
         target.push(current);
         trim_history(target);

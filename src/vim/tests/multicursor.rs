@@ -30,6 +30,35 @@ fn replace_mode_overwrites_at_every_cursor_and_repeats_as_one_edit() {
     );
 }
 
+#[test]
+fn document_marks_follow_multicursor_edits_like_the_single_cursor() {
+    let original = "a\nb\nc\nd\ne";
+    let mut single_text = original.to_owned();
+    let mut single = VimState::new();
+    single.set_cursor(&single_text, 6);
+    keys(&mut single, &mut single_text, "ma");
+    single.set_cursor(&single_text, 0);
+    keys(&mut single, &mut single_text, "ddjdd'a");
+    assert_eq!(single_text, "b\nd\ne");
+    assert_eq!(position(&single, &single_text), (1, 0));
+
+    let mut text = original.to_owned();
+    let mut vim = VimState::new();
+    vim.set_cursor(&text, 6);
+    keys(&mut vim, &mut text, "ma");
+    vim.multi.selections = vec![Selection::new(0, 0), Selection::new(4, 4)];
+    vim.cursor = 4;
+    keys(&mut vim, &mut text, "dd");
+    assert_eq!(text, "b\nd\ne");
+    vim.set_cursor(&text, 0);
+    keys(&mut vim, &mut text, "'a");
+    assert_eq!(
+        position(&vim, &text),
+        (1, 0),
+        "a document mark follows simultaneous multicursor edits"
+    );
+}
+
 fn cursors(positions: &[usize]) -> VimState {
     let mut vim = VimState::new();
     vim.multi.selections = positions.iter().map(|&at| Selection::new(at, at)).collect();

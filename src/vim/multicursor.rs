@@ -558,14 +558,12 @@ impl VimState {
             }
             merged.push(edit);
         }
-        if old_mode != VimMode::Insert
+        let starts_insert = old_mode != VimMode::Insert
             && results
                 .last()
-                .is_some_and(|(cursor, _)| cursor.navigation.mode == VimMode::Insert)
-        {
+                .is_some_and(|(cursor, _)| cursor.navigation.mode == VimMode::Insert);
+        if starts_insert {
             self.insert_origin = Some(before.clone());
-        } else if old_mode != VimMode::Insert && !merged.is_empty() {
-            self.record(before, text);
         }
         let output = if merged.is_empty() {
             None
@@ -599,6 +597,11 @@ impl VimState {
             self.last_change = primary.change;
         }
         self.multi = state;
+        // The undo snapshot is recorded after the merged text is in place so
+        // that document marks and change locations map through this edit.
+        if !starts_insert && old_mode != VimMode::Insert && !merged.is_empty() {
+            self.record(before, text);
+        }
         self.yank_register = yank_register;
         if old_mode == VimMode::Insert
             && self.mode != VimMode::Insert

@@ -72,7 +72,9 @@ impl VEditApp {
             }
             mark.path.clone_from(&tab.path);
             let name = (b'A' + index as u8) as char;
-            mark.available = tab.vim.global_mark_position(name).is_some();
+            // The window table owns the mark's availability: undo and a reload
+            // replace this Document's Vim state, while the mark stays for the
+            // session. Only its known position follows the live editing state.
             if let Some(offset) = tab.vim.global_mark_position(name) {
                 mark.offset = offset;
                 (mark.line, mark.column) = tab.lines.line_col(&tab.text, tab.revision, offset);

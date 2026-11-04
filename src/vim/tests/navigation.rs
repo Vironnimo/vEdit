@@ -111,6 +111,22 @@ fn marks_follow_edits_are_shared_by_views_and_restore_with_undo() {
 }
 
 #[test]
+fn window_marks_survive_undo_and_follow_the_restored_text() {
+    let mut text = "one\ntwo\nthree".to_owned();
+    let mut state = VimState::new();
+    keys(&mut state, &mut text, "xjmA");
+    assert_eq!(text, "ne\ntwo\nthree");
+    assert_eq!(state.global_mark_position('A'), Some(3));
+    keys(&mut state, &mut text, "u");
+    assert_eq!(text, "one\ntwo\nthree");
+    assert_eq!(
+        state.global_mark_position('A'),
+        Some(4),
+        "undo maps the window mark through the restored text instead of dropping it"
+    );
+}
+
+#[test]
 fn change_locations_and_affected_marks_cover_insert_delete_yank_and_counts() {
     let (mut text, _, mut state) = run("αbc\n  def\nlast", 0, "xjxlx");
     keys(&mut state, &mut text, "99g;");

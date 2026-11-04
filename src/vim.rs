@@ -262,7 +262,6 @@ struct Snapshot {
     cursor: usize,
     multi: crate::multicursor::State,
     marks: [Option<usize>; 26],
-    global_marks: [Option<usize>; 26],
 }
 
 #[derive(Clone, Debug)]

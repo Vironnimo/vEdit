@@ -67,8 +67,12 @@ mod project_workspace;
 mod source_editor;
 #[path = "task_controls.rs"]
 mod task_controls;
+#[cfg(test)]
+#[path = "vim_file_marks_tests.rs"]
+mod vim_file_marks_tests;
 #[path = "vim_input.rs"]
 mod vim_input;
+
 #[cfg(test)]
 #[path = "vim_macro_tests.rs"]
 mod vim_macro_tests;
