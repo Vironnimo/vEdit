@@ -1,4 +1,4 @@
-# vEdit 0.6.5 — Benutzerhandbuch
+# vEdit 0.6.6 — Benutzerhandbuch
 
 Ein nativer Code-Editor für Windows mit mehreren Projekten, Vim-Bedienung, Git und Sprachunterstützung für Rust, Python und Dart. Projektordner, offene Dateien, Cursorpositionen und Einstellungen werden beim nächsten Start wiederhergestellt. Die Oberfläche verwendet englische Beschriftungen.
 

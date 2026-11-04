@@ -3,6 +3,12 @@
 Historische Versionsnotizen aus der Benutzeranleitung. Die aktuelle Bedienung
 steht im [Benutzerhandbuch](handbuch.md).
 
+Version 0.6.6 macht die Statusleiste per Rechtsklick konfigurierbar: Zehn Angaben lassen sich in den Gruppen **Editor**, **Document** und **Project** einzeln ein- und ausblenden. Die Auswahl bleibt nach Neustarts erhalten; **Restore defaults** setzt sie zurück. Fehlermeldungen und aktive Bedienhinweise bleiben erreichbar.
+
+Projekt-Terminals lassen sich zwischen Ausgabebereich und Editor-Panes verschieben und mit den Projekten weiterverwenden. Agent-Nachrichten haben eine eigene **Messages**-Seitenleiste mit gespeicherter Lesemarkierung. Vim ergänzt benannte Register, Makros, Replace, Surround, lokale und dateiübergreifende Marks sowie Sprünge zu Einfüge- und Änderungsstellen. Eine durchsuchbare Befehlsreferenz und optionale Fortsetzungshinweise helfen bei der Bedienung. Multicursor-Änderungen erhalten Marks und Navigationspositionen; IME-Eingaben erscheinen auch in Vim Insert korrekt.
+
+Der Start bereitet Sitzung und Steuerverbindung neben der Grafikinitialisierung vor. Hintergrundabfragen und noch laufende Persistenzarbeiten blockieren die Oberfläche seltener. Titelleiste und Windows-Icon verwenden das gemeinsame vEdit-Erscheinungsbild.
+
 Version 0.6.5 verbessert das Zusammenspiel von Vim und Multicursor sowie die Navigation nach Editorbefehlen. Weitere Korrekturen erhalten abschließende Zeilenumbrüche bei Vim-Wortoperationen und sorgen dafür, dass Inbox und Befehlspalette Eingaben zuverlässig übernehmen.
 
 Fehlgeschlagenes Autosave wird erneut versucht; während eines laufenden Speichervorgangs lässt sich der Inhalt nicht verwerfen. Git-Diffs behandeln Konflikte und ungewöhnliche Dateipfade korrekt. Markdown-Linkhinweise, Fußnotensprünge und verlinkte Bilder, Task-Timeouts sowie die Zuordnung von Sprachdiagnosen wurden korrigiert. Das Hinzufügen von Projects ist vereinfacht, Listen reagieren unmittelbar auf Hover. Der Release-Ablauf umfasst jetzt ausdrücklich Quellcode-Push, Versionstag, GitHub Release und das vollständige Windows-Paket mit Prüfsumme.
