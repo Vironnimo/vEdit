@@ -281,7 +281,13 @@ Die `:`-Befehlszeile besitzt ebenfalls einen Verlauf mit **↑/↓**, der die ak
 Bei einer Visual-Auswahl setzt `:` den Bereich `'<,'>` voran. Eine folgende Zahl
 wie `3` springt wie in Vim um drei Zeilen ab dem Auswahlende weiter.
 
-vEdit implementiert einen eigenen Vim-Kern. Makros (`q`, `@`), Marken (`m`, `` ` ``, `'`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
+`ma` bis `mz` setzen lokale Marken im Document. Apostroph plus Marke, etwa `'a`, springt zum ersten Zeichen nach der Einrückung der markierten Zeile; Backtick plus Marke, etwa `` `a ``, springt zur genauen Position. Das funktioniert auch mit Operatoren: `d'a` löscht ganze Zeilen bis zur Marke, `` d`a `` den Text bis zu ihrer Position. `g'a` und `` g`a `` springen ohne neuen Eintrag in der Sprunghistorie.
+
+Die automatischen Marken `'.` und `` `. `` führen zur letzten Änderung, `'^` und `` `^ `` zur letzten Insert-Position. `gi` setzt dort die Eingabe fort, auch hinter dem letzten Zeichen einer Zeile; `gI` beginnt in Spalte 1. `''` und zwei Backticks springen zur Position vor dem letzten Sprung im aktuellen Document zurück; wiederholt wechseln sie zwischen beiden Stellen. `m'` beziehungsweise `` m` `` merken diese Rückkehrposition ausdrücklich. Auch kurze Vim-Sprünge, etwa `3G`, landen in der Sprunghistorie für **Ctrl+O/I**.
+
+`g;` und `g,` gehen zu älteren beziehungsweise neueren Änderungsstellen, auch mit Zählwerten wie `3g;`. Die Marken `'[` / `']` beziehungsweise `` `[ `` / `` `] `` begrenzen den zuletzt geänderten oder kopierten Text, `'<` / `'>` beziehungsweise `` `< `` / `` `> `` die letzte Visual-Auswahl. Marken folgen eingefügten und gelöschten Zeilen; bei gewöhnlichen Zeichenänderungen behalten sie wie in Vim ihre Spalte. Buchstabenmarken auf gelöschten Zeilen werden entfernt und mit Undo wiederhergestellt. Marken und Änderungsstellen gelten, solange das Document geöffnet ist. Rückkehrposition und Stelle in der Änderungshistorie gehören zur jeweiligen Pane. Diese Navigation verwendet einen einzelnen Cursor.
+
+vEdit implementiert einen eigenen Vim-Kern. Dateiübergreifende Großbuchstabenmarken, nummerierte und beim Neustart wiederhergestellte Marken, `:marks` / `:delmarks`, Makros (`q`, `@`), der Replace-Modus `R`, weitere benannte Register, Vimscript, Neovim-Plugins und das vollständige Ex-Befehlssystem sind nicht enthalten.
 
 ## Multicursor
 

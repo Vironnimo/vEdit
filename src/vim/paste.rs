@@ -53,7 +53,7 @@ impl VimState {
         self.leave_visual();
         self.clear_command();
         if changed {
-            self.record(before);
+            self.record(before, text);
         }
         changed
     }
@@ -123,7 +123,7 @@ impl VimState {
             Some(deleted)
         };
         if changed {
-            self.record(before);
+            self.record(before, text);
         }
         (true, changed, yank)
     }
@@ -192,7 +192,7 @@ impl VimState {
             let rows = lines(&chars);
             self.cursor = first_nonblank(&chars, rows[row_for_cursor(&rows, self.cursor)]);
         }
-        self.record(snapshot);
+        self.record(snapshot, text);
         self.preferred_column = None;
         true
     }
@@ -246,7 +246,7 @@ impl VimState {
         };
         self.leave_visual();
         if changed {
-            self.record(snapshot);
+            self.record(snapshot, text);
         }
         changed
     }

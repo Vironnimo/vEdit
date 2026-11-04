@@ -120,6 +120,7 @@ impl EditorTab {
         }
     }
     pub(super) fn changed(&mut self) {
+        self.vim.notify_external_text_change(&self.text);
         self.preview_tab = false;
         self.revision += 1;
         self.dirty = self.text != self.saved_text;
@@ -149,7 +150,7 @@ impl EditorTab {
             .navigation()
             .remapped(|position| edit.map_position(position));
         self.apply(edit);
-        self.vim.notify_external_text_change();
+        self.vim.notify_external_text_change(&self.text);
         self.vim.restore_navigation(&self.text, &navigation);
         if let Some(selection) = self.vim.selection(&self.text) {
             self.selection = selection.clone();
@@ -203,7 +204,7 @@ impl EditorTab {
         let start = self.vim_editor_selection().start;
         let delta = edit.selection.start as isize - start as isize;
         self.apply(edit);
-        self.vim.notify_external_text_change();
+        self.vim.notify_external_text_change(&self.text);
         self.vim
             .restore_navigation(&self.text, &navigation.shifted(delta));
         self.scroll_to_cursor = true;

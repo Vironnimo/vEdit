@@ -598,7 +598,7 @@ impl VEditApp {
                             && tab.text != result.edit.text
                         {
                             tab.apply(result.edit);
-                            tab.vim.notify_external_text_change();
+                            tab.vim.notify_external_text_change(&tab.text);
                             tab.set_cursor(tab.selection.clone());
                         }
                         self.status(

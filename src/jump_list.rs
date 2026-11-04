@@ -43,6 +43,7 @@ pub(super) struct JumpList {
     back: Vec<Jump>,
     forward: Vec<Jump>,
     observed: Option<Observed>,
+    pending_context: Option<Jump>,
 }
 
 impl JumpList {
@@ -101,11 +102,13 @@ impl VEditApp {
     /// Record the focused pane's current location before navigating away.
     /// Other features call this single hook for jumps that may be short.
     pub(super) fn record_jump(&mut self) {
+        self.record_vim_jumps();
         let Some(current) = self.current_observation() else {
             return;
         };
         if let Some(list) = self.focused_jump_list() {
-            list.push(current.jump);
+            list.push(current.jump.clone());
+            list.pending_context = Some(current.jump);
         }
     }
 
@@ -126,6 +129,37 @@ impl VEditApp {
         }
     }
 
+    /// Flush before an input batch can switch its document or pane owner.
+    pub(super) fn record_vim_jumps(&mut self) {
+        let origins: Vec<_> = self.tab_mut().map_or_else(Vec::new, |tab| {
+            tab.vim
+                .take_jump_origins()
+                .into_iter()
+                .map(|offset| {
+                    let (line, column) = tab.lines.line_col(&tab.text, tab.revision, offset);
+                    Jump {
+                        document: tab.id,
+                        path: tab.path.clone(),
+                        offset,
+                        line,
+                        column,
+                    }
+                })
+                .collect()
+        });
+        if origins.is_empty() {
+            return;
+        }
+        let current = self.current_observation();
+        if let Some(list) = self.focused_jump_list() {
+            for origin in origins {
+                list.push(origin);
+            }
+            list.observed = current.or(list.observed.take());
+            list.pending_context = None;
+        }
+    }
+
     /// Runs once per frame after input and rendering.
     pub(super) fn observe_navigation(&mut self) {
         if self.change_review_visible() {
@@ -137,21 +171,38 @@ impl VEditApp {
             // The destination is not in place yet; compare once it is.
             return;
         }
+        self.record_vim_jumps();
         let current = self.current_observation();
         let navigating = std::mem::take(&mut self.jump_navigating);
         let Some(list) = self.focused_jump_list() else {
             return;
         };
         let previous = list.observed.take();
+        let mut context = list.pending_context.take().and_then(|origin| {
+            current
+                .as_ref()
+                .filter(|current| {
+                    current.jump.document == origin.document && current.jump.offset != origin.offset
+                })
+                .map(|_| origin.offset)
+        });
         if !navigating && let (Some(previous), Some(current)) = (&previous, &current) {
             let moved_document = previous.jump.document != current.jump.document;
             let large_move = previous.revision == current.revision
                 && previous.jump.line.abs_diff(current.jump.line) > LARGE_MOVE_LINES;
             if moved_document || large_move {
                 list.push(previous.jump.clone());
+                if !moved_document && context.is_none() {
+                    context = Some(previous.jump.offset);
+                }
             }
         }
         list.observed = current.or(previous);
+        if let Some(context) = context
+            && let Some(tab) = self.tab_mut()
+        {
+            tab.vim.set_previous_context(context);
+        }
     }
 
     /// The mouse's back and forward buttons, outside dialogs and menus.

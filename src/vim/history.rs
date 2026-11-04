@@ -31,7 +31,8 @@ impl VimState {
         self.insert_origin = None;
         self.insert_replay = None;
         self.insert_count = 1;
-        self.record(before);
+        self.record(before, text);
+        self.external_edit = true;
     }
 
     pub(super) fn visual_repeat(&self, text: &str, range: &Range<usize>) -> VisualRepeat {
@@ -136,7 +137,7 @@ impl VimState {
             if let Some(origin) = self.insert_origin.take()
                 && changed
             {
-                self.record(origin);
+                self.record(origin, text);
             }
             if let Some(replay) = self.insert_replay.take()
                 && changed
@@ -203,6 +204,7 @@ impl VimState {
             VimKey::Escape => {
                 let block_inserting = self.block_insert.is_some();
                 let changed = self.finish_insert_repetitions(text);
+                let insert_boundary = self.cursor;
                 let chars: Vec<char> = text.chars().collect();
                 let rows = lines(&chars);
                 if self.cursor > rows[row_for_cursor(&rows, self.cursor)].start {
@@ -214,8 +216,9 @@ impl VimState {
                 if let Some(before) = self.insert_origin.take()
                     && before.text != *text
                 {
-                    self.record(before);
+                    self.record(before, text);
                 }
+                self.marks.insert = Some(insert_boundary);
                 self.mode = VimMode::Normal;
                 self.clear_command();
                 (true, changed, None)
@@ -277,13 +280,15 @@ impl VimState {
             text: text.to_owned(),
             cursor: self.cursor,
             multi: self.multi.clone(),
+            marks: self.marks.named,
         }
     }
 
-    pub(super) fn record(&mut self, before: Snapshot) {
+    pub(super) fn record(&mut self, before: Snapshot, text: &str) {
         if self.replaying {
             return;
         }
+        self.track_marks(&before.text, text, true, before.cursor);
         self.redo.clear();
         self.undo.push(before);
         trim_history(&mut self.undo);
@@ -343,6 +348,8 @@ impl VimState {
             return false;
         };
         let current = self.snapshot(text);
+        self.track_marks(text, &snapshot.text, false, self.cursor);
+        self.marks.named = snapshot.marks;
         let target = if redo { &mut self.undo } else { &mut self.redo };
         target.push(current);
         trim_history(target);
@@ -498,7 +505,7 @@ impl VimState {
         self.clear_command();
         let changed = *text != before.text;
         if changed {
-            self.record(before);
+            self.record(before, text);
             self.last_change = Some(change);
         }
         (true, changed, yank)

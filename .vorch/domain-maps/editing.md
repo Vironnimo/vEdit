@@ -11,6 +11,8 @@ preserving the document's edit history and each pane's navigation.
   `Action`. Private units in `src/vim/` implement command decoding, navigation,
   operators, paste/surround edits, history/insert replay and text geometry.
   The public owner remains `vim`; it does not own pane placement or app commands.
+  `src/vim/marks.rs` owns document marks and change locations; jump context and
+  the change-list index travel with `VimNavigation`, not document history.
 - `src/multicursor.rs` owns directed selection sets and simultaneous text edits;
   `src/multicursor_ui.rs` owns their input, pointer/layout integration, preferences
   and application transactions. `src/vim/multicursor.rs` runs modal commands

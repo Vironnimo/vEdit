@@ -106,6 +106,7 @@ impl VimState {
             }
             result
         } else {
+            self.remember_jump();
             self.set_cursor(text, target);
             (true, false, None)
         };
@@ -175,7 +176,7 @@ impl VimState {
         );
         self.cursor = start + replacement.chars().count() - 1;
         self.preferred_column = None;
-        self.record(before);
+        self.record(before, text);
         true
     }
 
@@ -316,7 +317,7 @@ impl VimState {
     /// Apply an exclusive motion with Vim's column-one rule: a target at the
     /// start of a later line does not include that line. From the indentation
     /// the motion becomes linewise; otherwise the preceding newline remains.
-    fn apply_exclusive(
+    pub(super) fn apply_exclusive(
         &mut self,
         text: &mut String,
         op: Operator,
@@ -448,7 +449,7 @@ impl VimState {
         } else {
             self.mode = VimMode::Normal;
             if changed {
-                self.record(before);
+                self.record(before, text);
             }
             let chars: Vec<char> = text.chars().collect();
             let rows = lines(&chars);
@@ -490,7 +491,7 @@ impl VimState {
             if changed {
                 let before = self.snapshot(text);
                 text.replace_range(bytes, &replacement);
-                self.record(before);
+                self.record(before, text);
             }
             self.leave_visual();
             self.cursor = start;
@@ -545,7 +546,7 @@ impl VimState {
         } else {
             self.mode = VimMode::Normal;
             if start < end {
-                self.record(before);
+                self.record(before, text);
             }
         }
         self.preferred_column = None;
@@ -676,7 +677,7 @@ impl VimState {
         let chars: Vec<char> = text.chars().collect();
         let rows = lines(&chars);
         self.cursor = first_nonblank(&chars, rows[first]);
-        self.record(before);
+        self.record(before, text);
         self.preferred_column = None;
         true
     }
@@ -718,7 +719,7 @@ impl VimState {
             &joined,
         );
         self.cursor = cursor;
-        self.record(snapshot);
+        self.record(snapshot, text);
         self.preferred_column = None;
         true
     }

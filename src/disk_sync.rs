@@ -462,6 +462,7 @@ impl VEditApp {
         let selection = map.range(tab.selection.clone());
         let pending = tab.pending_selection.clone().map(|range| map.range(range));
         tab.text = disk.text;
+        tab.vim.notify_external_text_change(&tab.text);
         tab.saved_text.clone_from(&tab.text);
         tab.fingerprint = Some(disk.fingerprint);
         tab.line_ending = disk.line_ending;

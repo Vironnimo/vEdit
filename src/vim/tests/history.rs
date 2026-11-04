@@ -186,7 +186,7 @@ fn open_line_indent_and_external_edits_group() {
     assert_eq!(text, "  one\ntwo");
     keys(&mut state, &mut text, "i");
     text.insert_str(0, "external");
-    state.notify_external_text_change();
+    state.notify_external_text_change(&text);
     state.finish_insert(&mut text);
     keys(&mut state, &mut text, "u");
     assert_eq!(text, "  one\ntwo");
@@ -398,7 +398,7 @@ fn dot_replays_external_widget_change_as_one_transaction() {
     keys(&mut state, &mut text, "ciw");
     text.insert_str(0, "é🙂");
     state.set_cursor(&text, 2);
-    state.notify_external_text_change();
+    state.notify_external_text_change(&text);
     state.finish_insert(&mut text);
     keys(&mut state, &mut text, "w.");
     assert_eq!(text, "é🙂 é🙂 three");
@@ -486,7 +486,7 @@ fn external_insert_edit_stays_in_one_insert_undo_transaction() {
     state.begin_external_edit(&text);
     text.insert_str(1, "completion");
     state.set_cursor(&text, 11);
-    state.notify_external_text_change();
+    state.notify_external_text_change(&text);
     assert!(state.undo.is_empty());
     state.finish_insert(&mut text);
     assert_eq!(state.undo.len(), 1);

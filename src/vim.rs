@@ -6,6 +6,7 @@ mod block;
 mod commands;
 mod geometry;
 mod history;
+mod marks;
 mod multicursor;
 mod navigation;
 mod operators;
@@ -202,12 +203,18 @@ enum Pending {
         count: usize,
         explicit: bool,
     },
-    /// The argument of an unsupported command such as `q` or `m`. It is
+    /// The argument of an unsupported command such as `q`. It is
     /// swallowed so that the user's next keys do not run as commands.
     Ignore,
     /// `[` or `]`: the editor handles `[d` / `]d` (previous / next problem);
     /// other bracket commands are unsupported and swallow their argument.
     Bracket(char),
+    SetMark,
+    Mark {
+        operator: Option<Operator>,
+        linewise: bool,
+        keep_jumps: bool,
+    },
 }
 
 /// The most recent Visual area, for `gv`.
@@ -225,6 +232,7 @@ struct Snapshot {
     text: String,
     cursor: usize,
     multi: crate::multicursor::State,
+    marks: [Option<usize>; 26],
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +309,8 @@ pub struct VimNavigation {
     visual_to_line_end: bool,
     last_visual: Option<LastVisual>,
     block_columns: Option<(usize, usize)>,
+    previous_context: Option<usize>,
+    change_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,6 +350,11 @@ pub struct VimState {
     visible: Option<Range<usize>>,
     scroll_request: Option<ScrollAlign>,
     message: Option<String>,
+    marks: marks::Marks,
+    previous_context: Option<usize>,
+    change_index: Option<usize>,
+    jump_origins: Vec<usize>,
+    external_edit: bool,
 }
 
 impl Default for VimState {
@@ -377,6 +392,11 @@ impl Default for VimState {
             visible: None,
             scroll_request: None,
             message: None,
+            marks: marks::Marks::default(),
+            previous_context: None,
+            change_index: None,
+            jump_origins: Vec::new(),
+            external_edit: false,
         }
     }
 }
@@ -408,10 +428,18 @@ impl VimState {
         self.indent_with_tabs = tabs;
     }
 
-    /// The insert-session snapshot also covers edits performed by the widget.
-    pub fn notify_external_text_change(&mut self) {}
+    /// Native Insert edits are mapped together when their transaction ends.
+    pub fn notify_external_text_change(&mut self, text: &str) {
+        if std::mem::take(&mut self.external_edit)
+            && let Some(before) = self.undo.last()
+        {
+            let (before, origin) = (before.text.clone(), before.cursor);
+            self.track_marks(&before, text, true, origin);
+        }
+    }
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        self.notify_external_text_change(text);
         if self.multi.active() {
             return self.handle_multi_key(text, key);
         }
@@ -497,6 +525,9 @@ impl VimState {
             self.sync_block_cursor(text, old_cursor);
         }
         self.clamp_cursor(text);
+        if yanked.is_some() && !text_changed {
+            self.remember_yank();
+        }
         if !self.replaying {
             if old_mode != VimMode::Insert && self.mode == VimMode::Insert {
                 let (visual, keys) = if let Some((visual, keys)) = visual_change {

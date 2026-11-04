@@ -150,7 +150,7 @@ impl VEditApp {
             let edit = editor::replace_selection(&tab.text, selection, "");
             tab.apply(edit);
             tab.set_cursor(tab.selection.start..tab.selection.start);
-            tab.vim.notify_external_text_change();
+            tab.vim.notify_external_text_change(&tab.text);
         }
         fn paste_system_text(tab: &mut EditorTab, text: &str) {
             if tab.loading || text.is_empty() {
@@ -172,7 +172,7 @@ impl VEditApp {
                 tab.vim.set_selection(&tab.text, cursor..cursor);
             }
             tab.set_cursor(cursor..cursor);
-            tab.vim.notify_external_text_change();
+            tab.vim.notify_external_text_change(&tab.text);
         }
         fn publish_search_yank(
             tab: &mut EditorTab,
@@ -459,7 +459,7 @@ impl VEditApp {
                             ) {
                                 tab.set_cursor(tab.selection.clone());
                             }
-                            tab.vim.notify_external_text_change();
+                            tab.vim.notify_external_text_change(&tab.text);
                         }
                         editor_input::defer(&ctx, tab.id, events.collect());
                         break;
@@ -731,6 +731,7 @@ impl VEditApp {
             yank_register = tab.vim.yank_register().cloned();
         }
         self.find = find;
+        self.record_vim_jumps();
         if vim_searched {
             self.find_visible = false;
         }
