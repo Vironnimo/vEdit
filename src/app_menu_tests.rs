@@ -206,6 +206,180 @@ fn compact_status_bar_keeps_mode_save_state_and_cursor_position_separate() {
 }
 
 #[test]
+fn status_bar_customization_toggles_items_persists_and_keeps_errors_visible() {
+    let mut app = fixture();
+    let path = app.tab().unwrap().path.clone().unwrap();
+    app.projects[0].diagnostics.insert(
+        path,
+        vec![crate::lsp::Diagnostic {
+            range: crate::lsp::TextRange::default(),
+            severity: 1,
+            message: "Example problem".into(),
+            source: None,
+        }],
+    );
+    let mut screen = harness(app, 1440.0, 760.0);
+    let original = screen.state().tab().unwrap().text.clone();
+    screen.get_by_label("Saved").click_secondary();
+    screen.run_steps(3);
+    for (option, label) in [
+        ("Editing mode and Vim help", " NORMAL "),
+        ("Line and column", "Ln 1/"),
+        ("Characters and tokens", " chars ·"),
+        ("Save status", "Saved"),
+        ("Auto save switch", "Auto save off"),
+        ("File language and format", "Rust"),
+        ("Indentation", "Spaces: 4"),
+        ("Git branch", "main"),
+        ("Problem count", "1 problem"),
+        ("Language analysis", "Rust: unavailable"),
+    ] {
+        let present = |screen: &Harness<'_, VEditApp>| {
+            if matches!(option, "Line and column" | "Characters and tokens") {
+                screen.query_by_label_contains(label).is_some()
+            } else {
+                screen.query_by_label(label).is_some()
+            }
+        };
+        assert!(present(&screen), "missing {label}");
+        screen.get_by_label(option).scroll_to_me();
+        screen.run_steps(3);
+        screen.get_by_label(option).click();
+        screen.run_steps(3);
+        assert!(
+            !present(&screen),
+            "still showing {label}: {:?}; option at {:?}",
+            screen.state().settings.status_bar,
+            screen.get_by_label(option).rect()
+        );
+        assert!(
+            screen.query_by_label("Restore defaults").is_some(),
+            "menu closed after {option}"
+        );
+    }
+    assert!(screen.state().session_dirty);
+    assert!(!screen.state().settings.autosave);
+    assert_eq!(screen.state().tab().unwrap().text, original);
+    let json = serde_json::to_vec(&screen.state().session()).unwrap();
+    let restored: Session = serde_json::from_slice(&json).unwrap();
+    let visible = restored.settings.unwrap().status_bar;
+    assert_eq!(visible, screen.state().settings.status_bar);
+    assert!(
+        !visible.mode
+            && !visible.position
+            && !visible.statistics
+            && !visible.save_status
+            && !visible.autosave
+            && !visible.language
+            && !visible.indentation
+            && !visible.branch
+            && !visible.problems
+            && !visible.analysis
+    );
+    let older: Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        older.status_bar,
+        app_chrome::StatusBarPreferences::default()
+    );
+    let partial: Settings = serde_json::from_str(r#"{"status_bar":{"branch":false}}"#).unwrap();
+    assert!(!partial.status_bar.branch);
+    assert!(partial.status_bar.position);
+
+    screen.key_press(Key::Escape);
+    screen.run_steps(3);
+    screen.state_mut().status("Example failure", true);
+    screen.state_mut().tab_mut().unwrap().error = Some("Example file error".into());
+    screen.run_steps(3);
+    assert!(screen.query_by_label("Example failure").is_some());
+    assert!(screen.query_by_label("File error").is_some());
+    screen.state_mut().status = None;
+    screen.state_mut().tab_mut().unwrap().error = None;
+    screen.run_steps(3);
+    let pos = egui::pos2(500.0, screen.ctx.content_rect().bottom() - 14.0);
+    for pressed in [true, false] {
+        screen.event(egui::Event::PointerMoved(pos));
+        screen.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        screen.run_steps(1);
+    }
+    screen.run_steps(3);
+    screen.get_by_label("Restore defaults").scroll_to_me();
+    screen.run_steps(3);
+    screen.get_by_label("Restore defaults").click();
+    screen.run_steps(3);
+    assert_eq!(screen.state().settings.status_bar, older.status_bar);
+    assert!(screen.query_by_label(" NORMAL ").is_some());
+    assert!(screen.query_by_label("Saved").is_some());
+}
+
+#[test]
+fn status_bar_menu_is_reachable_on_items_and_without_documents_in_small_windows() {
+    for (width, with_document, target) in [
+        (500.0, true, Some(" NORMAL ")),
+        (1440.0, true, Some("main")),
+        (500.0, false, None),
+    ] {
+        let app = if with_document {
+            fixture()
+        } else {
+            VEditApp::empty(egui::Context::default())
+        };
+        let mut screen = harness(app, width, 360.0);
+        if let Some(target) = target {
+            screen.get_by_label(target).click_secondary();
+        } else {
+            let pos = egui::pos2(width / 2.0, 346.0);
+            for pressed in [true, false] {
+                screen.event(egui::Event::PointerMoved(pos));
+                screen.event(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                screen.run_steps(1);
+            }
+        }
+        screen.run_steps(3);
+        if let Some(directory) = std::env::var_os("VEDIT_SNAPSHOT_DIR") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).unwrap();
+            screen
+                .render()
+                .unwrap()
+                .save(directory.join(format!("status-bar-menu-{width}-{with_document}.png")))
+                .unwrap();
+        }
+        screen.get_by_label("Git branch").scroll_to_me();
+        screen.run_steps(3);
+        assert!(
+            screen
+                .ctx
+                .content_rect()
+                .contains_rect(screen.get_by_label("Git branch").rect())
+        );
+        screen.get_by_label("Git branch").click();
+        screen.run_steps(3);
+        assert!(!screen.state().settings.status_bar.branch);
+        screen.get_by_label("Restore defaults").scroll_to_me();
+        screen.run_steps(3);
+        assert!(
+            screen
+                .ctx
+                .content_rect()
+                .contains_rect(screen.get_by_label("Restore defaults").rect())
+        );
+        screen.get_by_label("Restore defaults").click();
+        screen.run_steps(3);
+        assert!(screen.state().settings.status_bar.branch);
+    }
+}
+
+#[test]
 fn status_bar_explains_why_large_files_are_plain_text() {
     const HINT: &str = "Plain text: file too large for highlighting";
     let mut app = fixture();
@@ -363,5 +537,21 @@ fn text_statistics_follow_unsaved_text_and_selection_without_overlapping_status(
         for rect in [mode, saved, position] {
             assert!(screen.ctx.content_rect().contains_rect(rect));
         }
+        screen.state_mut().settings.status_bar.position = false;
+        screen.hover_at(egui::pos2(-20.0, -20.0));
+        screen.run_steps(3);
+        let statistics = screen
+            .get_by_label_contains(if width < 1100.0 {
+                " ch ·"
+            } else {
+                " chars ·"
+            })
+            .rect();
+        let saved = screen.get_by_label("Unsaved").rect();
+        assert!(
+            !saved.intersects(statistics),
+            "save/statistics overlap without position at {width}"
+        );
+        assert!(screen.ctx.content_rect().contains_rect(statistics));
     }
 }

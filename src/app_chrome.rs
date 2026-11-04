@@ -1,6 +1,38 @@
 //! Workspace chrome, status presentation and shared visual helpers.
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct StatusBarPreferences {
+    pub(super) mode: bool,
+    pub(super) position: bool,
+    pub(super) statistics: bool,
+    pub(super) save_status: bool,
+    pub(super) autosave: bool,
+    pub(super) language: bool,
+    pub(super) indentation: bool,
+    pub(super) branch: bool,
+    pub(super) problems: bool,
+    pub(super) analysis: bool,
+}
+
+impl Default for StatusBarPreferences {
+    fn default() -> Self {
+        Self {
+            mode: true,
+            position: true,
+            statistics: true,
+            save_status: true,
+            autosave: true,
+            language: true,
+            indentation: true,
+            branch: true,
+            problems: true,
+            analysis: true,
+        }
+    }
+}
+
 impl VEditApp {
     pub(super) fn header(&mut self, ui: &mut egui::Ui) {
         let options = crate::window_chrome::ChromeOptions {
@@ -161,27 +193,32 @@ impl VEditApp {
     }
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
         self.expire_vim_feedback();
+        let visible = self.settings.status_bar;
         let problems = self.problem_list();
-        let statistics = self.tab().filter(|tab| !tab.loading).map(|tab| {
-            self.text_statistics.display(
-                ui.ctx(),
-                tab.id,
-                tab.revision,
-                &tab.text,
-                tab.lines.char_count(&tab.text, tab.revision),
-                tab.selection.clone(),
-            )
-        });
+        let statistics = self
+            .tab()
+            .filter(|tab| visible.statistics && !tab.loading)
+            .map(|tab| {
+                self.text_statistics.display(
+                    ui.ctx(),
+                    tab.id,
+                    tab.revision,
+                    &tab.text,
+                    tab.lines.char_count(&tab.text, tab.revision),
+                    tab.selection.clone(),
+                )
+            });
         if statistics.is_none() {
             self.text_statistics.clear();
         }
-        egui::Panel::bottom("status").exact_size(28.0)
+        let response = egui::Panel::bottom("status").exact_size(28.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 2)))
             .show(ui, |ui| {
                 let compact = ui.available_width() < 820.0;
                 let narrow = ui.available_width() < 360.0;
                 let compact_statistics = ui.available_width() < 1100.0;
                 let show_statistics = ui.available_width() >= 650.0;
+                let save_before_statistics = !visible.position && !show_statistics;
                 let status_error = self.status.as_ref().is_some_and(|(_, error, _)| *error);
                 let right_budget = if narrow { 125.0 } else if !show_statistics { 300.0 } else if compact_statistics { 500.0 } else { 900.0 };
                 ui.spacing_mut().item_spacing.x = 12.0;
@@ -199,12 +236,15 @@ impl VEditApp {
                     let mode = if mode == "MULTI" && self.settings.vim {
                         match self.tab().unwrap().vim.mode { VimMode::Normal => "MULTI NORMAL", VimMode::Insert if self.tab().unwrap().vim.is_replacing() => "MULTI REPLACE", VimMode::Insert => "MULTI INSERT", VimMode::Visual => "MULTI VISUAL", VimMode::VisualLine => "MULTI V-LINE", VimMode::VisualBlock => "MULTI V-BLOCK" }
                     } else { mode };
-                    ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
+                    if visible.mode { ui.label(RichText::new(format!(" {mode} ")).monospace().size(11.0).strong().color(color))
                         .on_hover_text(if mode == "TERMINAL" { "Keyboard input goes to the shell. Ctrl+C interrupts; Ctrl+Shift+C/V copy and paste.".into() } else { format!("PLACE: move only the active cursor; {} finishes placement. MULTI: edit every cursor; {} returns to one cursor. Vim: i to insert, v to select, Shift+V for lines, Esc for Normal", self.shortcut_label(keybindings::Action::FinishCursorPlacement), self.shortcut_label(keybindings::Action::ExitMulticursor)) });
+                    }
                     if self.settings.vim && mode != "TERMINAL" && mode != "PREVIEW" {
+                        if visible.mode {
                         let reference = ui.add_enabled(!self.chrome_blocked(), egui::Button::new(RichText::new("?").size(11.0).color(BLUE)).frame_when_inactive(false).corner_radius(3.0)).on_hover_text("Vim commands · Search the supported commands");
                         reference.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Vim commands"));
                         if reference.clicked() { self.open_vim_reference(); }
+                        }
                         if let Some(label) = self.vim_macros.label() { ui.label(RichText::new(label).monospace().size(11.0).color(ORANGE)); }
                     }
                     if let Some(tab) = self.tab().filter(|t| t.vim.multi.active()) {
@@ -218,7 +258,7 @@ impl VEditApp {
                         let pending = tab.vim.pending_command();
                         if !pending.is_empty() { ui.label(RichText::new(pending).monospace().size(11.0).color(ORANGE)); }
                     }
-                    if !narrow && !(compact && status_error) && let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
+                    if visible.branch && !narrow && !(compact && status_error) && let Some(branch) = self.project().and_then(|p| p.git_branch.clone()) {
                         let tracking = self.project().and_then(|p| p.git_tracking.as_ref());
                         let hint = tracking.map(|b| format!("{} - {} ahead, {} behind. Open source control.", b.upstream.as_deref().unwrap_or("Local branch"), b.ahead, b.behind)).unwrap_or_else(|| "Open source control".into());
                         let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(branch.clone(), FontId::proportional(11.0), TEXT)).size().x + 16.0;
@@ -242,21 +282,24 @@ impl VEditApp {
                         self.status_message_ui(ui, width);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // Without the position's compact tooltip, keep statistics reachable
+                        // in the remaining space after the save controls.
+                        if save_before_statistics { self.save_status_ui(ui, visible.autosave && !narrow); }
                         if let Some(t) = self.tab() {
                             let (line, col) = t.lines.line_col(&t.text, t.revision, t.vim.cursor);
                             let total = t.lines.line_count(&t.text, t.revision);
                             let position = if narrow { format!("{line}:{col}") } else { format!("Ln {line}/{total}, Col {col}") };
                             let mut position_hint = format!("Line {line}/{total} · Column {col}\nGo to line: {}", self.shortcut_label(keybindings::Action::GoToLine));
-                            if !show_statistics && let Some(statistics) = &statistics {
+                            if !show_statistics && visible.position && let Some(statistics) = &statistics {
                                 position_hint.push_str(&format!("\n\n{}", statistics.tooltip()));
                             }
-                            ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(position_hint);
-                            if show_statistics && let Some(statistics) = &statistics {
-                                ui.label(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).on_hover_text(statistics.tooltip());
+                            if visible.position { ui.label(RichText::new(position).size(11.0).color(MUTED)).on_hover_text(position_hint); }
+                            if (show_statistics || !visible.position) && let Some(statistics) = &statistics {
+                                ui.add(egui::Label::new(RichText::new(statistics.label(compact_statistics)).size(11.0).color(MUTED)).truncate()).on_hover_text(statistics.tooltip());
                             }
                             let details = format!("UTF-8{} - {} - {}", if t.bom { " with BOM" } else { "" }, t.line_ending, if t.agent_unsaved { "Agent draft: save to resume auto save" } else if self.settings.autosave { "Auto save on" } else { "Manual save" });
-                            if !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
-                            if !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
+                            if visible.language && !compact_statistics { ui.label(RichText::new(language_name(t.path.as_deref())).size(11.0).color(MUTED)).on_hover_text(details); }
+                            if visible.language && !compact_statistics && t.text.len() > crate::render::MAX_DOCUMENT_BYTES && !syntax_language(t.path.as_deref()).is_empty() {
                                 ui.label(RichText::new("Plain text: file too large for highlighting").size(11.0).color(MUTED)).on_hover_text(format!(
                                     "Syntax colors are off for files larger than {} KiB so editing stays fast. This file has {} KiB. Editing, search and language analysis work as usual.",
                                     crate::render::MAX_DOCUMENT_BYTES / 1024,
@@ -264,20 +307,86 @@ impl VEditApp {
                                 ));
                             }
                         }
-                        if !compact_statistics { self.indentation_status_ui(ui); }
-                        self.save_status_ui(ui, !narrow);
+                        if visible.indentation && !compact_statistics { self.indentation_status_ui(ui); }
+                        if !save_before_statistics { self.save_status_ui(ui, visible.autosave && !narrow); }
                         let problem_count = problems.counted();
-                        if !compact_statistics && problem_count > 0 {
+                        if visible.problems && !compact_statistics && problem_count > 0 {
                             let label = if problem_count == 1 { "1 problem".to_owned() } else { format!("{problem_count} problems") };
                             let hint = format!("{}
 Show Problems · {}
 Next / previous error or warning: {} / {}", problems.summary(), self.shortcut_label(keybindings::Action::Problems), self.shortcut_label(keybindings::Action::NextProblem), self.shortcut_label(keybindings::Action::PreviousProblem));
                             if design::status_item(ui, &label, problems.badge_color(), &hint).clicked() { self.problems_visible = true; self.output_visible = true; }
                         }
-                        if !compact_statistics { self.rust_analysis_status_ui(ui); }
+                        if visible.analysis && !compact_statistics { self.rust_analysis_status_ui(ui); }
                     });
                 });
+            }).response;
+        // Read the secondary click over the entire panel, including its buttons.
+        // A message's own copy/details menu takes precedence.
+        let open = response.contains_pointer()
+            && ui.input(|input| input.pointer.secondary_clicked())
+            && !egui::Popup::is_any_open(ui.ctx());
+        egui::Popup::context_menu(&response)
+            .open_memory(open.then_some(egui::SetOpenCommand::Bool(true)))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.status_bar_menu_ui(ui));
+    }
+
+    pub(super) fn status_bar_menu_ui(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(230.0);
+        let before = self.settings.status_bar;
+        ui.label(RichText::new("Status bar items").strong());
+        ui.separator();
+        egui::ScrollArea::vertical()
+            // Leave room for the heading and reset action in small windows.
+            .max_height((ui.ctx().content_rect().height() - 160.0).max(80.0))
+            .show(ui, |ui| {
+                let visible = &mut self.settings.status_bar;
+                for (heading, items) in [
+                    (
+                        "Editor",
+                        vec![
+                            (&mut visible.mode, "Editing mode and Vim help"),
+                            (&mut visible.position, "Line and column"),
+                            (&mut visible.statistics, "Characters and tokens"),
+                        ],
+                    ),
+                    (
+                        "Document",
+                        vec![
+                            (&mut visible.save_status, "Save status"),
+                            (&mut visible.autosave, "Auto save switch"),
+                            (&mut visible.language, "File language and format"),
+                            (&mut visible.indentation, "Indentation"),
+                        ],
+                    ),
+                    (
+                        "Project",
+                        vec![
+                            (&mut visible.branch, "Git branch"),
+                            (&mut visible.problems, "Problem count"),
+                            (&mut visible.analysis, "Language analysis"),
+                        ],
+                    ),
+                ] {
+                    ui.label(RichText::new(heading).small().color(MUTED));
+                    for (value, label) in items {
+                        ui.checkbox(value, label);
+                    }
+                }
             });
+        ui.separator();
+        ui.label(
+            RichText::new("Errors and active input hints stay visible.")
+                .small()
+                .color(MUTED),
+        );
+        if ui.button("Restore defaults").clicked() {
+            self.settings.status_bar = StatusBarPreferences::default();
+        }
+        if self.settings.status_bar != before {
+            self.session_dirty = true;
+        }
     }
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
         let available_height = ui.available_height();

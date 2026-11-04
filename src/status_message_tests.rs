@@ -126,8 +126,19 @@ fn status_context_menu_copies_the_complete_multiline_message() {
     let mut screen = harness();
     screen.get_by_label(SUMMARY).click_secondary();
     screen.run_steps(3);
+    assert!(screen.query_by_label_contains("Status bar items").is_some());
     assert_eq!(copy_button(&mut screen, "Copy message"), vec![message()]);
     assert!(screen.state().status_details.is_none());
+    screen.get_by_label(SUMMARY).click_secondary();
+    screen.run_steps(3);
+    screen.get_by_label_contains("Status bar items").hover();
+    screen.run_steps(3);
+    screen.get_by_label("Git branch").scroll_to_me();
+    screen.run_steps(3);
+    screen.get_by_label("Git branch").click();
+    screen.run_steps(3);
+    assert!(!screen.state().settings.status_bar.branch);
+    assert!(screen.query_by_label("Restore defaults").is_some());
 }
 
 #[test]
