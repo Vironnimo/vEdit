@@ -137,6 +137,27 @@ fn multicursor_vim_keeps_mode_and_moves_each_cursor_independently() {
 }
 
 #[test]
+fn multicursor_vim_replace_keeps_overwrite_semantics_for_native_input() {
+    let mut screen = harness("abc def", true);
+    screen.state_mut().tab_mut().unwrap().vim.multi.selections =
+        vec![Selection::new(0, 0), Selection::new(4, 4)];
+    screen.input_mut().events.extend([
+        egui::Event::Text("RXY".into()),
+        key(Key::Backspace, egui::Modifiers::NONE),
+        key(Key::Escape, egui::Modifiers::NONE),
+    ]);
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().text, "Xbc Xef");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    screen
+        .input_mut()
+        .events
+        .push(egui::Event::Text("u".into()));
+    screen.run_steps(2);
+    assert_eq!(screen.state().tab().unwrap().text, "abc def");
+}
+
+#[test]
 fn multicursor_vim_insert_counts_and_dot_repeat_each_local_edit() {
     for windows_history in [false, true] {
         for command in ["iXY", "3iX", "cwnew"] {

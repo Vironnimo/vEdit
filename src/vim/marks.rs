@@ -6,6 +6,7 @@ const MAX_MARK_DIFF_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Marks {
     pub named: [Option<usize>; 26],
+    pub global: [Option<usize>; 26],
     pub insert: Option<usize>,
     change: Option<usize>,
     affected: Option<(usize, usize)>,
@@ -14,6 +15,67 @@ pub(super) struct Marks {
 }
 
 impl VimState {
+    pub fn take_global_mark_request(&mut self) -> Option<GlobalMarkRequest> {
+        self.global_mark_request.take()
+    }
+
+    pub fn global_mark_position(&self, name: char) -> Option<usize> {
+        if !name.is_ascii_uppercase() {
+            return None;
+        }
+        self.marks
+            .global
+            .get(name as usize - 'A' as usize)
+            .copied()
+            .flatten()
+    }
+
+    pub fn set_global_mark_position(&mut self, name: char, position: Option<usize>) {
+        if !name.is_ascii_uppercase() {
+            return;
+        }
+        if let Some(mark) = self.marks.global.get_mut(name as usize - 'A' as usize) {
+            *mark = position;
+        }
+    }
+
+    /// Complete the original pending mark motion after the application has
+    /// established that its authoritative target is in this document.
+    pub fn resolve_global_mark(
+        &mut self,
+        text: &mut String,
+        name: char,
+        position: usize,
+    ) -> Action {
+        self.set_global_mark_position(name, Some(position));
+        if let Some(change) = self.pending_global_repeat.take() {
+            let old_cursor = self.cursor;
+            let old_mode = self.mode;
+            self.cancel_pending_command();
+            self.last_change = Some(change);
+            self.resolving_global_mark = true;
+            let (consumed, text_changed, yanked) = self.repeat_change(text, 1, false);
+            self.resolving_global_mark = false;
+            return Action {
+                consumed,
+                text_changed,
+                yanked,
+                cursor_changed: self.cursor != old_cursor,
+                mode_changed: self.mode != old_mode,
+                yanked_ranges: std::mem::take(&mut self.yanked_ranges),
+                message: self.message.take(),
+                ..Action::default()
+            };
+        }
+        if self.command_keys.last() == Some(&VimKey::Char(name)) {
+            self.command_keys.pop();
+        }
+        self.resolving_global_mark = true;
+        let action = self.handle_key(text, VimKey::Char(name));
+        self.resolving_global_mark = false;
+        action
+    }
+
     /// Application navigation uses the same context mark as Vim jumps.
     pub fn set_previous_context(&mut self, cursor: usize) {
         self.previous_context = Some(cursor);
@@ -35,6 +97,10 @@ impl VimState {
     pub(super) fn set_mark(&mut self, name: char) {
         match name {
             'a'..='z' => self.marks.named[name as usize - 'a' as usize] = Some(self.cursor),
+            'A'..='Z' => {
+                self.marks.global[name as usize - 'A' as usize] = Some(self.cursor);
+                self.global_mark_request = Some(GlobalMarkRequest::Set(name));
+            }
             '\'' | '`' => self.previous_context = Some(self.cursor),
             _ => self.unsupported(&format!("m{name}")),
         }
@@ -43,6 +109,7 @@ impl VimState {
     fn mark(&self, name: char) -> Option<usize> {
         match name {
             'a'..='z' => self.marks.named[name as usize - 'a' as usize],
+            'A'..='Z' => self.marks.global[name as usize - 'A' as usize],
             '\'' | '`' => self.previous_context,
             '^' => self.marks.insert,
             '.' => self.marks.change,
@@ -62,6 +129,20 @@ impl VimState {
         linewise: bool,
         keep_jumps: bool,
     ) -> (bool, bool, Option<Yank>) {
+        if name.is_ascii_uppercase() && !self.resolving_global_mark {
+            self.pending = Some(Pending::Mark {
+                operator,
+                linewise,
+                keep_jumps,
+            });
+            self.global_mark_request = Some(GlobalMarkRequest::Jump {
+                name,
+                linewise,
+                keep_jumps,
+                operator: operator.is_some(),
+            });
+            return (true, false, None);
+        }
         let Some(target) = self.mark(name) else {
             self.message = Some(format!("Mark not set: {name}"));
             return (true, false, None);
@@ -70,6 +151,7 @@ impl VimState {
         let rows = lines(&chars);
         let target = target.min(chars.len());
         if let Some(op) = operator {
+            self.numbered_delete = !linewise;
             return if linewise || matches!(op, Operator::Indent | Operator::Outdent) {
                 self.apply_lines(
                     text,
@@ -194,7 +276,7 @@ impl VimState {
                     .saturating_sub(line.start)
                     .min(target.end - target.start)
         };
-        for mark in &mut self.marks.named {
+        for mark in self.marks.named.iter_mut().chain(&mut self.marks.global) {
             if let Some(position) = *mark {
                 let line = line_at_cursor(&chars, position);
                 let end = line.newline.map_or(line.end, |newline| newline + 1);

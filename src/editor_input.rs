@@ -46,7 +46,7 @@ pub(super) fn edit(
 }
 
 #[derive(Clone, PartialEq)]
-struct Owner {
+pub(super) struct Owner {
     pane: u64,
     document: u64,
     revision: u64,
@@ -54,6 +54,8 @@ struct Owner {
     selection: Range<usize>,
     multi: crate::multicursor::State,
     mode: VimMode,
+    replacing: bool,
+    pending: String,
     widget: Option<egui::Id>,
     vim: bool,
     swap_jk: bool,
@@ -61,6 +63,19 @@ struct Owner {
     keybindings: keybindings::Bindings,
     vim_keys: keybindings::vim_keys::Preferences,
     view: crate::cli::DocumentView,
+}
+
+impl Owner {
+    pub(super) fn same_view(&self, other: &Self) -> bool {
+        self.pane == other.pane
+            && self.document == other.document
+            && self.vim == other.vim
+            && self.swap_jk == other.swap_jk
+            && self.leader == other.leader
+            && self.keybindings == other.keybindings
+            && self.vim_keys == other.vim_keys
+            && self.view == other.view
+    }
 }
 
 #[derive(Clone, Default)]
@@ -283,7 +298,7 @@ impl VEditApp {
         }
     }
 
-    fn editor_input_owner(&self) -> Option<Owner> {
+    pub(super) fn editor_input_owner(&self) -> Option<Owner> {
         if self.terminal_input_active() {
             return None;
         }
@@ -296,6 +311,8 @@ impl VEditApp {
             selection: tab.selection.clone(),
             multi: tab.vim.multi.clone(),
             mode: tab.vim.mode,
+            replacing: tab.vim.is_replacing(),
+            pending: tab.vim.pending_command(),
             widget: self.ctx.memory(|memory| memory.focused()),
             vim: self.settings.vim,
             swap_jk: self.settings.swap_jk,
@@ -327,7 +344,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()
@@ -366,7 +383,6 @@ impl VEditApp {
         });
     }
 
-    #[cfg(test)]
     pub(super) fn editor_input_pending(&self) -> bool {
         self.ctx
             .data(|data| data.get_temp::<Continuation>(continuation_id()).is_some())

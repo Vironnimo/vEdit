@@ -72,6 +72,62 @@ fn text<'a>(screen: &'a Harness<'_, VEditApp>) -> &'a str {
 }
 
 #[test]
+fn vim_replace_consumes_native_text_paste_ime_and_editing_keys_in_order() {
+    let mut indented = harness("{}", true);
+    events(
+        &mut indented,
+        [
+            egui::Event::Text("lR".into()),
+            key(Key::Enter, egui::Modifiers::NONE),
+            key(Key::Tab, egui::Modifiers::NONE),
+            egui::Event::Text("x".into()),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(
+        text(&indented),
+        "{\n        x\n}",
+        "physical Enter and Tab use the configured indentation"
+    );
+    events(&mut indented, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&indented), "{}");
+    let mut screen = harness("α🦀c\r\nlast", true);
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("R中🙂".into()),
+            key(Key::Backspace, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "中🦀c\r\nlast");
+    assert!(screen.state().tab().unwrap().vim.is_replacing());
+    events(
+        &mut screen,
+        [
+            egui::Event::Paste("XY".into()),
+            egui::Event::Ime(egui::ImeEvent::Commit("Z".into())),
+            key(Key::Enter, egui::Modifiers::NONE),
+            egui::Event::Text("Q".into()),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "中XYZ\r\nQ\r\nlast");
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    events(&mut screen, [egui::Event::Text("u".into())]);
+    assert_eq!(text(&screen), "α🦀c\r\nlast");
+    events(
+        &mut screen,
+        [
+            egui::Event::Text("R!".into()),
+            key(Key::ArrowRight, egui::Modifiers::NONE),
+            key(Key::Backspace, egui::Modifiers::NONE),
+            key(Key::Escape, egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(text(&screen), "!🦀c\r\nlast");
+}
+
+#[test]
 fn vim_marks_resume_native_insert_and_keep_literal_targets_out_of_search() {
     let mut screen = harness("  α🦀\n  last", true);
     events(

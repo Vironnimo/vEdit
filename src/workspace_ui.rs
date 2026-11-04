@@ -146,7 +146,7 @@ impl VEditApp {
         if self.picker.is_some()
             || self.palette.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -233,7 +233,7 @@ impl VEditApp {
             && self.picker.is_none()
             && self.palette.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.save_as.is_none()
             && self.close_action.is_none()

@@ -754,7 +754,7 @@ impl VEditApp {
             || self.git_detail_open()
             || self.navigation_modal_open()
             || self.navigation_pending()
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.context_file_dialog.is_some()
             || self.vim_command.is_some()

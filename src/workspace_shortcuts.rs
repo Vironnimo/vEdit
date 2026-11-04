@@ -11,7 +11,7 @@ impl VEditApp {
         if self.picker.is_some()
             || self.palette.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()
@@ -158,7 +158,7 @@ impl VEditApp {
             && self.close_action.is_none()
             && self.picker.is_none()
             && !self.navigation_modal_open()
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && let Some(tab) = self.tab().filter(|tab| {
                 tab.agent_view == crate::cli::DocumentView::Source
@@ -174,7 +174,7 @@ impl VEditApp {
             && self.close_action.is_none()
             && self.picker.is_none()
             && !self.navigation_modal_open()
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
         {
             self.defer_widget_shortcut_tail();

@@ -6,7 +6,7 @@ impl VEditApp {
         let find_id = ui.make_persistent_id("find_query");
         let replace_id = ui.make_persistent_id("replace_query");
         let interactive = !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.palette.is_none()
             && self.picker.is_none()

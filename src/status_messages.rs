@@ -7,7 +7,48 @@ pub(super) struct Details {
     restore_focus: Option<egui::Id>,
 }
 
+pub(super) struct VimFeedback {
+    shown_at: f64,
+    status_at: Instant,
+    context: Option<(u64, u64, u64, VimMode)>,
+}
+
 impl VEditApp {
+    /// Vim input errors describe one command, rather than a durable failure.
+    pub(super) fn vim_input_status(&mut self, message: impl Into<String>) {
+        self.cancel_vim_macro();
+        self.status(message, true);
+        self.vim_feedback = Some(VimFeedback {
+            shown_at: self.ctx.input(|input| input.time),
+            status_at: self.status.as_ref().unwrap().2,
+            context: self.vim_feedback_context(),
+        });
+        self.ctx.request_repaint_after(Duration::from_secs(3));
+    }
+
+    fn vim_feedback_context(&self) -> Option<(u64, u64, u64, VimMode)> {
+        self.tab()
+            .map(|tab| (tab.id, tab.revision, tab.vim.motion_epoch(), tab.vim.mode))
+    }
+
+    pub(super) fn expire_vim_feedback(&mut self) {
+        let Some(feedback) = &self.vim_feedback else {
+            return;
+        };
+        let now = self.ctx.input(|input| input.time);
+        let expired =
+            now - feedback.shown_at >= 3.0 || feedback.context != self.vim_feedback_context();
+        if expired {
+            if self
+                .status
+                .as_ref()
+                .is_some_and(|(_, _, at)| *at == feedback.status_at)
+            {
+                self.status = None;
+            }
+            self.vim_feedback = None;
+        }
+    }
     pub(super) fn message_details_json(&self) -> Option<serde_json::Value> {
         self.status_details
             .as_ref()

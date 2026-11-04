@@ -48,6 +48,36 @@ Explicit Vim jumps queue their origins for `jump_list.rs`, so even short motions
 enter the pane's back/forward history. Mark and change-list commands require one
 cursor; the multicursor adapter consumes them with feedback.
 
+Uppercase mark positions stay with the Document; App's `vim_file_marks.rs` owns
+their window-wide identity and closed-file fallback. A pending global mark is an
+input barrier. Dot suspends its recipe until the authoritative same-Document
+target resolves, then completes the original operator/Insert transaction.
+
+`vim/registers.rs` shares immutable register payloads through `RegisterBank`.
+The app synchronizes that bank alongside the unnamed/yank registers across
+Documents, search and multicursor operations. Macro input metadata shares the
+same namespace; text writes invalidate it. Register selection is pane-local.
+Insert/Replace Ctrl+R consumes one literal register name before native typing
+continues; Escape cancels only that pending name.
+
+Replace is an Insert transaction with an explicit session carried in navigation.
+It consumes text, IME commits and editing keys before TextEdit, which remains
+read-only there. Backspace restores only still-owned replacement steps; cursor
+movement starts a new restoration/dot segment and cancels the R count.
+
+`vim_macros.rs` records source input and replays it through the existing native,
+Vim, search and Ex owners. It yields between events and waits on native input,
+definition requests and file-mark/load/location transitions. Failed commands,
+missing targets or user cancellation discard synthetic suffixes; actual typed
+input after an invocation remains ordered after playback. Modifier presses are
+not recorded, and synthetic key presses get matching releases. Macro history
+checkpoints collapse completed commands into one Undo step per Document; marks
+and dot recipes remain owned by the individual editing transactions. Recording,
+nesting and execution have explicit size/step bounds in the owner.
+Playback reuses the source continuation owner after external-state polling.
+Unexpected context changes cancel it without merging external edits into macro
+history, also when a text-register macro leaves a deferred Insert checkpoint.
+
 `VimState` owns document history; `VimNavigation` captures the pane-local modal
 and multicursor state. Finish an active Insert transaction before switching views, then restore
 navigation without replacing shared Undo/Redo. Counted insertion can change text

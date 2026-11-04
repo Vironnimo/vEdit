@@ -524,7 +524,7 @@ impl VEditApp {
                             );
                         }
                     }
-                    Err(error) => self.status(error, true),
+                    Err(error) => self.vim_input_status(error),
                 }
             }
             "set" => self.ex_set(argument),
@@ -576,7 +576,7 @@ impl VEditApp {
                     .tab()
                     .filter(|tab| !tab.loading && !tab.saving && tab.error.is_none())
                 else {
-                    self.status("Wait for the file to become editable", true);
+                    self.vim_input_status("Wait for the file to become editable");
                     return;
                 };
                 let visual = state
@@ -623,8 +623,8 @@ impl VEditApp {
                                 .substitute = Some(result.spec)
                         });
                     }
-                    Ok(None) => self.status(format!("Unknown command: {command}"), true),
-                    Err(error) => self.status(error, true),
+                    Ok(None) => self.vim_input_status(format!("Unknown command: {command}")),
+                    Err(error) => self.vim_input_status(error),
                 }
             }
         }
@@ -657,7 +657,7 @@ impl VEditApp {
                 "rnu" | "relativenumber" => settings.line_numbers = LineNumbers::Relative,
                 "nornu" | "norelativenumber" => settings.line_numbers = LineNumbers::Absolute,
                 _ => {
-                    self.status(format!("Unsupported option: {option}"), true);
+                    self.vim_input_status(format!("Unsupported option: {option}"));
                     return;
                 }
             }
@@ -738,6 +738,11 @@ impl VEditApp {
                     .extend(trailing)
             });
         }
+        self.ctx.input(|input| {
+            for event in &input.events {
+                self.vim_macros.record_event(event);
+            }
+        });
     }
 
     pub(super) fn finish_ex_command(&mut self) {

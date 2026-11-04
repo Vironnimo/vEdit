@@ -361,6 +361,7 @@ impl VEditApp {
         })
     }
     pub(super) fn perform_close(&mut self, action: CloseAction) {
+        self.refresh_vim_file_marks();
         if self.close_has_saving(action) {
             self.close_action = Some(action);
             return;
@@ -443,6 +444,7 @@ impl VEditApp {
         self.session_dirty = true;
     }
     pub(super) fn remove_closed_document(&mut self, id: u64) {
+        self.refresh_vim_file_marks();
         for project in &mut self.projects {
             if let Some(index) = project.tabs.iter().position(|tab| tab.id == id) {
                 let tab = project.tabs.remove(index);

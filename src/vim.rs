@@ -11,6 +11,10 @@ mod multicursor;
 mod navigation;
 mod operators;
 mod paste;
+mod registers;
+
+pub use registers::RegisterBank;
+mod replace;
 
 use geometry::{
     bracket_partner, change_word_end, char_boundary, char_to_byte, first_nonblank, is_bracket,
@@ -19,8 +23,10 @@ use geometry::{
     repeat_motion, row_for_cursor, text_object, word_backward, word_end, word_end_backward,
     word_forward,
 };
+pub use history::MacroHistory;
 use history::insert_delta;
 use paste::{repeated_text, surround_range};
+pub use registers::RegisterValue;
 
 const MAX_COUNT: usize = 9_999;
 const MAX_HISTORY: usize = 100;
@@ -52,6 +58,14 @@ pub enum VimKey {
     Increment,
     /// Vim's Ctrl+X: subtract the count from the number at or after the cursor.
     Decrement,
+    /// Native editing motions, used while replacing text.
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Delete,
 }
 
 /// Where the view should place the cursor line after zt, zz or zb.
@@ -86,6 +100,18 @@ pub struct Action {
     pub scroll: Option<ScrollAlign>,
     /// Short feedback for the status bar, e.g. for an unsupported command.
     pub message: Option<String>,
+}
+
+/// Window-owned file-mark identity is resolved outside the editing model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalMarkRequest {
+    Set(char),
+    Jump {
+        name: char,
+        linewise: bool,
+        keep_jumps: bool,
+        operator: bool,
+    },
 }
 
 /// Remap physical Vim navigation keys. Callers leave literal targets and
@@ -175,8 +201,11 @@ enum Pending {
         explicit: bool,
     },
     Replace(usize),
-    Register(usize),
-    RegisterPaste(usize),
+    Register {
+        count: usize,
+        explicit: bool,
+    },
+    InsertRegister,
     SurroundAdd(usize, usize),
     SurroundTarget {
         change: bool,
@@ -233,6 +262,7 @@ struct Snapshot {
     cursor: usize,
     multi: crate::multicursor::State,
     marks: [Option<usize>; 26],
+    global_marks: [Option<usize>; 26],
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +333,8 @@ pub struct VimNavigation {
     count: usize,
     preferred_column: Option<usize>,
     last_find: Option<Find>,
+    selected_register: Option<char>,
+    register_count: Option<(usize, bool)>,
     command_keys: Vec<VimKey>,
     surround_search: Option<SearchMotion>,
     motion_epoch: u64,
@@ -311,6 +343,7 @@ pub struct VimNavigation {
     block_columns: Option<(usize, usize)>,
     previous_context: Option<usize>,
     change_index: Option<usize>,
+    replace: Option<replace::Session>,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +355,12 @@ pub struct VimState {
     pub cursor: usize,
     register: Option<Yank>,
     yank_register: Option<Yank>,
+    register_bank: RegisterBank,
+    selected_register: Option<char>,
+    register_count: Option<(usize, bool)>,
+    collecting_registers: bool,
+    register_capture: Option<(Option<char>, bool, bool)>,
+    numbered_delete: bool,
     yanked_ranges: Vec<Range<usize>>,
     pending: Option<Pending>,
     count: usize,
@@ -337,6 +376,7 @@ pub struct VimState {
     command_keys: Vec<VimKey>,
     surround_search: Option<SearchMotion>,
     last_change: Option<RepeatChange>,
+    pending_global_repeat: Option<RepeatChange>,
     insert_replay: Option<InsertReplay>,
     replaying: bool,
     motion_epoch: u64,
@@ -346,15 +386,19 @@ pub struct VimState {
     block_insert: Option<block::BlockInsert>,
     /// Line break and indentation that separate the copies of a counted `o`.
     insert_line_prefix: Option<String>,
+    replace: Option<replace::Session>,
     /// Character range of the lines the view currently shows, for H/M/L.
     visible: Option<Range<usize>>,
     scroll_request: Option<ScrollAlign>,
     message: Option<String>,
     marks: marks::Marks,
+    global_mark_request: Option<GlobalMarkRequest>,
+    resolving_global_mark: bool,
     previous_context: Option<usize>,
     change_index: Option<usize>,
     jump_origins: Vec<usize>,
     external_edit: bool,
+    command_failed: bool,
 }
 
 impl Default for VimState {
@@ -366,6 +410,12 @@ impl Default for VimState {
             cursor: 0,
             register: None,
             yank_register: None,
+            register_bank: RegisterBank::default(),
+            selected_register: None,
+            register_count: None,
+            collecting_registers: false,
+            register_capture: None,
+            numbered_delete: false,
             yanked_ranges: Vec::new(),
             pending: None,
             count: 0,
@@ -381,6 +431,7 @@ impl Default for VimState {
             command_keys: Vec::new(),
             surround_search: None,
             last_change: None,
+            pending_global_repeat: None,
             insert_replay: None,
             replaying: false,
             motion_epoch: 0,
@@ -389,14 +440,18 @@ impl Default for VimState {
             block_columns: None,
             block_insert: None,
             insert_line_prefix: None,
+            replace: None,
             visible: None,
             scroll_request: None,
             message: None,
             marks: marks::Marks::default(),
+            global_mark_request: None,
+            resolving_global_mark: false,
             previous_context: None,
             change_index: None,
             jump_origins: Vec::new(),
             external_edit: false,
+            command_failed: false,
         }
     }
 }
@@ -412,6 +467,7 @@ impl VimState {
     }
 
     pub fn set_register(&mut self, yank: Yank) {
+        self.register_bank.set_text('"', yank.clone());
         self.register = Some(yank);
     }
 
@@ -420,6 +476,11 @@ impl VimState {
     }
 
     pub fn set_yank_register(&mut self, yank: Option<Yank>) {
+        if let Some(yank) = &yank {
+            self.register_bank.set_text('0', yank.clone());
+        } else {
+            self.register_bank.clear('0');
+        }
         self.yank_register = yank;
     }
 
@@ -439,6 +500,7 @@ impl VimState {
     }
 
     pub fn handle_key(&mut self, text: &mut String, key: VimKey) -> Action {
+        self.numbered_delete = false;
         self.notify_external_text_change(text);
         if self.multi.active() {
             return self.handle_multi_key(text, key);
@@ -454,7 +516,12 @@ impl VimState {
         }
         let old_cursor = self.cursor;
         let old_mode = self.mode;
+        let old_pending = self.pending;
         let old_count = self.count;
+        let replace_keys = (self.is_replacing() && key == VimKey::Escape)
+            .then(|| self.replace_change_keys())
+            .flatten();
+        let selecting_register = matches!(self.pending, Some(Pending::Register { .. }));
         let visual_change = self.visual_change_geometry(text).and_then(|visual| {
             let keys = match (self.pending, key) {
                 (Some(Pending::Replace(_)), VimKey::Char(_) | VimKey::Enter | VimKey::Tab) => {
@@ -479,24 +546,26 @@ impl VimState {
                 (Some(Pending::Go { operator: None, .. }), VimKey::Char('J')) => {
                     vec![VimKey::Char('g'), key]
                 }
-                (Some(Pending::RegisterPaste(prefix)), VimKey::Char('p' | 'P')) => {
-                    let count = prefix.saturating_mul(old_count.max(1)).min(MAX_COUNT);
-                    let mut keys: Vec<_> = count.to_string().chars().map(VimKey::Char).collect();
-                    keys.extend([VimKey::Char('"'), VimKey::Char('0'), key]);
-                    keys
-                }
                 (Some(Pending::SurroundAdd(..)), VimKey::Char(_)) => {
                     vec![VimKey::Char('S'), key]
                 }
                 _ => return None,
             };
+            let mut keys = keys;
+            if let Some(name) = self.selected_register {
+                keys.splice(0..0, [VimKey::Char('"'), VimKey::Char(name)]);
+            }
             Some((visual, keys))
         });
         let insert_changed = old_mode == VimMode::Insert
-            && self
+            && (self
                 .insert_origin
                 .as_ref()
-                .is_some_and(|origin| origin.text != *text);
+                .is_some_and(|origin| origin.text != *text)
+                || self
+                    .replace
+                    .as_ref()
+                    .is_some_and(|session| session.changed()));
         let inserted_delta = if old_mode == VimMode::Insert && key == VimKey::Escape {
             self.insert_replay
                 .as_ref()
@@ -525,7 +594,7 @@ impl VimState {
             self.sync_block_cursor(text, old_cursor);
         }
         self.clamp_cursor(text);
-        if yanked.is_some() && !text_changed {
+        if !self.yanked_ranges.is_empty() && !text_changed {
             self.remember_yank();
         }
         if !self.replaying {
@@ -544,7 +613,15 @@ impl VimState {
                     visual,
                 });
             } else if old_mode == VimMode::Insert && self.mode != VimMode::Insert {
-                if let Some(replay) = self.insert_replay.take()
+                if let Some(keys) = replace_keys.filter(|_| insert_changed || text_changed) {
+                    self.insert_replay = None;
+                    self.last_change = Some(RepeatChange {
+                        keys,
+                        insert: None,
+                        search: None,
+                        visual: None,
+                    });
+                } else if let Some(replay) = self.insert_replay.take()
                     && insert_changed
                 {
                     self.last_change = Some(RepeatChange {
@@ -569,9 +646,15 @@ impl VimState {
                     visual,
                 });
             }
-            if self.mode == VimMode::Normal && self.pending.is_none() && self.count == 0 {
+            if self.mode == VimMode::Normal
+                && self.pending.is_none()
+                && self.count == 0
+                && !selecting_register
+            {
                 self.command_keys.clear();
                 self.surround_search = None;
+                self.selected_register = None;
+                self.register_count = None;
             }
         }
         if self.cursor != old_cursor
@@ -609,6 +692,34 @@ impl VimState {
             || key == VimKey::Char('0') && old_count == 0
         {
             self.motion_epoch = self.motion_epoch.wrapping_add(1);
+        }
+        let targeted_motion = matches!(old_pending, Some(Pending::Find { .. }))
+            || old_pending.is_none()
+                && matches!(
+                    key,
+                    VimKey::Char(
+                        'h' | 'j'
+                            | 'k'
+                            | 'l'
+                            | 'w'
+                            | 'W'
+                            | 'b'
+                            | 'B'
+                            | 'e'
+                            | 'E'
+                            | '%'
+                            | ';'
+                            | ','
+                            | '{'
+                            | '}'
+                    )
+                );
+        if old_mode != VimMode::Insert
+            && targeted_motion
+            && self.cursor == old_cursor
+            && !text_changed
+        {
+            self.command_failed = true;
         }
         Action {
             consumed,

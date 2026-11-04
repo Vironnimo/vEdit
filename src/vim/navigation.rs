@@ -51,6 +51,9 @@ impl VimNavigation {
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.previous_context = navigation.previous_context.map(&map);
+        if let Some(replace) = navigation.replace.as_mut() {
+            replace.remap(&map);
+        }
         navigation.multi.remap(&map);
         for cursor in &mut navigation.multi_cursors {
             cursor.remap(&map);
@@ -71,6 +74,9 @@ impl VimNavigation {
         navigation.cursor = map(navigation.cursor);
         navigation.visual_anchor = navigation.visual_anchor.map(&map);
         navigation.previous_context = navigation.previous_context.map(&map);
+        if let Some(replace) = navigation.replace.as_mut() {
+            replace.remap(&map);
+        }
         navigation.preferred_column = None;
         navigation.multi.remap(&map);
         for cursor in &mut navigation.multi_cursors {
@@ -93,6 +99,8 @@ impl VimState {
             count: self.count,
             preferred_column: self.preferred_column,
             last_find: self.last_find,
+            selected_register: self.selected_register,
+            register_count: self.register_count,
             command_keys: self.command_keys.clone(),
             surround_search: self.surround_search.clone(),
             motion_epoch: self.motion_epoch,
@@ -101,6 +109,7 @@ impl VimState {
             block_columns: self.block_columns,
             previous_context: self.previous_context,
             change_index: self.change_index,
+            replace: self.replace.clone(),
         }
     }
 
@@ -118,6 +127,8 @@ impl VimState {
         self.count = navigation.count.min(MAX_COUNT);
         self.preferred_column = navigation.preferred_column;
         self.last_find = navigation.last_find;
+        self.selected_register = navigation.selected_register;
+        self.register_count = navigation.register_count;
         self.command_keys.clone_from(&navigation.command_keys);
         self.surround_search.clone_from(&navigation.surround_search);
         self.motion_epoch = navigation.motion_epoch;
@@ -126,11 +137,12 @@ impl VimState {
         self.block_columns = navigation.block_columns;
         self.previous_context = navigation.previous_context;
         self.change_index = navigation.change_index;
+        self.replace = navigation.replace.clone();
         if self.mode == VimMode::Insert && self.insert_origin.is_none() {
             self.insert_origin = Some(self.snapshot(text));
             self.insert_count = 1;
             self.insert_replay = Some(InsertReplay {
-                keys: vec![VimKey::Char('i')],
+                keys: vec![VimKey::Char(if self.replace.is_some() { 'R' } else { 'i' })],
                 baseline: text.to_owned(),
                 cursor: self.cursor,
                 search: None,
@@ -186,6 +198,7 @@ impl VimState {
         linewise: bool,
     ) {
         if self.mode == VimMode::Insert {
+            self.break_replace_restoration();
             self.motion_epoch = self.motion_epoch.wrapping_add(1);
             self.cursor = primary.min(text.chars().count());
             self.visual_anchor = None;
@@ -203,6 +216,9 @@ impl VimState {
     }
 
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
+        if self.cursor != cursor {
+            self.break_replace_restoration();
+        }
         self.multi.clear();
         self.multi_cursors.clear();
         self.motion_epoch = self.motion_epoch.wrapping_add(1);
@@ -216,6 +232,8 @@ impl VimState {
         self.preferred_column = None;
         self.pending = None;
         self.count = 0;
+        self.selected_register = None;
+        self.register_count = None;
         if self.mode != VimMode::Insert {
             self.command_keys.clear();
         }

@@ -69,6 +69,11 @@ mod source_editor;
 mod task_controls;
 #[path = "vim_input.rs"]
 mod vim_input;
+#[cfg(test)]
+#[path = "vim_macro_tests.rs"]
+mod vim_macro_tests;
+#[path = "vim_macros.rs"]
+mod vim_macros;
 #[path = "workspace_shortcuts.rs"]
 mod workspace_shortcuts;
 
@@ -175,6 +180,13 @@ mod status_messages;
 mod tab_drag;
 #[path = "task_output_ui.rs"]
 mod task_output_ui;
+#[cfg(test)]
+#[path = "vim_discovery_tests.rs"]
+mod vim_discovery_tests;
+#[path = "vim_file_marks.rs"]
+mod vim_file_marks;
+#[path = "vim_ui.rs"]
+mod vim_ui;
 #[path = "workspace_ui.rs"]
 mod workspace_ui;
 
@@ -223,6 +235,8 @@ pub struct VEditApp {
     ctx: egui::Context,
     status: Option<(String, bool, Instant)>,
     status_details: Option<status_messages::Details>,
+    vim_feedback: Option<status_messages::VimFeedback>,
+    vim_ui: vim_ui::State,
     palette: Option<Palette>,
     palette_query: String,
     palette_selected: usize,
@@ -292,6 +306,8 @@ pub struct VEditApp {
     task_output_cache: task_output_ui::TaskOutputCache,
     register: Option<Yank>,
     yank_register: Option<Yank>,
+    vim_macros: vim_macros::State,
+    vim_registers: crate::vim::RegisterBank,
     editor_focused: bool,
     editor_rect: Option<egui::Rect>,
     editor_cursor_rect: Option<egui::Rect>,
@@ -310,6 +326,7 @@ pub struct VEditApp {
     file_watching: bool,
     /// A back/forward destination waiting for its document to load.
     pending_jump: Option<(u64, jump_list::Jump)>,
+    vim_file_marks: vim_file_marks::FileMarks,
     /// The latest clicked output location; older resolutions are dropped.
     output_link_request: u64,
     /// The next observed move comes from back/forward and is not recorded.
@@ -438,6 +455,8 @@ impl VEditApp {
             ctx,
             status: None,
             status_details: None,
+            vim_feedback: None,
+            vim_ui: Default::default(),
             palette: None,
             palette_query: String::new(),
             palette_selected: 0,
@@ -500,6 +519,8 @@ impl VEditApp {
             task_output_cache: task_output_ui::TaskOutputCache::default(),
             register: None,
             yank_register: None,
+            vim_macros: Default::default(),
+            vim_registers: crate::vim::RegisterBank::default(),
             editor_focused: false,
             editor_rect: None,
             editor_cursor_rect: None,
@@ -516,6 +537,7 @@ impl VEditApp {
             intel: Default::default(),
             file_watching: !cfg!(test),
             pending_jump: None,
+            vim_file_marks: Default::default(),
             output_link_request: 0,
             jump_navigating: false,
             problem_cache: Default::default(),
@@ -576,6 +598,7 @@ impl VEditApp {
             .find(|t| t.id == id)
     }
     fn status(&mut self, text: impl Into<String>, error: bool) {
+        self.vim_feedback = None;
         self.status = Some((text.into(), error, Instant::now()));
     }
 }
@@ -608,6 +631,7 @@ impl VEditApp {
         self.apply_pending_agent_locations();
         self.apply_pending_jump();
         self.poll_languages();
+        self.prepare_vim_macros();
         self.resume_region_input();
         self.focus_pane_from_pointer();
         // Editing buffers use LF; Windows clipboard text commonly uses CRLF.
@@ -695,7 +719,7 @@ impl VEditApp {
             && self.palette.is_none()
             && self.picker.is_none()
             && !self.settings_open
-            && self.status_details.is_none()
+            && (self.status_details.is_none() && !self.vim_reference_open())
             && !self.agent_marks_modal_open()
             && self.close_action.is_none()
             && self.save_as.is_none()
@@ -712,6 +736,7 @@ impl VEditApp {
         }
         self.intel.begin_frame();
         self.editor_ui(ui);
+        self.vim_command_hints_ui();
         self.finish_workspace_action();
         self.finish_region_render_owner();
         self.finish_region_focus();
@@ -719,6 +744,7 @@ impl VEditApp {
         self.agent_marks_dialog();
         self.notifications_toast();
         self.status_details_ui();
+        self.vim_reference_ui();
         self.sync_agent_marks();
         self.navigation_ui();
         self.completion_ui();
@@ -731,6 +757,7 @@ impl VEditApp {
         self.watch_disk();
         self.paint_file_drop();
         self.observe_navigation();
+        self.finish_vim_macros();
         if !self.projects.is_empty() {
             self.ctx.request_repaint_after(Duration::from_secs(2));
         }

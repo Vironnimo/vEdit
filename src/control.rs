@@ -762,7 +762,9 @@ impl VEditApp {
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
     pub(super) fn control_dialog(&self) -> Option<&'static str> {
-        if self.status_details.is_some() {
+        if self.vim_reference_open() {
+            Some("vim_commands")
+        } else if self.status_details.is_some() {
             Some("message_details")
         } else if self.close_action.is_some() {
             Some("confirm_close")

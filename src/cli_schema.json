@@ -213,6 +213,7 @@
       "patch": {
         "vim": true,
         "swap_jk": false,
+        "vim_command_hints": true,
         "autosave": true,
         "font_size": 14.0,
         "ui_scale": 1.0,
@@ -637,6 +638,7 @@
     "language_indent_with_tabs": "Map of language IDs to booleans, true for tabs and false for spaces. Supplied map replaces all style overrides; {} clears them. Omitted/null preserves them. Defaults: Go tabs, explicit space style for languages with built-in width defaults. Same ID limits as language_indent_widths.",
     "smooth_scroll": "false by default; input key scrolling works with either setting",
     "swap_jk": "false by default. true exchanges physical j/k navigation in Normal/Visual Vim commands (including counts/operators), Explorer navigation and Markdown scrolling. Inserted text, literal f/t/r targets, arrows and page motions remain unchanged. CLI shortcut: settings swap-jk true|false.",
+    "vim_command_hints": "Show continuation hints for unfinished Vim commands. true by default; false hides the hints and keeps the command reference available.",
     "search_excludes": "Persistent list of gitignore-style folder/glob rules, shared by GUI and CLI project search. Trimmed, blank entries removed, duplicates collapsed and Windows separators normalized to /. Literal leading # is supported; ! negation and malformed globs are refused before any patch field changes. Maximum 128 input rules, 1024 bytes per rule, 16 KiB total. [] removes optional filters; omitted/null preserves the current list. Changing filters cancels stale GUI search results and reruns its current query.",
     "leader_key": "One printable Unicode character, including a literal space. Aliases space/comma/backslash are accepted and normalized to that character. CLI shortcut: settings leader-key space|comma|backslash|CHAR. Applied settings return the actual character."
   },

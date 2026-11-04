@@ -13,6 +13,9 @@ preserving the document's edit history and each pane's navigation.
   The public owner remains `vim`; it does not own pane placement or app commands.
   `src/vim/marks.rs` owns document marks and change locations; jump context and
   the change-list index travel with `VimNavigation`, not document history.
+  `src/vim/registers.rs` owns session-shared register payloads; `replace.rs` runs
+  Replace through the Insert transaction. App's `src/vim_macros.rs` replays input
+  through existing owners, and `src/vim_ui.rs` owns command discovery.
 - `src/multicursor.rs` owns directed selection sets and simultaneous text edits;
   `src/multicursor_ui.rs` owns their input, pointer/layout integration, preferences
   and application transactions. `src/vim/multicursor.rs` runs modal commands

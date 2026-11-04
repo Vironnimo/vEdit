@@ -11,6 +11,7 @@ pub(super) struct CompletionPopup {
 
 impl VEditApp {
     pub(super) fn poll_languages(&mut self) {
+        self.validate_vim_macro_owner();
         if let Some((request, revision, cursor, widget)) = self.definition_origin
             && self
                 .definition_request
@@ -21,6 +22,7 @@ impl VEditApp {
                     || self.document_widget_id(tab.id) != widget
             })
         {
+            self.complete_vim_macro_definition(request, false);
             self.definition_request = None;
             self.definition_origin = None;
             if self
@@ -83,6 +85,7 @@ impl VEditApp {
                             .definition_request
                             .is_some_and(|(id, _)| id == request_id)
                         {
+                            self.complete_vim_macro_definition(request_id, false);
                             self.definition_request = None;
                             if self
                                 .status
@@ -202,6 +205,7 @@ impl VEditApp {
                                 character: column,
                             },
                         );
+                        self.complete_vim_macro_definition(request_id, true);
                     }
                 }
                 crate::lsp::LspEvent::DefinitionNotFound { request_id } => {
@@ -213,6 +217,7 @@ impl VEditApp {
                         })
                     {
                         self.language_response_succeeded(index, &language);
+                        self.complete_vim_macro_definition(request_id, false);
                         self.definition_request = None;
                         self.status("No definition found here", false);
                     }
@@ -428,7 +433,7 @@ impl VEditApp {
         if self.palette.is_some()
             || self.picker.is_some()
             || self.settings_open
-            || self.status_details.is_some()
+            || (self.status_details.is_some() || self.vim_reference_open())
             || self.agent_marks_modal_open()
             || self.save_as.is_some()
             || self.close_action.is_some()

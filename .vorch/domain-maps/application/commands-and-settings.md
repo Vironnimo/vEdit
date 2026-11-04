@@ -93,6 +93,17 @@ read-only modal supports selection and copying, suppresses source input and
 restores the prior focus when closed. `src/status_message_tests.rs` covers this
 behavior; `control.md` describes the observation/mutation boundary.
 
+Vim command feedback uses `vim_input_status`, expires after three seconds or a
+changed editing context, and keeps an already-open Details snapshot intact.
+Generic `status` calls clear that transient category so durable failures are not
+silently expired. The controlled egui-clock status regression owns this contract.
+
+`src/vim_ui.rs` owns the searchable command reference and delayed continuation
+hints. The reference is a user dialog and participates in existing input/control
+gates; closing it restores the source or Settings focus. Hints remain passive,
+source-focused and bounded to the editor bottom. `vim_command_hints` defaults to
+true and persists through the same Settings/CLI patch boundary as other options.
+
 `src/notifications.rs` owns the inbox, its Messages sidebar view, the arrival
 cards and taskbar attention throttling. `Session` persists messages, IDs, repeat
 counts, read state and the time a message was first seen through the existing

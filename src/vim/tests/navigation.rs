@@ -478,7 +478,6 @@ fn unsupported_commands_consume_their_argument_and_report_it() {
     for (command, message) in [
         ("qa", "q"),
         ("@a", "@"),
-        ("R", "R"),
         ("ZZ", "Z"),
         ("zf", "zf"),
         ("gq", "gq"),

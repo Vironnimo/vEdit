@@ -1,6 +1,135 @@
 use super::*;
 
 #[test]
+fn replace_mode_overwrites_extends_and_restores_with_backspace() {
+    for (initial, command, expected) in [
+        ("abcdef\nlast", "RXY\u{1b}", "XYcdef\nlast"),
+        ("α🦀c\r\nlast", "R中🙂XYZ\u{1b}", "中🙂XYZ\r\nlast"),
+        ("abcdef\nlast", "RXY\nZ\u{1b}", "XY\nZdef\nlast"),
+        ("abc\r\nlast", "RXY\nZ\u{1b}", "XY\r\nZ\r\nlast"),
+    ] {
+        let (mut text, _, mut state) = run(initial, 0, command);
+        assert_eq!(text, expected, "{command}");
+        assert!(!state.is_replacing());
+        keys(&mut state, &mut text, "u");
+        assert_eq!(text, initial);
+        state.handle_key(&mut text, VimKey::Redo);
+        assert_eq!(text, expected);
+    }
+    let (mut text, _, mut state) = run("α🦀c\r\nlast", 0, "R");
+    state.insert_text(&mut text, "中🙂XYZ");
+    for _ in 0..5 {
+        state.handle_key(&mut text, VimKey::Backspace);
+    }
+    assert_eq!(text, "α🦀c\r\nlast");
+    assert_eq!(state.cursor, 0);
+    assert!(state.is_replacing());
+    state.insert_text(&mut text, "X\nZ");
+    state.handle_key(&mut text, VimKey::Backspace);
+    state.handle_key(&mut text, VimKey::Backspace);
+    assert_eq!(text, "X🦀c\r\nlast");
+    state.handle_key(&mut text, VimKey::Right);
+    state.handle_key(&mut text, VimKey::Backspace);
+    assert_eq!(text, "X🦀c\r\nlast", "moving ends Backspace restoration");
+    state.finish_insert(&mut text);
+}
+
+#[test]
+fn replace_mode_formats_keyboard_indentation_and_keeps_payloads_literal() {
+    for (width, tabs, original, at, expected) in [
+        (2, false, "abcdef", 1, "a cdef"),
+        (4, false, "abcdef", 1, "a   ef"),
+        (8, true, "abcdef", 1, "a\tcdef"),
+        (4, false, "a\tbcdef", 2, "a\t    f"),
+    ] {
+        let mut state = VimState::new();
+        let mut text = original.to_owned();
+        state.set_indentation(width, tabs);
+        state.set_cursor(&text, at);
+        keys(&mut state, &mut text, "R");
+        state.handle_key(&mut text, VimKey::Tab);
+        assert_eq!(text, expected, "Tab width {width}, tabs {tabs}");
+        state.handle_key(&mut text, VimKey::Backspace);
+        assert_eq!(text, original, "Backspace restores the replaced Tab span");
+        state.finish_insert(&mut text);
+    }
+    for (width, tabs, original, at, expected) in [
+        (2, false, "  {}", 3, "  {\n    \n  }"),
+        (4, true, "\t{}", 2, "\t{\n\t\t\n\t}"),
+        (2, false, "  {  }\r\n", 3, "  {\r\n    \r\n  }\r\n"),
+    ] {
+        let mut state = VimState::new();
+        let mut text = original.to_owned();
+        state.set_indentation(width, tabs);
+        state.set_cursor(&text, at);
+        keys(&mut state, &mut text, "R");
+        state.handle_key(&mut text, VimKey::Enter);
+        assert_eq!(text, expected, "Enter width {width}, tabs {tabs}");
+        state.handle_key(&mut text, VimKey::Backspace);
+        assert_eq!(
+            text, original,
+            "Backspace restores newline, indent and closing-delimiter layout"
+        );
+        state.finish_insert(&mut text);
+    }
+    let (mut text, _, mut state) = run("{}\n{}", 1, "R\n\u{1b}");
+    let target = text.rfind('{').unwrap() + 1;
+    state.set_cursor(&text, target);
+    keys(&mut state, &mut text, ".");
+    assert_eq!(
+        text, "{\n    \n}\n{\n    \n}",
+        "dot re-evaluates typed Enter at the new location"
+    );
+
+    let (mut text, _, mut state) = run("{x\n}\n{x\n}", 1, "R");
+    state.insert_text(&mut text, "\n\tX");
+    state.finish_insert(&mut text);
+    assert_eq!(text, "{\n\tX\n}\n{x\n}");
+    let target = text.rfind('{').unwrap() + 1;
+    state.set_cursor(&text, target);
+    keys(&mut state, &mut text, ".");
+    assert_eq!(
+        text, "{\n\tX\n}\n{\n\tX\n}",
+        "dot keeps pasted Tab/newline literal"
+    );
+
+    let (mut text, _, mut state) = run("abcdef\nuvwxyz", 1, "2R");
+    state.handle_key(&mut text, VimKey::Tab);
+    state.finish_insert(&mut text);
+    assert_eq!(
+        text, "a       \nuvwxyz",
+        "counted R regenerates each configured tab stop"
+    );
+}
+
+#[test]
+fn replace_mode_counts_dot_and_windows_history_keep_replacement_semantics() {
+    let (mut moved, _, mut moving) = run("abcdefghij", 0, "3RXY");
+    moving.handle_key(&mut moved, VimKey::Left);
+    keys(&mut moving, &mut moved, "Z\u{1b}4l.");
+    assert_eq!(
+        moved, "XZcdeZghij",
+        "arrows cancel R's count and start a new dot segment"
+    );
+    let (mut text, _, mut state) = run("abcdef\nuvwxyz", 0, "3RXY\u{1b}j0.");
+    assert_eq!(text, "XYXYXY\nXYXYXY");
+    keys(&mut state, &mut text, "u0\u{1b}2.");
+    assert_eq!(text, "XYXYXY\nXYXYyz");
+    keys(&mut state, &mut text, "u");
+    assert_eq!(text, "XYXYXY\nuvwxyz");
+    keys(&mut state, &mut text, "R中");
+    state.history_edit(&mut text, false);
+    assert_eq!(text, "XYXYXY\nuvwxyz");
+    assert!(state.is_replacing());
+    state.history_edit(&mut text, true);
+    assert_eq!(text, "XYXYXY\n中vwxyz");
+    assert!(state.is_replacing());
+    state.insert_text(&mut text, "Z");
+    state.finish_insert(&mut text);
+    assert_eq!(text, "XYXYXY\n中Zwxyz");
+}
+
+#[test]
 fn insert_replay_delta_retains_scalar_boundaries_and_cursor_limited_prefix() {
     for (before, after, cursor, start, removed, inserted) in [
         ("α🦀\r\nβ", "α中\r\nβ", 1, 0, 1, "中"),

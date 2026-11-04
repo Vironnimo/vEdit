@@ -830,6 +830,9 @@ fn apply_settings_patch(settings: &mut Settings, patch: &SettingsPatch) {
     if let Some(value) = patch.swap_jk {
         settings.swap_jk = value;
     }
+    if let Some(value) = patch.vim_command_hints {
+        settings.vim_command_hints = value;
+    }
     if let Some(value) = &patch.search_excludes {
         // The entire patch was validated before any preference could change.
         settings.search_excludes =
@@ -1597,6 +1600,7 @@ mod tests {
                 word_wrap: Some(true),
                 smooth_scroll: Some(true),
                 swap_jk: Some(true),
+                vim_command_hints: Some(false),
                 ui_scale: Some(1.25),
                 font_size: Some(28.0),
                 line_height: Some(1.7),
@@ -1620,6 +1624,8 @@ mod tests {
         assert!(app.settings.word_wrap);
         assert!(app.settings.smooth_scroll);
         assert!(app.settings.swap_jk);
+        assert!(!app.settings.vim_command_hints);
+        assert_eq!(response.result["settings"]["vim_command_hints"], false);
         assert_eq!(app.settings.search_excludes, ["generated", "src/cache"]);
         assert_eq!(
             response.result["settings"]["vim_keys"],
@@ -1662,6 +1668,7 @@ mod tests {
         assert_eq!(saved.autosave_delay_ms, 1500);
         assert!(saved.show_ignored_files);
         assert!(saved.word_wrap && saved.swap_jk);
+        assert!(!saved.vim_command_hints);
         assert_eq!(saved.search_excludes, ["generated", "src/cache"]);
         assert_eq!(
             serde_json::to_value(saved.vim_keys).unwrap(),

@@ -9,7 +9,8 @@ impl VimState {
             self.pending,
             Some(
                 Pending::Replace(_)
-                    | Pending::Register(_)
+                    | Pending::Register { .. }
+                    | Pending::InsertRegister
                     | Pending::SurroundAdd(..)
                     | Pending::SurroundTarget { .. }
                     | Pending::SurroundChange { .. }
@@ -25,9 +26,15 @@ impl VimState {
 
     /// Cancel an unfinished operator/count without leaving a visual selection.
     pub fn cancel_pending_command(&mut self) {
+        self.pending_global_repeat = None;
         self.clear_command();
+        self.selected_register = None;
+        self.register_count = None;
         self.command_keys.clear();
         self.surround_search = None;
+        for cursor in &mut self.multi_cursors {
+            cursor.cancel_pending_command();
+        }
     }
 
     /// Consume a search count while retaining a waiting operator. Search
@@ -110,8 +117,8 @@ impl VimState {
                 operator.map(|op| op.command()).unwrap_or_default()
             ),
             Some(Pending::Replace(count)) => format!("{}r", prefix(count)),
-            Some(Pending::Register(count)) => format!("{}\"", prefix(count)),
-            Some(Pending::RegisterPaste(count)) => format!("{}\"0", prefix(count)),
+            Some(Pending::Register { count, .. }) => format!("{}\"", prefix(count)),
+            Some(Pending::InsertRegister) => "^R".into(),
             Some(Pending::SurroundAdd(..)) => self
                 .command_keys
                 .iter()
@@ -174,6 +181,17 @@ impl VimState {
         };
         if self.count > 0 {
             command.push_str(&self.count.to_string());
+        }
+        if let Some(name) = self.selected_register {
+            command.insert_str(
+                0,
+                &format!(
+                    "{}\"{name}",
+                    self.register_count
+                        .filter(|(_, explicit)| *explicit)
+                        .map_or_else(String::new, |(count, _)| count.to_string())
+                ),
+            );
         }
         command
     }
@@ -287,13 +305,20 @@ impl VimState {
                 None,
             );
         }
-        if let Some(Pending::Register(count)) = self.pending {
-            self.pending = if key == VimKey::Char('0') {
-                Some(Pending::RegisterPaste(count))
+        if let Some(Pending::Register { count, explicit }) = self.pending {
+            self.pending = None;
+            if let VimKey::Char(name) = key
+                && Self::valid_register(name)
+            {
+                self.selected_register = Some(name);
+                self.register_count = Some((count, explicit));
+                self.count = 0;
             } else {
-                None
-            };
-            self.count = 0;
+                self.selected_register = None;
+                self.register_count = None;
+                self.count = 0;
+                self.message = Some("Invalid Vim register".into());
+            }
             return (true, false, None);
         }
         if let Some(Pending::SurroundAdd(start, end)) = self.pending {
@@ -457,7 +482,7 @@ impl VimState {
                 .min(MAX_COUNT);
             return (true, false, None);
         }
-        let explicit = self.count > 0;
+        let explicit = self.count > 0 || self.register_count.is_some_and(|(_, explicit)| explicit);
         let count = self.take_count();
         let chars: Vec<char> = text.chars().collect();
         if let Some(pending) = self.pending.take() {
@@ -672,25 +697,9 @@ impl VimState {
                         explicit || explicit_prefix,
                     );
                 }
-                Pending::RegisterPaste(prefix) => {
-                    if !matches!(ch, 'p' | 'P') {
-                        return (true, false, None);
-                    }
-                    let count = prefix.saturating_mul(count).min(MAX_COUNT);
-                    let register = self.register.take();
-                    self.register = self.yank_register.clone();
-                    let result = if self.mode == VimMode::Normal {
-                        (true, self.paste(text, ch == 'P', count), None)
-                    } else {
-                        self.paste_visual(text, count, ch == 'P')
-                    };
-                    if result.2.is_none() {
-                        self.register = register;
-                    }
-                    return result;
-                }
                 Pending::Replace(_)
-                | Pending::Register(_)
+                | Pending::Register { .. }
+                | Pending::InsertRegister
                 | Pending::SurroundAdd(..)
                 | Pending::SurroundTarget { .. }
                 | Pending::SurroundChange { .. }
@@ -713,7 +722,7 @@ impl VimState {
                 'y' | 'd' | 'x' | 'c' | 's' | '>' | '<' | 'u' | 'U' | '~' => {
                     return self.apply_visual(text, ch, count);
                 }
-                'p' | 'P' => return self.paste_visual(text, count, ch == 'P'),
+                'p' | 'P' => return self.paste_selected_register(text, ch == 'P', count),
                 'I' | 'A' if self.mode == VimMode::VisualBlock => {
                     return self.apply_block(text, ch, count);
                 }
@@ -766,6 +775,10 @@ impl VimState {
         }
 
         match ch {
+            'R' if self.mode == VimMode::Normal => {
+                self.start_replace(text, count);
+                (true, false, None)
+            }
             'm' => {
                 self.pending = Some(Pending::SetMark);
                 (true, false, None)
@@ -779,7 +792,7 @@ impl VimState {
                 (true, false, None)
             }
             '"' => {
-                self.pending = Some(Pending::Register(count));
+                self.pending = Some(Pending::Register { count, explicit });
                 (true, false, None)
             }
             '.' if self.mode == VimMode::Normal => self.repeat_change(text, count, explicit),
@@ -919,7 +932,7 @@ impl VimState {
                 result
             }
             'p' | 'P' if self.mode == VimMode::Normal => {
-                (true, self.paste(text, ch == 'P', count), None)
+                self.paste_selected_register(text, ch == 'P', count)
             }
             'r' => {
                 self.pending = Some(Pending::Replace(count));
@@ -965,6 +978,7 @@ impl VimState {
     }
 
     pub(super) fn unsupported(&mut self, command: &str) {
+        self.command_failed = true;
         self.message = Some(format!("Not supported in vEdit: {command}"));
     }
 
@@ -972,6 +986,8 @@ impl VimState {
         let count = self.count.max(1);
         self.count = 0;
         count
+            .saturating_mul(self.register_count.take().map_or(1, |(count, _)| count))
+            .min(MAX_COUNT)
     }
 
     pub(super) fn clear_command(&mut self) {

@@ -50,7 +50,11 @@ fn settle(app: &mut VEditApp) {
         app.apply_pending_location();
         app.apply_pending_jump();
         let loading = app.projects[0].tabs.iter().any(|tab| tab.loading);
-        if !loading && app.pending_location.is_none() && app.pending_jump.is_none() {
+        if !loading
+            && app.pending_location.is_none()
+            && app.pending_jump.is_none()
+            && !app.vim_file_mark_pending()
+        {
             break;
         }
         assert!(
@@ -97,6 +101,166 @@ fn move_to_line(app: &mut VEditApp, line: usize) {
         .sum();
     tab.set_cursor(offset..offset);
     app.observe_navigation();
+}
+
+fn vim_file_mark_keys(app: &mut VEditApp, command: &str) {
+    for ch in command.chars() {
+        let request = {
+            let tab = app.tab_mut().unwrap();
+            let key = if ch == '\u{1b}' {
+                crate::vim::VimKey::Escape
+            } else {
+                crate::vim::VimKey::Char(ch)
+            };
+            let action = tab.vim.handle_key(&mut tab.text, key);
+            if action.text_changed {
+                tab.changed();
+            }
+            tab.vim.take_global_mark_request()
+        };
+        if let Some(request) = request {
+            app.handle_vim_file_mark(request, Vec::new());
+        }
+    }
+}
+
+#[test]
+fn uppercase_vim_marks_follow_edits_and_reopen_files_with_safe_operator_scope() {
+    let fixture = Fixture::new();
+    let root = fixture.0.clone();
+    let mut app = app(&root);
+    app.open_file(root.join("a.rs"));
+    settle(&mut app);
+    vim_file_mark_keys(&mut app, "3G2lmA");
+    let a = app.tab().unwrap().id;
+    vim_file_mark_keys(&mut app, "ggOnew\u{1b}`A");
+    assert_eq!(location(&app), ("a.rs".into(), 4, 3));
+    vim_file_mark_keys(&mut app, "u`A");
+    assert_eq!(location(&app), ("a.rs".into(), 3, 3));
+    app.open_file(root.join("b.rs"));
+    settle(&mut app);
+    let b = app.tab().unwrap().id;
+    let original = app.tab().unwrap().text.clone();
+    vim_file_mark_keys(&mut app, "d'A");
+    assert_eq!(app.tab().unwrap().id, b);
+    assert_eq!(app.tab().unwrap().text, original);
+    vim_file_mark_keys(&mut app, "'A");
+    settle(&mut app);
+    assert_eq!(location(&app), ("a.rs".into(), 3, 1));
+    vim_file_mark_keys(&mut app, "`A");
+    assert_eq!(location(&app), ("a.rs".into(), 3, 3));
+    vim_file_mark_keys(&mut app, "ggd'A");
+    assert!(app.tab().unwrap().text.starts_with("a line 4\n"));
+    vim_file_mark_keys(&mut app, "u`A");
+    assert_eq!(location(&app), ("a.rs".into(), 3, 3));
+    app.request_close(CloseAction::Tab(a));
+    settle(&mut app);
+    assert_eq!(app.tab().unwrap().id, b);
+    vim_file_mark_keys(&mut app, "`A");
+    settle(&mut app);
+    assert_eq!(location(&app), ("a.rs".into(), 3, 3));
+    assert_ne!(
+        app.tab().unwrap().id,
+        a,
+        "closed file gets a new Document identity"
+    );
+    vim_file_mark_keys(&mut app, "4GmA");
+    app.open_file(root.join("b.rs"));
+    settle(&mut app);
+    vim_file_mark_keys(&mut app, "2GmA");
+    app.open_file(root.join("a.rs"));
+    settle(&mut app);
+    vim_file_mark_keys(&mut app, "'A");
+    settle(&mut app);
+    assert_eq!(
+        location(&app),
+        ("b.rs".into(), 2, 1),
+        "uppercase names are unique across Documents"
+    );
+    let before = (location(&app), app.tab().unwrap().text.clone());
+    vim_file_mark_keys(&mut app, "'Z");
+    assert_eq!((location(&app), app.tab().unwrap().text.clone()), before);
+    assert!(app.tab().unwrap().vim.pending_command().is_empty());
+    for operator in ["d", "c"] {
+        let mut results = Vec::new();
+        for name in ['a', 'A'] {
+            app.new_file();
+            let tab = app.tab_mut().unwrap();
+            tab.text = "abcdefghij".into();
+            tab.saved_text = tab.text.clone();
+            tab.set_cursor(0..0);
+            let insert = if operator == "c" { "xy\u{1b}" } else { "" };
+            vim_file_mark_keys(&mut app, &format!("5lm{name}0{operator}`{name}{insert}."));
+            assert_eq!(
+                app.tab().unwrap().vim.mode,
+                VimMode::Normal,
+                "{operator} to {name} followed by dot"
+            );
+            results.push(app.tab().unwrap().text.clone());
+        }
+        assert_eq!(
+            results[0], results[1],
+            "uppercase mark dot repeat follows the same operator contract as local marks: {operator}"
+        );
+    }
+}
+
+#[test]
+fn uppercase_vim_mark_jump_defers_batched_typing_to_the_destination_document() {
+    let fixture = Fixture::new();
+    let root = fixture.0.clone();
+    let mut app = app(&root);
+    app.settings.vim = true;
+    app.settings.smooth_scroll = false;
+    app.sidebar_visible = false;
+    app.open_file(root.join("a.rs"));
+    settle(&mut app);
+    vim_file_mark_keys(&mut app, "2G2lmA");
+    let a = app.tab().unwrap().id;
+    app.open_file(root.join("b.rs"));
+    settle(&mut app);
+    let b = app.tab().unwrap().id;
+    let original_b = app.tab().unwrap().text.clone();
+    let mut screen = egui_kittest::Harness::builder()
+        .with_size([900.0, 600.0])
+        .with_os(egui::os::OperatingSystem::Windows)
+        .build_ui_state(
+            |ui, app: &mut VEditApp| {
+                app.ctx = ui.ctx().clone();
+                app.poll();
+                app.shortcuts();
+                app.handle_vim();
+                app.apply_pending_jump();
+                app.editor_ui(ui);
+                app.observe_navigation();
+            },
+            app,
+        );
+    screen.run_steps(3);
+    screen.input_mut().events.extend([
+        egui::Event::Text("`AiX".into()),
+        egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    screen.run_steps(12);
+    assert_eq!(screen.state().tab().unwrap().id, a);
+    assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+    assert!(screen.state().tab().unwrap().text.contains("a Xline 2\n"));
+    assert_eq!(
+        screen.state().projects[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.id == b)
+            .unwrap()
+            .text,
+        original_b
+    );
+    assert!(!screen.state().editor_input_pending());
 }
 
 #[test]

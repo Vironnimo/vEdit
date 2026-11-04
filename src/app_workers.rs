@@ -48,6 +48,10 @@ impl<K: PartialEq, V> BackgroundValue<K, V> {
 }
 
 pub(super) enum WorkerResult {
+    VimFileMarkPath {
+        request: u64,
+        path: Option<PathBuf>,
+    },
     EditorFonts {
         request: u64,
         result: Result<egui::FontDefinitions, String>,
@@ -332,6 +336,9 @@ impl VEditApp {
                             self.status(error, true);
                         }
                     }
+                }
+                WorkerResult::VimFileMarkPath { request, path } => {
+                    self.resolve_vim_file_mark_path(request, path)
                 }
                 WorkerResult::RecentOpened(opened) => self.finish_recent_open(opened),
                 WorkerResult::DroppedPaths(batch) => self.finish_dropped_paths(batch),

@@ -51,6 +51,7 @@ struct Control {
 const MODAL: &[&str] = &["normal", "visual", "visualline", "visualblock"];
 const NORMAL: &[&str] = &["normal"];
 const INSERT: &[&str] = &["insert"];
+const NORMAL_INSERT: &[&str] = &["normal", "insert"];
 const ALL_MODES: &[&str] = &["normal", "insert", "visual", "visualline", "visualblock"];
 
 const CONTROLS: &[Control] = &[
@@ -135,8 +136,8 @@ const CONTROLS: &[Control] = &[
         key: Key::R,
         chord: "Ctrl+R",
         default: Target::Vim,
-        modes: NORMAL,
-        effect: "Redo the last undone change",
+        modes: NORMAL_INSERT,
+        effect: "Redo in Normal; insert a register in Insert or Replace",
     },
     Control {
         key: Key::N,
@@ -163,6 +164,7 @@ impl Control {
         match self.modes {
             NORMAL => mode == VimMode::Normal,
             INSERT => mode == VimMode::Insert,
+            NORMAL_INSERT => matches!(mode, VimMode::Normal | VimMode::Insert),
             MODAL => mode != VimMode::Insert,
             _ => true,
         }
@@ -172,6 +174,7 @@ impl Control {
         match self.modes {
             NORMAL => "Normal",
             INSERT => "Insert",
+            NORMAL_INSERT => "Normal & Insert / Replace",
             MODAL => "Normal & Visual modes",
             _ => "All Vim modes",
         }
@@ -428,7 +431,7 @@ mod tests {
             (Key::U, Target::Vim, modal.as_slice()),
             (Key::O, Target::Vim, &[Normal]),
             (Key::I, Target::Vim, &[Normal]),
-            (Key::R, Target::Vim, &[Normal]),
+            (Key::R, Target::Vim, &[Normal, Insert]),
             (Key::N, Target::Vim, &[Insert]),
             (Key::P, Target::Editor, &[Insert]),
         ] {

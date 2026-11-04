@@ -26,6 +26,16 @@ struct Insertion {
 }
 
 impl Cursor {
+    pub(super) fn cancel_pending_command(&mut self) {
+        self.navigation.pending = None;
+        self.navigation.count = 0;
+        self.navigation.selected_register = None;
+        self.navigation.register_count = None;
+        self.navigation.preferred_column = None;
+        self.navigation.command_keys.clear();
+        self.navigation.surround_search = None;
+    }
+
     pub(super) fn remap(&mut self, map: &dyn Fn(usize) -> usize) {
         self.selection.anchor = map(self.selection.anchor);
         self.selection.head = map(self.selection.head);
@@ -119,6 +129,9 @@ impl VimState {
         if self.mode == VimMode::Insert {
             single.mode = VimMode::Insert;
             single.cursor = selection.head;
+            if self.is_replacing() {
+                single.replace = Some(replace::Session::new(1));
+            }
         } else if matches!(self.mode, VimMode::Visual | VimMode::VisualLine)
             && !selection.range().is_empty()
         {
@@ -271,6 +284,7 @@ impl VimState {
         }
         if self.mode == VimMode::Normal
             && self.pending.is_none()
+            && self.selected_register.is_none()
             && let VimKey::Char(ch) = key
             && super::navigation::direct_motion(ch)
             && !(ch == '0' && self.count > 0)
@@ -326,6 +340,7 @@ impl VimState {
                 };
                 let count = cursor.navigation.count;
                 single.move_cursor(&chars, ch, count.max(1), count > 0);
+                self.command_failed |= single.cursor == cursor.navigation.cursor;
                 cursor.navigation.cursor = clamp(single.cursor);
                 cursor.navigation.preferred_column = single.preferred_column;
                 cursor.navigation.count = 0;
@@ -354,6 +369,14 @@ impl VimState {
 
     pub(super) fn multi_scroll_lines(&mut self, text: &mut String, delta: isize) -> Action {
         self.multi_action(text, |single, local| single.scroll_lines(local, delta))
+    }
+
+    pub(super) fn multi_start_insert_register(&mut self, text: &mut String) -> Action {
+        self.multi_action(text, |single, local| single.start_insert_register(local))
+    }
+
+    pub(super) fn multi_replace_text(&mut self, text: &mut String, inserted: &str) -> Action {
+        self.multi_action(text, |single, text| single.insert_text(text, inserted))
     }
 
     pub(super) fn finish_multi_insert_history(&mut self, text: &mut String) -> Action {
@@ -390,6 +413,7 @@ impl VimState {
         let mut results = Vec::new();
         let mut edits = Vec::new();
         let mut yank_register = self.yank_register.clone();
+        let mut register_capture = None;
         let mut local = text.clone();
         let mut action = Action {
             consumed: true,
@@ -407,6 +431,8 @@ impl VimState {
             single.set_indentation(self.indent_width, self.indent_with_tabs);
             single.register = self.register.clone();
             single.yank_register = self.yank_register.clone();
+            single.register_bank = self.register_bank.clone();
+            single.collecting_registers = true;
             single.last_change = cursor.change;
             single.visible = self.visible.clone();
             if old_mode == VimMode::Insert {
@@ -438,6 +464,10 @@ impl VimState {
                 }
             }
             let result = run(&mut single, &mut local);
+            self.command_failed |= single.take_command_failure();
+            if single.register_capture.is_some() {
+                register_capture = single.register_capture;
+            }
             yank_register = single.yank_register.clone();
             if old_mode == VimMode::Insert
                 && single.insert_replay.is_none()
@@ -559,9 +589,12 @@ impl VimState {
         state.normalize(text.chars().count());
         if let Some(primary) = self.multi_cursors.last().cloned() {
             self.mode = primary.navigation.mode;
+            self.replace = primary.navigation.replace.clone();
             self.cursor = primary.navigation.cursor;
             self.pending = primary.navigation.pending;
             self.count = primary.navigation.count;
+            self.selected_register = primary.navigation.selected_register;
+            self.register_count = primary.navigation.register_count;
             self.command_keys = primary.navigation.command_keys;
             self.last_change = primary.change;
         }
@@ -574,8 +607,20 @@ impl VimState {
         {
             self.record(origin, text);
         }
-        if let Some(yank) = &action.yanked {
-            self.register = Some(yank.clone());
+        if let Some(yank) = action.yanked.take() {
+            action.yanked = if let Some((name, deleting, numbered)) = register_capture {
+                let selected = self.selected_register;
+                self.selected_register = name;
+                self.numbered_delete = numbered;
+                let value = self.capture_register(yank, deleting);
+                self.selected_register = selected;
+                value
+            } else {
+                Some(yank)
+            };
+            if let Some(yank) = &action.yanked {
+                self.register = Some(yank.clone());
+            }
         }
         action.text_changed = !merged.is_empty();
         action.cursor_changed = old_cursor != self.cursor;

@@ -126,6 +126,70 @@ fn select_native(screen: &mut Harness<'_, VEditApp>, mode: VimMode) {
 }
 
 #[test]
+fn named_registers_are_shared_between_documents_and_black_hole_keeps_them() {
+    let mut app = fixture("α🦀 beta");
+    let mut second = EditorTab::new(None, "second.txt".into());
+    second.text = "tail".into();
+    second.saved_text = second.text.clone();
+    app.projects[0].tabs.push(second);
+    let mut screen = harness(app);
+    text(&mut screen, "\"ayiW");
+    assert_eq!(
+        screen.state().vim_registers.get('a').unwrap().yank.text,
+        "α🦀"
+    );
+    screen.state_mut().activate_tab(0, 1);
+    screen.run_steps(3);
+    text(&mut screen, "\"aP");
+    assert_eq!(screen.state().tab().unwrap().text, "α🦀tail");
+    assert_unnamed(screen.state(), "α🦀", false);
+    text(&mut screen, "\"_dd");
+    assert_eq!(screen.state().tab().unwrap().text, "");
+    assert_unnamed(screen.state(), "α🦀", false);
+    assert_eq!(
+        screen.state().vim_registers.get('a').unwrap().yank.text,
+        "α🦀"
+    );
+    assert_no_clipboard_write(&screen);
+}
+
+#[test]
+fn insert_ctrl_r_consumes_its_name_and_preserves_following_native_text_order() {
+    for command in ["i", "R"] {
+        let mut app = fixture("abcdef");
+        app.vim_registers.set_text(
+            'a',
+            Yank {
+                text: "α🦀".into(),
+                linewise: false,
+                block_width: None,
+            },
+        );
+        let mut screen = harness(app);
+        text(&mut screen, command);
+        events(
+            &mut screen,
+            [
+                egui::Event::Text("x".into()),
+                key(Key::R, egui::Modifiers::CTRL | egui::Modifiers::COMMAND),
+                egui::Event::Text("a!".into()),
+                key(Key::Escape, egui::Modifiers::NONE),
+            ],
+        );
+        for _ in 0..8 {
+            screen.run_steps(1);
+        }
+        assert_eq!(screen.state().tab().unwrap().vim.mode, VimMode::Normal);
+        assert!(
+            screen.state().tab().unwrap().text.starts_with("xα🦀!"),
+            "{command}"
+        );
+        text(&mut screen, "u");
+        assert_eq!(screen.state().tab().unwrap().text, "abcdef");
+    }
+}
+
+#[test]
 fn vim_yank_delete_and_change_never_write_to_the_system_clipboard() {
     for (command, expected, linewise) in [
         ("vlly", "a🦀é", false),
@@ -890,19 +954,19 @@ fn alt_a_and_alt_x_change_numbers_and_unsupported_commands_report_in_the_status_
     events(&mut screen, [key(Key::A, egui::Modifiers::CTRL)]);
     assert_eq!(screen.state().tab().unwrap().text, "width 10 and -8\n");
 
-    text(&mut screen, "0qa");
+    text(&mut screen, "0gq");
     let status = screen
         .state()
         .status
         .as_ref()
         .map(|status| status.0.clone());
-    assert_eq!(status.as_deref(), Some("Not supported in vEdit: q"));
+    assert_eq!(status.as_deref(), Some("Not supported in vEdit: gq"));
     assert_eq!(screen.state().tab().unwrap().text, "width 10 and -8\n");
     text(&mut screen, "x");
     assert_eq!(
         screen.state().tab().unwrap().text,
         "idth 10 and -8\n",
-        "the recorded register name is consumed, later keys work again"
+        "the unsupported command is complete, later keys work again"
     );
     text(&mut screen, "u");
     text(&mut screen, "u");
