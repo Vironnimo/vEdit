@@ -589,19 +589,18 @@ impl VEditApp {
                         paste_system_text(tab, text);
                         continue;
                     }
+                    // Replace applies text itself and has no native composition.
+                    // Insert hands every IME event to the source widget, so egui
+                    // draws the composition and its candidate window.
                     egui::Event::Ime(egui::ImeEvent::Commit(text))
-                        if tab.vim.mode == VimMode::Insert =>
+                        if tab.vim.mode == VimMode::Insert && tab.vim.is_replacing() =>
                     {
-                        if tab.vim.is_replacing() {
-                            let action = tab.vim.insert_text(&mut tab.text, text);
-                            apply_action(tab, action, &mut vim_register);
-                            continue;
-                        }
-                        // Composition previews remain separate from source;
-                        // committed text uses the same native event chronology.
-                        native_insert.push(egui::Event::Text(text.clone()));
+                        let action = tab.vim.insert_text(&mut tab.text, text);
+                        apply_action(tab, action, &mut vim_register);
                         continue;
                     }
+                    egui::Event::Ime(_)
+                        if tab.vim.mode == VimMode::Insert && !tab.vim.is_replacing() => {}
                     egui::Event::Ime(_) => continue,
                     egui::Event::Key {
                         key: Key::C,

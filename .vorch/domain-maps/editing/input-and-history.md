@@ -62,8 +62,10 @@ continues; Escape cancels only that pending name.
 
 Replace is an Insert transaction with an explicit session carried in navigation.
 It consumes text, IME commits and editing keys before TextEdit, which remains
-read-only there. Backspace restores only still-owned replacement steps; cursor
-movement starts a new restoration/dot segment and cancels the R count.
+read-only there. Insert instead hands every IME event to TextEdit, which draws
+the composition and its candidate window before the commit arrives. Backspace
+restores only still-owned replacement steps; cursor movement starts a new
+restoration/dot segment and cancels the R count.
 
 `vim_macros.rs` records source input and replays it through the existing native,
 Vim, search and Ex owners. It yields between events and waits on native input,
@@ -202,6 +204,7 @@ boundary remains in `language-services.md`.
 - `src/native_input_tests.rs`: native IME, Copy/Cut, modal blocking, mouse
   selection and live typing while a save is pending.
 - `src/vim_clipboard_tests.rs`: application-level register/clipboard integration.
+- `src/vim_input_tests.rs`: Insert/Replace IME composition and commit ordering.
 - `src/multicursor.rs` inline tests: simultaneous Unicode replacements, overlap
   merging, atomic CRLF deletion and paste order. `src/multicursor_tests.rs`:
   native/Vim text history, repeated identical text states, selection Undo,

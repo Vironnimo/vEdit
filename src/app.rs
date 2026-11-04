@@ -72,6 +72,9 @@ mod task_controls;
 mod vim_file_marks_tests;
 #[path = "vim_input.rs"]
 mod vim_input;
+#[cfg(test)]
+#[path = "vim_input_tests.rs"]
+mod vim_input_tests;
 
 #[cfg(test)]
 #[path = "vim_macro_tests.rs"]
