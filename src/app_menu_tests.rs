@@ -18,6 +18,8 @@ fn harness(app: VEditApp, width: f32, height: f32) -> Harness<'static, VEditApp>
         .build_ui_state(
             |ui, app| {
                 app.ctx = ui.ctx().clone();
+                // Menu tests observe scheduled persistence, not its background timer.
+                app.last_session_save = Instant::now();
                 app.draw_ui(ui);
             },
             app,
